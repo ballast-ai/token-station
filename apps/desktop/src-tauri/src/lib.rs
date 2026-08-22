@@ -437,8 +437,7 @@ fn collect_installed_self_test() -> Result<Value, String> {
                     .filter_map(|value| value.as_str().map(str::to_owned))
                     .collect()
             }
-            let (kind, protocols, agent_tools, providers, capabilities) = match &package.manifest
-            {
+            let (kind, protocols, agent_tools, providers, capabilities) = match &package.manifest {
                 PackageManifest::Agent(agent) => (
                     "agent-adapter",
                     agent.agent_protocols.clone(),
@@ -1064,6 +1063,10 @@ fn is_official_openai_compatible_package(package: &str) -> bool {
         "provider-openai-compatible" | "provider-openai-compatible-v2"
     )
 }
+
+/// The engine an upstream runs on when its config names none: the full South
+/// transport. Mirrors `ProviderCallEngine::default()` in the CLI crate.
+const DEFAULT_PROVIDER_CALL: &str = "south_v1_buffered_streaming_header_auth";
 
 fn south_v1_unavailable_reason(
     draft: &Value,
@@ -1744,7 +1747,7 @@ impl AppInner {
                     provider_call: up
                         .get("provider_call")
                         .and_then(Value::as_str)
-                        .unwrap_or("legacy")
+                        .unwrap_or(DEFAULT_PROVIDER_CALL)
                         .to_owned(),
                     south_v1_available: south_v1_unavailable_reason.is_none(),
                     south_v1_unavailable_reason,
@@ -3720,7 +3723,7 @@ fn edit_provider_with_credential(
     api_key: Option<String>,
     credential_source: String,
     credential_reference: Option<String>,
-    provider_call: String,
+    provider_call: Option<String>,
 ) -> Result<StateView, String> {
     edit_provider_impl(
         state,
@@ -3729,7 +3732,7 @@ fn edit_provider_with_credential(
         api_key,
         Some(credential_source.trim()),
         credential_reference.as_deref(),
-        Some(provider_call.trim()),
+        provider_call.as_deref().map(str::trim),
     )
 }
 
@@ -3769,14 +3772,16 @@ fn edit_provider_impl(
     if credential_source.is_some_and(|source| source != "store") && api_key.is_some() {
         return Err("env/file 凭据只保存引用，不能同时提交 API Key 明文".to_owned());
     }
+    // An engine is written exactly as named, `legacy` included: South is the
+    // default, so an explicit legacy choice must survive in the document.
     let provider_call = match provider_call {
         None => None,
-        Some("legacy") => Some(None),
-        Some("south_v1_buffered") => Some(Some("south_v1_buffered")),
-        Some("south_v1_buffered_streaming") => Some(Some("south_v1_buffered_streaming")),
-        Some("south_v1_buffered_streaming_header_auth") => {
-            Some(Some("south_v1_buffered_streaming_header_auth"))
-        }
+        Some(
+            engine @ ("legacy"
+            | "south_v1_buffered"
+            | "south_v1_buffered_streaming"
+            | "south_v1_buffered_streaming_header_auth"),
+        ) => Some(engine),
         Some(_) => return Err("Provider call engine 不受支持".to_owned()),
     };
     let previous_auth = previous.get("auth").filter(|value| !value.is_null());
@@ -3798,17 +3803,7 @@ fn edit_provider_impl(
         clear_provider_scoped_prices(&mut inner, &name)?;
     }
     if let Some(provider_call) = provider_call {
-        match provider_call {
-            Some(provider_call) => {
-                inner.draft["upstreams"][&name]["provider_call"] = json!(provider_call);
-            }
-            None => {
-                inner.draft["upstreams"][&name]
-                    .as_object_mut()
-                    .expect("upstream is an object")
-                    .remove("provider_call");
-            }
-        }
+        inner.draft["upstreams"][&name]["provider_call"] = json!(provider_call);
     }
     inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
     if let Some(auth) = auth {
@@ -3910,7 +3905,10 @@ fn ensure_provider_discovery_target_unchanged(
 }
 
 fn provider_health_uses_south(draft: &Value, upstream: &Value, package_verified: bool) -> bool {
-    match upstream["provider_call"].as_str().unwrap_or("legacy") {
+    match upstream["provider_call"]
+        .as_str()
+        .unwrap_or(DEFAULT_PROVIDER_CALL)
+    {
         "south_v1_buffered" | "south_v1_buffered_streaming" => {
             south_v1_unavailable_reason(draft, upstream, package_verified).is_none()
         }
@@ -11670,7 +11668,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("AZURE_OPENAI_API_KEY".to_owned()),
-            "legacy".to_owned(),
+            Some("legacy".to_owned()),
         ) {
             Err(error) => error,
             Ok(_) => panic!("editing Azure must preserve the exact /openai/v1 API root"),
@@ -11806,7 +11804,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("FIXTURE_API_KEY".to_owned()),
-            "south_v1_buffered_streaming".to_owned(),
+            Some("south_v1_buffered_streaming".to_owned()),
         )
         .expect("submitting unchanged provider details is a no-op identity update");
 
@@ -11870,7 +11868,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("FIXTURE_API_KEY".to_owned()),
-            "south_v1_buffered".to_owned(),
+            Some("south_v1_buffered".to_owned()),
         ) {
             Err(error) => error,
             Ok(_) => panic!("a catalog symlink makes identity cleanup fail closed"),
@@ -12613,6 +12611,19 @@ mod tests {
             "auth": {"env": "PROVIDER_API_KEY"}
         });
         assert!(provider_health_uses_south(&draft, &eligible, true));
+
+        // No engine named: the South default applies, as it does for traffic.
+        let defaulted = json!({
+            "provider": "openai-compatible",
+            "auth": {"env": "PROVIDER_API_KEY"}
+        });
+        assert!(provider_health_uses_south(&draft, &defaulted, true));
+        let explicit_legacy = json!({
+            "provider": "openai-compatible",
+            "provider_call": "legacy",
+            "auth": {"env": "PROVIDER_API_KEY"}
+        });
+        assert!(!provider_health_uses_south(&draft, &explicit_legacy, true));
 
         let mut proxied = draft.clone();
         proxied["egress"] = json!({

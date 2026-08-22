@@ -35,7 +35,7 @@ use token_station_metrics::{
     AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
     ConversionRecord, ConversionStage, CostKind, DecisionRecord,
     ProviderCallEngine as RecordedProviderCallEngine, Recorder, RequestPathKind, RequestRecord,
-    RoutingRecord,
+    RoutingRecord, SouthFallbackReason,
 };
 use token_station_plugin_runtime::{AgentPlugin, PluginRuntime};
 use token_station_protocol::{
@@ -65,7 +65,7 @@ use crate::south_provider_call::{
     CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
     PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1, PreparedProviderStreamResultV1,
     ProviderPackageEligibilityV1, RequestBodyModeV1, ResponseMetadataEligibilityV1,
-    RolloutEligibilityV1, StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
+    StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
     build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1, map_failure_v1,
     map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
     prepare_provider_stream_v1, project_open_stream_head_v1,
@@ -1042,12 +1042,53 @@ fn annotate_conversion_failure(record: &mut RequestRecord, error: &ErrorEnvelope
     }
 }
 
+/// Which engine actually carried one attempt, and — when South was eligible
+/// by configuration but legacy ran — the content-free reason why.
+#[derive(Debug, Clone, Copy, Default)]
+struct ProviderCallOutcome {
+    engine: RecordedProviderCallEngine,
+    south_fallback_reason: Option<SouthFallbackReason>,
+}
+
+impl ProviderCallOutcome {
+    const fn legacy(reason: SouthFallbackReason) -> Self {
+        Self {
+            engine: RecordedProviderCallEngine::Legacy,
+            south_fallback_reason: Some(reason),
+        }
+    }
+
+    const fn south(engine: RecordedProviderCallEngine) -> Self {
+        Self {
+            engine,
+            south_fallback_reason: None,
+        }
+    }
+}
+
+/// The content-free classification of a South eligibility refusal.
+const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
+    match reason {
+        IneligibleV1::ProviderDialect => SouthFallbackReason::ProviderDialect,
+        IneligibleV1::ProviderPackageUnapproved => SouthFallbackReason::ProviderPackageUnapproved,
+        IneligibleV1::ApiDialect => SouthFallbackReason::ApiDialect,
+        IneligibleV1::Egress => SouthFallbackReason::Egress,
+        IneligibleV1::Streaming => SouthFallbackReason::Streaming,
+        IneligibleV1::Method => SouthFallbackReason::Method,
+        IneligibleV1::Auth => SouthFallbackReason::Auth,
+        IneligibleV1::Body => SouthFallbackReason::Body,
+        IneligibleV1::SecretSource => SouthFallbackReason::SecretSource,
+        IneligibleV1::ResponseMetadata => SouthFallbackReason::ResponseMetadata,
+        IneligibleV1::Headers => SouthFallbackReason::Headers,
+    }
+}
+
 fn attempt_receipt(
     target: &UpstreamModel,
     ordinal: u32,
     latency_ms: u64,
     upstream_http_status: Option<u16>,
-    provider_call_engine: RecordedProviderCallEngine,
+    provider_call: ProviderCallOutcome,
     result: Result<StreamOutcome, &ErrorEnvelope>,
     record: &RequestRecord,
 ) -> AttemptRecord {
@@ -1067,7 +1108,8 @@ fn attempt_receipt(
                 http_status: upstream_http_status,
                 error_code,
                 stream_outcome: Some(outcome),
-                provider_call_engine,
+                provider_call_engine: provider_call.engine,
+                south_fallback_reason: provider_call.south_fallback_reason,
                 fallback_allowed: matches!(outcome, StreamOutcome::FailedBeforeOutput)
                     && error_code.is_some_and(ErrorCode::is_retriable_elsewhere),
             }
@@ -1080,7 +1122,8 @@ fn attempt_receipt(
             http_status: upstream_http_status,
             error_code: Some(error.code),
             stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
-            provider_call_engine,
+            provider_call_engine: provider_call.engine,
+            south_fallback_reason: provider_call.south_fallback_reason,
             fallback_allowed: attempt_fallback_allowed(error),
         },
     }
@@ -1152,7 +1195,7 @@ fn attempt_receipt_for_result(
     ordinal: u32,
     latency_ms: u64,
     upstream_http_status: Option<u16>,
-    provider_call_engine: RecordedProviderCallEngine,
+    provider_call: ProviderCallOutcome,
     result: &Result<StreamOutcome, ErrorEnvelope>,
     record: &RequestRecord,
 ) -> AttemptRecord {
@@ -1162,7 +1205,7 @@ fn attempt_receipt_for_result(
             ordinal,
             latency_ms,
             upstream_http_status,
-            provider_call_engine,
+            provider_call,
             Ok(*outcome),
             record,
         ),
@@ -1171,7 +1214,7 @@ fn attempt_receipt_for_result(
             ordinal,
             latency_ms,
             upstream_http_status,
-            provider_call_engine,
+            provider_call,
             Err(error),
             record,
         ),
@@ -1447,24 +1490,21 @@ fn south_component_support(
     Ok(SouthComponentSupport { adapters })
 }
 
+/// The South transport, when the caller handed the gateway a server-owned
+/// async runtime. Without one (diagnostics, tests, the desktop self-test)
+/// every call runs on legacy and each receipt says so — a missing runtime
+/// is a recorded fallback, not a startup failure.
 fn south_runtime_for(
     config: &ClientConfig,
     provider_runtime: Option<tokio::runtime::Handle>,
 ) -> Result<Option<SouthProviderRuntime>, String> {
-    let uses_south = config.upstreams.values().any(|entry| {
-        matches!(
-            entry.provider_call,
-            ConfiguredProviderCallEngine::SouthV1Buffered
-                | ConfiguredProviderCallEngine::SouthV1BufferedStreaming
-                | ConfiguredProviderCallEngine::SouthV1BufferedStreamingHeaderAuth
-        )
-    });
-    if !uses_south {
+    let uses_south = config
+        .upstreams
+        .values()
+        .any(|entry| !entry.provider_call.is_legacy());
+    let Some(handle) = provider_runtime.filter(|_| uses_south) else {
         return Ok(None);
-    }
-    let handle = provider_runtime.ok_or_else(|| {
-        "a South production opt-in requires a server-owned Tokio runtime".to_owned()
-    })?;
+    };
     let streaming_transport =
         build_direct_reqwest_streaming_transport_v1(None, UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT)
             .map_err(|failure| {
@@ -3881,7 +3921,7 @@ impl Gateway {
         );
         let retry_clock = Instant::now();
         let mut retry_status = None;
-        let mut retry_engine = RecordedProviderCallEngine::Unknown;
+        let mut retry_engine = ProviderCallOutcome::default();
         let retry = self.try_upstream(
             ctx,
             budget.per_attempt_timeout,
@@ -3961,7 +4001,7 @@ impl Gateway {
             record_actual_attempt_target(record, decision, target);
             let attempt_clock = Instant::now();
             let mut upstream_http_status = None;
-            let mut provider_call_engine = RecordedProviderCallEngine::Unknown;
+            let mut provider_call_engine = ProviderCallOutcome::default();
             let result = self.try_upstream(
                 ctx,
                 budget.per_attempt_timeout,
@@ -4429,7 +4469,7 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
         upstream_http_status: &mut Option<u16>,
-        provider_call_engine: &mut RecordedProviderCallEngine,
+        provider_call_engine: &mut ProviderCallOutcome,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         // Freeze the attempt budget before provider rendering or eligibility
         // work so those stages cannot extend the caller-owned deadline.
@@ -4926,7 +4966,6 @@ impl Gateway {
             ResponseMetadataEligibilityV1::Incompatible
         };
         let policy = CommunityCallPolicyV1::new(
-            RolloutEligibilityV1::Enabled,
             approved,
             upstream.dialect,
             self.egress.policy.mode,
@@ -4954,19 +4993,21 @@ impl Gateway {
         upstream_name: &str,
         streaming: bool,
         attempt_deadline: std::time::Instant,
-        actual_engine: &mut RecordedProviderCallEngine,
+        actual_engine: &mut ProviderCallOutcome,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
         if upstream.provider_call == ConfiguredProviderCallEngine::Legacy {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::ConfiguredLegacy);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         }
         if streaming && upstream.provider_call == ConfiguredProviderCallEngine::SouthV1Buffered {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine =
+                ProviderCallOutcome::legacy(SouthFallbackReason::BufferedModeCannotStream);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         }
 
         let Some(auth_config) = upstream.auth_config.as_ref() else {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine =
+                ProviderCallOutcome::legacy(SouthFallbackReason::UnauthenticatedUpstream);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         };
         let body_mode = if streaming {
@@ -4986,8 +5027,8 @@ impl Gateway {
             prepare_provider_call_v1(policy, &upstream.config, auth_config, descriptor)
         } {
             Ok(prepared) => prepared,
-            Err(PrepareProviderCallErrorV1::Ineligible(_)) => {
-                *actual_engine = RecordedProviderCallEngine::Legacy;
+            Err(PrepareProviderCallErrorV1::Ineligible(reason)) => {
+                *actual_engine = ProviderCallOutcome::legacy(fallback_reason_for(reason));
                 return self.send(ctx, attempt_timeout, descriptor, upstream_name);
             }
             Err(failure) => {
@@ -5000,23 +5041,34 @@ impl Gateway {
         let Ok(resolver) =
             CommunityCredentialResolverV1::try_new(&self.secrets, upstream_name, auth_config)
         else {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::CredentialResolver);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         };
-        let runtime = self.south_runtime.as_ref().ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCode::Internal,
-                500,
-                "South provider runtime is unavailable",
-            )
-        })?;
+        let Some(runtime) = self.south_runtime.as_ref() else {
+            *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::NoProviderRuntime);
+            return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+        };
+        // South reports a missing credential as an opaque resolution failure,
+        // which is right at the transport seam and useless to an operator.
+        // The host owns the store, so it asks the same question the legacy
+        // path asks — is the slot populated? — and answers with the same
+        // named, value-free 401 before anything is sent.
+        if let Err(detail) = self.secrets.resolve(upstream_name, &auth_config.slot) {
+            *actual_engine = ProviderCallOutcome::south(if streaming {
+                RecordedProviderCallEngine::SouthV1Streaming
+            } else {
+                RecordedProviderCallEngine::SouthV1Buffered
+            });
+            return Err(ErrorEnvelope::new(ErrorCode::Auth, 401, detail));
+        }
         let cancellation = ctx.token().async_token();
         let deadline = tokio::time::Instant::from_std(attempt_deadline);
 
         // Crossing this line may resolve a credential or perform network I/O.
         // From here onward the actual attempt is South and legacy replay is forbidden.
         if streaming {
-            *actual_engine = RecordedProviderCallEngine::SouthV1Streaming;
+            *actual_engine =
+                ProviderCallOutcome::south(RecordedProviderCallEngine::SouthV1Streaming);
             return runtime.open_stream(
                 &prepared,
                 &resolver,
@@ -5036,7 +5088,7 @@ impl Gateway {
             transport_timeout,
         )
         .map_err(|failure| map_failure_v1(failure, Self::south_cancellation_disposition(ctx)))?;
-        *actual_engine = RecordedProviderCallEngine::SouthV1Buffered;
+        *actual_engine = ProviderCallOutcome::south(RecordedProviderCallEngine::SouthV1Buffered);
         let response = runtime.handle.block_on(execute_prepared_provider_call_v1(
             &prepared,
             &resolver,

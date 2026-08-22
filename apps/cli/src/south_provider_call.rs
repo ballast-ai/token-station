@@ -45,7 +45,6 @@ const PROVIDER_QUOTA_METADATA_FIELDS_V1: [ProviderQuotaMetadataFieldV1; 9] = [
 /// Host-owned reasons why a call cannot enter the first South rollout slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IneligibleV1 {
-    RolloutDisabled,
     ProviderDialect,
     ProviderPackageUnapproved,
     ApiDialect,
@@ -57,19 +56,6 @@ pub(crate) enum IneligibleV1 {
     SecretSource,
     ResponseMetadata,
     Headers,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RolloutEligibilityV1 {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "production rollout wiring begins after diagnostics"
-        )
-    )]
-    Disabled,
-    Enabled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +86,6 @@ enum AuthenticationEligibilityV1 {
 /// Static host facts used before any credential lookup or transport call.
 #[derive(Clone, Copy)]
 pub(crate) struct CommunityCallPolicyV1 {
-    rollout: RolloutEligibilityV1,
     provider_package: ProviderPackageEligibilityV1,
     api_dialect: ApiDialect,
     egress_mode: EgressMode,
@@ -112,7 +97,6 @@ pub(crate) struct CommunityCallPolicyV1 {
 impl CommunityCallPolicyV1 {
     #[must_use]
     pub(crate) const fn new(
-        rollout: RolloutEligibilityV1,
         provider_package: ProviderPackageEligibilityV1,
         api_dialect: ApiDialect,
         egress_mode: EgressMode,
@@ -120,7 +104,6 @@ impl CommunityCallPolicyV1 {
         response_metadata: ResponseMetadataEligibilityV1,
     ) -> Self {
         Self {
-            rollout,
             provider_package,
             api_dialect,
             egress_mode,
@@ -157,7 +140,6 @@ impl fmt::Debug for CommunityCallPolicyV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CommunityCallPolicyV1")
-            .field("rollout", &self.rollout)
             .field("provider_package", &self.provider_package)
             .field("api_dialect", &self.api_dialect)
             .field("egress_mode", &self.egress_mode)
@@ -686,9 +668,6 @@ fn check_static_eligibility(
     descriptor: &HttpRequestDescriptor,
 ) -> Result<(), PrepareProviderCallErrorV1> {
     let ineligible = |reason| Err(PrepareProviderCallErrorV1::Ineligible(reason));
-    if policy.rollout != RolloutEligibilityV1::Enabled {
-        return ineligible(IneligibleV1::RolloutDisabled);
-    }
     let supported_provider = provider.provider == "openai-compatible"
         || (provider.provider == "azure-openai-v1"
             && policy.authentication == AuthenticationEligibilityV1::AzureOpenAiHeader);

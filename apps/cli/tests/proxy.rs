@@ -5542,6 +5542,69 @@ fn production_south_opt_in_keeps_streaming_on_legacy_and_records_the_fallback() 
         receipts[0]["attempt_records"][0]["provider_call_engine"],
         json!("legacy")
     );
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["south_fallback_reason"],
+        json!("buffered_mode_cannot_stream"),
+        "a fallback names its reason: {receipts}"
+    );
+}
+
+/// South is the default: an upstream that names no engine runs on South, and
+/// a South attempt carries no fallback reason.
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn the_default_engine_is_south_and_the_receipt_says_so() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-default-south",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "south"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let (config_path, _) = write_south_probe_config(&mock, "sk-south-default", true);
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South default config reads"))
+            .expect("South default config is JSON");
+    config["data"]["metrics"] = json!(true);
+    assert!(
+        config["upstreams"]["mock_primary"]
+            .get("provider_call")
+            .is_none(),
+        "the fixture names no engine"
+    );
+    let config: ClientConfig = serde_json::from_value(config).expect("South default config parses");
+    let proxy = spawn_proxy(&config);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 1);
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_buffered"),
+        "{receipts}"
+    );
+    assert!(
+        receipts[0]["attempt_records"][0]
+            .get("south_fallback_reason")
+            .is_none(),
+        "a South attempt has nothing to explain: {receipts}"
+    );
 }
 
 #[test]

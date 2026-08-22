@@ -127,7 +127,9 @@ enum UpstreamCommand {
         #[arg(long)]
         model: Option<String>,
         /// HTTP engine for this real, potentially billable completion probe.
-        #[arg(long, value_enum, default_value_t = ProbeTransportArg::Legacy)]
+        /// South is the default, as it is for served traffic; `legacy` probes
+        /// the fallback path.
+        #[arg(long, value_enum, default_value_t = ProbeTransportArg::SouthV1)]
         transport: ProbeTransportArg,
     },
     /// Layered health for an upstream: DNS/TLS, HTTP, auth, model, generation —
@@ -142,8 +144,8 @@ enum UpstreamCommand {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum ProbeTransportArg {
-    #[default]
     Legacy,
+    #[default]
     SouthV1,
 }
 
@@ -692,31 +694,31 @@ mod tests {
     }
 
     #[test]
-    fn upstream_test_accepts_an_explicit_south_transport_and_keeps_legacy_default() {
+    fn upstream_test_defaults_to_the_south_transport_and_accepts_an_explicit_legacy() {
         let explicit = super::Cli::try_parse_from([
             "token-station-cli",
             "upstream",
             "test",
             "example",
             "--transport",
-            "south-v1",
+            "legacy",
         ])
-        .expect("south-v1 is a documented diagnostic transport");
+        .expect("legacy is a documented diagnostic transport");
         let defaulted =
             super::Cli::try_parse_from(["token-station-cli", "upstream", "test", "example"])
-                .expect("legacy remains the backwards-compatible default");
+                .expect("south-v1 is the default, as for served traffic");
 
         assert!(matches!(
             explicit.command,
             super::Command::Upstream(super::UpstreamCommand::Test {
-                transport: super::ProbeTransportArg::SouthV1,
+                transport: super::ProbeTransportArg::Legacy,
                 ..
             })
         ));
         assert!(matches!(
             defaulted.command,
             super::Command::Upstream(super::UpstreamCommand::Test {
-                transport: super::ProbeTransportArg::Legacy,
+                transport: super::ProbeTransportArg::SouthV1,
                 ..
             })
         ));

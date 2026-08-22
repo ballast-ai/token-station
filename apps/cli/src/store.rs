@@ -367,6 +367,18 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE attempts_v10 RENAME TO attempts;
         ",
     },
+    Migration {
+        // v10 -> v11: why a South-eligible attempt ran on legacy. Existing
+        // rows predate the South default and stay NULL rather than guessed.
+        to: 11,
+        sql: "ALTER TABLE attempts ADD COLUMN south_fallback_reason TEXT
+                CHECK (south_fallback_reason IS NULL OR south_fallback_reason IN (
+                    'configured_legacy', 'buffered_mode_cannot_stream', 'unauthenticated_upstream',
+                    'no_provider_runtime', 'credential_resolver', 'provider_dialect',
+                    'provider_package_unapproved', 'api_dialect', 'egress', 'streaming', 'method',
+                    'auth', 'body', 'secret_source', 'response_metadata', 'headers'
+                ));",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -486,6 +498,13 @@ CREATE TABLE IF NOT EXISTS attempts (
     provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
         CHECK (provider_call_engine IN (
             'legacy', 'south_v1_buffered', 'south_v1_streaming', 'unknown'
+        )),
+    south_fallback_reason TEXT
+        CHECK (south_fallback_reason IS NULL OR south_fallback_reason IN (
+            'configured_legacy', 'buffered_mode_cannot_stream', 'unauthenticated_upstream',
+            'no_provider_runtime', 'credential_resolver', 'provider_dialect',
+            'provider_package_unapproved', 'api_dialect', 'egress', 'streaming', 'method',
+            'auth', 'body', 'secret_source', 'response_metadata', 'headers'
         )),
     fallback_allowed INTEGER NOT NULL,
     PRIMARY KEY (request_id, ordinal)
@@ -1020,8 +1039,9 @@ impl SqliteStore {
             transaction.execute(
                 "INSERT INTO attempts (
                     request_id, ordinal, upstream, model, latency_ms, http_status,
-                    error_code, stream_outcome, provider_call_engine, fallback_allowed
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    error_code, stream_outcome, provider_call_engine, fallback_allowed,
+                    south_fallback_reason
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     record.request_id,
                     attempt.ordinal,
@@ -1033,6 +1053,9 @@ impl SqliteStore {
                     attempt.stream_outcome.map(stream_outcome_name),
                     attempt.provider_call_engine.as_str(),
                     attempt.fallback_allowed,
+                    attempt
+                        .south_fallback_reason
+                        .map(token_station_metrics::SouthFallbackReason::as_str),
                 ],
             )?;
         }
@@ -1238,6 +1261,14 @@ fn provider_call_engine(column: usize, value: &str) -> Result<ProviderCallEngine
         "unknown" => Ok(ProviderCallEngine::Unknown),
         other => Err(invalid_enum(column, "provider call engine", other)),
     }
+}
+
+fn south_fallback_reason(
+    column: usize,
+    value: &str,
+) -> Result<token_station_metrics::SouthFallbackReason, rusqlite::Error> {
+    token_station_metrics::SouthFallbackReason::parse(value)
+        .ok_or_else(|| invalid_enum(column, "south fallback reason", value))
 }
 
 fn conversion_stage(column: usize, value: &str) -> Result<ConversionStage, rusqlite::Error> {
@@ -1569,7 +1600,7 @@ fn read_attempts(
 ) -> Result<Vec<AttemptRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
         "SELECT ordinal, upstream, model, latency_ms, http_status, error_code,
-                stream_outcome, fallback_allowed, provider_call_engine
+                stream_outcome, fallback_allowed, provider_call_engine, south_fallback_reason
            FROM attempts WHERE request_id = ?1 ORDER BY ordinal",
     )?;
     statement
@@ -1580,6 +1611,11 @@ fn read_attempts(
                 .map(|value| stream_outcome(6, value))
                 .transpose()?;
             let raw_error_code = row.get::<_, Option<String>>(5)?;
+            let fallback_reason = row
+                .get::<_, Option<String>>(9)?
+                .as_deref()
+                .map(|value| south_fallback_reason(9, value))
+                .transpose()?;
             Ok(AttemptRecord {
                 ordinal: row.get(0)?,
                 upstream: row.get(1)?,
@@ -1589,6 +1625,7 @@ fn read_attempts(
                 error_code: optional_error_code(5, raw_error_code.as_deref())?,
                 stream_outcome: outcome,
                 provider_call_engine: provider_call_engine(8, &row.get::<_, String>(8)?)?,
+                south_fallback_reason: fallback_reason,
                 fallback_allowed: row.get(7)?,
             })
         })?
@@ -1741,6 +1778,7 @@ mod tests {
                 error_code: Some(ErrorCode::UpstreamUnavailable),
                 stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
                 provider_call_engine: ProviderCallEngine::Legacy,
+                south_fallback_reason: None,
                 fallback_allowed: true,
             },
             AttemptRecord {
@@ -1752,6 +1790,7 @@ mod tests {
                 error_code: None,
                 stream_outcome: Some(StreamOutcome::Complete),
                 provider_call_engine: ProviderCallEngine::SouthV1Buffered,
+                south_fallback_reason: None,
                 fallback_allowed: false,
             },
         ];
@@ -1881,6 +1920,7 @@ mod tests {
             error_code: Some(ErrorCode::Internal),
             stream_outcome: None,
             provider_call_engine: ProviderCallEngine::Legacy,
+            south_fallback_reason: None,
             fallback_allowed: false,
         });
         store.record(&replay);
@@ -2063,7 +2103,7 @@ mod tests {
             let version: u32 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(version, 10);
+            assert_eq!(version, super::SCHEMA_VERSION);
             let mut engines = connection
                 .prepare("SELECT provider_call_engine FROM attempts ORDER BY request_id")
                 .expect("query prepares")

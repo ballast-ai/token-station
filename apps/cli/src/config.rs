@@ -484,17 +484,22 @@ pub enum AccessTier {
     Paid,
 }
 
-/// Which host-owned HTTP engine may execute eligible provider calls.
+/// Which host-owned HTTP engine executes eligible provider calls.
 ///
-/// Legacy remains the default and is omitted from serialized configs so an
-/// upgrade does not silently opt in or rewrite existing documents.
+/// The South transport (`south-core` + `south-transport-reqwest`) is the
+/// default and is omitted from serialized configs. A call the South slice
+/// cannot carry — a proxied egress, a file-backed credential, a non-POST
+/// descriptor — falls back to the legacy reqwest path before any credential
+/// is read, and the attempt receipt records why. The narrower South tiers
+/// and `legacy` remain valid explicit values: an upstream that writes
+/// `"provider_call": "legacy"` stays on the legacy path by its own choice.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCallEngine {
-    #[default]
     Legacy,
     SouthV1Buffered,
     SouthV1BufferedStreaming,
+    #[default]
     SouthV1BufferedStreamingHeaderAuth,
 }
 
@@ -502,6 +507,13 @@ impl ProviderCallEngine {
     #[must_use]
     pub const fn is_legacy(&self) -> bool {
         matches!(self, Self::Legacy)
+    }
+
+    /// True for the default (the full South transport), so it is omitted on
+    /// serialize and an explicit `legacy` choice survives a round trip.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::SouthV1BufferedStreamingHeaderAuth)
     }
 }
 
@@ -551,9 +563,10 @@ pub struct UpstreamConfig {
     /// `…/anthropic/v1/messages`.
     #[serde(default, skip_serializing_if = "ApiDialect::is_default")]
     pub api_dialect: ApiDialect,
-    /// Opt-in engine for eligible buffered provider calls. Ineligible calls
-    /// remain on the legacy path before credentials or network I/O begin.
-    #[serde(default, skip_serializing_if = "ProviderCallEngine::is_legacy")]
+    /// The HTTP engine for eligible provider calls; South by default. Calls
+    /// the South slice cannot carry fall back to the legacy path before
+    /// credentials or network I/O begin, and the receipt names the reason.
+    #[serde(default, skip_serializing_if = "ProviderCallEngine::is_default")]
     pub provider_call: ProviderCallEngine,
     /// What this upstream serves. The provider adapter may refine it; with no
     /// network of its own it cannot replace it.
@@ -1157,32 +1170,49 @@ mod tests {
     }
 
     #[test]
-    fn provider_call_engine_defaults_to_legacy_and_round_trips_the_opt_in() {
-        let legacy: UpstreamConfig = serde_json::from_value(serde_json::json!({
+    fn provider_call_engine_defaults_to_south_and_round_trips_an_explicit_legacy() {
+        let defaulted: UpstreamConfig = serde_json::from_value(serde_json::json!({
             "provider": "openai-compatible",
             "base_url": "https://api.deepseek.com/v1",
             "models": [{ "model": "deepseek-chat" }]
         }))
-        .expect("legacy upstream parses");
-        assert_eq!(legacy.provider_call, ProviderCallEngine::Legacy);
+        .expect("an upstream without an engine parses");
+        assert_eq!(
+            defaulted.provider_call,
+            ProviderCallEngine::SouthV1BufferedStreamingHeaderAuth
+        );
         assert!(
-            serde_json::to_value(&legacy)
+            serde_json::to_value(&defaulted)
                 .expect("serializes")
                 .get("provider_call")
                 .is_none(),
-            "the legacy default must not rewrite old configs"
+            "the South default must not rewrite configs that never named an engine"
         );
 
-        let opted_in: UpstreamConfig = serde_json::from_value(serde_json::json!({
+        let legacy: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "provider_call": "legacy",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [{ "model": "deepseek-chat" }]
+        }))
+        .expect("an explicit legacy choice parses");
+        assert_eq!(legacy.provider_call, ProviderCallEngine::Legacy);
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("serializes")["provider_call"],
+            serde_json::json!("legacy"),
+            "an explicit legacy choice must survive a round trip"
+        );
+
+        let narrower: UpstreamConfig = serde_json::from_value(serde_json::json!({
             "provider": "openai-compatible",
             "provider_call": "south_v1_buffered",
             "base_url": "https://api.deepseek.com/v1",
             "models": [{ "model": "deepseek-chat" }]
         }))
-        .expect("the only South production opt-in parses");
-        assert_eq!(opted_in.provider_call, ProviderCallEngine::SouthV1Buffered);
+        .expect("a narrower South tier parses");
+        assert_eq!(narrower.provider_call, ProviderCallEngine::SouthV1Buffered);
         assert_eq!(
-            serde_json::to_value(&opted_in).expect("serializes")["provider_call"],
+            serde_json::to_value(&narrower).expect("serializes")["provider_call"],
             serde_json::json!("south_v1_buffered")
         );
 
@@ -1196,14 +1226,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_call_engine_requires_an_explicit_streaming_opt_in() {
+    fn provider_call_engine_round_trips_the_streaming_tier() {
         let opted_in: UpstreamConfig = serde_json::from_value(serde_json::json!({
             "provider": "openai-compatible",
             "provider_call": "south_v1_buffered_streaming",
             "base_url": "https://api.deepseek.com/v1",
             "models": [{ "model": "deepseek-chat" }]
         }))
-        .expect("the cumulative South streaming opt-in parses");
+        .expect("the cumulative South streaming tier parses");
 
         assert_eq!(
             opted_in.provider_call,
@@ -1216,22 +1246,25 @@ mod tests {
     }
 
     #[test]
-    fn provider_call_engine_requires_an_explicit_header_auth_opt_in() {
-        let opted_in: UpstreamConfig = serde_json::from_value(serde_json::json!({
+    fn provider_call_engine_accepts_the_default_tier_spelled_out() {
+        let spelled_out: UpstreamConfig = serde_json::from_value(serde_json::json!({
             "provider": "azure-openai-v1",
             "provider_call": "south_v1_buffered_streaming_header_auth",
             "base_url": "https://fixture.openai.azure.com/openai/v1",
             "models": [{ "model": "deployment-fixture" }]
         }))
-        .expect("the cumulative South Header Auth opt-in parses");
+        .expect("the default tier parses when written explicitly");
 
         assert_eq!(
-            opted_in.provider_call,
+            spelled_out.provider_call,
             ProviderCallEngine::SouthV1BufferedStreamingHeaderAuth
         );
-        assert_eq!(
-            serde_json::to_value(&opted_in).expect("serializes")["provider_call"],
-            serde_json::json!("south_v1_buffered_streaming_header_auth")
+        assert!(
+            serde_json::to_value(&spelled_out)
+                .expect("serializes")
+                .get("provider_call")
+                .is_none(),
+            "the default tier is omitted on serialize"
         );
     }
 

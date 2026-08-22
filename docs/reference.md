@@ -26,7 +26,7 @@ Provider presets are editable starting points, not availability guarantees. Mode
 
 Provider requests, model discovery, and health probes can use direct access, HTTP CONNECT, or SOCKS5, with validated `no_proxy` rules and separate proxy credentials. These flows do not inherit ambient proxy environment variables. The desktop updater uses its own HTTP stack and may follow system or environment proxy settings.
 
-Legacy is the default Provider execution engine. Eligible OpenAI-compatible Bearer requests can opt in to South for buffered calls or for buffered and streaming calls. Azure OpenAI v1 uses the separate cumulative `south_v1_buffered_streaming_header_auth` opt-in and a fixed `api-key` header. See [Azure OpenAI v1 with South Header Auth](guides/azure-openai-v1-south-header-auth.md).
+South is the default Provider execution engine: buffered and streaming calls, Bearer credentials, and the fixed `api-key` header for Azure OpenAI v1. A call South cannot carry — a proxied egress, a file-backed credential, a non-translated API dialect, a dialect without a builtin South component — runs on the legacy engine instead, decided before any credential is read, and the attempt receipt records `south_fallback_reason`. A South attempt never replays through legacy. To pin an upstream to legacy, set `"provider_call": "legacy"` on it. See [Azure OpenAI v1 with South Header Auth](guides/azure-openai-v1-south-header-auth.md).
 
 ## Desktop
 

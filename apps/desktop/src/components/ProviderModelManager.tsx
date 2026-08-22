@@ -134,7 +134,6 @@ export default function ProviderModelManager({
   const { copy, language } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
   const endpointErrorId = useId();
-  const providerCallName = useId();
   const [models, setModels] = useState(provider.models);
   const [selected, setSelected] = useState(provider.models);
   const [status, setStatus] = useState<CatalogStatus>({
@@ -166,11 +165,6 @@ export default function ProviderModelManager({
   const [credentialReference, setCredentialReference] = useState(
     provider.credential_reference ?? "",
   );
-  const [providerCall, setProviderCall] = useState<ProviderCallEngine>(
-    provider.provider_call ?? "legacy",
-  );
-  const [runtimeOpen, setRuntimeOpen] = useState(provider.provider_call !== undefined
-    && provider.provider_call !== "legacy");
   const [editing, setEditing] = useState(false);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const capabilities = useMemo(() => {
@@ -274,13 +268,26 @@ export default function ProviderModelManager({
       "South Header Auth 需要来自本地存储或环境变量的凭据。", "South Header Auth 需要本機儲存區或環境變數中的憑證。", "South Header Auth にはローカルストアまたは環境変数の認証情報が必要です。"
     ),
   } as const;
-  const usesHeaderAuthEngine = providerCall === "south_v1_buffered_streaming_header_auth";
-  const activeUnavailableReason = usesHeaderAuthEngine
-    ? headerAuthUnavailableReason
-    : southUnavailableReason;
+  // The transport is the host's decision, not an editable detail: South is
+  // the default, a config may pin `legacy`, and the host falls back per call
+  // when an upstream's shape is outside the South slice. The row reports
+  // which of the three this provider is in.
+  const effectiveEngine: ProviderCallEngine = provider.provider_call
+    ?? "south_v1_buffered_streaming_header_auth";
+  const usesHeaderAuthEngine = effectiveEngine === "south_v1_buffered_streaming_header_auth";
+  const activeUnavailableReason = effectiveEngine === "legacy"
+    ? null
+    : usesHeaderAuthEngine
+      ? headerAuthUnavailableReason
+      : southUnavailableReason;
   const activeUnavailableCopy = usesHeaderAuthEngine
     ? headerAuthUnavailableCopy
     : southUnavailableCopy;
+  const transportState = effectiveEngine === "legacy"
+    ? "legacy"
+    : activeUnavailableReason
+      ? "fallback"
+      : "south";
 
   useEffect(() => {
     let active = true;
@@ -390,7 +397,6 @@ export default function ProviderModelManager({
         credentialSource === "env" || credentialSource === "file"
           ? credentialReference.trim()
           : null,
-        providerCall,
       ));
       setEditKey("");
       showSuccess(
@@ -531,9 +537,6 @@ export default function ProviderModelManager({
           onValueChange={(value) => {
             const nextSource = value as typeof credentialSource;
             setCredentialSource(nextSource);
-            if (nextSource !== "store" && nextSource !== "env") {
-              setProviderCall("legacy");
-            }
             setEditKey("");
             setCredentialReference("");
           }}
@@ -570,124 +573,29 @@ export default function ProviderModelManager({
           {editing ? copy("Saving…", "保存中…", "儲存中…", "保存中…") : copy("Save details", "保存基本信息", "儲存詳細資訊", "詳細情報を保存")}
         </button>
       </div>
-      <details
-        className={`provider-runtime-advanced ${providerCall === "legacy" ? "stable" : "experimental"}`}
-        open={runtimeOpen}
-        onToggle={(event) => setRuntimeOpen(event.currentTarget.open)}
-      >
-        <summary>
-          <span>{copy("Advanced runtime", "高级运行时", "進階執行時", "アドバンスド実行時")}</span>
-          <small>
-            {providerCall === "legacy"
-              ? copy("Legacy active", "Legacy 已启用", "遺產已啟用", "レガシーが有効")
-              : activeUnavailableReason
-                ? copy(
-                  "Experimental configured but unavailable",
-                  "实验运行时已配置但不可用", "實驗執行時已配置但不可用", "実験的実行時が設定済みですが利用不可"
-                )
-                : copy("Experimental active", "实验运行时已启用", "實驗執行時已啟用", "実験的実行時が有効")}
-          </small>
-        </summary>
-        <div className="provider-runtime-panel">
-          <p>{copy(
-            "Choose how this provider sends requests. Legacy remains the stable default.",
-            "选择此 Provider 发送请求的方式。Legacy 始终是稳定默认项。", "選擇此供應商傳送請求的方式。Legacy 始終是穩定預設選項。", "このプロバイダーがリクエストを送信する方法を選択してください。レガシーは常に安定したデフォルトです。"
-          )}</p>
-          <fieldset className="provider-runtime-options">
-            <legend>{copy("Provider runtime", "Provider 运行时", "供應商執行時", "プロバイダー実行時")}</legend>
-            <label className={providerCall === "legacy" ? "selected" : ""}>
-              <input
-                type="radio"
-                name={providerCallName}
-                value="legacy"
-                checked={providerCall === "legacy"}
-                disabled={operationDisabled}
-                onChange={() => setProviderCall("legacy")}
-              />
-              <span>
-                <strong>Legacy</strong>
-                <small>{copy("Stable default · broad compatibility", "稳定默认 · 兼容性最广", "穩定預設 · 相容性最廣", "安定したデフォルト · 最大の互換性")}</small>
-              </span>
-              <i>{copy("Stable", "稳定", "穩定", "安定")}</i>
-            </label>
-            <label className={providerCall === "south_v1_buffered" ? "selected" : ""}>
-              <input
-                type="radio"
-                name={providerCallName}
-                value="south_v1_buffered"
-                checked={providerCall === "south_v1_buffered"}
-                disabled={operationDisabled || southUnavailableReason !== null}
-                onChange={() => setProviderCall("south_v1_buffered")}
-              />
-              <span>
-                <strong>{copy("South buffered only", "South 仅非流式", "South 僅非流式", "South は非ストリームのみ")}</strong>
-                <small>{copy(
-                  "South handles eligible buffered requests. Streams remain on Legacy.",
-                  "符合条件的非流式请求使用 South。流式请求仍使用 Legacy。", "South 處理符合條件的非流式請求。流式請求仍使用 Legacy。", "South は条件に合致した非ストリームリクエストを処理します。ストリームリクエストはレガシーが使用されます。"
-                )}</small>
-              </span>
-              <i>{copy("Experimental", "实验", "實驗", "実験")}</i>
-            </label>
-            <label className={providerCall === "south_v1_buffered_streaming" ? "selected" : ""}>
-              <input
-                type="radio"
-                name={providerCallName}
-                value="south_v1_buffered_streaming"
-                checked={providerCall === "south_v1_buffered_streaming"}
-                disabled={operationDisabled || southUnavailableReason !== null}
-                onChange={() => setProviderCall("south_v1_buffered_streaming")}
-              />
-              <span>
-                <strong>{copy("South buffered + streaming", "South 非流式 + 流式", "South 非流式 + 流式", "South 非ストリーム + ストリーム")}</strong>
-                <small>{copy(
-                  "South for eligible buffered and streaming requests.",
-                  "符合条件的非流式和流式请求均使用 South。", "符合條件的非流式和流式請求均使用 South。", "条件に合致した非ストリームおよびストリームリクエストはすべて South が使用されます。"
-                )}</small>
-              </span>
-              <i>{copy("Experimental", "实验", "實驗", "実験")}</i>
-            </label>
-            <label className={usesHeaderAuthEngine ? "selected" : ""}>
-              <input
-                type="radio"
-                name={providerCallName}
-                value="south_v1_buffered_streaming_header_auth"
-                checked={usesHeaderAuthEngine}
-                disabled={operationDisabled || headerAuthUnavailableReason !== null}
-                onChange={() => setProviderCall("south_v1_buffered_streaming_header_auth")}
-              />
-              <span>
-                <strong>{copy(
-                  "South buffered + streaming + Header Auth",
-                  "South 非流式 + 流式 + Header Auth", "南向緩衝 + 流式 + Header 身分驗證", "南向バッファ + ストリーミング + ヘッダー認証"
-                )}</strong>
-                <small>{copy(
-                  "Adds fixed api-key Header Auth for eligible Azure OpenAI v1 calls.",
-                  "为符合条件的 Azure OpenAI v1 调用启用固定 api-key Header Auth。", "為符合條件的 Azure OpenAI v1 呼叫啟用固定 api-key Header 身分驗證。", "条件を満たす Azure OpenAI v1 呼び出しで、固定 api-key ヘッダー認証を有効にします。"
-                )}</small>
-              </span>
-              <i>{copy("Experimental", "实验", "實驗", "実験")}</i>
-            </label>
-          </fieldset>
-          <p className={`provider-runtime-note ${providerCall === "legacy" ? "" : "warning"}`}>
-            {activeUnavailableReason
-              ? activeUnavailableCopy[activeUnavailableReason]
-              : providerCall === "legacy"
-                ? copy(
-                  "South is eligible for this provider. Enable it only for a controlled canary.",
-                  "此 Provider 符合 South 条件。仅在受控 canary 中启用。", "此供應商符合 South 條件。請只在受控的金絲雀測試中啟用。", "このプロバイダーは South の条件を満たしています。管理されたカナリアテストでのみ有効にしてください。"
-                )
-                : usesHeaderAuthEngine
-                  ? copy(
-                    "Eligible calls use South. Azure OpenAI v1 uses the fixed api-key header. South attempts never replay through Legacy.",
-                    "符合条件的调用使用 South。Azure OpenAI v1 使用固定 api-key header。South 尝试不会通过 Legacy 重放。", "符合資格的呼叫使用 South。Azure OpenAI v1 使用固定 api-key header。South 嘗試不會通過 Legacy 重放。", "資格のある呼び出しは South を使用します。Azure OpenAI v1 は固定 api-key ヘッダーを使用します。South の試行は Legacy を経由して再送信されません。"
-                  )
-                : copy(
-                  "South never replays an attempt through Legacy once South execution begins.",
-                  "South 一旦开始执行，就不会再通过 Legacy 重放该次尝试。", "South 一旦開始執行，就不會再通過 Legacy 重放該次嘗試。", "South が実行を開始した後は、Legacy を経由して再送信されません。"
-                )}
-          </p>
-        </div>
-      </details>
+      <div className={`provider-transport-status ${transportState}`} role="status">
+        <strong>{copy("Transport", "传输引擎", "傳輸引擎", "トランスポート")}</strong>
+        <span>
+          {transportState === "legacy"
+            ? copy("Legacy (pinned in configuration)", "Legacy（配置中显式指定）", "Legacy（設定中明確指定）", "レガシー（設定で固定）")
+            : transportState === "fallback"
+              ? copy("Legacy fallback", "回落到 Legacy", "回落至 Legacy", "レガシーにフォールバック")
+              : copy("South active", "South 已启用", "South 已啟用", "South が有効")}
+        </span>
+        <small>
+          {transportState === "fallback" && activeUnavailableReason
+            ? activeUnavailableCopy[activeUnavailableReason]
+            : transportState === "legacy"
+              ? copy(
+                "Remove `provider_call` from this upstream's configuration to return it to South.",
+                "从该上游配置中删除 `provider_call` 即可回到 South。", "從該上游設定中移除 `provider_call` 即可回到 South。", "このアップストリームの設定から `provider_call` を削除すると South に戻ります。"
+              )
+              : copy(
+                "Eligible calls use South; a call South cannot carry runs on Legacy and the receipt records why. South never replays an attempt through Legacy.",
+                "符合条件的调用使用 South；South 无法承载的调用走 Legacy，回执会记录原因。South 尝试不会通过 Legacy 重放。", "符合資格的呼叫使用 South；South 無法承載的呼叫走 Legacy，回執會記錄原因。South 嘗試不會通過 Legacy 重放。", "条件を満たす呼び出しは South を使用し、South が扱えない呼び出しはレガシーで実行され、理由がレシートに記録されます。South の試行はレガシーで再送信されません。"
+              )}
+        </small>
+      </div>
       {endpointError && (
         <p id={endpointErrorId} className="error-text" role="alert">
           {endpointError}

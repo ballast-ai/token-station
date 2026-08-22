@@ -5,7 +5,7 @@ use crate::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
         IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
         PreparedProviderStreamResultV1, ProviderPackageEligibilityV1, RequestBodyModeV1,
-        ResponseMetadataEligibilityV1, RolloutEligibilityV1, StableProviderCallFailureV1,
+        ResponseMetadataEligibilityV1, StableProviderCallFailureV1,
         build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
         execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
         open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
@@ -62,7 +62,6 @@ use tokio_util::sync::CancellationToken;
 
 fn eligible_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        RolloutEligibilityV1::Enabled,
         ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
@@ -73,7 +72,6 @@ fn eligible_policy() -> CommunityCallPolicyV1 {
 
 fn eligible_streaming_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        RolloutEligibilityV1::Enabled,
         ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
@@ -324,18 +322,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
     let cases = [
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Disabled,
-                ProviderPackageEligibilityV1::Approved,
-                ApiDialect::Translated,
-                EgressMode::Direct,
-                RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
-            ),
-            IneligibleV1::RolloutDisabled,
-        ),
-        (
-            CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Unapproved,
                 ApiDialect::Translated,
                 EgressMode::Direct,
@@ -346,7 +332,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
         ),
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Approved,
                 ApiDialect::AnthropicNative,
                 EgressMode::Direct,
@@ -357,7 +342,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
         ),
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Http,
@@ -368,7 +352,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
         ),
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Direct,
@@ -470,7 +453,6 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
     );
 
     let metadata_incompatible = CommunityCallPolicyV1::new(
-        RolloutEligibilityV1::Enabled,
         ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,

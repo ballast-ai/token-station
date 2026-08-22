@@ -55,7 +55,7 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v8: adds content-free transport diagnostics and closed conversion
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// The content-free transport path classification recorded for diagnostics.
 /// Raw, caller-controlled URL paths never enter the receipt.
@@ -222,7 +222,104 @@ pub struct AttemptRecord {
     pub stream_outcome: Option<StreamOutcome>,
     #[serde(default)]
     pub provider_call_engine: ProviderCallEngine,
+    /// Why a South-eligible configuration executed this attempt on the legacy
+    /// engine instead. `None` when the attempt ran on South, or on legacy by
+    /// explicit configuration with nothing to explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub south_fallback_reason: Option<SouthFallbackReason>,
     pub fallback_allowed: bool,
+}
+
+/// The content-free reason one attempt fell back from South to the legacy
+/// engine. Every variant is a host-local classification; none carries a
+/// header value, a URL, or a credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SouthFallbackReason {
+    /// The upstream is configured `provider_call: legacy`.
+    ConfiguredLegacy,
+    /// The upstream's South tier covers buffered calls only and this was a stream.
+    BufferedModeCannotStream,
+    /// The upstream has no credential; South carries authenticated calls only.
+    UnauthenticatedUpstream,
+    /// The gateway was built without a server-owned async runtime.
+    NoProviderRuntime,
+    /// The credential resolver could not be built for this upstream.
+    CredentialResolver,
+    /// The provider dialect is outside the South slice.
+    ProviderDialect,
+    /// The dialect resolves to a package the South slice does not approve.
+    ProviderPackageUnapproved,
+    /// The upstream speaks a non-translated API dialect.
+    ApiDialect,
+    /// Egress goes through a proxy.
+    Egress,
+    /// The body mode did not match what the slice carries.
+    Streaming,
+    /// The descriptor is not a POST.
+    Method,
+    /// The credential shape is outside the slice.
+    Auth,
+    /// The descriptor carries no body.
+    Body,
+    /// The credential source is outside the slice (a key file, say).
+    SecretSource,
+    /// Response metadata compatibility could not be asserted.
+    ResponseMetadata,
+    /// A descriptor header fails the safe-header contract.
+    Headers,
+}
+
+impl SouthFallbackReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfiguredLegacy => "configured_legacy",
+            Self::BufferedModeCannotStream => "buffered_mode_cannot_stream",
+            Self::UnauthenticatedUpstream => "unauthenticated_upstream",
+            Self::NoProviderRuntime => "no_provider_runtime",
+            Self::CredentialResolver => "credential_resolver",
+            Self::ProviderDialect => "provider_dialect",
+            Self::ProviderPackageUnapproved => "provider_package_unapproved",
+            Self::ApiDialect => "api_dialect",
+            Self::Egress => "egress",
+            Self::Streaming => "streaming",
+            Self::Method => "method",
+            Self::Auth => "auth",
+            Self::Body => "body",
+            Self::SecretSource => "secret_source",
+            Self::ResponseMetadata => "response_metadata",
+            Self::Headers => "headers",
+        }
+    }
+
+    /// Every variant, in token order, for schema constraints and parsers.
+    pub const ALL: [Self; 16] = [
+        Self::ConfiguredLegacy,
+        Self::BufferedModeCannotStream,
+        Self::UnauthenticatedUpstream,
+        Self::NoProviderRuntime,
+        Self::CredentialResolver,
+        Self::ProviderDialect,
+        Self::ProviderPackageUnapproved,
+        Self::ApiDialect,
+        Self::Egress,
+        Self::Streaming,
+        Self::Method,
+        Self::Auth,
+        Self::Body,
+        Self::SecretSource,
+        Self::ResponseMetadata,
+        Self::Headers,
+    ];
+
+    /// The inverse of [`Self::as_str`].
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_str() == token)
+    }
 }
 
 /// The content-free HTTP engine that actually performed one upstream attempt.

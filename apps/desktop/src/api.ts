@@ -921,13 +921,17 @@ export const setQuotaPlan = (
     rateLimitPerMin,
   });
 
+/**
+ * Edits a provider's endpoint and credential. The transport engine is not
+ * an editable detail: South is the default and the host decides per call
+ * whether an attempt can use it, so this never sends `providerCall`.
+ */
 export const editProvider = (
   name: string,
   base_url: string,
   api_key: string | null,
   credential_source?: "store" | "env" | "file" | "none",
   credential_reference?: string | null,
-  provider_call?: ProviderCallEngine,
 ) => credential_source
   ? invoke<StateView>("edit_provider_with_credential", {
     name,
@@ -935,7 +939,6 @@ export const editProvider = (
     apiKey: api_key,
     credentialSource: credential_source,
     credentialReference: credential_reference ?? null,
-    providerCall: provider_call ?? "legacy",
   })
   : invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
 

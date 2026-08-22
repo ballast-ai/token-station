@@ -26,7 +26,7 @@
 
 供应商请求、模型发现与健康探测可以使用直连、HTTP CONNECT 或 SOCKS5，并提供经过校验的 `no_proxy` 规则与独立代理凭证。这些流量不会继承环境中的代理变量。桌面更新器使用独立 HTTP 栈，可能遵循系统或环境代理设置。
 
-Legacy 是默认的 Provider 执行引擎。符合条件的 OpenAI-compatible Bearer 请求可以显式启用 South 非流式，或同时启用非流式与流式。Azure OpenAI v1 必须单独选择累计式 `south_v1_buffered_streaming_header_auth`，并固定使用 `api-key` Header。配置方法见 [Azure OpenAI v1 与 South Header Auth](guides/azure-openai-v1-south-header-auth.md)。
+South 是默认的 Provider 执行引擎：覆盖非流式与流式调用、Bearer 凭据，以及 Azure OpenAI v1 固定的 `api-key` Header。South 无法承载的调用——经代理的 Egress、文件凭据、非 translated API 方言、没有内置 South 组件的方言——在读取任何凭据之前就改走 Legacy 引擎，并在回执里记录 `south_fallback_reason`。South 尝试绝不会通过 Legacy 重放。要把某个上游固定在 Legacy，给它设置 `"provider_call": "legacy"`。另见 [Azure OpenAI v1 与 South Header Auth](guides/azure-openai-v1-south-header-auth.md)。
 
 ## 桌面端
 
