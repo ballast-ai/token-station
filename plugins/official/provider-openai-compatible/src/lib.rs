@@ -155,18 +155,6 @@ fn index_of(value: &Value) -> u32 {
     u32::try_from(value.as_u64().unwrap_or(0)).unwrap_or(0)
 }
 
-fn anthropic_reasoning_history(message: &Message) -> Option<String> {
-    let blocks = message
-        .extensions
-        .get("anthropic_thinking_blocks")?
-        .as_array()?;
-    let thinking = blocks
-        .iter()
-        .filter_map(|entry| entry.pointer("/block/thinking").and_then(Value::as_str))
-        .collect::<String>();
-    (!thinking.is_empty()).then_some(thinking)
-}
-
 fn message_to_openai_for_model(
     message: &Message,
     requires_reasoning_content: bool,
@@ -240,14 +228,12 @@ fn message_to_openai_for_model(
             && !out.contains_key("reasoning_content")
         {
             // DeepSeek thinking-mode tool continuations require this private
-            // field on the historical assistant tool call. Restore genuine
-            // Anthropic thinking when it survived the inbound adapter; an empty
-            // placeholder is the documented no-thinking history shape accepted
-            // by DeepSeek and does not invent a chain of thought.
-            out.insert(
-                "reasoning_content".to_owned(),
-                json!(anthropic_reasoning_history(message).unwrap_or_default()),
-            );
+            // field on the historical assistant tool call. Genuine thinking
+            // arrives as `ContentPart::Thinking` and the content arm above has
+            // already written it, so reaching here means the turn carried none:
+            // the empty placeholder is the documented no-thinking history shape
+            // DeepSeek accepts, and it does not invent a chain of thought.
+            out.insert("reasoning_content".to_owned(), json!(""));
         }
         let calls: Vec<Value> = message
             .tool_calls

@@ -357,13 +357,16 @@ fn discover_request_direction_divergences() {
 // Two classes, both found by the first discovery pass over the curated corpus,
 // both landing exactly on the fault lines the reconnaissance named.
 //
-// **R-1 — assistant `thinking` blocks are dropped, silently.** `agent-anthropic`
-// puts them in `extensions["anthropic_thinking_blocks"]` (an adapter-local
-// channel that predates the IR gaining `ContentPart::Thinking`), while the
-// component reads the typed field. The two channels never meet, so the block
-// vanishes with no error. This is the worst class in the ledger: silent content
-// loss on the exact multi-turn continuation the passthrough exists to serve.
-// Retiring it is stage B's job.
+// **R-1 — retired.** Assistant `thinking` blocks used to vanish silently:
+// `agent-anthropic` put them in `extensions["anthropic_thinking_blocks"]`, an
+// adapter-local channel older than the IR's own `ContentPart::Thinking`, while
+// the component read the typed field. The two never met. The fix was to stop
+// diverting them — they ride in `content` parts like every other block now, and
+// the extension is gone with them. This eraser is retired rather than kept as
+// dead normalisation, which is the evidence the class is actually eliminated:
+// `every_registered_class_is_still_load_bearing` is what demanded the
+// retirement, and the 200,000-body sweep confirmed the fix introduced nothing
+// new in its place.
 //
 // **R-2 — a forced `tool_choice` degrades to `auto`.** Not an accident, and not
 // an IR limitation: `validate_tool_choice` says so itself — "`ToolChoice::Other`
@@ -377,29 +380,6 @@ fn discover_request_direction_divergences() {
 // area still survives. When a class is really fixed its eraser stops being
 // load-bearing, which `every_registered_class_is_still_load_bearing` reports —
 // retiring the eraser is then the evidence the class is gone rather than hidden.
-
-/// R-1: drop `thinking` / `redacted_thinking` blocks from every content array.
-fn erase_r1_dropped_thinking(value: &mut Value) {
-    match value {
-        Value::Array(items) => {
-            items.retain(|item| {
-                !matches!(
-                    item.get("type").and_then(Value::as_str),
-                    Some("thinking" | "redacted_thinking")
-                )
-            });
-            for item in items {
-                erase_r1_dropped_thinking(item);
-            }
-        }
-        Value::Object(fields) => {
-            for (_, field) in fields.iter_mut() {
-                erase_r1_dropped_thinking(field);
-            }
-        }
-        _ => {}
-    }
-}
 
 /// R-2: rewrite a forced `tool_choice` to the `auto` the translate path emits.
 fn erase_r2_degraded_tool_choice(value: &mut Value) {
@@ -485,10 +465,6 @@ fn erase_r6_tool_use_reordered(value: &mut Value) {
 type Eraser = (&'static str, fn(&mut Value));
 
 const ERASERS: &[Eraser] = &[
-    (
-        "R-1 assistant thinking blocks are dropped",
-        erase_r1_dropped_thinking,
-    ),
     (
         "R-2 a forced tool_choice degrades to auto",
         erase_r2_degraded_tool_choice,

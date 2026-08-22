@@ -3,21 +3,18 @@
   "messages": [
     {
       "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "Check the tool result before replying.",
+          "signature": "opaque-signature"
+        }
+      ],
       "tool_calls": [
         {
           "id": "toolu_1",
           "name": "lookup",
           "arguments": "{\"query\":\"Token Station\"}"
-        }
-      ],
-      "anthropic_thinking_blocks": [
-        {
-          "index": 0,
-          "block": {
-            "type": "thinking",
-            "thinking": "Check the tool result before replying.",
-            "signature": "opaque-signature"
-          }
         }
       ]
     },
