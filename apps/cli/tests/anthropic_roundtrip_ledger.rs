@@ -31,6 +31,7 @@
 //!   sandboxed component to this implementation byte for byte, so the
 //!   translation is the same and no wasm build is paid for here.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -277,6 +278,55 @@ fn corpus() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// Every sample every gate runs over: the curated shapes, then the generated
+/// sweep. Keeping them in one place means a class found by the sweep is also
+/// held to the load-bearing check, and vice versa.
+fn all_bodies() -> impl Iterator<Item = (String, Value)> {
+    corpus()
+        .into_iter()
+        .map(|(name, body)| (name.to_owned(), body))
+        .chain(
+            (1..=SWEEP_CASES).map(|seed| (format!("generated seed {seed}"), generated_body(seed))),
+        )
+}
+
+/// The sweep as a gate: over the whole generated space, every divergence must
+/// fall to a registered eraser. A new one survives and turns this red, with the
+/// seed that reproduces it.
+#[test]
+fn the_generated_sweep_finds_no_unregistered_class() {
+    let mut unlisted: BTreeMap<String, u64> = BTreeMap::new();
+    for seed in 1..=SWEEP_CASES {
+        let body = generated_body(seed);
+        let Outcome::Divergent {
+            passthrough,
+            component,
+        } = observe(&body)
+        else {
+            continue;
+        };
+        let (left, right) = (erased(passthrough), erased(component));
+        if left == right {
+            continue;
+        }
+        let signature = difference_signature(&left, &right)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        unlisted.entry(signature).or_insert(seed);
+    }
+    assert!(
+        unlisted.is_empty(),
+        "{} unregistered class(es) survived every eraser:\n{}",
+        unlisted.len(),
+        unlisted
+            .iter()
+            .map(|(signature, seed)| format!("  seed {seed}: {signature}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 /// Discovery, not a gate: prints every observation so the ledger can be written
 /// from what the round trip actually does rather than from what it ought to do.
 /// The gate that replaces this is added once the classes it finds are registered
@@ -361,6 +411,76 @@ fn erase_r2_degraded_tool_choice(value: &mut Value) {
     }
 }
 
+/// R-3: a block-array `system` is flattened to the string the IR carries.
+fn erase_r3_flattened_system(value: &mut Value) {
+    let Some(system) = value.get_mut("system") else {
+        return;
+    };
+    let Some(blocks) = system.as_array() else {
+        return;
+    };
+    let all_text = blocks.iter().all(|block| {
+        block.get("type").and_then(Value::as_str) == Some("text")
+            && block.get("text").and_then(Value::as_str).is_some()
+    });
+    if !all_text {
+        return;
+    }
+    let joined: String = blocks
+        .iter()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect();
+    *system = json!(joined);
+}
+
+/// R-4: `metadata` is dropped — the IR has no slot for it, so `user_id` and its
+/// siblings never reach the upstream on the translated route.
+fn erase_r4_dropped_metadata(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.remove("metadata");
+    }
+}
+
+/// R-5: a bare-string `content` comes back as a one-element text array.
+fn erase_r5_string_content_becomes_array(value: &mut Value) {
+    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(content) = message.get_mut("content") else {
+            continue;
+        };
+        if let Some(text) = content.as_str() {
+            *content = json!([{"type": "text", "text": text}]);
+        }
+    }
+}
+
+/// R-6: `tool_use` blocks are re-ordered to the end of the turn.
+///
+/// The IR splits a message into `content` parts and a separate `tool_calls`
+/// vector, so a renderer can only append the calls after the parts — the
+/// interleaving the caller sent is not representable. Registered rather than
+/// condoned: block order carries meaning in an assistant turn, and this is the
+/// same structural gap that makes retiring the `anthropic_thinking_blocks`
+/// extension a shape question rather than a swap.
+fn erase_r6_tool_use_reordered(value: &mut Value) {
+    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let is_tool_use =
+            |block: &Value| block.get("type").and_then(Value::as_str) == Some("tool_use");
+        let (calls, rest): (Vec<Value>, Vec<Value>) = blocks.iter().cloned().partition(is_tool_use);
+        blocks.clear();
+        blocks.extend(rest);
+        blocks.extend(calls);
+    }
+}
+
 /// A registered class: its label, and the narrow rewrite that erases exactly it.
 type Eraser = (&'static str, fn(&mut Value));
 
@@ -372,6 +492,19 @@ const ERASERS: &[Eraser] = &[
     (
         "R-2 a forced tool_choice degrades to auto",
         erase_r2_degraded_tool_choice,
+    ),
+    (
+        "R-3 a block-array system is flattened",
+        erase_r3_flattened_system,
+    ),
+    ("R-4 metadata is dropped", erase_r4_dropped_metadata),
+    (
+        "R-5 a string content becomes a text array",
+        erase_r5_string_content_becomes_array,
+    ),
+    (
+        "R-6 tool_use blocks are re-ordered to the end",
+        erase_r6_tool_use_reordered,
     ),
 ];
 
@@ -440,7 +573,7 @@ fn every_registered_class_is_still_load_bearing() {
             .filter(|(other, _)| *other != index)
             .map(|(_, entry)| entry)
             .collect();
-        let load_bearing = corpus().into_iter().any(|(_, body)| {
+        let load_bearing = all_bodies().any(|(_, body)| {
             let Outcome::Divergent {
                 passthrough,
                 component,
@@ -487,4 +620,247 @@ fn the_component_still_parses_this_workspaces_ir() {
              shape: {reason}"
         ),
     }
+}
+
+// -- generated sweep -----------------------------------------------------------
+//
+// The curated corpus above proves the harness; it does not bound the shape
+// space. 5a's sweep grew its ledger from six classes to twelve and two of the
+// additions outranked most of the original list, so the same lesson applies
+// here: a hand-written list is a starting point, not a census.
+//
+// The generator is a seeded walk over a grammar of Messages bodies rather than
+// a `proptest` dependency. Determinism is the point — a gate that finds a new
+// class on one run and not the next is not a gate — and the shape space here is
+// discrete enough that a deliberate grammar covers it better than sampling.
+
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        // xorshift64*, deterministic and dependency-free.
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        usize::try_from(self.next_u64() % n as u64).unwrap_or(0)
+    }
+
+    fn chance(&mut self, percent: u64) -> bool {
+        self.next_u64() % 100 < percent
+    }
+}
+
+fn text_block(rng: &mut Rng) -> Value {
+    json!({"type": "text", "text": format!("t{}", rng.below(4))})
+}
+
+fn user_block(rng: &mut Rng) -> Value {
+    match rng.below(5) {
+        0 => json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}
+        }),
+        1 => json!({"type": "document", "source": {"type": "text", "data": "d"}}),
+        2 => json!({"type": "search_result", "content": []}),
+        3 => json!({"type": "wholly_unknown_block", "payload": {"k": rng.below(3)}}),
+        _ => text_block(rng),
+    }
+}
+
+fn assistant_block(rng: &mut Rng) -> Value {
+    match rng.below(6) {
+        0 => json!({
+            "type": "thinking",
+            "thinking": format!("th{}", rng.below(3)),
+            "signature": format!("sig{}", rng.below(3))
+        }),
+        1 => json!({"type": "redacted_thinking", "data": "opaque"}),
+        2 => json!({"type": "tool_use", "id": "tu_1", "name": "lookup", "input": {}}),
+        3 => json!({"type": "server_tool_use", "id": "st_1", "name": "web_search", "input": {}}),
+        4 => json!({"type": "web_search_tool_result", "tool_use_id": "st_1", "content": []}),
+        _ => text_block(rng),
+    }
+}
+
+fn content(rng: &mut Rng, assistant: bool) -> Value {
+    if rng.chance(25) {
+        return json!(format!("s{}", rng.below(3)));
+    }
+    let count = 1 + rng.below(3);
+    let blocks: Vec<Value> = (0..count)
+        .map(|_| {
+            if assistant {
+                assistant_block(rng)
+            } else {
+                user_block(rng)
+            }
+        })
+        .collect();
+    Value::Array(blocks)
+}
+
+fn generated_body(seed: u64) -> Value {
+    let rng = &mut Rng(seed | 1);
+    let turns = 1 + rng.below(4);
+    let mut messages = Vec::new();
+    for turn in 0..turns {
+        let assistant = turn % 2 == 1;
+        messages.push(json!({
+            "role": if assistant { "assistant" } else { "user" },
+            "content": content(rng, assistant)
+        }));
+    }
+    let mut body = json!({
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 256 * (1 + rng.below(4)),
+        "messages": messages
+    });
+    let object = body.as_object_mut().expect("object");
+    if rng.chance(30) {
+        object.insert(
+            "system".to_owned(),
+            if rng.chance(50) {
+                json!("be brief")
+            } else {
+                json!([{"type": "text", "text": "be brief"}])
+            },
+        );
+    }
+    if rng.chance(40) {
+        object.insert(
+            "tools".to_owned(),
+            json!([{
+                "name": "lookup",
+                "description": "look it up",
+                "input_schema": {"type": "object", "properties": {}}
+            }]),
+        );
+        if rng.chance(60) {
+            object.insert(
+                "tool_choice".to_owned(),
+                match rng.below(3) {
+                    0 => json!({"type": "auto"}),
+                    1 => json!({"type": "any"}),
+                    _ => json!({"type": "tool", "name": "lookup"}),
+                },
+            );
+        }
+    }
+    if rng.chance(35) {
+        object.insert("temperature".to_owned(), json!(0.5));
+    }
+    if rng.chance(25) {
+        object.insert("top_p".to_owned(), json!(0.9));
+    }
+    if rng.chance(20) {
+        object.insert("stop_sequences".to_owned(), json!(["STOP"]));
+    }
+    if rng.chance(15) {
+        object.insert("metadata".to_owned(), json!({"user_id": "u1"}));
+    }
+    body
+}
+
+/// Where two bodies differ, as a set of tagged paths. Two observations with the
+/// same signature are the same class, so a sweep reports classes rather than
+/// twenty thousand dumps.
+fn difference_signature(left: &Value, right: &Value) -> BTreeSet<String> {
+    fn walk(left: &Value, right: &Value, path: &str, out: &mut BTreeSet<String>) {
+        match (left, right) {
+            (Value::Object(a), Value::Object(b)) => {
+                for key in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
+                    let next = format!("{path}/{key}");
+                    match (a.get(key), b.get(key)) {
+                        (Some(l), Some(r)) => walk(l, r, &next, out),
+                        (Some(_), None) => {
+                            out.insert(format!("{next}: only on the passthrough side"));
+                        }
+                        (None, Some(_)) => {
+                            out.insert(format!("{next}: only on the component side"));
+                        }
+                        (None, None) => {}
+                    }
+                }
+            }
+            (Value::Array(a), Value::Array(b)) => {
+                if a.len() == b.len() {
+                    for (index, (l, r)) in a.iter().zip(b).enumerate() {
+                        walk(l, r, &format!("{path}/{index}"), out);
+                    }
+                } else {
+                    out.insert(format!("{path}: array length {} vs {}", a.len(), b.len()));
+                }
+            }
+            _ => {
+                if left != right {
+                    let kind = |value: &Value| match value {
+                        Value::Null => "null",
+                        Value::Bool(_) => "bool",
+                        Value::Number(_) => "number",
+                        Value::String(_) => "string",
+                        Value::Array(_) => "array",
+                        Value::Object(_) => "object",
+                    };
+                    out.insert(format!("{path}: {} vs {}", kind(left), kind(right)));
+                }
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(left, right, "", &mut out);
+    out
+}
+
+/// How many bodies the sweep walks. Deliberately a constant: the gate must not
+/// depend on wall-clock budget or an environment variable nobody sets in CI.
+const SWEEP_CASES: u64 = 200_000;
+
+/// Discovery, not a gate: walks the generated space and reports each *distinct*
+/// class that survives every registered eraser, with the seed that reproduces it.
+#[test]
+#[ignore = "discovery pass; run explicitly to grow the ledger"]
+fn sweep_for_unregistered_request_divergences() {
+    let mut seen: BTreeMap<String, u64> = BTreeMap::new();
+    let mut refusals: BTreeMap<String, u64> = BTreeMap::new();
+    for seed in 1..=SWEEP_CASES {
+        let body = generated_body(seed);
+        match observe(&body) {
+            Outcome::Equivalent => {}
+            Outcome::Refused(reason) => {
+                *refusals.entry(reason).or_insert(0) += 1;
+            }
+            Outcome::Divergent {
+                passthrough,
+                component,
+            } => {
+                let (left, right) = (erased(passthrough), erased(component));
+                if left == right {
+                    continue;
+                }
+                let signature = difference_signature(&left, &right)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                seen.entry(signature).or_insert(seed);
+            }
+        }
+    }
+    println!("-- refusals by reason --");
+    for (reason, count) in &refusals {
+        println!("  {count:>6}  {reason}");
+    }
+    println!("-- unregistered classes (signature -> first seed) --");
+    for (signature, seed) in &seen {
+        println!("  seed {seed:>6}  {signature}");
+    }
+    println!(
+        "-- {} unregistered classes over {SWEEP_CASES} generated bodies --",
+        seen.len()
+    );
 }
