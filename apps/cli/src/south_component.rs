@@ -62,6 +62,13 @@ impl SouthComponentAdapter {
     pub fn dialects(&self) -> Vec<String> {
         self.component.manifest().providers.clone()
     }
+
+    /// The package name its manifest reports, for diagnostics that have to name
+    /// which of several components is being talked about.
+    #[must_use]
+    pub fn package_name(&self) -> String {
+        self.component.manifest().name.clone()
+    }
 }
 
 fn internal(detail: impl std::fmt::Display) -> ErrorEnvelope {

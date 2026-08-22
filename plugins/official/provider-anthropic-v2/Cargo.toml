@@ -1,0 +1,33 @@
+# The official Anthropic Messages provider component, v2: the South-owned ABI
+# (token-station:adapter@2.0.0, world provider-adapter-v2), compiled to a
+# wasm32-wasip2 component. Standalone (not a workspace member): the main
+# workspace must stay buildable without a wasm toolchain.
+#
+# The translation logic is south-component-conformance's reference
+# implementation — the same code gate ② froze its fixture pack against — so
+# this shell cannot drift from the judged behavior. The vendored
+# wit/provider-adapter.wit is pinned byte-for-byte to
+# south_provider_api::ADAPTER_WIT by this crate's test.
+[package]
+name = "provider-anthropic-v2"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: stops cargo from walking up into the main workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+south-component-conformance = { version = "=0.13.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "00291412e8cf90093713e64294d71878a0a4ab15", default-features = false }
+wit-bindgen = "0.59"
+
+[dev-dependencies]
+south-provider-api = { version = "=0.13.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "00291412e8cf90093713e64294d71878a0a4ab15" }
+
+[profile.release]
+lto = "thin"
+opt-level = "s"
+strip = true

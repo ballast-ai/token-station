@@ -45,6 +45,11 @@ fn main() {
             "south/provider-openai-compatible-v2",
             "component.wasm",
         ),
+        (
+            "PROVIDER_ANTHROPIC_V2",
+            "south/provider-anthropic-v2",
+            "component.wasm",
+        ),
     ] {
         for (kind, file) in [("MANIFEST", "manifest.json"), ("WASM", wasm_file)] {
             let path = dist.join(package).join(file);

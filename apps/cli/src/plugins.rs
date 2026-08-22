@@ -99,18 +99,30 @@ mod builtin {
     /// [`PACKAGES`]: its manifest is the south v2 schema, which the v1
     /// registry must not try to parse. The south loader runs its own gates.
     #[cfg(feature = "builtin-plugins")]
-    pub(crate) const SOUTH_OPENAI_COMPATIBLE_V2: Option<Package> = Some(Package {
-        manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_MANIFEST")),
-        wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_WASM")),
-    });
+    pub(crate) const SOUTH_COMPONENTS: &[Package] = &[
+        Package {
+            manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_MANIFEST")),
+            wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_WASM")),
+        },
+        Package {
+            manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_ANTHROPIC_V2_MANIFEST")),
+            wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_ANTHROPIC_V2_WASM")),
+        },
+    ];
 
     #[cfg(not(feature = "builtin-plugins"))]
-    pub(crate) const SOUTH_OPENAI_COMPATIBLE_V2: Option<Package> = None;
+    pub(crate) const SOUTH_COMPONENTS: &[Package] = &[];
 }
 
-/// The embedded v2 south component package, when the builtin tier carries it.
-pub(crate) fn builtin_south_openai_compatible_v2() -> Option<(&'static str, &'static [u8])> {
-    builtin::SOUTH_OPENAI_COMPATIBLE_V2.map(|package| (package.manifest_source, package.wasm))
+/// Every embedded v2 south component package the builtin tier carries.
+///
+/// A list rather than a single package since the Anthropic component joined
+/// the OpenAI-compatible one: the host resolves which to use by the upstream's
+/// declared dialect, exactly as the v1 registry already does.
+pub(crate) fn builtin_south_components() -> impl Iterator<Item = (&'static str, &'static [u8])> {
+    builtin::SOUTH_COMPONENTS
+        .iter()
+        .map(|package| (package.manifest_source, package.wasm))
 }
 
 /// Where a package's bytes come from. The loader runs the same gates on both.

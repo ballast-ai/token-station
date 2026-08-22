@@ -1283,15 +1283,23 @@ impl SouthProviderRuntime {
 }
 
 /// Everything the v2 south component lane needs, built once per gateway.
+///
+/// Keyed by dialect because there is more than one official component now.
+/// A package declares the dialects it speaks and the host resolves by that,
+/// the same rule the v1 registry has always used — adding a third component
+/// is a packaging change, not a wiring one.
 struct SouthComponentSupport {
-    adapter: Arc<crate::south_component::SouthComponentAdapter>,
+    adapters:
+        std::collections::BTreeMap<String, Arc<crate::south_component::SouthComponentAdapter>>,
     report: Arc<crate::south_component::ShadowReport>,
-    dialects: std::collections::BTreeSet<String>,
 }
 
 impl SouthComponentSupport {
-    fn covers(&self, dialect: &str) -> bool {
-        self.dialects.contains(dialect)
+    fn adapter_for(
+        &self,
+        dialect: &str,
+    ) -> Option<&Arc<crate::south_component::SouthComponentAdapter>> {
+        self.adapters.get(dialect)
     }
 }
 
@@ -1385,19 +1393,24 @@ fn south_component_engine(
     mode: crate::config::SouthComponentMode,
     dialect: &str,
 ) -> Arc<dyn ProviderAdapter + Send + Sync> {
-    match (support, mode) {
-        (Some(support), crate::config::SouthComponentMode::Shadow) if support.covers(dialect) => {
+    let Some(component) = support.and_then(|support| {
+        support
+            .adapter_for(dialect)
+            .map(|adapter| (adapter, &support.report))
+    }) else {
+        return plugin;
+    };
+    match mode {
+        crate::config::SouthComponentMode::Shadow => {
             Arc::new(crate::south_component::ShadowedProviderAdapter::new(
                 plugin,
-                Arc::clone(&support.adapter),
-                Arc::clone(&support.report),
+                Arc::clone(component.0),
+                Arc::clone(component.1),
                 dialect,
             ))
         }
-        (Some(support), crate::config::SouthComponentMode::Primary) if support.covers(dialect) => {
-            Arc::clone(&support.adapter) as _
-        }
-        _ => plugin,
+        crate::config::SouthComponentMode::Primary => Arc::clone(component.0) as _,
+        crate::config::SouthComponentMode::Off => plugin,
     }
 }
 
@@ -1412,24 +1425,38 @@ fn south_component_support(config: &ClientConfig) -> Result<Option<SouthComponen
     if !wanted {
         return Ok(None);
     }
-    let Some((manifest_source, wasm)) = crate::plugins::builtin_south_openai_compatible_v2() else {
+    let mut packages = crate::plugins::builtin_south_components().peekable();
+    if packages.peek().is_none() {
         eprintln!(
-            "south component package unavailable in this build; upstream translation stays on \
+            "south component packages unavailable in this build; upstream translation stays on \
              the v1 plugin path"
         );
         return Ok(None);
-    };
+    }
     let runtime = crate::south_component::south_component_runtime()?;
-    let adapter = crate::south_component::SouthComponentAdapter::load_embedded(
-        &runtime,
-        manifest_source,
-        wasm,
-    )?;
-    let dialects = adapter.dialects().into_iter().collect();
+    let mut adapters = std::collections::BTreeMap::new();
+    for (manifest_source, wasm) in packages {
+        let adapter = crate::south_component::SouthComponentAdapter::load_embedded(
+            &runtime,
+            manifest_source,
+            wasm,
+        )?;
+        let adapter = Arc::new(adapter);
+        for dialect in adapter.dialects() {
+            // Two packages claiming one dialect is a packaging mistake, not a
+            // runtime choice to make silently.
+            if let Some(previous) = adapters.insert(dialect.clone(), Arc::clone(&adapter)) {
+                return Err(format!(
+                    "two south component packages both declare `{dialect}`: `{}` and `{}`",
+                    previous.package_name(),
+                    adapter.package_name(),
+                ));
+            }
+        }
+    }
     Ok(Some(SouthComponentSupport {
-        adapter: Arc::new(adapter),
+        adapters,
         report: Arc::new(crate::south_component::ShadowReport::default()),
-        dialects,
     }))
 }
 

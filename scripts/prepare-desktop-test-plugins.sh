@@ -16,6 +16,7 @@ readonly plugins=(
 # directory scan skips (no manifest.json at its top level).
 readonly south_components=(
   provider-openai-compatible-v2
+  provider-anthropic-v2
 )
 
 # Desktop startup tests exercise the real Gateway, whose development config
