@@ -10,6 +10,7 @@ const southRevision = "00291412e8cf90093713e64294d71878a0a4ab15";
 const southVersion = "0.13.0";
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const expectedSouthPackages = new Set([
+  "south-component-conformance",
   "south-contracts",
   "south-core",
   "south-provider-api",
@@ -200,6 +201,7 @@ const cliSouthDependencies = new Map(
 assert.deepEqual(
   cliSouthDependencies,
   new Map([
+    ["south-component-conformance", "dev"],
     ["south-contracts", "normal"],
     ["south-core", "normal"],
     ["south-provider-api", "normal"],

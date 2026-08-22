@@ -2153,6 +2153,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "south-component-conformance"
+version = "0.13.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=00291412e8cf90093713e64294d71878a0a4ab15#00291412e8cf90093713e64294d71878a0a4ab15"
+dependencies = [
+ "serde",
+ "serde_json",
+ "south-provider-api",
+ "thiserror 2.0.18",
+ "token-station-protocol 0.3.0 (git+https://github.com/ballast-ai/token-station-kernel.git?tag=v0.2.0)",
+]
+
+[[package]]
 name = "south-contracts"
 version = "0.13.0"
 source = "git+https://github.com/ballast-ai/token-station-south.git?rev=00291412e8cf90093713e64294d71878a0a4ab15#00291412e8cf90093713e64294d71878a0a4ab15"
@@ -2411,6 +2423,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "south-component-conformance",
  "south-contracts",
  "south-core",
  "south-provider-api",
@@ -2423,7 +2436,7 @@ dependencies = [
  "token-station-plugin-api",
  "token-station-plugin-runtime",
  "token-station-private-fs",
- "token-station-protocol",
+ "token-station-protocol 0.3.0",
  "token-station-release",
  "token-station-router-core",
  "tokio",
@@ -2440,7 +2453,7 @@ dependencies = [
  "serde",
  "serde_json",
  "token-station-plugin-api",
- "token-station-protocol",
+ "token-station-protocol 0.3.0",
 ]
 
 [[package]]
@@ -2449,7 +2462,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol",
+ "token-station-protocol 0.3.0",
  "token-station-router-core",
 ]
 
@@ -2470,7 +2483,7 @@ dependencies = [
  "serde_json",
  "token-station-conformance",
  "token-station-plugin-api",
- "token-station-protocol",
+ "token-station-protocol 0.3.0",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -2486,6 +2499,15 @@ dependencies = [
 [[package]]
 name = "token-station-protocol"
 version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "token-station-protocol"
+version = "0.3.0"
+source = "git+https://github.com/ballast-ai/token-station-kernel.git?tag=v0.2.0#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
 dependencies = [
  "serde",
  "serde_json",
@@ -2511,7 +2533,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol",
+ "token-station-protocol 0.3.0",
 ]
 
 [[package]]
