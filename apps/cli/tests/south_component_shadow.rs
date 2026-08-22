@@ -283,3 +283,79 @@ fn the_anthropic_component_renders_a_messages_request() {
         descriptor.url
     );
 }
+
+/// Stage C's shadow classifies without serving. The three outcomes answer
+/// different questions and are counted apart on purpose: a divergence asks
+/// whether the round trip is faithful, a refusal asks whether the translated
+/// route can carry the request at all — and it is the refusal count that tells
+/// stage A′ which rejections are worth opening.
+#[test]
+fn the_passthrough_shadow_separates_refusals_from_divergences() {
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    use token_station_cli::south_component::{PassthroughShadow, PassthroughShadowReport};
+
+    let wasm = std::fs::read(build_wasm("provider-anthropic-v2", "provider_anthropic_v2"))
+        .expect("the anthropic component builds");
+    let manifest = std::fs::read_to_string(
+        repo_root().join("plugins/official/provider-anthropic-v2/manifest.json"),
+    )
+    .expect("its manifest reads");
+    let runtime = south_component_runtime().expect("the south runtime builds");
+    let component = Arc::new(
+        SouthComponentAdapter::load_embedded(&runtime, &manifest, &wasm)
+            .expect("the anthropic component loads"),
+    );
+    let report = Arc::new(PassthroughShadowReport::default());
+    let shadow = PassthroughShadow::new(Arc::clone(&component), Arc::clone(&report));
+
+    let config: ProviderConfig = serde_json::from_value(serde_json::json!({
+        "provider": "anthropic",
+        "base_url": "https://api.anthropic.com/v1"
+    }))
+    .expect("an anthropic provider config");
+    let request: ChatRequest = serde_json::from_value(serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [{"role": "user", "content": "hello"}],
+        "sampling": {"max_output_tokens": 1024}
+    }))
+    .expect("a minimal IR request");
+
+    // A refusal is not a diff. The translated route declining a shape the
+    // passthrough serves today is exactly what stage A′ needs counted.
+    let refusing = |_: &serde_json::Value| {
+        Err(token_station_protocol::ErrorEnvelope::new(
+            token_station_protocol::ErrorCode::Capability,
+            400,
+            "server-tool history cannot be replayed",
+        ))
+    };
+    shadow.observe(
+        &refusing,
+        &serde_json::json!({}),
+        &config,
+        "claude-sonnet-4-5",
+    );
+    assert_eq!(report.refused.load(AtomicOrdering::Relaxed), 1);
+    assert_eq!(report.divergent.load(AtomicOrdering::Relaxed), 0);
+
+    // Feeding back the component's own rendering is the one input guaranteed to
+    // round-trip, so it pins the equality arm rather than the differing one.
+    let rendered = component
+        .build_http_request(&request, &config)
+        .expect("the component renders")
+        .body
+        .expect("with a body");
+    let accepting = |_: &serde_json::Value| Ok(request.clone());
+    shadow.observe(&accepting, &rendered, &config, "claude-sonnet-4-5");
+    assert_eq!(report.equivalent.load(AtomicOrdering::Relaxed), 1);
+
+    // And a body the round trip does not reproduce lands as a divergence.
+    shadow.observe(
+        &accepting,
+        &serde_json::json!({"model": "claude-sonnet-4-5", "messages": []}),
+        &config,
+        "claude-sonnet-4-5",
+    );
+    assert_eq!(report.divergent.load(AtomicOrdering::Relaxed), 1);
+    assert_eq!(report.refused.load(AtomicOrdering::Relaxed), 1);
+}

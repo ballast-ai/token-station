@@ -1240,6 +1240,11 @@ struct Upstream {
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
     provider_call: ConfiguredProviderCallEngine,
+    /// The v2 component's configured role for this upstream. The translated
+    /// path consumes it at assembly (it picks the engine); the passthrough
+    /// reads it here, because that path has no engine to pick and would
+    /// otherwise shadow an upstream that asked to be left alone.
+    south_component: crate::config::SouthComponentMode,
     south_package_approved: bool,
 }
 
@@ -1281,6 +1286,10 @@ impl SouthProviderRuntime {
         })
     }
 }
+
+/// The dialect the official Anthropic component declares. Stage C's shadow
+/// resolves by this, the same key the registry uses.
+const ANTHROPIC_DIALECT: &str = "anthropic";
 
 /// Everything the v2 south component lane needs, built once per gateway.
 ///
@@ -1375,6 +1384,7 @@ fn assemble_upstreams(
                 plugin,
                 dialect: entry.api_dialect,
                 provider_call: entry.provider_call,
+                south_component: entry.south_component,
                 south_package_approved: registry
                     .provider_package_south_approved(&entry.provider, "provider-openai-compatible"),
             },
@@ -1807,6 +1817,10 @@ const CLAUDE_DESKTOP_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[{"id":"
 
 /// The assembled data plane.
 pub struct Gateway {
+    /// Stage C's shadow over the `anthropic-native` passthrough, when an
+    /// Anthropic component is embedded. Present or absent; never in the
+    /// serving path either way.
+    anthropic_shadow: Option<crate::south_component::PassthroughShadow>,
     /// Inbound adapters in match-priority order. Each request is dispatched to
     /// the first whose `match_inbound` claims it — that is `match_inbound`, the
     /// multi-inbound multiplexing, done here in the host orchestrator.
@@ -2324,6 +2338,18 @@ impl Gateway {
 
         let south_component = south_component_support(config)?;
 
+        // Stage C: the passthrough keeps serving; the Anthropic component runs
+        // beside it only to be compared. Absent when no such component is
+        // embedded, which leaves the passthrough exactly as it was.
+        let anthropic_shadow = south_component.as_ref().and_then(|support| {
+            support.adapter_for(ANTHROPIC_DIALECT).map(|adapter| {
+                crate::south_component::PassthroughShadow::new(
+                    Arc::clone(adapter),
+                    Arc::new(crate::south_component::PassthroughShadowReport::default()),
+                )
+            })
+        });
+
         let (upstreams, catalog) = assemble_upstreams(
             config,
             &provider_plugins,
@@ -2347,6 +2373,7 @@ impl Gateway {
         }
 
         Ok(Self {
+            anthropic_shadow,
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
             home_router,
@@ -3739,7 +3766,7 @@ impl Gateway {
         // which would reject server-tool history blocks, is never called here.
         if agent.protocol == "anthropic-messages"
             && let Some(served) =
-                self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
+                self.try_anthropic_passthrough(ctx, agent, router, headers, body, emit, record)?
         {
             return Ok(served);
         }
@@ -4607,15 +4634,59 @@ impl Gateway {
         }
     }
 
+    /// Stage C: run the translated route beside the passthrough and record how
+    /// the two compare. A no-op when no Anthropic component is embedded.
+    ///
+    /// `forwarded` is the caller's body; the routed model is applied here so
+    /// the comparison is against exactly the bytes the passthrough sends, not a
+    /// reconstruction of them.
+    fn shadow_translated_route(
+        &self,
+        agent: &LoadedAgent,
+        forwarded: &Value,
+        upstream: &Upstream,
+        routed_model: &str,
+    ) {
+        let Some(shadow) = &self.anthropic_shadow else {
+            return;
+        };
+        // `Off` means off on this path too. Only `Shadow` observes: `Primary`
+        // would mean serving the component's rendering, which is stage D's
+        // decision and not one to take by omission here.
+        if upstream.south_component != crate::config::SouthComponentMode::Shadow {
+            return;
+        }
+        let mut forwarded = forwarded.clone();
+        forwarded["model"] = json!(routed_model);
+        let normalize = |candidate: &Value| {
+            let envelope = AgentRequestEnvelope {
+                protocol: agent.protocol.clone(),
+                agent_tool: None,
+                headers: HeaderDigest::default(),
+                principal: Principal {
+                    subject: "local".to_owned(),
+                    tenant: None,
+                },
+                hints: Vec::new(),
+                body: candidate.clone(),
+                extensions: token_station_protocol::Extensions::new(),
+            };
+            agent.plugin.normalize_inbound(&envelope)
+        };
+        shadow.observe(&normalize, &forwarded, &upstream.config, routed_model);
+    }
+
     /// Native Anthropic passthrough decision + execution. Returns `Some(served)`
     /// when an anthropic-messages request routed to an `anthropic-native` upstream
     /// and was forwarded verbatim; `None` when it is not a passthrough and the
     /// caller must fall through to the Canonical-IR pipeline. Never runs
     /// `normalize_inbound`, so server-tool history and `tool_choice:{type:tool}` —
     /// which the IR path rejects — survive.
+    #[allow(clippy::too_many_arguments)] // decision, fallbacks and dispatch stay one path
     fn try_anthropic_passthrough(
         &self,
         ctx: &RequestContext,
+        agent: &LoadedAgent,
         router: &Router,
         raw_headers: &[(String, String)],
         body: &[u8],
@@ -4700,6 +4771,13 @@ impl Gateway {
         }
 
         // Committed to the passthrough path.
+        //
+        // Stage C's shadow runs here, before the send: the body below is
+        // exactly what goes on the wire, so the comparison is against the
+        // served bytes rather than a reconstruction. Pure translation — the
+        // passthrough's request stays the only one issued.
+        self.shadow_translated_route(agent, &body_value, upstream, &decision.chosen.model);
+
         let configured = self
             .catalog
             .iter()

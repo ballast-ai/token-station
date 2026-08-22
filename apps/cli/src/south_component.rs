@@ -357,3 +357,110 @@ impl StreamParser for ShadowedStreamParser {
         primary
     }
 }
+
+/// Stage C's shadow over the `anthropic-native` passthrough.
+///
+/// The passthrough forwards the caller's body verbatim, so unlike S4's lane
+/// this one is not comparing two translators: the served side *is* the ground
+/// truth, and the question is whether the IR round trip preserves it. The
+/// design record calls that `f(g(x)) ≟ x`.
+///
+/// This lane measures; it does not adjudicate. The offline ledger
+/// (`anthropic_roundtrip_ledger`) is the gate that decides which differences
+/// are registered, and it runs a 200,000-body sweep to do it. What no offline
+/// corpus can supply is the *distribution* on real traffic — which shapes
+/// actually arrive, and how often the translated route refuses one outright.
+/// That is the number stage A′ needs, so refusals are counted as their own
+/// outcome rather than folded into divergences.
+///
+/// Nothing here opens a socket. The passthrough's request is the only one sent.
+pub struct PassthroughShadow {
+    component: Arc<SouthComponentAdapter>,
+    report: Arc<PassthroughShadowReport>,
+}
+
+/// What the lane has seen. Divergences and refusals are separate counters
+/// because they answer different questions: a divergence asks "is the round
+/// trip faithful", a refusal asks "can the translated route carry this at all".
+#[derive(Debug, Default)]
+pub struct PassthroughShadowReport {
+    pub equivalent: AtomicU64,
+    pub divergent: AtomicU64,
+    pub refused: AtomicU64,
+}
+
+impl PassthroughShadow {
+    #[must_use]
+    pub fn new(
+        component: Arc<SouthComponentAdapter>,
+        report: Arc<PassthroughShadowReport>,
+    ) -> Self {
+        Self { component, report }
+    }
+
+    #[must_use]
+    pub fn report(&self) -> &Arc<PassthroughShadowReport> {
+        &self.report
+    }
+
+    /// Compare one exchange. `forwarded` is exactly what the passthrough will
+    /// put on the wire, `routed_model` the model routing chose — the caller has
+    /// both before it sends, so the comparison costs one translation and no
+    /// network at all.
+    pub fn observe(
+        &self,
+        normalize: &dyn Fn(&Value) -> Result<ChatRequest, ErrorEnvelope>,
+        forwarded: &Value,
+        config: &ProviderConfig,
+        routed_model: &str,
+    ) {
+        let mut request = match normalize(forwarded) {
+            Ok(request) => request,
+            Err(envelope) => {
+                self.report.refused.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "south passthrough shadow: the translated route would refuse this request: {}",
+                    envelope.message
+                );
+                return;
+            }
+        };
+        routed_model.clone_into(&mut request.model);
+
+        let Ok(descriptor) = self.component.build_http_request(&request, config) else {
+            self.report.refused.fetch_add(1, Ordering::Relaxed);
+            eprintln!("south passthrough shadow: the component refused to render this request");
+            return;
+        };
+        let Some(rendered) = descriptor.body else {
+            self.report.divergent.fetch_add(1, Ordering::Relaxed);
+            eprintln!("south passthrough shadow: the component produced no body");
+            return;
+        };
+        if &rendered == forwarded {
+            self.report.equivalent.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.report.divergent.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "south passthrough shadow divergence: passthrough {} vs translated {}",
+            truncated(forwarded),
+            truncated(&rendered)
+        );
+    }
+}
+
+/// Divergence logs are diagnostics, not a transcript: a full body would put
+/// caller content in the host's log.
+fn truncated(value: &Value) -> String {
+    const LIMIT: usize = 240;
+    let rendered = value.to_string();
+    if rendered.len() <= LIMIT {
+        return rendered;
+    }
+    let mut cut = LIMIT;
+    while !rendered.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &rendered[..cut])
+}
