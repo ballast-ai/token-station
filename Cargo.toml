@@ -37,14 +37,14 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-south-contracts = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
-south-core = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
-south-component-conformance = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
-south-provider-conformance = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
-south-testkit = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
-south-transport-reqwest = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
-south-provider-api = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
-south-provider-runtime = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "a02993d5e536ed5e72a831bb83608062fa8ea801" }
+south-contracts = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-core = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-component-conformance = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-provider-conformance = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-testkit = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-transport-reqwest = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-provider-api = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-provider-runtime = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
