@@ -28,6 +28,11 @@ pub enum GroupBy {
     Status,
     Hour,
     Day,
+    /// The transport engine of the attempt that settled the request.
+    Engine,
+    /// Why that attempt ran on legacy instead of South (`(south)` when it
+    /// did not fall back).
+    Fallback,
 }
 
 impl GroupBy {
@@ -41,6 +46,8 @@ impl GroupBy {
             Self::Status => "status",
             Self::Hour => "hour",
             Self::Day => "day",
+            Self::Engine => "engine",
+            Self::Fallback => "fallback",
         }
     }
 }
@@ -198,6 +205,34 @@ pub fn collect_filtered(
         ));
     }
 
+    let rows = select_rows(&connection, start_ms, end_ms, filter)?;
+
+    let total = aggregate(rows.iter());
+    let groups = match group_by {
+        None => Vec::new(),
+        Some(by) => {
+            let mut buckets: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
+            for row in &rows {
+                buckets.entry(row.key(by)).or_default().push(row);
+            }
+            buckets
+                .into_iter()
+                .map(|(key, rows)| (key, aggregate(rows.into_iter())))
+                .collect()
+        }
+    };
+
+    Ok(Report { total, groups })
+}
+
+/// Reads the receipts in `[start_ms, end_ms)` that pass `filter`, with the
+/// engine and fallback reason of each request's last attempt.
+fn select_rows(
+    connection: &Connection,
+    start_ms: Option<u64>,
+    end_ms: Option<u64>,
+    filter: StatsFilter<'_>,
+) -> Result<Vec<Row>, String> {
     let mut statement = connection
         .prepare(
             "SELECT latency_ms, status, error_code, agent_id, upstream, model, pool,
@@ -208,7 +243,13 @@ pub fn collect_filtered(
                         'utc') AS INTEGER) * 1000,
                     CAST(strftime('%s',
                         date(started_at_ms / 1000, 'unixepoch', 'localtime'),
-                        'utc') AS INTEGER) * 1000
+                        'utc') AS INTEGER) * 1000,
+                    (SELECT provider_call_engine FROM attempts
+                      WHERE attempts.request_id = requests.request_id
+                      ORDER BY ordinal DESC LIMIT 1),
+                    (SELECT south_fallback_reason FROM attempts
+                      WHERE attempts.request_id = requests.request_id
+                      ORDER BY ordinal DESC LIMIT 1)
              FROM requests
              WHERE started_at_ms >= ?1
                AND (?2 IS NULL OR started_at_ms < ?2)
@@ -248,6 +289,8 @@ pub fn collect_filtered(
                     cost_micros: row.get::<_, Option<i64>>(12)?,
                     hour_bucket_ms: narrow(row.get::<_, i64>(13)?),
                     day_bucket_ms: narrow(row.get::<_, i64>(14)?),
+                    engine: row.get::<_, Option<String>>(15)?,
+                    fallback_reason: row.get::<_, Option<String>>(16)?,
                 })
             },
         )
@@ -257,23 +300,7 @@ pub fn collect_filtered(
         enforce_stats_row_limit(rows.len().saturating_add(1))?;
         rows.push(row.map_err(|error| format!("metrics query: {error}"))?);
     }
-
-    let total = aggregate(rows.iter());
-    let groups = match group_by {
-        None => Vec::new(),
-        Some(by) => {
-            let mut buckets: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
-            for row in &rows {
-                buckets.entry(row.key(by)).or_default().push(row);
-            }
-            buckets
-                .into_iter()
-                .map(|(key, rows)| (key, aggregate(rows.into_iter())))
-                .collect()
-        }
-    };
-
-    Ok(Report { total, groups })
+    Ok(rows)
 }
 
 fn enforce_stats_row_limit(selected_rows: usize) -> Result<(), String> {
@@ -372,6 +399,9 @@ struct Row {
     cost_micros: Option<i64>,
     hour_bucket_ms: u64,
     day_bucket_ms: u64,
+    /// From the last attempt; `None` when no upstream was ever tried.
+    engine: Option<String>,
+    fallback_reason: Option<String>,
 }
 
 impl Row {
@@ -391,6 +421,15 @@ impl Row {
             GroupBy::Status => self.status.to_string(),
             GroupBy::Hour => self.hour_bucket_ms.to_string(),
             GroupBy::Day => self.day_bucket_ms.to_string(),
+            GroupBy::Engine => self.engine.clone().unwrap_or_else(unrouted),
+            GroupBy::Fallback => match (&self.fallback_reason, self.engine.as_deref()) {
+                (Some(reason), _) => reason.clone(),
+                (None, Some(engine)) if engine.starts_with("south") => "(south)".to_owned(),
+                // Legacy without a reason: the attempt predates the receipt
+                // field, or ran before South was the default.
+                (None, Some(_)) => "(unrecorded)".to_owned(),
+                (None, None) => unrouted(),
+            },
         }
     }
 }
@@ -655,6 +694,69 @@ mod tests {
             .expect("collects a half-open fixed period");
         assert_eq!(report.total.requests, 2);
         assert!(super::collect_range(&path, Some(200), Some(100), None).is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn engine_and_fallback_groups_read_the_attempt_that_settled_the_request() {
+        use token_station_metrics::{AttemptRecord, ProviderCallEngine, SouthFallbackReason};
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-engine-groups.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let attempt = |ordinal: u32, engine: ProviderCallEngine, reason| AttemptRecord {
+            ordinal,
+            upstream: "provider".to_owned(),
+            model: "m1".to_owned(),
+            latency_ms: 1,
+            http_status: Some(200),
+            error_code: None,
+            stream_outcome: None,
+            provider_call_engine: engine,
+            south_fallback_reason: reason,
+            fallback_allowed: false,
+        };
+        // Served on South after a legacy first attempt: the last attempt wins.
+        let mut south = record(10, 1, 200, Some("provider"), None);
+        south.request_id = "south".to_owned();
+        south.attempt_records = vec![
+            attempt(
+                1,
+                ProviderCallEngine::Legacy,
+                Some(SouthFallbackReason::Headers),
+            ),
+            attempt(2, ProviderCallEngine::SouthV1Streaming, None),
+        ];
+        store.record(&south);
+        let mut pinned = record(10, 1, 200, Some("provider"), None);
+        pinned.request_id = "pinned".to_owned();
+        pinned.attempt_records = vec![attempt(
+            1,
+            ProviderCallEngine::Legacy,
+            Some(SouthFallbackReason::ConfiguredLegacy),
+        )];
+        store.record(&pinned);
+        let mut old = record(10, 1, 200, Some("provider"), None);
+        old.request_id = "old".to_owned();
+        old.attempt_records = vec![attempt(1, ProviderCallEngine::Legacy, None)];
+        store.record(&old);
+        let mut unrouted = record(10, 1, 400, None, None);
+        unrouted.request_id = "unrouted".to_owned();
+        store.record(&unrouted);
+
+        let engines = collect(&path, None, Some(GroupBy::Engine)).expect("groups by engine");
+        let keys: Vec<&str> = engines.groups.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, ["(unrouted)", "legacy", "south_v1_streaming"]);
+        assert_eq!(engines.groups[1].1.requests, 2);
+
+        let reasons = collect(&path, None, Some(GroupBy::Fallback)).expect("groups by reason");
+        let keys: Vec<&str> = reasons.groups.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["(south)", "(unrecorded)", "(unrouted)", "configured_legacy"]
+        );
         std::fs::remove_file(path).ok();
     }
 

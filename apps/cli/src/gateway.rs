@@ -296,7 +296,7 @@ fn content_text(content: &Content) -> impl Iterator<Item = &str> {
     direct.into_iter().chain(parts.into_iter().flatten())
 }
 
-fn localized_media_marker(request: &ChatRequest) -> &'static str {
+fn request_prefers_chinese(request: &ChatRequest) -> bool {
     let latest_user_content = request
         .messages
         .iter()
@@ -304,11 +304,48 @@ fn localized_media_marker(request: &ChatRequest) -> &'static str {
         .filter(|message| message.role == token_station_protocol::Role::User)
         .filter_map(|message| message.content.as_ref())
         .find(|content| content_text(content).any(|text| !text.trim().is_empty()));
-    if latest_user_content.is_some_and(|content| content_text(content).any(contains_han)) {
+    latest_user_content.is_some_and(|content| content_text(content).any(contains_han))
+}
+
+fn localized_media_marker(request: &ChatRequest) -> &'static str {
+    if request_prefers_chinese(request) {
         MEDIA_FALLBACK_ZH
     } else {
         MEDIA_FALLBACK_EN
     }
+}
+
+/// Replaces every `document` block the IR carries verbatim with locally
+/// extracted text (or an honest marker) for an upstream whose renderer cannot
+/// express it. Anthropic upstreams never see this: they take the block as is.
+fn replace_canonical_documents(request: &mut ChatRequest) -> DocumentFallbackStats {
+    let prefers_chinese = request_prefers_chinese(request);
+    let mut stats = DocumentFallbackStats::default();
+    for part in request
+        .messages
+        .iter_mut()
+        .filter_map(|message| message.content.as_mut())
+        .filter_map(|content| match content {
+            Content::Parts(parts) => Some(parts),
+            Content::Text(_) => None,
+        })
+        .flatten()
+    {
+        let ContentPart::Unknown(block) = part else {
+            continue;
+        };
+        if block.get("type").and_then(Value::as_str) != Some("document") {
+            continue;
+        }
+        let (text, extracted) = document_replacement_text(block, prefers_chinese);
+        *part = ContentPart::Text { text };
+        if extracted {
+            stats.extracted += 1;
+        } else {
+            stats.omitted += 1;
+        }
+    }
+    stats
 }
 
 fn replace_canonical_images(request: &mut ChatRequest) -> usize {
@@ -498,6 +535,13 @@ fn extracted_pdf_text(block: &Value) -> Option<(String, bool)> {
 }
 
 fn anthropic_document_replacement(block: &Value, prefers_chinese: bool) -> (Value, bool) {
+    let (text, extracted) = document_replacement_text(block, prefers_chinese);
+    (json!({"type": "text", "text": text}), extracted)
+}
+
+/// The text standing in for one `document` block, and whether it carries the
+/// PDF's own text (`true`) or only a marker saying it could not be read.
+fn document_replacement_text(block: &Value, prefers_chinese: bool) -> (String, bool) {
     let label = safe_document_label(block);
     if let Some((text, truncated)) = extracted_pdf_text(block) {
         let truncation = if truncated {
@@ -518,7 +562,7 @@ fn anthropic_document_replacement(block: &Value, prefers_chinese: bool) -> (Valu
                 "[Token Station converted the attached PDF to text because the current route cannot pass document content blocks directly.]\nFile: {label}\n\n{text}{truncation}"
             )
         };
-        return (json!({"type": "text", "text": rendered}), true);
+        return (rendered, true);
     }
 
     let rendered = if prefers_chinese {
@@ -530,7 +574,7 @@ fn anthropic_document_replacement(block: &Value, prefers_chinese: bool) -> (Valu
             "[Attachment not read: Token Station could not extract usable text from \"{label}\", and the current route does not support this document, vision, or OCR input. Tell the user clearly that you did not see the attachment. To process it, switch to a model that supports files or vision/OCR and retry. To continue without it, edit the earlier message, remove the attachment, and resend.]"
         )
     };
-    (json!({"type": "text", "text": rendered}), false)
+    (rendered, false)
 }
 
 fn replace_anthropic_documents_in_content(
@@ -577,18 +621,6 @@ fn replace_anthropic_documents(body: &mut Value) -> DocumentFallbackStats {
         }
     }
     stats
-}
-
-fn prepare_anthropic_documents(body: &[u8]) -> Option<(Vec<u8>, DocumentFallbackStats)> {
-    if body.len() > MAX_INBOUND_BODY {
-        return None;
-    }
-    let mut value: Value = serde_json::from_slice(body).ok()?;
-    let stats = replace_anthropic_documents(&mut value);
-    if stats == DocumentFallbackStats::default() {
-        return None;
-    }
-    serde_json::to_vec(&value).ok().map(|body| (body, stats))
 }
 
 fn replace_anthropic_images(body: &mut Value) -> usize {
@@ -3748,25 +3780,11 @@ impl Gateway {
             return Ok(served);
         }
 
-        // The translated Canonical-IR path cannot preserve Anthropic document
-        // blocks. Extract text-bearing PDFs locally before the WASM adapter sees
-        // them, and replace every other document with an honest localized marker.
-        // Native Anthropic routes returned above and still receive the original
-        // structured document verbatim.
-        let prepared_body = (agent.protocol == "anthropic-messages")
-            .then(|| prepare_anthropic_documents(body))
-            .flatten();
-        let normalized_body = prepared_body
-            .as_ref()
-            .map_or(body, |(prepared, _)| prepared.as_slice());
-        if let Some((_, stats)) = &prepared_body {
-            eprintln!(
-                "document fallback -> extracted {} PDF document(s), omitted {} unsupported document(s)",
-                stats.extracted, stats.omitted
-            );
-        }
+        // Anthropic `document` blocks ride through the IR verbatim; whether
+        // one survives to the wire is decided per attempt, in `try_upstream`,
+        // once the upstream's dialect is known.
         let (mut request, hints, inbound_tools) =
-            Self::normalize_request(agent, method, path, headers, normalized_body, record)?;
+            Self::normalize_request(agent, method, path, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -4481,6 +4499,29 @@ impl Gateway {
         Ok(StreamOutcome::Complete)
     }
 
+    /// The request one attempt renders: the routed model, and `document`
+    /// blocks resolved for the upstream's dialect. An Anthropic upstream takes
+    /// them as they are; every other dialect's renderer refuses them by name,
+    /// so the text is extracted locally (or an honest marker left) first.
+    fn request_for_attempt(
+        upstream: &Upstream,
+        target: &UpstreamModel,
+        request: &ChatRequest,
+    ) -> ChatRequest {
+        let mut request = request.clone();
+        request.model.clone_from(&target.model);
+        if upstream.config.provider != "anthropic" {
+            let documents = replace_canonical_documents(&mut request);
+            if documents != DocumentFallbackStats::default() {
+                eprintln!(
+                    "document fallback -> extracted {} PDF document(s), omitted {} unsupported document(s) for {target}",
+                    documents.extracted, documents.omitted
+                );
+            }
+        }
+        request
+    }
+
     /// One upstream attempt: build, authorize, inject, send, translate back.
     #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
     fn try_upstream(
@@ -4511,8 +4552,7 @@ impl Gateway {
             })?;
 
         // Routing may have picked a different model than the caller named.
-        let mut request = request.clone();
-        request.model.clone_from(&target.model);
+        let request = Self::request_for_attempt(upstream, target, request);
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
         let response = match self.send_provider_call(

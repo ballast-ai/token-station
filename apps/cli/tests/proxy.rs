@@ -3325,6 +3325,62 @@ fn anthropic_native_direct_refuses_tools_before_hitting_an_unsupported_target() 
 }
 
 #[test]
+fn anthropic_upstreams_receive_document_blocks_verbatim_over_the_translated_path() {
+    // A `provider: anthropic` upstream can read a PDF itself. The document block
+    // rides through the IR as an unmodelled part and the Anthropic component
+    // renders it back unchanged — no local text extraction, no marker.
+    let upstream_answer = json!({
+        "id": "msg_doc_verbatim",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "read it"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("anthropic-document-verbatim", "sk-upstream-secret\n");
+    let proxy = start_native_anthropic_proxy(&mock, &key);
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": TEST_TEXT_PDF_BASE64}, "title": "native.pdf"},
+                {"type": "text", "text": "请总结这个 PDF"}
+            ]}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "body={body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "exactly one upstream hit");
+    let forwarded = &seen[0];
+    assert_eq!(forwarded.path, "/v1/messages");
+    assert!(
+        forwarded.body.get("tools").is_none(),
+        "no server tool, so this is the translated path, not passthrough"
+    );
+    assert_eq!(
+        forwarded.body["messages"][0]["content"][0],
+        json!({
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": TEST_TEXT_PDF_BASE64},
+            "title": "native.pdf"
+        }),
+        "the document block reaches an Anthropic upstream untouched"
+    );
+    let wire = forwarded.body.to_string();
+    assert!(
+        !wire.contains("TOKEN_STATION_PDF_TEXT") && !wire.contains("转换为文字"),
+        "no local extraction for an Anthropic upstream: {wire}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
     // Native passthrough keeps server tools and forced tool choice verbatim, but
     // its confirmed text-only target receives localized image and PDF fallback.

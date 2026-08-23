@@ -92,6 +92,8 @@ impl AdminContext {
             Some("status") => Some(stats::GroupBy::Status),
             Some("hour") => Some(stats::GroupBy::Hour),
             Some("day") => Some(stats::GroupBy::Day),
+            Some("engine") => Some(stats::GroupBy::Engine),
+            Some("fallback") => Some(stats::GroupBy::Fallback),
             Some(other) => return Err(format!("unknown grouping `{other}`")),
         };
         let report = stats::collect_filtered(

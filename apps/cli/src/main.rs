@@ -212,6 +212,8 @@ enum GroupByArg {
     Model,
     Pool,
     Status,
+    Engine,
+    Fallback,
 }
 
 impl From<GroupByArg> for stats::GroupBy {
@@ -222,6 +224,8 @@ impl From<GroupByArg> for stats::GroupBy {
             GroupByArg::Model => Self::Model,
             GroupByArg::Pool => Self::Pool,
             GroupByArg::Status => Self::Status,
+            GroupByArg::Engine => Self::Engine,
+            GroupByArg::Fallback => Self::Fallback,
         }
     }
 }
