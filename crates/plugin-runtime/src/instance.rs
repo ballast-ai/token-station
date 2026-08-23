@@ -1,18 +1,16 @@
-//! The instantiate/call/metadata skeleton both adapter worlds run, generic
-//! over which world.
+//! The instantiate/call/metadata skeleton an adapter world runs, generic over
+//! which world.
 //!
-//! `provider.rs` and `agent.rs` each `bindgen!` a distinct world (see
-//! `bindings.rs`), so `ProviderAdapterV1` and `AgentAdapterV1` are unrelated
-//! generated types with no shared trait of their own. [`AdapterWorld`] is that
-//! trait, written by hand: one instantiate call and one metadata call per
-//! world, everything else here runs once instead of twice.
+//! `agent.rs` `bindgen!`s its world (see `bindings.rs`); [`AdapterWorld`] is
+//! the hand-written trait over the generated type: one instantiate call and
+//! one metadata call, so the store wiring and the call/trap mapping are written
+//! once. It stays generic so a second northbound world (`agent-adapter-v2`)
+//! can reuse it without touching the skeleton.
 //!
-//! What stays out on purpose: `admit()`'s linker wiring (the provider world
-//! links `host.sign`, the agent world deliberately does not — see
-//! `agent.rs`'s doc comment) and every adapter-specific method (`build-http-
-//! request`, `normalize-inbound`, ...). Those differ by more than a type
-//! parameter and forcing them through this trait would hide the differences
-//! that matter, not the ones that don't.
+//! What stays out on purpose: `admit()`'s linker wiring and every
+//! adapter-specific method (`normalize-inbound`, ...). Those differ by more
+//! than a type parameter and forcing them through this trait would hide the
+//! differences that matter, not the ones that don't.
 
 use std::sync::Mutex;
 
@@ -52,11 +50,7 @@ pub(crate) struct InstanceHandle<W> {
     pub(crate) instance: W,
 }
 
-/// Builds one instance with its own locked-down store.
-///
-/// `ctx` is the caller's: the provider world seeds it with the manifest's
-/// declared secrets and a real signer, the agent world seeds it with none —
-/// that choice stays in `provider.rs` / `agent.rs`, this only wires the store
+/// Builds one instance with its own locked-down store, wiring the store
 /// limits and deadline every world needs identically.
 pub(crate) fn instantiate<W: AdapterWorld>(
     runtime: &PluginRuntime,
@@ -85,9 +79,9 @@ impl<W: AdapterWorld> InstanceHandle<W> {
 /// Runs one guest call with a fresh deadline, mapping a trap to the
 /// adapter-shaped error the trait promises.
 ///
-/// Shared by [`crate::ProviderPlugin`] and [`crate::AgentPlugin`], both of
-/// which hold their live instance behind a `Mutex<InstanceHandle<W>>` — the
-/// lock, not a type parameter on `Self`, is what this needs.
+/// [`crate::AgentPlugin`] holds its live instance behind a
+/// `Mutex<InstanceHandle<W>>` — the lock, not a type parameter on `Self`, is
+/// what this needs.
 pub(crate) fn call<W, T>(
     runtime: &PluginRuntime,
     main: &Mutex<InstanceHandle<W>>,

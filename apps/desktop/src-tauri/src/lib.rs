@@ -39,7 +39,7 @@ use token_station_cli::config::{
     ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
 };
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
-use token_station_cli::plugins::{PluginRegistry, Receipts};
+use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
 use token_station_cli::{
     secrets, stats,
@@ -317,7 +317,7 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
         "plugins": {
             "dir": plugins_dir,
             "agents": desktop_agents(),
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {},
         "pricing": pricing,
@@ -336,12 +336,13 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
     })
 }
 
-const BUNDLED_PLUGIN_IDS: [&str; 5] = [
+const BUNDLED_PLUGIN_IDS: [&str; 6] = [
     "agent-openai",
     "agent-anthropic",
     "agent-openai-responses",
     "agent-gemini",
     "provider-openai-compatible",
+    "provider-anthropic",
 ];
 
 #[derive(Serialize)]
@@ -427,33 +428,44 @@ fn collect_installed_self_test() -> Result<Value, String> {
                     "plugin `{id}` did not come from the signed builtin tier"
                 ));
             }
-            let manifest = &package.manifest;
-            let kind = serde_json::to_value(manifest.kind)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned());
-            let capabilities = manifest
-                .capabilities
-                .iter()
-                .filter_map(|capability| {
-                    serde_json::to_value(capability)
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_owned))
-                })
-                .collect();
+            fn capability_names<T: serde::Serialize>(capabilities: &T) -> Vec<String> {
+                serde_json::to_value(capabilities)
+                    .ok()
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            }
+            let (kind, protocols, agent_tools, providers, capabilities) = match &package.manifest {
+                PackageManifest::Agent(agent) => (
+                    "agent-adapter",
+                    agent.agent_protocols.clone(),
+                    agent.agent_tools.clone(),
+                    Vec::new(),
+                    capability_names(&agent.capabilities),
+                ),
+                PackageManifest::Provider(component) => (
+                    "provider-component",
+                    Vec::new(),
+                    Vec::new(),
+                    component.providers.clone(),
+                    capability_names(&component.capabilities),
+                ),
+            };
             plugins.push(InstalledPluginSelfTest {
-                id: manifest.name.clone(),
-                version: manifest.version.clone(),
-                kind,
+                id: package.manifest.name().to_owned(),
+                version: package.manifest.version().to_owned(),
+                kind: kind.to_owned(),
                 source: "builtin",
-                protocols: manifest.agent_protocols.clone(),
-                agent_tools: manifest.agent_tools.clone(),
-                providers: manifest.providers.clone(),
+                protocols,
+                agent_tools,
+                providers,
                 capabilities,
                 loadable: true,
             });
         }
-        for dialect in ["openai-compatible", "azure-openai-v1"] {
+        for dialect in ["openai-compatible", "azure-openai-v1", "anthropic"] {
             if registry.provider_binding(dialect).is_none() {
                 return Err(format!("builtin provider dialect `{dialect}` is not bound"));
             }
@@ -1043,19 +1055,24 @@ fn provider_brand_id(
         .find_map(|(known_url, brand_id)| (*known_url == normalized).then_some(*brand_id))
 }
 
+/// The official OpenAI-compatible South component, by its builtin manifest
+/// name or by the package directory the staged copy lives in.
+fn is_official_openai_compatible_package(package: &str) -> bool {
+    matches!(
+        package,
+        "provider-openai-compatible" | "provider-openai-compatible-v2"
+    )
+}
+
+/// The engine an upstream runs on when its config names none: the full South
+/// transport. Mirrors `ProviderCallEngine::default()` in the CLI crate.
+const DEFAULT_PROVIDER_CALL: &str = "south_v1_buffered_streaming_header_auth";
+
 fn south_v1_unavailable_reason(
     draft: &Value,
     upstream: &Value,
     package_verified: bool,
 ) -> Option<&'static str> {
-    if !package_verified
-        || upstream["provider"].as_str() != Some("openai-compatible")
-        || draft["plugins"]["providers"]["openai-compatible"]
-            .as_str()
-            .is_some_and(|package| package != "provider-openai-compatible")
-    {
-        return Some("provider_package");
-    }
     if upstream
         .get("api_dialect")
         .and_then(Value::as_str)
@@ -1063,6 +1080,15 @@ fn south_v1_unavailable_reason(
     {
         return Some("api_dialect");
     }
+    if !package_verified
+        || upstream["provider"].as_str() != Some("openai-compatible")
+        || draft["plugins"]["providers"]["openai-compatible"]
+            .as_str()
+            .is_some_and(|package| !is_official_openai_compatible_package(package))
+    {
+        return Some("provider_package");
+    }
+
     if draft["egress"]["mode"]
         .as_str()
         .is_some_and(|mode| mode != "direct")
@@ -1081,14 +1107,6 @@ fn south_header_auth_v1_unavailable_reason(
     package_verified: bool,
 ) -> Option<&'static str> {
     let provider = upstream["provider"].as_str().unwrap_or_default();
-    if !package_verified
-        || !matches!(provider, "openai-compatible" | "azure-openai-v1")
-        || draft["plugins"]["providers"][provider]
-            .as_str()
-            .is_some_and(|package| package != "provider-openai-compatible")
-    {
-        return Some("provider_package");
-    }
     if upstream
         .get("api_dialect")
         .and_then(Value::as_str)
@@ -1096,6 +1114,15 @@ fn south_header_auth_v1_unavailable_reason(
     {
         return Some("api_dialect");
     }
+    if !package_verified
+        || !matches!(provider, "openai-compatible" | "azure-openai-v1")
+        || draft["plugins"]["providers"][provider]
+            .as_str()
+            .is_some_and(|package| !is_official_openai_compatible_package(package))
+    {
+        return Some("provider_package");
+    }
+
     if draft["egress"]["mode"]
         .as_str()
         .is_some_and(|mode| mode != "direct")
@@ -1430,9 +1457,7 @@ fn south_approved_dialects(registry: &PluginRegistry) -> BTreeSet<String> {
     registry
         .provider_dialects()
         .into_iter()
-        .filter(|dialect| {
-            registry.provider_package_south_approved(dialect, "provider-openai-compatible")
-        })
+        .filter(|dialect| registry.provider_package_south_approved(dialect))
         .map(str::to_owned)
         .collect()
 }
@@ -1724,7 +1749,7 @@ impl AppInner {
                     provider_call: up
                         .get("provider_call")
                         .and_then(Value::as_str)
-                        .unwrap_or("legacy")
+                        .unwrap_or(DEFAULT_PROVIDER_CALL)
                         .to_owned(),
                     south_v1_available: south_v1_unavailable_reason.is_none(),
                     south_v1_unavailable_reason,
@@ -3700,7 +3725,7 @@ fn edit_provider_with_credential(
     api_key: Option<String>,
     credential_source: String,
     credential_reference: Option<String>,
-    provider_call: String,
+    provider_call: Option<String>,
 ) -> Result<StateView, String> {
     edit_provider_impl(
         state,
@@ -3709,7 +3734,7 @@ fn edit_provider_with_credential(
         api_key,
         Some(credential_source.trim()),
         credential_reference.as_deref(),
-        Some(provider_call.trim()),
+        provider_call.as_deref().map(str::trim),
     )
 }
 
@@ -3749,14 +3774,16 @@ fn edit_provider_impl(
     if credential_source.is_some_and(|source| source != "store") && api_key.is_some() {
         return Err("env/file 凭据只保存引用，不能同时提交 API Key 明文".to_owned());
     }
+    // An engine is written exactly as named, `legacy` included: South is the
+    // default, so an explicit legacy choice must survive in the document.
     let provider_call = match provider_call {
         None => None,
-        Some("legacy") => Some(None),
-        Some("south_v1_buffered") => Some(Some("south_v1_buffered")),
-        Some("south_v1_buffered_streaming") => Some(Some("south_v1_buffered_streaming")),
-        Some("south_v1_buffered_streaming_header_auth") => {
-            Some(Some("south_v1_buffered_streaming_header_auth"))
-        }
+        Some(
+            engine @ ("legacy"
+            | "south_v1_buffered"
+            | "south_v1_buffered_streaming"
+            | "south_v1_buffered_streaming_header_auth"),
+        ) => Some(engine),
         Some(_) => return Err("Provider call engine 不受支持".to_owned()),
     };
     let previous_auth = previous.get("auth").filter(|value| !value.is_null());
@@ -3778,17 +3805,7 @@ fn edit_provider_impl(
         clear_provider_scoped_prices(&mut inner, &name)?;
     }
     if let Some(provider_call) = provider_call {
-        match provider_call {
-            Some(provider_call) => {
-                inner.draft["upstreams"][&name]["provider_call"] = json!(provider_call);
-            }
-            None => {
-                inner.draft["upstreams"][&name]
-                    .as_object_mut()
-                    .expect("upstream is an object")
-                    .remove("provider_call");
-            }
-        }
+        inner.draft["upstreams"][&name]["provider_call"] = json!(provider_call);
     }
     inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
     if let Some(auth) = auth {
@@ -3890,7 +3907,10 @@ fn ensure_provider_discovery_target_unchanged(
 }
 
 fn provider_health_uses_south(draft: &Value, upstream: &Value, package_verified: bool) -> bool {
-    match upstream["provider_call"].as_str().unwrap_or("legacy") {
+    match upstream["provider_call"]
+        .as_str()
+        .unwrap_or(DEFAULT_PROVIDER_CALL)
+    {
         "south_v1_buffered" | "south_v1_buffered_streaming" => {
             south_v1_unavailable_reason(draft, upstream, package_verified).is_none()
         }
@@ -6599,6 +6619,8 @@ fn get_stats(
         Some("status") => Some(stats::GroupBy::Status),
         Some("hour") => Some(stats::GroupBy::Hour),
         Some("day") => Some(stats::GroupBy::Day),
+        Some("engine") => Some(stats::GroupBy::Engine),
+        Some("fallback") => Some(stats::GroupBy::Fallback),
         Some(other) => return Err(format!("未知分组 `{other}`")),
     };
     let report = stats::collect_filtered(
@@ -7455,7 +7477,7 @@ mod tests {
             (
                 json!({
                     "provider": "openai-compatible",
-                    "api_dialect": "anthropic_native",
+                    "api_dialect": "anthropic-native",
                     "auth": {"store": true}
                 }),
                 eligible_draft.clone(),
@@ -11650,7 +11672,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("AZURE_OPENAI_API_KEY".to_owned()),
-            "legacy".to_owned(),
+            Some("legacy".to_owned()),
         ) {
             Err(error) => error,
             Ok(_) => panic!("editing Azure must preserve the exact /openai/v1 API root"),
@@ -11786,7 +11808,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("FIXTURE_API_KEY".to_owned()),
-            "south_v1_buffered_streaming".to_owned(),
+            Some("south_v1_buffered_streaming".to_owned()),
         )
         .expect("submitting unchanged provider details is a no-op identity update");
 
@@ -11850,7 +11872,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("FIXTURE_API_KEY".to_owned()),
-            "south_v1_buffered".to_owned(),
+            Some("south_v1_buffered".to_owned()),
         ) {
             Err(error) => error,
             Ok(_) => panic!("a catalog symlink makes identity cleanup fail closed"),
@@ -12594,6 +12616,19 @@ mod tests {
         });
         assert!(provider_health_uses_south(&draft, &eligible, true));
 
+        // No engine named: the South default applies, as it does for traffic.
+        let defaulted = json!({
+            "provider": "openai-compatible",
+            "auth": {"env": "PROVIDER_API_KEY"}
+        });
+        assert!(provider_health_uses_south(&draft, &defaulted, true));
+        let explicit_legacy = json!({
+            "provider": "openai-compatible",
+            "provider_call": "legacy",
+            "auth": {"env": "PROVIDER_API_KEY"}
+        });
+        assert!(!provider_health_uses_south(&draft, &explicit_legacy, true));
+
         let mut proxied = draft.clone();
         proxied["egress"] = json!({
             "mode": "http",
@@ -12602,7 +12637,7 @@ mod tests {
         assert!(!provider_health_uses_south(&proxied, &eligible, true));
 
         let mut native = eligible.clone();
-        native["api_dialect"] = json!("anthropic_native");
+        native["api_dialect"] = json!("anthropic-native");
         assert!(!provider_health_uses_south(&draft, &native, true));
         assert!(!provider_health_uses_south(&draft, &eligible, false));
 

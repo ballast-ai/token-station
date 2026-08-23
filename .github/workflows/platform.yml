@@ -5,14 +5,14 @@ name: Platform Gates
 # ci.yml runs the full clippy / test / fmt / doc / audit / MSRV / frontend set
 # on Linux at 1x billing and catches the large majority of problems. Windows is
 # 2x and macOS is 10x, and what they run here overlaps heavily with that Linux
-# layer, so putting them on every pull request buys almost no extra coverage
-# while multiplying both the bill and the wait. They run once a change reaches
-# develop / main instead.
+# layer, so running them on non-main integration branches buys almost no extra
+# coverage while multiplying both the bill and the wait. Ordinary branch
+# validation therefore runs only after a change reaches main. Published releases
+# and manual release validation keep their explicit entry points below.
 on:
   push:
     branches:
       - main
-      - develop
     paths-ignore:
       - '**.md'
       - 'LICENSE'
@@ -111,10 +111,14 @@ jobs:
             apps/desktop/src-tauri
       - run: npm --prefix apps/desktop ci
       - run: node scripts/check-windows-release-config.mjs
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - name: Fetch the locked official component dependency sets
+        shell: bash
+        run: |
+          for manifest in \
+            plugins/official/provider-openai-compatible-v2/Cargo.toml \
+            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
+          done
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - name: Prepare official plugins for desktop gateway tests

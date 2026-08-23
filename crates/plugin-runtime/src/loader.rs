@@ -1,17 +1,14 @@
-//! The load gates both adapter kinds share, in the order both run them.
+//! The load gates, in the order they run.
 //!
-//! Kind-specific work — which world to instantiate, which host interfaces the
-//! linker offers — stays in `provider.rs` / `agent.rs`. What lives here is the
-//! part where the two kinds must not be allowed to drift: how a package is
-//! read, which gate runs first, and what the sandbox refuses by name.
+//! World-specific work — which world to instantiate, what the linker offers —
+//! stays in `agent.rs`. What lives here is how a package is read, which gate
+//! runs first, and what the sandbox refuses by name.
 
-use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use token_station_conformance::accepts_manifest;
 use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata, ManifestError};
@@ -20,7 +17,6 @@ use wasmtime::component::{Component, ResourceTable};
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::provider::SecretSigner;
 use crate::runtime::PluginRuntime;
 
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -38,33 +34,23 @@ const FORBIDDEN_EVERYWHERE: &[&str] = &["wasi:sockets/", "wasi:http/"];
 
 /// Additionally forbidden for `agent-adapter` components.
 ///
-/// Only the provider world imports `host`, and only to name credentials. The
-/// WIT declares that; this enforces it on the compiled artifact, so an agent
-/// component that somehow acquired the import is refused by name rather than
-/// failing instantiation with a generic link error.
+/// `token-station:adapter/host` was the credential-naming interface of the
+/// retired southbound world. No world this runtime loads may import it; an
+/// agent component that somehow acquired the import is refused by name rather
+/// than failing instantiation with a generic link error.
 pub(crate) const FORBIDDEN_FOR_AGENTS: &[&str] = &["token-station:adapter/host"];
 
-/// Everything one store carries: the locked-down WASI, the resource limits,
-/// and the credential boundary for `host.sign`.
-///
-/// Shared by both kinds. For an agent adapter the credential fields are inert
-/// by construction: its linker never registers the `host` interface, so
-/// nothing in the instance can reach them.
+/// Everything one store carries: the locked-down WASI and the resource limits.
+/// Nothing here can reach a credential; the agent world has no import that
+/// could ask for one.
 pub(crate) struct Ctx {
     wasi: WasiCtx,
     table: ResourceTable,
     pub(crate) limits: StoreLimits,
-    /// The manifest's `permissions.secrets`, the only names `sign` may see.
-    pub(crate) declared_secrets: BTreeSet<String>,
-    pub(crate) signer: Arc<dyn SecretSigner + Sync>,
 }
 
 impl Ctx {
-    pub(crate) fn new(
-        memory_bytes: usize,
-        declared_secrets: BTreeSet<String>,
-        signer: Arc<dyn SecretSigner + Sync>,
-    ) -> Self {
+    pub(crate) fn new(memory_bytes: usize) -> Self {
         // No preopened directories, no environment, no arguments, no inherited
         // stdio: WASI is provided so a std-compiled guest can instantiate, and
         // it opens onto nothing.
@@ -72,8 +58,6 @@ impl Ctx {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new().memory_size(memory_bytes).build(),
-            declared_secrets,
-            signer,
         }
     }
 }

@@ -9,24 +9,22 @@ Sample configuration:
 It listens on `127.0.0.1:8792` and writes data to
 `token-station-m4/opencode/data`.
 
-## 1. Build, install, and start
+## 1. Build, stage, and start
 
-If you installed the provider with the Codex guide, install only
+If you staged the provider component with the Codex guide, copy only
 `agent-openai`:
 
 ```bash
 cargo build --release -p token-station-cli
-./target/release/token-station-cli plugin build plugins/official/agent-openai
-./target/release/token-station-cli plugin test plugins/official/agent-openai
-./target/release/token-station-cli \
-  --config apps/cli/opencode-deepseek-config.json \
-  plugin install plugins/official/agent-openai
+scripts/prepare-desktop-test-plugins.sh   # builds every official package into plugins-dist/
+mkdir -p token-station-m4/plugins
+cp -R plugins-dist/agent-openai token-station-m4/plugins/
 ```
 
-If `provider-openai-compatible` is not installed, run the same `plugin build`,
-`plugin test`, and `plugin install` commands for it. The three M4
-configurations share one plugin directory. Do not overwrite a package with the
-same name.
+If `provider-openai-compatible-v2` is not staged yet, copy it the same way.
+The three M4 configurations share one plugin directory and vouch for the
+component through `plugins.providers`; official release binaries embed every
+official package, so this step is only needed for a source build.
 
 Start the service in a separate terminal:
 

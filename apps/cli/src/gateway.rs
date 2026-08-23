@@ -30,14 +30,14 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::{Value, json};
-use token_station_conformance::{AgentAdapter, ProviderAdapter};
+use token_station_conformance::AgentAdapter;
 use token_station_metrics::{
     AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
     ConversionRecord, ConversionStage, CostKind, DecisionRecord,
     ProviderCallEngine as RecordedProviderCallEngine, Recorder, RequestPathKind, RequestRecord,
-    RoutingRecord,
+    RoutingRecord, SouthFallbackReason,
 };
-use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
+use token_station_plugin_runtime::{AgentPlugin, PluginRuntime};
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, CapabilityState, ChatRequest, ChatResponse, Content, ContentPart,
     ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts,
@@ -53,6 +53,7 @@ use crate::admission::Admission;
 use crate::bodylog::{BodyLog, BoundedBody};
 use crate::cancel::{CancelReason, CancelToken};
 use crate::request_context::RequestContext;
+use crate::south_component::ProviderAdapter;
 use crate::sse::SseFrameDecoder;
 
 use crate::config::{
@@ -64,11 +65,12 @@ use crate::south_provider_call::{
     CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
     PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1, PreparedProviderStreamResultV1,
     ProviderPackageEligibilityV1, RequestBodyModeV1, ResponseMetadataEligibilityV1,
-    RolloutEligibilityV1, StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
+    StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
     build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1, map_failure_v1,
     map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
     prepare_provider_stream_v1, project_open_stream_head_v1,
 };
+use south_core::raw::BoundedResolverV1;
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
 pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
@@ -294,7 +296,7 @@ fn content_text(content: &Content) -> impl Iterator<Item = &str> {
     direct.into_iter().chain(parts.into_iter().flatten())
 }
 
-fn localized_media_marker(request: &ChatRequest) -> &'static str {
+fn request_prefers_chinese(request: &ChatRequest) -> bool {
     let latest_user_content = request
         .messages
         .iter()
@@ -302,11 +304,48 @@ fn localized_media_marker(request: &ChatRequest) -> &'static str {
         .filter(|message| message.role == token_station_protocol::Role::User)
         .filter_map(|message| message.content.as_ref())
         .find(|content| content_text(content).any(|text| !text.trim().is_empty()));
-    if latest_user_content.is_some_and(|content| content_text(content).any(contains_han)) {
+    latest_user_content.is_some_and(|content| content_text(content).any(contains_han))
+}
+
+fn localized_media_marker(request: &ChatRequest) -> &'static str {
+    if request_prefers_chinese(request) {
         MEDIA_FALLBACK_ZH
     } else {
         MEDIA_FALLBACK_EN
     }
+}
+
+/// Replaces every `document` block the IR carries verbatim with locally
+/// extracted text (or an honest marker) for an upstream whose renderer cannot
+/// express it. Anthropic upstreams never see this: they take the block as is.
+fn replace_canonical_documents(request: &mut ChatRequest) -> DocumentFallbackStats {
+    let prefers_chinese = request_prefers_chinese(request);
+    let mut stats = DocumentFallbackStats::default();
+    for part in request
+        .messages
+        .iter_mut()
+        .filter_map(|message| message.content.as_mut())
+        .filter_map(|content| match content {
+            Content::Parts(parts) => Some(parts),
+            Content::Text(_) => None,
+        })
+        .flatten()
+    {
+        let ContentPart::Unknown(block) = part else {
+            continue;
+        };
+        if block.get("type").and_then(Value::as_str) != Some("document") {
+            continue;
+        }
+        let (text, extracted) = document_replacement_text(block, prefers_chinese);
+        *part = ContentPart::Text { text };
+        if extracted {
+            stats.extracted += 1;
+        } else {
+            stats.omitted += 1;
+        }
+    }
+    stats
 }
 
 fn replace_canonical_images(request: &mut ChatRequest) -> usize {
@@ -496,6 +535,13 @@ fn extracted_pdf_text(block: &Value) -> Option<(String, bool)> {
 }
 
 fn anthropic_document_replacement(block: &Value, prefers_chinese: bool) -> (Value, bool) {
+    let (text, extracted) = document_replacement_text(block, prefers_chinese);
+    (json!({"type": "text", "text": text}), extracted)
+}
+
+/// The text standing in for one `document` block, and whether it carries the
+/// PDF's own text (`true`) or only a marker saying it could not be read.
+fn document_replacement_text(block: &Value, prefers_chinese: bool) -> (String, bool) {
     let label = safe_document_label(block);
     if let Some((text, truncated)) = extracted_pdf_text(block) {
         let truncation = if truncated {
@@ -516,7 +562,7 @@ fn anthropic_document_replacement(block: &Value, prefers_chinese: bool) -> (Valu
                 "[Token Station converted the attached PDF to text because the current route cannot pass document content blocks directly.]\nFile: {label}\n\n{text}{truncation}"
             )
         };
-        return (json!({"type": "text", "text": rendered}), true);
+        return (rendered, true);
     }
 
     let rendered = if prefers_chinese {
@@ -528,7 +574,7 @@ fn anthropic_document_replacement(block: &Value, prefers_chinese: bool) -> (Valu
             "[Attachment not read: Token Station could not extract usable text from \"{label}\", and the current route does not support this document, vision, or OCR input. Tell the user clearly that you did not see the attachment. To process it, switch to a model that supports files or vision/OCR and retry. To continue without it, edit the earlier message, remove the attachment, and resend.]"
         )
     };
-    (json!({"type": "text", "text": rendered}), false)
+    (rendered, false)
 }
 
 fn replace_anthropic_documents_in_content(
@@ -575,18 +621,6 @@ fn replace_anthropic_documents(body: &mut Value) -> DocumentFallbackStats {
         }
     }
     stats
-}
-
-fn prepare_anthropic_documents(body: &[u8]) -> Option<(Vec<u8>, DocumentFallbackStats)> {
-    if body.len() > MAX_INBOUND_BODY {
-        return None;
-    }
-    let mut value: Value = serde_json::from_slice(body).ok()?;
-    let stats = replace_anthropic_documents(&mut value);
-    if stats == DocumentFallbackStats::default() {
-        return None;
-    }
-    serde_json::to_vec(&value).ok().map(|body| (body, stats))
 }
 
 fn replace_anthropic_images(body: &mut Value) -> usize {
@@ -1040,12 +1074,76 @@ fn annotate_conversion_failure(record: &mut RequestRecord, error: &ErrorEnvelope
     }
 }
 
+/// Which engine actually carried one attempt, and — when South was eligible
+/// by configuration but legacy ran — the content-free reason why.
+#[derive(Debug, Clone, Copy, Default)]
+struct ProviderCallOutcome {
+    engine: RecordedProviderCallEngine,
+    south_fallback_reason: Option<SouthFallbackReason>,
+}
+
+impl ProviderCallOutcome {
+    const fn legacy(reason: SouthFallbackReason) -> Self {
+        Self {
+            engine: RecordedProviderCallEngine::Legacy,
+            south_fallback_reason: Some(reason),
+        }
+    }
+
+    const fn south(engine: RecordedProviderCallEngine) -> Self {
+        Self {
+            engine,
+            south_fallback_reason: None,
+        }
+    }
+}
+
+/// The content-free classification of a South eligibility refusal.
+const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
+    match reason {
+        IneligibleV1::ProviderDialect => SouthFallbackReason::ProviderDialect,
+        IneligibleV1::ProviderPackageUnapproved => SouthFallbackReason::ProviderPackageUnapproved,
+        IneligibleV1::ApiDialect => SouthFallbackReason::ApiDialect,
+        IneligibleV1::Egress => SouthFallbackReason::Egress,
+        IneligibleV1::Streaming => SouthFallbackReason::Streaming,
+        IneligibleV1::Method => SouthFallbackReason::Method,
+        IneligibleV1::Auth => SouthFallbackReason::Auth,
+        IneligibleV1::Body => SouthFallbackReason::Body,
+        IneligibleV1::SecretSource => SouthFallbackReason::SecretSource,
+        IneligibleV1::ResponseMetadata => SouthFallbackReason::ResponseMetadata,
+        IneligibleV1::Headers => SouthFallbackReason::Headers,
+    }
+}
+
+/// Whether an Anthropic Messages body declares a tool the upstream executes
+/// itself. Mirrors `agent-anthropic`'s `is_anthropic_server_tool`: the six
+/// families Anthropic runs server-side, by `type` prefix.
+fn anthropic_request_declares_server_tool(body: &Value) -> bool {
+    const SERVER_TOOL_PREFIXES: [&str; 6] = [
+        "web_search_",
+        "web_fetch_",
+        "code_execution_",
+        "tool_search_",
+        "mcp_",
+        "advisor_",
+    ];
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| SERVER_TOOL_PREFIXES.iter().any(|p| kind.starts_with(p)))
+            })
+        })
+}
+
 fn attempt_receipt(
     target: &UpstreamModel,
     ordinal: u32,
     latency_ms: u64,
     upstream_http_status: Option<u16>,
-    provider_call_engine: RecordedProviderCallEngine,
+    provider_call: ProviderCallOutcome,
     result: Result<StreamOutcome, &ErrorEnvelope>,
     record: &RequestRecord,
 ) -> AttemptRecord {
@@ -1065,7 +1163,8 @@ fn attempt_receipt(
                 http_status: upstream_http_status,
                 error_code,
                 stream_outcome: Some(outcome),
-                provider_call_engine,
+                provider_call_engine: provider_call.engine,
+                south_fallback_reason: provider_call.south_fallback_reason,
                 fallback_allowed: matches!(outcome, StreamOutcome::FailedBeforeOutput)
                     && error_code.is_some_and(ErrorCode::is_retriable_elsewhere),
             }
@@ -1078,7 +1177,8 @@ fn attempt_receipt(
             http_status: upstream_http_status,
             error_code: Some(error.code),
             stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
-            provider_call_engine,
+            provider_call_engine: provider_call.engine,
+            south_fallback_reason: provider_call.south_fallback_reason,
             fallback_allowed: attempt_fallback_allowed(error),
         },
     }
@@ -1150,7 +1250,7 @@ fn attempt_receipt_for_result(
     ordinal: u32,
     latency_ms: u64,
     upstream_http_status: Option<u16>,
-    provider_call_engine: RecordedProviderCallEngine,
+    provider_call: ProviderCallOutcome,
     result: &Result<StreamOutcome, ErrorEnvelope>,
     record: &RequestRecord,
 ) -> AttemptRecord {
@@ -1160,7 +1260,7 @@ fn attempt_receipt_for_result(
             ordinal,
             latency_ms,
             upstream_http_status,
-            provider_call_engine,
+            provider_call,
             Ok(*outcome),
             record,
         ),
@@ -1169,7 +1269,7 @@ fn attempt_receipt_for_result(
             ordinal,
             latency_ms,
             upstream_http_status,
-            provider_call_engine,
+            provider_call,
             Err(error),
             record,
         ),
@@ -1231,12 +1331,16 @@ fn record_actual_attempt_target(
 struct Upstream {
     config: ProviderConfig,
     auth_config: Option<AuthConfig>,
-    plugin: Arc<ProviderPlugin>,
+    /// The translation engine: the South provider component that speaks this
+    /// upstream's dialect, resolved at assembly.
+    plugin: Arc<dyn ProviderAdapter + Send + Sync>,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
     provider_call: ConfiguredProviderCallEngine,
+    /// The dialect resolves to a component embedded by the signed release
+    /// pipeline, which is what the South transport slice requires.
     south_package_approved: bool,
 }
 
@@ -1252,7 +1356,7 @@ impl SouthProviderRuntime {
     fn open_stream(
         &self,
         prepared: &PreparedCommunityProviderCallV1,
-        resolver: &CommunityCredentialResolverV1<'_>,
+        resolver: &BoundedResolverV1<CommunityCredentialResolverV1<'_>>,
         deadline: tokio::time::Instant,
         cancellation: &tokio_util::sync::CancellationToken,
         disposition: CancellationDispositionV1,
@@ -1279,24 +1383,183 @@ impl SouthProviderRuntime {
     }
 }
 
+/// Every South provider component the configured upstreams need, keyed by
+/// dialect.
+///
+/// Keyed by dialect because there is more than one official component. A
+/// package declares the dialects it speaks and the registry resolves by that;
+/// adding a third component is a packaging change, not a wiring one. One
+/// package serving two dialects is loaded once.
+struct SouthComponentSupport {
+    adapters:
+        std::collections::BTreeMap<String, Arc<crate::south_component::SouthComponentAdapter>>,
+}
+
+impl SouthComponentSupport {
+    fn adapter_for(
+        &self,
+        dialect: &str,
+    ) -> Option<&Arc<crate::south_component::SouthComponentAdapter>> {
+        self.adapters.get(dialect)
+    }
+}
+
+/// Resolves every configured upstream: its translation component, its fenced
+/// provider config, and its refined model catalog.
+#[allow(
+    clippy::type_complexity,
+    reason = "one call site; the pair is unpacked immediately"
+)]
+fn assemble_upstreams(
+    config: &ClientConfig,
+    south_component: &SouthComponentSupport,
+    registry: &crate::plugins::PluginRegistry,
+) -> Result<
+    (
+        BTreeMap<String, Upstream>,
+        Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
+    ),
+    String,
+> {
+    let mut upstreams = BTreeMap::new();
+    let mut catalog = Vec::new();
+
+    for (name, entry) in &config.upstreams {
+        // `.clone()` rather than `Arc::clone`: the unsized coercion to the
+        // trait-object field must not flow backward into the map's concrete
+        // value type.
+        let plugin: Arc<dyn ProviderAdapter + Send + Sync> = south_component
+            .adapter_for(&entry.provider)
+            .expect("the caller loaded a component for every configured dialect")
+            .clone();
+
+        let mut provider_config =
+            ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
+        provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
+        provider_config.models = entry
+            .models
+            .iter()
+            .cloned()
+            .map(project_capability_evidence_for_v1)
+            .collect();
+
+        // The component may refine the declared catalog; it cannot invent one,
+        // having no network. This is `model_capabilities`' production call.
+        let capabilities: Vec<_> = plugin
+            .model_capabilities(&provider_config)
+            .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
+            .into_iter()
+            .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
+            .collect();
+
+        let reference = token_station_router_core::UpstreamRef::new(name.clone())
+            .expect("config validation checked the shape");
+        for capability in &capabilities {
+            catalog.push((
+                UpstreamModel::new(reference.clone(), capability.model.clone()),
+                capability.clone(),
+            ));
+        }
+
+        upstreams.insert(
+            name.clone(),
+            Upstream {
+                config: provider_config,
+                auth_config: entry.auth.clone(),
+                plugin,
+                dialect: entry.api_dialect,
+                provider_call: entry.provider_call,
+                south_package_approved: registry.provider_package_south_approved(&entry.provider),
+            },
+        );
+    }
+
+    Ok((upstreams, catalog))
+}
+
+/// Loads one South provider component per dialect the configured upstreams
+/// speak, resolving each through the registry: builtin bytes or a package
+/// directory. A package declaring several dialects is loaded once and shared.
+fn south_component_support(
+    config: &ClientConfig,
+    registry: &crate::plugins::PluginRegistry,
+) -> Result<SouthComponentSupport, String> {
+    let runtime = crate::south_component::south_component_runtime()?;
+    let mut by_package: BTreeMap<String, Arc<crate::south_component::SouthComponentAdapter>> =
+        BTreeMap::new();
+    let mut adapters = BTreeMap::new();
+    for (name, entry) in &config.upstreams {
+        if adapters.contains_key(&entry.provider) {
+            continue;
+        }
+        let binding = registry.provider_binding(&entry.provider).ok_or_else(|| {
+            format!(
+                "upstream `{name}` speaks `{}`, but no provider component speaks that dialect; \
+                 available: [{}] (scanned {})",
+                entry.provider,
+                registry.provider_dialects().join(", "),
+                config.plugins.dir.display(),
+            )
+        })?;
+        let adapter = if let Some(adapter) = by_package.get(&binding.package) {
+            Arc::clone(adapter)
+        } else {
+            let adapter = match &binding.source {
+                crate::plugins::PackageSource::Builtin {
+                    manifest_source,
+                    wasm,
+                } => crate::south_component::SouthComponentAdapter::load_embedded(
+                    &runtime,
+                    manifest_source,
+                    wasm,
+                ),
+                crate::plugins::PackageSource::Dir(dir) => {
+                    crate::south_component::SouthComponentAdapter::load_dir(&runtime, dir)
+                }
+            }
+            .map_err(|error| {
+                format!(
+                    "provider component for `{}` (package `{}`): {error}",
+                    entry.provider, binding.package,
+                )
+            })?;
+            let adapter = Arc::new(adapter);
+            by_package.insert(binding.package.clone(), Arc::clone(&adapter));
+            adapter
+        };
+        // The registry resolved the dialect by the package's manifest; the
+        // loaded component must agree, or the package is not what it claims.
+        if !adapter
+            .dialects()
+            .iter()
+            .any(|dialect| dialect == &entry.provider)
+        {
+            return Err(format!(
+                "provider component `{}` does not declare `{}` once loaded",
+                adapter.package_name(),
+                entry.provider,
+            ));
+        }
+        adapters.insert(entry.provider.clone(), adapter);
+    }
+    Ok(SouthComponentSupport { adapters })
+}
+
+/// The South transport, when the caller handed the gateway a server-owned
+/// async runtime. Without one (diagnostics, tests, the desktop self-test)
+/// every call runs on legacy and each receipt says so — a missing runtime
+/// is a recorded fallback, not a startup failure.
 fn south_runtime_for(
     config: &ClientConfig,
     provider_runtime: Option<tokio::runtime::Handle>,
 ) -> Result<Option<SouthProviderRuntime>, String> {
-    let uses_south = config.upstreams.values().any(|entry| {
-        matches!(
-            entry.provider_call,
-            ConfiguredProviderCallEngine::SouthV1Buffered
-                | ConfiguredProviderCallEngine::SouthV1BufferedStreaming
-                | ConfiguredProviderCallEngine::SouthV1BufferedStreamingHeaderAuth
-        )
-    });
-    if !uses_south {
+    let uses_south = config
+        .upstreams
+        .values()
+        .any(|entry| !entry.provider_call.is_legacy());
+    let Some(handle) = provider_runtime.filter(|_| uses_south) else {
         return Ok(None);
-    }
-    let handle = provider_runtime.ok_or_else(|| {
-        "a South production opt-in requires a server-owned Tokio runtime".to_owned()
-    })?;
+    };
     let streaming_transport =
         build_direct_reqwest_streaming_transport_v1(None, UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT)
             .map_err(|failure| {
@@ -1953,47 +2216,6 @@ pub enum Reply {
     Chunk(String),
 }
 
-/// Loads one provider plugin per dialect the configured upstreams speak,
-/// resolving each through the registry: builtin bytes or a package directory.
-fn load_provider_plugins(
-    runtime: &PluginRuntime,
-    registry: &crate::plugins::PluginRegistry,
-    config: &ClientConfig,
-) -> Result<BTreeMap<String, Arc<ProviderPlugin>>, String> {
-    let mut provider_plugins: BTreeMap<String, Arc<ProviderPlugin>> = BTreeMap::new();
-    for (name, entry) in &config.upstreams {
-        if provider_plugins.contains_key(&entry.provider) {
-            continue;
-        }
-        let binding = registry.provider_binding(&entry.provider).ok_or_else(|| {
-            format!(
-                "upstream `{name}` speaks `{}`, but no plugin provides that dialect; \
-                 available: [{}] (scanned {})",
-                entry.provider,
-                registry.provider_dialects().join(", "),
-                config.plugins.dir.display(),
-            )
-        })?;
-        let plugin = match &binding.source {
-            crate::plugins::PackageSource::Builtin {
-                manifest_source,
-                wasm,
-            } => ProviderPlugin::load_embedded(runtime, manifest_source, wasm, NoSecrets),
-            crate::plugins::PackageSource::Dir(dir) => {
-                ProviderPlugin::load(runtime, dir, NoSecrets)
-            }
-        }
-        .map_err(|error| {
-            format!(
-                "provider plugin for `{}` (package `{}`): {error}",
-                entry.provider, binding.package,
-            )
-        })?;
-        provider_plugins.insert(entry.provider.clone(), Arc::new(plugin));
-    }
-    Ok(provider_plugins)
-}
-
 impl Gateway {
     fn load_agent(
         runtime: &PluginRuntime,
@@ -2137,63 +2359,11 @@ impl Gateway {
             .collect::<std::collections::BTreeSet<_>>();
         supported_agent_ids.extend(config.agent_routes.keys().cloned());
 
-        let provider_plugins = load_provider_plugins(&runtime, &registry, config)?;
-
         let south_runtime = south_runtime_for(config, provider_runtime)?;
 
-        let mut upstreams = BTreeMap::new();
-        let mut catalog = Vec::new();
+        let south_component = south_component_support(config, &registry)?;
 
-        for (name, entry) in &config.upstreams {
-            let plugin = Arc::clone(
-                provider_plugins
-                    .get(&entry.provider)
-                    .expect("the loop above loaded a plugin for every configured dialect"),
-            );
-
-            let mut provider_config =
-                ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
-            provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
-            provider_config.models = entry
-                .models
-                .iter()
-                .cloned()
-                .map(project_capability_evidence_for_v1)
-                .collect();
-
-            // The adapter may refine the declared catalog; it cannot invent one,
-            // having no network. This is `model_capabilities`' production call.
-            let capabilities: Vec<_> = plugin
-                .model_capabilities(&provider_config)
-                .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
-                .into_iter()
-                .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
-                .collect();
-
-            let reference = token_station_router_core::UpstreamRef::new(name.clone())
-                .expect("config validation checked the shape");
-            for capability in &capabilities {
-                catalog.push((
-                    UpstreamModel::new(reference.clone(), capability.model.clone()),
-                    capability.clone(),
-                ));
-            }
-
-            upstreams.insert(
-                name.clone(),
-                Upstream {
-                    config: provider_config,
-                    auth_config: entry.auth.clone(),
-                    plugin,
-                    dialect: entry.api_dialect,
-                    provider_call: entry.provider_call,
-                    south_package_approved: registry.provider_package_south_approved(
-                        &entry.provider,
-                        "provider-openai-compatible",
-                    ),
-                },
-            );
-        }
+        let (upstreams, catalog) = assemble_upstreams(config, &south_component, &registry)?;
 
         let (local_upstreams, free_upstreams) = Self::upstream_boundary_sets(config);
 
@@ -2624,7 +2794,7 @@ impl Gateway {
         upstream: &Upstream,
         model: &str,
         auth_config: &AuthConfig,
-        resolver: &CommunityCredentialResolverV1<'_>,
+        resolver: &BoundedResolverV1<CommunityCredentialResolverV1<'_>>,
         transport: &south_transport_reqwest::ReqwestTransportV1,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<u64, String> {
@@ -3595,12 +3765,14 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
-        // Native Anthropic passthrough: an anthropic-messages request that routes
-        // to an `anthropic-native` upstream is forwarded verbatim — preserving
-        // server tools (web_search), tool_choice:{type:tool}, server-tool history
-        // and thinking — instead of being lowered through the Canonical IR. The
-        // decision runs on a minimal request (model only) so `normalize_inbound`,
-        // which would reject server-tool history blocks, is never called here.
+        // Native Anthropic passthrough, the server-tool escape hatch: an
+        // anthropic-messages request that routes to an `anthropic-native`
+        // upstream *and declares a server tool* (web_search, code_execution, …)
+        // is forwarded verbatim. Everything else — thinking, tool_choice:{type:
+        // tool}, server-tool history blocks — round-trips through the Canonical
+        // IR and the Anthropic provider component now, so only the one thing
+        // the IR cannot carry, a tool the upstream executes itself, takes the
+        // verbatim route. The decision runs on a minimal request (model only).
         if agent.protocol == "anthropic-messages"
             && let Some(served) =
                 self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
@@ -3608,25 +3780,11 @@ impl Gateway {
             return Ok(served);
         }
 
-        // The translated Canonical-IR path cannot preserve Anthropic document
-        // blocks. Extract text-bearing PDFs locally before the WASM adapter sees
-        // them, and replace every other document with an honest localized marker.
-        // Native Anthropic routes returned above and still receive the original
-        // structured document verbatim.
-        let prepared_body = (agent.protocol == "anthropic-messages")
-            .then(|| prepare_anthropic_documents(body))
-            .flatten();
-        let normalized_body = prepared_body
-            .as_ref()
-            .map_or(body, |(prepared, _)| prepared.as_slice());
-        if let Some((_, stats)) = &prepared_body {
-            eprintln!(
-                "document fallback -> extracted {} PDF document(s), omitted {} unsupported document(s)",
-                stats.extracted, stats.omitted
-            );
-        }
+        // Anthropic `document` blocks ride through the IR verbatim; whether
+        // one survives to the wire is decided per attempt, in `try_upstream`,
+        // once the upstream's dialect is known.
         let (mut request, hints, inbound_tools) =
-            Self::normalize_request(agent, method, path, headers, normalized_body, record)?;
+            Self::normalize_request(agent, method, path, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -3806,7 +3964,7 @@ impl Gateway {
         );
         let retry_clock = Instant::now();
         let mut retry_status = None;
-        let mut retry_engine = RecordedProviderCallEngine::Unknown;
+        let mut retry_engine = ProviderCallOutcome::default();
         let retry = self.try_upstream(
             ctx,
             budget.per_attempt_timeout,
@@ -3886,7 +4044,7 @@ impl Gateway {
             record_actual_attempt_target(record, decision, target);
             let attempt_clock = Instant::now();
             let mut upstream_http_status = None;
-            let mut provider_call_engine = RecordedProviderCallEngine::Unknown;
+            let mut provider_call_engine = ProviderCallOutcome::default();
             let result = self.try_upstream(
                 ctx,
                 budget.per_attempt_timeout,
@@ -4341,6 +4499,29 @@ impl Gateway {
         Ok(StreamOutcome::Complete)
     }
 
+    /// The request one attempt renders: the routed model, and `document`
+    /// blocks resolved for the upstream's dialect. An Anthropic upstream takes
+    /// them as they are; every other dialect's renderer refuses them by name,
+    /// so the text is extracted locally (or an honest marker left) first.
+    fn request_for_attempt(
+        upstream: &Upstream,
+        target: &UpstreamModel,
+        request: &ChatRequest,
+    ) -> ChatRequest {
+        let mut request = request.clone();
+        request.model.clone_from(&target.model);
+        if upstream.config.provider != "anthropic" {
+            let documents = replace_canonical_documents(&mut request);
+            if documents != DocumentFallbackStats::default() {
+                eprintln!(
+                    "document fallback -> extracted {} PDF document(s), omitted {} unsupported document(s) for {target}",
+                    documents.extracted, documents.omitted
+                );
+            }
+        }
+        request
+    }
+
     /// One upstream attempt: build, authorize, inject, send, translate back.
     #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
     fn try_upstream(
@@ -4354,7 +4535,7 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
         upstream_http_status: &mut Option<u16>,
-        provider_call_engine: &mut RecordedProviderCallEngine,
+        provider_call_engine: &mut ProviderCallOutcome,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         // Freeze the attempt budget before provider rendering or eligibility
         // work so those stages cannot extend the caller-owned deadline.
@@ -4371,8 +4552,7 @@ impl Gateway {
             })?;
 
         // Routing may have picked a different model than the caller named.
-        let mut request = request.clone();
-        request.model.clone_from(&target.model);
+        let request = Self::request_for_attempt(upstream, target, request);
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
         let response = match self.send_provider_call(
@@ -4473,10 +4653,10 @@ impl Gateway {
 
     /// Native Anthropic passthrough decision + execution. Returns `Some(served)`
     /// when an anthropic-messages request routed to an `anthropic-native` upstream
-    /// and was forwarded verbatim; `None` when it is not a passthrough and the
-    /// caller must fall through to the Canonical-IR pipeline. Never runs
-    /// `normalize_inbound`, so server-tool history and `tool_choice:{type:tool}` —
-    /// which the IR path rejects — survive.
+    /// and declared a server tool, and was forwarded verbatim; `None` when it is
+    /// not a passthrough and the caller must fall through to the Canonical-IR
+    /// pipeline. Never runs `normalize_inbound`.
+    #[allow(clippy::too_many_arguments)] // decision, fallbacks and dispatch stay one path
     fn try_anthropic_passthrough(
         &self,
         ctx: &RequestContext,
@@ -4539,6 +4719,14 @@ impl Gateway {
             return Ok(None);
         };
         if upstream.dialect != ApiDialect::AnthropicNative {
+            return Ok(None);
+        }
+        // The escape hatch is for what the IR cannot carry: a server tool has
+        // no `ToolDef` representation (there is no `type` to say "the upstream
+        // runs this"). A request without one round-trips through the IR and the
+        // Anthropic component instead, where thinking, forced tool choice and
+        // server-tool history all survive.
+        if !anthropic_request_declares_server_tool(&body_value) {
             return Ok(None);
         }
         let vision_state = candidates
@@ -4850,7 +5038,6 @@ impl Gateway {
             ResponseMetadataEligibilityV1::Incompatible
         };
         let policy = CommunityCallPolicyV1::new(
-            RolloutEligibilityV1::Enabled,
             approved,
             upstream.dialect,
             self.egress.policy.mode,
@@ -4878,19 +5065,21 @@ impl Gateway {
         upstream_name: &str,
         streaming: bool,
         attempt_deadline: std::time::Instant,
-        actual_engine: &mut RecordedProviderCallEngine,
+        actual_engine: &mut ProviderCallOutcome,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
         if upstream.provider_call == ConfiguredProviderCallEngine::Legacy {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::ConfiguredLegacy);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         }
         if streaming && upstream.provider_call == ConfiguredProviderCallEngine::SouthV1Buffered {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine =
+                ProviderCallOutcome::legacy(SouthFallbackReason::BufferedModeCannotStream);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         }
 
         let Some(auth_config) = upstream.auth_config.as_ref() else {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine =
+                ProviderCallOutcome::legacy(SouthFallbackReason::UnauthenticatedUpstream);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         };
         let body_mode = if streaming {
@@ -4910,8 +5099,8 @@ impl Gateway {
             prepare_provider_call_v1(policy, &upstream.config, auth_config, descriptor)
         } {
             Ok(prepared) => prepared,
-            Err(PrepareProviderCallErrorV1::Ineligible(_)) => {
-                *actual_engine = RecordedProviderCallEngine::Legacy;
+            Err(PrepareProviderCallErrorV1::Ineligible(reason)) => {
+                *actual_engine = ProviderCallOutcome::legacy(fallback_reason_for(reason));
                 return self.send(ctx, attempt_timeout, descriptor, upstream_name);
             }
             Err(failure) => {
@@ -4924,23 +5113,34 @@ impl Gateway {
         let Ok(resolver) =
             CommunityCredentialResolverV1::try_new(&self.secrets, upstream_name, auth_config)
         else {
-            *actual_engine = RecordedProviderCallEngine::Legacy;
+            *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::CredentialResolver);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         };
-        let runtime = self.south_runtime.as_ref().ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCode::Internal,
-                500,
-                "South provider runtime is unavailable",
-            )
-        })?;
+        let Some(runtime) = self.south_runtime.as_ref() else {
+            *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::NoProviderRuntime);
+            return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+        };
+        // South reports a missing credential as an opaque resolution failure,
+        // which is right at the transport seam and useless to an operator.
+        // The host owns the store, so it asks the same question the legacy
+        // path asks — is the slot populated? — and answers with the same
+        // named, value-free 401 before anything is sent.
+        if let Err(detail) = self.secrets.resolve(upstream_name, &auth_config.slot) {
+            *actual_engine = ProviderCallOutcome::south(if streaming {
+                RecordedProviderCallEngine::SouthV1Streaming
+            } else {
+                RecordedProviderCallEngine::SouthV1Buffered
+            });
+            return Err(ErrorEnvelope::new(ErrorCode::Auth, 401, detail));
+        }
         let cancellation = ctx.token().async_token();
         let deadline = tokio::time::Instant::from_std(attempt_deadline);
 
         // Crossing this line may resolve a credential or perform network I/O.
         // From here onward the actual attempt is South and legacy replay is forbidden.
         if streaming {
-            *actual_engine = RecordedProviderCallEngine::SouthV1Streaming;
+            *actual_engine =
+                ProviderCallOutcome::south(RecordedProviderCallEngine::SouthV1Streaming);
             return runtime.open_stream(
                 &prepared,
                 &resolver,
@@ -4960,7 +5160,7 @@ impl Gateway {
             transport_timeout,
         )
         .map_err(|failure| map_failure_v1(failure, Self::south_cancellation_disposition(ctx)))?;
-        *actual_engine = RecordedProviderCallEngine::SouthV1Buffered;
+        *actual_engine = ProviderCallOutcome::south(RecordedProviderCallEngine::SouthV1Buffered);
         let response = runtime.handle.block_on(execute_prepared_provider_call_v1(
             &prepared,
             &resolver,
@@ -5115,6 +5315,9 @@ impl Gateway {
         let mut reader = response.into_reader();
         let mut decoder = SseFrameDecoder::default();
         let mut committed = false;
+        // Whether the stream has produced any event other than its terminal
+        // one. See `terminal_without_delivery`.
+        let mut delivered = false;
         let mut buffer = [0u8; STREAM_READ];
 
         loop {
@@ -5173,6 +5376,16 @@ impl Gateway {
                             committed,
                         );
                     }
+                    if Self::terminal_without_delivery(&events, delivered) {
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            Self::empty_stream_envelope(),
+                            committed,
+                        );
+                    }
                     let mut terminal = false;
                     for event in events {
                         let chunk = match agent.plugin.render_stream_event(&event, render_context) {
@@ -5202,6 +5415,8 @@ impl Gateway {
                             return Ok(StreamOutcome::ClientCancelled);
                         }
                         committed = true;
+                        // No `delivered` update: this is the last batch the
+                        // stream can produce, and the guard above already ran.
                         match event {
                             StreamEvent::Usage { usage } => record.usage = Some(usage),
                             StreamEvent::Done { .. } => terminal = true,
@@ -5315,6 +5530,17 @@ impl Gateway {
                     );
                 }
 
+                if Self::terminal_without_delivery(&events, delivered) {
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        Self::empty_stream_envelope(),
+                        committed,
+                    );
+                }
+
                 let mut rendered = Vec::with_capacity(events.len());
                 for event in &events {
                     let chunk = match agent.plugin.render_stream_event(event, render_context) {
@@ -5354,9 +5580,12 @@ impl Gateway {
                     }
                     committed = true;
                     match event {
-                        StreamEvent::Usage { usage } => record.usage = Some(usage),
                         StreamEvent::Done { .. } => terminal = true,
-                        _ => {}
+                        StreamEvent::Usage { usage } => {
+                            record.usage = Some(usage);
+                            delivered = true;
+                        }
+                        _ => delivered = true,
                     }
                 }
                 if terminal {
@@ -5365,6 +5594,35 @@ impl Gateway {
                 }
             }
         }
+    }
+
+    /// Whether this batch closes the stream without anything having been
+    /// delivered — the terminal event, and nothing else, ever.
+    ///
+    /// Adapters no longer refuse the frames that produce this shape: an empty
+    /// `choices` array is a keepalive to some upstreams and the opening frame
+    /// to others, so refusing it frame by frame kills streams that work
+    /// (south 0.11.0's S5 ruling; the v1 package matches it). Refusing only
+    /// the *stream* that delivered nothing keeps both halves: the keepalive
+    /// passes through, an empty completion still does not become a success.
+    ///
+    /// It lives here rather than in an adapter because it is the host's
+    /// guarantee, not one dialect's — which also means it covers the v2 south
+    /// component, whose translation carries no such guard of its own.
+    fn terminal_without_delivery(events: &[StreamEvent], delivered: bool) -> bool {
+        !delivered
+            && !events.is_empty()
+            && events
+                .iter()
+                .all(|event| matches!(event, StreamEvent::Done { .. }))
+    }
+
+    fn empty_stream_envelope() -> ErrorEnvelope {
+        ErrorEnvelope::new(
+            ErrorCode::ProviderProtocolError,
+            502,
+            "the upstream stream ended without delivering any event",
+        )
     }
 
     fn terminate_stream(

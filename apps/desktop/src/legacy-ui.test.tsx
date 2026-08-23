@@ -627,7 +627,7 @@ describe("model selection and provider model management", () => {
     expect(screen.getByText(/Azure deployment name 需要手工填写/)).toBeInTheDocument();
   });
 
-  it("keeps Legacy selected while placing South behind an experimental disclosure", async () => {
+  it("reports South as the active transport for a provider that names no engine", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {
       name: "openai",
@@ -636,10 +636,12 @@ describe("model selection and provider model management", () => {
       models: ["gpt-test"],
       has_auth: true,
       credential_source: "store",
-      provider_call: "legacy",
       south_v1_available: true,
       south_v1_unavailable_reason: null,
+      south_header_auth_v1_available: true,
+      south_header_auth_v1_unavailable_reason: null,
     };
+    vi.mocked(editProvider).mockResolvedValue(state);
     const user = userEvent.setup();
 
     render(
@@ -648,28 +650,8 @@ describe("model selection and provider model management", () => {
       </ErrorToastProvider>,
     );
 
-    const disclosure = screen.getByText("Advanced runtime").closest("details");
-    expect(disclosure).not.toHaveAttribute("open");
-    await user.click(screen.getByText("Advanced runtime"));
-    const legacy = screen.getByRole("radio", { name: /^Legacy/ });
-    const southBuffered = screen.getByRole("radio", { name: /South buffered only/ });
-    const southStreaming = screen.getByRole("radio", {
-      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
-    });
-    const southHeader = screen.getByRole("radio", { name: /South buffered \+ streaming \+ Header Auth/ });
-    expect(legacy).toBeChecked();
-    expect(screen.getAllByText("Experimental")).toHaveLength(3);
-
-    legacy.focus();
-    await user.keyboard("{ArrowDown}");
-    expect(southBuffered).toBeChecked();
-    await user.keyboard("{ArrowDown}");
-    expect(southStreaming).toBeChecked();
-    await user.keyboard("{ArrowDown}");
-    expect(legacy).toBeChecked();
-    await user.keyboard("{ArrowUp}");
-    expect(southStreaming).toBeChecked();
-    expect(southHeader).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("South active");
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save details" }));
     await waitFor(() => expect(editProvider).toHaveBeenCalledWith(
       "openai",
@@ -677,62 +659,10 @@ describe("model selection and provider model management", () => {
       null,
       "store",
       null,
-      "south_v1_buffered_streaming",
-    ));
-    expect(screen.getByText(/South never replays an attempt through Legacy/)).toBeInTheDocument();
-    expect(screen.getByText(/Restart after saving to apply/)).toBeInTheDocument();
-  });
-
-  it("keeps Azure off old South modes and enables only the cumulative Header Auth option", async () => {
-    window.localStorage.setItem("token-station-language", "en");
-    const provider: ProviderView = {
-      name: "azure",
-      provider: "azure-openai-v1",
-      base_url: "https://fixture.openai.azure.com/openai/v1",
-      models: ["deployment-fixture"],
-      has_auth: true,
-      credential_source: "store",
-      provider_call: "legacy",
-      south_v1_available: false,
-      south_v1_unavailable_reason: "provider_package",
-      south_header_auth_v1_available: true,
-      south_header_auth_v1_unavailable_reason: null,
-    };
-    vi.mocked(editProvider).mockResolvedValue(state);
-    const user = userEvent.setup();
-    render(
-      <ErrorToastProvider>
-        <ProviderModelManager provider={provider} serveRunning onSaved={vi.fn()} />
-      </ErrorToastProvider>,
-    );
-
-    await user.click(screen.getByText("Advanced runtime"));
-    const buffered = screen.getByRole("radio", { name: /South buffered only/ });
-    const streaming = screen.getByRole("radio", {
-      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
-    });
-    const header = screen.getByRole("radio", {
-      name: /South buffered \+ streaming \+ Header Auth/,
-    });
-    expect(buffered).toBeDisabled();
-    expect(streaming).toBeDisabled();
-    expect(header).toBeEnabled();
-    expect(screen.getByText(/real Provider requests and may incur charges/)).toBeInTheDocument();
-
-    await user.click(header);
-    expect(screen.getByText(/Azure OpenAI v1 uses the fixed api-key header/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Save details" }));
-    await waitFor(() => expect(editProvider).toHaveBeenCalledWith(
-      "azure",
-      "https://fixture.openai.azure.com/openai/v1",
-      null,
-      "store",
-      null,
-      "south_v1_buffered_streaming_header_auth",
     ));
   });
 
-  it("opens the advanced runtime disclosure for an active South setting", () => {
+  it("labels a provider pinned to Legacy and says how to return it to South", () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {
       name: "openai",
@@ -740,43 +670,20 @@ describe("model selection and provider model management", () => {
       base_url: "https://api.example/v1",
       models: ["gpt-test"],
       has_auth: true,
-      credential_source: "env",
-      credential_reference: "OPENAI_API_KEY",
-      provider_call: "south_v1_buffered",
+      credential_source: "store",
+      provider_call: "legacy",
       south_v1_available: true,
       south_v1_unavailable_reason: null,
     };
 
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
 
-    expect(screen.getByText("Advanced runtime").closest("details")).toHaveAttribute("open");
-    expect(screen.getByRole("radio", { name: /South buffered only/ })).toBeChecked();
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Legacy (pinned in configuration)");
+    expect(status).toHaveTextContent(/Remove `provider_call`/);
   });
 
-  it("labels a retained unavailable South setting as configured, not active", () => {
-    window.localStorage.setItem("token-station-language", "en");
-    const provider: ProviderView = {
-      name: "openai",
-      provider: "openai-compatible",
-      base_url: "https://api.example/v1",
-      models: ["gpt-test"],
-      has_auth: true,
-      credential_source: "store",
-      provider_call: "south_v1_buffered_streaming",
-      south_v1_available: false,
-      south_v1_unavailable_reason: "provider_package",
-    };
-
-    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
-
-    expect(screen.getByText("Experimental configured but unavailable")).toBeInTheDocument();
-    expect(screen.queryByText("Experimental active")).not.toBeInTheDocument();
-    expect(screen.getByRole("radio", {
-      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
-    })).toBeDisabled();
-  });
-
-  it("disables all experimental runtimes when host eligibility fails", async () => {
+  it("reports a Legacy fallback with the host's reason when South cannot carry the provider", () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {
       name: "local",
@@ -785,23 +692,17 @@ describe("model selection and provider model management", () => {
       models: ["local"],
       has_auth: false,
       credential_source: "none",
-      provider_call: "legacy",
       south_v1_available: false,
       south_v1_unavailable_reason: "auth",
+      south_header_auth_v1_available: false,
+      south_header_auth_v1_unavailable_reason: "auth",
     };
-    const user = userEvent.setup();
 
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
-    await user.click(screen.getByText("Advanced runtime"));
 
-    expect(screen.getByRole("radio", { name: /South buffered only/ })).toBeDisabled();
-    expect(screen.getByRole("radio", {
-      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
-    })).toBeDisabled();
-    expect(screen.getByRole("radio", { name: /South buffered \+ streaming \+ Header Auth/ }))
-      .toBeDisabled();
-    expect(screen.getByText(/requires Bearer credentials from the local store or an environment variable/))
-      .toBeInTheDocument();
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Legacy fallback");
+    expect(status).toHaveTextContent(/requires credentials from the local store or an environment variable/);
   });
 
   it("keeps provider endpoint resolution failures accessibly linked for provider names with spaces", async () => {

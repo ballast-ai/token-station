@@ -15,6 +15,17 @@
 //! surface at run time rather than at build time; the conformance suite is what
 //! catches those.
 //!
+//! # Scope: northbound only
+//!
+//! This crate carries the agent (northbound) ABI: `agent-adapter-v1`. The
+//! provider (southbound) ABI that used to live beside it — `provider-adapter-v1`
+//! and its `host.sign` import — was retired when the host moved every
+//! southbound translation onto the South-owned `token-station:adapter@2.0.0`
+//! component ABI (`provider-adapter-v2`, loaded by `south-provider-runtime`).
+//! Southbound packages are therefore not described by this manifest schema;
+//! the host's plugin directory scan dispatches on `api_version` before it
+//! decides which schema to parse.
+//!
 //! # Versioning
 //!
 //! [`AdapterKind::expected_api_version`] returns the WIT `world` an adapter must
@@ -59,13 +70,11 @@ mod tests {
     fn every_adapter_kind_has_a_world_named_after_its_api_version() {
         let resolve = resolve();
 
-        for kind in [AdapterKind::Agent, AdapterKind::Provider] {
-            let expected = kind.expected_api_version();
-            assert!(
-                resolve.worlds.iter().any(|(_, w)| w.name == expected),
-                "wit/adapter.wit declares no world named `{expected}`"
-            );
-        }
+        let expected = AdapterKind::Agent.expected_api_version();
+        assert!(
+            resolve.worlds.iter().any(|(_, w)| w.name == expected),
+            "wit/adapter.wit declares no world named `{expected}`"
+        );
     }
 
     #[test]
@@ -85,29 +94,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_provider_world_may_name_a_credential() {
+    fn no_world_names_a_credential() {
         let resolve = resolve();
 
-        let imports_host = |world_name: &str| {
-            resolve
-                .worlds
-                .iter()
-                .find(|(_, w)| w.name == world_name)
-                .map(|(_, w)| {
-                    w.imports
-                        .keys()
-                        .any(|key| resolve.name_world_key(key).contains("host"))
-                })
-                .expect("world exists")
-        };
-
-        assert!(
-            imports_host(AdapterKind::Provider.expected_api_version()),
-            "a provider adapter signs upstream requests, so it names credentials via `host`"
-        );
-        assert!(
-            !imports_host(AdapterKind::Agent.expected_api_version()),
-            "an agent adapter never touches a credential"
-        );
+        for (_, world) in &resolve.worlds {
+            for (key, _) in &world.imports {
+                let name = resolve.name_world_key(key);
+                assert!(
+                    !name.contains("host"),
+                    "world `{}` imports `{name}`; the northbound ABI never touches a credential",
+                    world.name
+                );
+            }
+        }
     }
 }

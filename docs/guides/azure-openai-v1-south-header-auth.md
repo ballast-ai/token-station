@@ -20,13 +20,13 @@ Do not append `chat/completions`, query parameters, credentials, or a dated `api
 3. Enter the `/openai/v1` Base URL.
 4. Add the deployment name manually as the model.
 5. Select the local credential store or an environment variable.
-6. Save the provider and open its details.
-7. Open Advanced runtime.
-8. Select `South buffered + streaming + Header Auth`.
-9. Save the details. Restart the proxy when the App requests it.
+6. Save the provider. Restart the proxy when the App requests it.
 
-The older `south_v1_buffered` and `south_v1_buffered_streaming` values do not enable Azure Header Auth.
-Azure stays on Legacy unless the fourth value is selected explicitly.
+South is the default transport, and its default tier carries Azure Header Auth, so nothing has to be
+selected. The provider's details show a read-only transport row: `South active`, or `Legacy fallback`
+with the host's reason when the provider's shape is outside the South slice. The narrower
+`south_v1_buffered` and `south_v1_buffered_streaming` values, if written into a config by hand, do not
+carry Azure Header Auth and keep Azure on Legacy.
 
 `azure-openai-v1` is an official reserved dialect. Token Station rejects an existing third-party or
 explicit mapping with the same dialect. Rename or remove that old mapping before upgrading.
@@ -43,7 +43,6 @@ explicit mapping with the same dialect. Rename or remove that old mapping before
         "slot": "provider_api_key",
         "env": "AZURE_OPENAI_API_KEY"
       },
-      "provider_call": "south_v1_buffered_streaming_header_auth",
       "models": [
         {
           "model": "my-deployment"
@@ -63,16 +62,19 @@ After saving and restarting, run a real canary only with an authorized account:
 
 ```bash
 token-station-cli upstream test azure \
-  --model my-deployment \
-  --transport south-v1
+  --model my-deployment
 ```
+
+The probe uses the South transport by default, as served traffic does; `--transport legacy` probes the
+fallback path.
 
 This command sends one real Azure completion. It can consume quota and incur charges. A successful
 canary sends one request to `/openai/v1/chat/completions`, uses only `api-key`, and does not replay a
 South attempt through Legacy.
 
-To roll back, select Legacy in Provider details and restart the proxy. Keep the Base URL, deployment,
-and credential unchanged so the rollback tests only the execution engine.
+To pin this upstream to legacy, add `"provider_call": "legacy"` to its configuration and restart the
+proxy. Keep the Base URL, deployment, and credential unchanged so the change tests only the execution
+engine.
 
 Current limits:
 
@@ -81,7 +83,7 @@ Current limits:
 - Direct egress and translated API dialect only.
 - No legacy Azure query API, OAuth, multiple secrets, or arbitrary Header Auth.
 - Deployment names are manual. Token Station does not use Bearer model discovery for Azure.
-- South remains opt-in and Legacy remains available.
+- Legacy remains available as the automatic fallback and as an explicit `provider_call` value.
 
 ---
 
@@ -107,13 +109,12 @@ https://my-resource.openai.azure.com/openai/v1
 3. 填写以 `/openai/v1` 结尾的 Base URL。
 4. 把 Deployment Name 作为模型手工加入。
 5. 选择本地凭据存储或环境变量。
-6. 保存 Provider，然后打开详情。
-7. 展开“高级运行时”。
-8. 选择 `South 非流式 + 流式 + Header Auth`。
-9. 保存详情。App 提示时重启代理。
+6. 保存 Provider。App 提示时重启代理。
 
-旧的 `south_v1_buffered` 和 `south_v1_buffered_streaming` 不会启用 Azure Header Auth。只有显式
-选择第四档后，Azure 才会使用 South。
+South 是默认传输引擎，默认档位已包含 Azure Header Auth，无需任何选择。Provider 详情里有一行只读的
+传输状态：`South 已启用`，或在 Provider 形态超出 South 范围时显示 `回落到 Legacy` 及宿主给出的原因。
+手工写进配置的旧值 `south_v1_buffered` / `south_v1_buffered_streaming` 不包含 Azure Header Auth，
+会让 Azure 停留在 Legacy。
 
 `azure-openai-v1` 是官方保留方言。如果已有第三方或显式映射使用同名方言，Token Station 会
 拒绝启动。升级前请先重命名或移除旧映射。
@@ -127,16 +128,15 @@ JSON 等价配置见上方英文部分。`provider`、`provider_call` 和 Creden
 
 ```bash
 token-station-cli upstream test azure \
-  --model my-deployment \
-  --transport south-v1
+  --model my-deployment
 ```
 
-该命令会发出一次真实 Azure Completion，可能消耗额度并产生费用。成功 Canary 应只向
+探测默认使用 South 传输（与正式流量一致）；`--transport legacy` 探测回落路径。该命令会发出一次真实 Azure Completion，可能消耗额度并产生费用。成功 Canary 应只向
 `/openai/v1/chat/completions` 发出一次请求，只使用 `api-key`，且 South 尝试不会通过 Legacy
 重放。
 
-需要回滚时，在 Provider 详情中选择 Legacy 并重启代理。不要同时修改 Base URL、Deployment 或
-Credential，否则无法单独判断执行引擎的影响。
+要把该上游固定在 Legacy，在其配置中加入 `"provider_call": "legacy"` 并重启代理。不要同时修改
+Base URL、Deployment 或 Credential，否则无法单独判断执行引擎的影响。
 
 当前限制：
 
@@ -145,4 +145,4 @@ Credential，否则无法单独判断执行引擎的影响。
 - 只支持直连 Egress 和 Translated API Dialect。
 - 不支持旧版 Azure Query API、OAuth、多 Secret 或任意 Header Auth。
 - Deployment Name 只能手工填写，不会对 Azure 使用 Bearer 模型发现。
-- South 仍需显式启用，Legacy 仍然保留。
+- Legacy 仍然保留：既是自动回落目标，也可作为显式 `provider_call` 值。

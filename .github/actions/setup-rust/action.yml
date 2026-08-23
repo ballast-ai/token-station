@@ -80,7 +80,8 @@ runs:
               agent-openai \
               agent-openai-responses \
               agent-gemini \
-              provider-openai-compatible
+              provider-openai-compatible-v2 \
+              provider-anthropic-v2
           fi
           echo WORKSPACES_EOF
         } >> "$GITHUB_OUTPUT"
@@ -90,5 +91,5 @@ runs:
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
-        save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+        save-if: ${{ github.ref == 'refs/heads/develop-v2' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
         workspaces: ${{ steps.scope.outputs.value }}

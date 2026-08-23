@@ -6,19 +6,28 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "b8562d3e52c84beed0b6655c360ef58b3a96aa99";
-const southVersion = "0.4.0";
+const southRevision = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae";
+const southVersion = "0.15.0";
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
+const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git";
+const kernelRevision = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35";
+const kernelVersion = "0.3.0";
+const kernelSource = `git+${kernelRepository}?tag=v0.2.0#${kernelRevision}`;
 const expectedSouthPackages = new Set([
+  "south-component-conformance",
   "south-contracts",
   "south-core",
+  "south-provider-api",
   "south-provider-conformance",
+  "south-provider-runtime",
   "south-testkit",
   "south-transport-reqwest",
 ]);
 const expectedDesktopSouthPackages = new Set([
   "south-contracts",
   "south-core",
+  "south-provider-api",
+  "south-provider-runtime",
   "south-transport-reqwest",
 ]);
 
@@ -171,6 +180,34 @@ const desktopSouthPackages = validateSouthClosure(
   "the Desktop workspace",
 );
 
+const rootGitPackages = metadata.packages.filter((pkg) =>
+  pkg.source?.startsWith("git+"),
+);
+for (const pkg of rootGitPackages) {
+  assert.ok(
+    pkg.source === southSource || pkg.source === kernelSource,
+    `${pkg.name} must resolve from an exact approved Git source and commit`,
+  );
+}
+const kernelPackages = rootGitPackages.filter(
+  (pkg) => pkg.source === kernelSource,
+);
+assert.equal(
+  kernelPackages.length,
+  1,
+  "the root workspace must resolve exactly one approved kernel package",
+);
+assert.equal(
+  kernelPackages[0].name,
+  "token-station-protocol",
+  "the approved kernel source may supply only the protocol package",
+);
+assert.equal(
+  kernelPackages[0].version,
+  kernelVersion,
+  `the kernel protocol package must stay on ${kernelVersion}`,
+);
+
 const workspaceMemberIds = new Set(metadata.workspace_members);
 const nodeById = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
 for (const pkg of southPackages) {
@@ -196,13 +233,16 @@ const cliSouthDependencies = new Map(
 assert.deepEqual(
   cliSouthDependencies,
   new Map([
+    ["south-component-conformance", "dev"],
     ["south-contracts", "normal"],
     ["south-core", "normal"],
+    ["south-provider-api", "normal"],
     ["south-provider-conformance", "dev"],
+    ["south-provider-runtime", "normal"],
     ["south-testkit", "dev"],
     ["south-transport-reqwest", "normal"],
   ]),
-  "the CLI must keep conformance/testkit test-only and only three South runtime dependencies",
+  "the CLI must keep conformance/testkit test-only and only five South runtime dependencies",
 );
 
 const policyPackageIds = new Set([

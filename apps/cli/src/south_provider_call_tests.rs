@@ -5,7 +5,7 @@ use crate::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
         IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
         PreparedProviderStreamResultV1, ProviderPackageEligibilityV1, RequestBodyModeV1,
-        ResponseMetadataEligibilityV1, RolloutEligibilityV1, StableProviderCallFailureV1,
+        ResponseMetadataEligibilityV1, StableProviderCallFailureV1,
         build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
         execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
         open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
@@ -28,8 +28,9 @@ use south_provider_conformance::{
     PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1, PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1,
     PROVIDER_STREAM_CONFORMANCE_IDLE_TIMEOUT_V1, ProviderCallControlV1, ProviderCallFailureCodeV1,
     ProviderCallFixtureV1, ProviderCallInputV1, ProviderCallUpstreamV1,
-    ProviderQuotaMetadataFixtureV1, ProviderStreamControlV1, ProviderStreamFixtureV1,
-    ProviderStreamRawHeadV1, ProviderStreamTerminalV1, ProviderStreamUpstreamV1,
+    ProviderQuotaMetadataFixtureV1, ProviderQuotaMetadataUpstreamV1, ProviderStreamControlV1,
+    ProviderStreamFixtureV1, ProviderStreamRawHeadV1, ProviderStreamTerminalV1,
+    ProviderStreamUpstreamV1,
 };
 use south_testkit::{
     AssembledExecutionFutureV1, AssembledHeaderAuthExecutionFutureV1,
@@ -61,7 +62,6 @@ use tokio_util::sync::CancellationToken;
 
 fn eligible_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        RolloutEligibilityV1::Enabled,
         ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
@@ -72,7 +72,6 @@ fn eligible_policy() -> CommunityCallPolicyV1 {
 
 fn eligible_streaming_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        RolloutEligibilityV1::Enabled,
         ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
@@ -323,18 +322,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
     let cases = [
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Disabled,
-                ProviderPackageEligibilityV1::Approved,
-                ApiDialect::Translated,
-                EgressMode::Direct,
-                RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
-            ),
-            IneligibleV1::RolloutDisabled,
-        ),
-        (
-            CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Unapproved,
                 ApiDialect::Translated,
                 EgressMode::Direct,
@@ -345,7 +332,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
         ),
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Approved,
                 ApiDialect::AnthropicNative,
                 EgressMode::Direct,
@@ -356,7 +342,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
         ),
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Http,
@@ -367,7 +352,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
         ),
         (
             CommunityCallPolicyV1::new(
-                RolloutEligibilityV1::Enabled,
                 ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Direct,
@@ -469,7 +453,6 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
     );
 
     let metadata_incompatible = CommunityCallPolicyV1::new(
-        RolloutEligibilityV1::Enabled,
         ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
@@ -715,8 +698,8 @@ impl AsyncHttpTransport for InspectingTransport {
         assert_eq!(request.body().as_str(), r#"{"model":"test"}"#);
         assert_eq!(request.headers().get("x-trace-id"), Some("trace-1"));
         assert_eq!(
-            request.auth_header(),
-            ("authorization", b"Bearer synthetic-test-secret".as_slice())
+            request.auth_headers().collect::<Vec<_>>(),
+            vec![("authorization", b"Bearer synthetic-test-secret".as_slice())]
         );
         Box::pin(async {
             let quota_metadata = ProviderQuotaMetadataV1::try_from_iter([
@@ -776,8 +759,8 @@ impl AsyncHttpTransport for HeaderInspectingTransport<'_> {
     ) -> TransportFuture<'a> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
-            request.auth_header(),
-            (self.expected_name, b"synthetic-test-secret".as_slice())
+            request.auth_headers().collect::<Vec<_>>(),
+            vec![(self.expected_name, b"synthetic-test-secret".as_slice())]
         );
         Box::pin(async {
             BufferedHttpResponseV1::try_from_parts(
@@ -1594,7 +1577,11 @@ impl HeaderAuthProbe {
     }
 
     fn inspect(&self, request: &PreparedHttpRequestV1<'_>, fixture: &HeaderAuthFixtureV1) {
-        let (name, value) = request.auth_header();
+        let mut auth_headers = request.auth_headers();
+        let (name, value) = auth_headers
+            .next()
+            .expect("a header-auth request binds exactly one auth header");
+        assert!(auth_headers.next().is_none());
         self.sanctioned_header_exact.store(
             name == fixture.secret_header().header_name()
                 && value == FAKE_HEADER_SECRET_V1.as_bytes(),
@@ -2437,7 +2424,8 @@ fn map_contract_failure_code(error: ContractErrorV1) -> ProviderCallFailureCodeV
         | ContractErrorV1::InvalidQueryValue
         | ContractErrorV1::DuplicateQueryParameter
         | ContractErrorV1::EmptyQuery
-        | ContractErrorV1::QueryTooLarge => ProviderCallFailureCodeV1::InvalidRelativePath,
+        | ContractErrorV1::QueryTooLarge
+        | ContractErrorV1::InvalidUserAgentValue => ProviderCallFailureCodeV1::InvalidRelativePath,
         ContractErrorV1::InvalidCredentialSlot => ProviderCallFailureCodeV1::InvalidCredentialSlot,
         ContractErrorV1::InvalidJsonBody => ProviderCallFailureCodeV1::InvalidJsonBody,
         ContractErrorV1::RequestBodyTooLarge => ProviderCallFailureCodeV1::RequestBodyTooLarge,
@@ -2470,6 +2458,10 @@ fn map_preparation_failure_code(error: PreparationErrorV1) -> ProviderCallFailur
         }
         PreparationErrorV1::Cancelled => ProviderCallFailureCodeV1::Cancelled,
         PreparationErrorV1::DeadlineExceeded => ProviderCallFailureCodeV1::DeadlineExceeded,
+        // `PreparationErrorV1` is `#[non_exhaustive]` since South 0.7.0: no frozen
+        // fixture produces a newer variant, so fold to the context-free fallback and
+        // let the runner flag the mismatch.
+        _ => ProviderCallFailureCodeV1::RequestFailed,
     }
 }
 
@@ -2529,15 +2521,20 @@ impl CommunityQuotaConformanceExecutorV1 {
         };
         let transport = QuotaConformanceTransport {
             calls: AtomicUsize::new(0),
-            metadata: ProviderQuotaMetadataV1::try_from_iter(
-                QUOTA_METADATA_FIELDS_V1.into_iter().filter_map(|field| {
-                    fixture
-                        .upstream_metadata()
-                        .value(field)
-                        .map(|value| (field, value.to_owned()))
-                }),
-            )
-            .expect("canonical quota metadata is valid"),
+            metadata: match fixture.upstream() {
+                ProviderQuotaMetadataUpstreamV1::Metadata(raw) => {
+                    ProviderQuotaMetadataV1::try_from_iter(
+                        QUOTA_METADATA_FIELDS_V1.into_iter().filter_map(|field| {
+                            raw.value(field).map(|value| (field, value.to_owned()))
+                        }),
+                    )
+                    .expect("canonical quota metadata is valid")
+                }
+                // The transport boundary must not be reached for this case; an
+                // empty metadata set keeps the transport constructible while the
+                // call-count evidence proves it was never asked.
+                ProviderQuotaMetadataUpstreamV1::NotReached => ProviderQuotaMetadataV1::default(),
+            },
         };
         let result = execute_prepared_provider_call_v1(
             &prepared,
@@ -2607,7 +2604,7 @@ impl AsyncHttpTransport for QuotaConformanceTransport {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn community_adapter_passes_both_public_quota_metadata_cases() {
+async fn community_adapter_passes_all_public_quota_metadata_cases() {
     let executor = CommunityQuotaConformanceExecutorV1::new();
     let report = tokio::time::timeout(
         Duration::from_secs(5),
@@ -2616,7 +2613,7 @@ async fn community_adapter_passes_both_public_quota_metadata_cases() {
     .await
     .expect("quota conformance watchdog expired")
     .expect("community adapter must pass the public quota metadata suite");
-    assert_eq!(report.passed_case_ids().len(), 2);
+    assert_eq!(report.passed_case_ids().len(), 3);
 }
 
 const QUOTA_LOOPBACK_RESPONSE: &[u8] = concat!(

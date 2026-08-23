@@ -48,6 +48,7 @@ const expected = [
   "agent-gemini",
   "agent-openai",
   "agent-openai-responses",
+  "provider-anthropic",
   "provider-openai-compatible",
 ];
 const actual = Array.isArray(report.plugins)
@@ -101,6 +102,7 @@ for plugin in \
   agent-anthropic \
   agent-openai-responses \
   agent-gemini \
+  provider-anthropic \
   provider-openai-compatible; do
   grep -Fq "$plugin" "$strings_file" || {
     echo "desktop executable is missing builtin plugin marker: $plugin" >&2

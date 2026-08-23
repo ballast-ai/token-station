@@ -1,7 +1,0 @@
-{
-  "code": "rate_limit",
-  "http_status": 429,
-  "message": "the upstream rate limited this request",
-  "provider_message": "Rate limit reached for gpt-5.5",
-  "retry_after_ms": 2000
-}

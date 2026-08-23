@@ -15,21 +15,38 @@ fn main() {
 
     let dist = std::env::var("TOKEN_STATION_PLUGINS_DIST").expect(
         "the `builtin-plugins` feature needs TOKEN_STATION_PLUGINS_DIST pointing at a directory \
-         holding all official agent/provider packages (manifest.json + adapter.wasm each) \
+         holding every official package (agents: manifest.json + adapter.wasm; South \
+         provider components: manifest.json + component.wasm) \
          — scripts/build-release.sh assembles one",
     );
     let dist = Path::new(&dist)
         .canonicalize()
         .expect("TOKEN_STATION_PLUGINS_DIST must name an existing directory");
 
-    for (stem, package) in [
-        ("AGENT_OPENAI", "agent-openai"),
-        ("AGENT_ANTHROPIC", "agent-anthropic"),
-        ("AGENT_OPENAI_RESPONSES", "agent-openai-responses"),
-        ("AGENT_GEMINI", "agent-gemini"),
-        ("PROVIDER_OPENAI", "provider-openai-compatible"),
+    for (stem, package, wasm_file) in [
+        ("AGENT_OPENAI", "agent-openai", "adapter.wasm"),
+        ("AGENT_ANTHROPIC", "agent-anthropic", "adapter.wasm"),
+        (
+            "AGENT_OPENAI_RESPONSES",
+            "agent-openai-responses",
+            "adapter.wasm",
+        ),
+        ("AGENT_GEMINI", "agent-gemini", "adapter.wasm"),
+        // The South provider components: staged by the same scripts and
+        // embedded by the same mechanism, but loaded by `south-provider-runtime`
+        // (their manifest is South's v2 schema, their binary `component.wasm`).
+        (
+            "PROVIDER_OPENAI_V2",
+            "provider-openai-compatible-v2",
+            "component.wasm",
+        ),
+        (
+            "PROVIDER_ANTHROPIC_V2",
+            "provider-anthropic-v2",
+            "component.wasm",
+        ),
     ] {
-        for (kind, file) in [("MANIFEST", "manifest.json"), ("WASM", "adapter.wasm")] {
+        for (kind, file) in [("MANIFEST", "manifest.json"), ("WASM", wasm_file)] {
             let path = dist.join(package).join(file);
             assert!(
                 path.is_file(),

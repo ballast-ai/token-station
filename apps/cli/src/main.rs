@@ -15,9 +15,7 @@ use token_station_cli::config::ClientConfig;
 use token_station_cli::filelog::{FileLog, Recorders};
 use token_station_cli::gateway::{Gateway, StageStatus};
 use token_station_cli::store::SqliteStore;
-use token_station_cli::{
-    backup, manage, plugins, scaffold, secrets, server, stats, upgrade, virtual_key,
-};
+use token_station_cli::{backup, manage, plugins, secrets, server, stats, upgrade, virtual_key};
 use token_station_metrics::Recorder;
 
 #[derive(Parser)]
@@ -129,7 +127,9 @@ enum UpstreamCommand {
         #[arg(long)]
         model: Option<String>,
         /// HTTP engine for this real, potentially billable completion probe.
-        #[arg(long, value_enum, default_value_t = ProbeTransportArg::Legacy)]
+        /// South is the default, as it is for served traffic; `legacy` probes
+        /// the fallback path.
+        #[arg(long, value_enum, default_value_t = ProbeTransportArg::SouthV1)]
         transport: ProbeTransportArg,
     },
     /// Layered health for an upstream: DNS/TLS, HTTP, auth, model, generation —
@@ -144,8 +144,8 @@ enum UpstreamCommand {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum ProbeTransportArg {
-    #[default]
     Legacy,
+    #[default]
     SouthV1,
 }
 
@@ -173,32 +173,8 @@ enum PluginCommand {
     /// Delete an installed package and its approval (refused while an
     /// upstream still routes through it).
     Remove { name: String },
-    /// One package in full: identity, trust, dialects, declared secrets.
+    /// One package in full: identity, trust, dialects.
     Info { name: String },
-    /// Scaffold a provider-adapter project: the official OpenAI-compatible
-    /// adapter renamed, compiling and conformance-passing from the start.
-    New {
-        /// Package name, lowercase kebab-case (e.g. `provider-acme`).
-        name: String,
-        /// The provider dialect it will speak; defaults to the package name.
-        #[arg(long)]
-        dialect: Option<String>,
-        /// Parent directory to scaffold into.
-        #[arg(long, default_value = ".")]
-        dir: PathBuf,
-    },
-    /// cargo build --target wasm32-wasip2, then place adapter.wasm beside
-    /// the manifest so the project directory is directly installable.
-    Build {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Run the package's conformance suite — the exact one `plugin install`
-    /// holds it to.
-    Test {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
 }
 
 #[derive(Subcommand)]
@@ -236,6 +212,8 @@ enum GroupByArg {
     Model,
     Pool,
     Status,
+    Engine,
+    Fallback,
 }
 
 impl From<GroupByArg> for stats::GroupBy {
@@ -246,6 +224,8 @@ impl From<GroupByArg> for stats::GroupBy {
             GroupByArg::Model => Self::Model,
             GroupByArg::Pool => Self::Pool,
             GroupByArg::Status => Self::Status,
+            GroupByArg::Engine => Self::Engine,
+            GroupByArg::Fallback => Self::Fallback,
         }
     }
 }
@@ -405,20 +385,6 @@ fn plugin(command: PluginCommand, config_path: &Path) -> Result<(), String> {
         PluginCommand::Info { name } => {
             let config = load(config_path)?;
             print!("{}", plugins::info(&config, &name)?);
-            Ok(())
-        }
-        // The developer chain works on package directories, not the config.
-        PluginCommand::New { name, dialect, dir } => {
-            let dialect = dialect.as_deref().unwrap_or(name.as_str());
-            println!("{}", scaffold::new_package(&dir, &name, dialect)?);
-            Ok(())
-        }
-        PluginCommand::Build { path } => {
-            println!("{}", scaffold::build_package(&path)?);
-            Ok(())
-        }
-        PluginCommand::Test { path } => {
-            println!("{}", scaffold::test_package(&path)?);
             Ok(())
         }
     }
@@ -732,31 +698,31 @@ mod tests {
     }
 
     #[test]
-    fn upstream_test_accepts_an_explicit_south_transport_and_keeps_legacy_default() {
+    fn upstream_test_defaults_to_the_south_transport_and_accepts_an_explicit_legacy() {
         let explicit = super::Cli::try_parse_from([
             "token-station-cli",
             "upstream",
             "test",
             "example",
             "--transport",
-            "south-v1",
+            "legacy",
         ])
-        .expect("south-v1 is a documented diagnostic transport");
+        .expect("legacy is a documented diagnostic transport");
         let defaulted =
             super::Cli::try_parse_from(["token-station-cli", "upstream", "test", "example"])
-                .expect("legacy remains the backwards-compatible default");
+                .expect("south-v1 is the default, as for served traffic");
 
         assert!(matches!(
             explicit.command,
             super::Command::Upstream(super::UpstreamCommand::Test {
-                transport: super::ProbeTransportArg::SouthV1,
+                transport: super::ProbeTransportArg::Legacy,
                 ..
             })
         ));
         assert!(matches!(
             defaulted.command,
             super::Command::Upstream(super::UpstreamCommand::Test {
-                transport: super::ProbeTransportArg::Legacy,
+                transport: super::ProbeTransportArg::SouthV1,
                 ..
             })
         ));

@@ -1,17 +1,21 @@
-//! WASM host runtime: loads adapter plugins and holds them to the sandbox the
-//! architecture promises.
+//! WASM host runtime: loads northbound agent adapters and holds them to the
+//! sandbox the architecture promises.
 //!
 //! What this crate is, in one sentence: the thing that makes
 //! `token-station-conformance`'s trait seam real for a `.wasm` file. The suite
-//! and the request path are written against `ProviderAdapter`; this crate
+//! and the request path are written against `AgentAdapter`; this crate
 //! implements that trait over a WASM component, which is exactly the
 //! "serialize, call, deserialize, turn a trap into an `ErrorEnvelope`" job the
 //! seam's documentation assigns to it.
 //!
+//! Southbound provider components do not load here. They are South's
+//! `provider-adapter-v2` components, loaded through `south-provider-runtime`
+//! with its own gates; the host wires the two runtimes side by side.
+//!
 //! # The load path is the trust path
 //!
-//! [`ProviderPlugin::load`] runs the gates in order, cheapest and most
-//! decidable first:
+//! [`AgentPlugin::load`] runs the gates in order, cheapest and most decidable
+//! first:
 //!
 //! 1. **Manifest gate** — `accepts_manifest`, before any code is read.
 //! 2. **Import scan** — the compiled component must not import `wasi:sockets`
@@ -34,20 +38,17 @@
 //!
 //! # Credentials
 //!
-//! The provider world imports `host.sign`. The runtime enforces the manifest
-//! boundary *before* consulting any signer: a `secret-ref` the manifest did
-//! not declare under `permissions.secrets` is refused here, so a
-//! [`SecretSigner`] implementation never even learns that an undeclared name
-//! was asked for.
+//! The agent world imports nothing of the host's, so no instance built here can
+//! so much as name a credential. The import scan enforces that on the compiled
+//! artifact: a component importing `token-station:adapter/host` — the credential
+//! interface the retired southbound world used to carry — is refused by name.
 
 mod agent;
 mod bindings;
 mod instance;
 mod loader;
-mod provider;
 mod runtime;
 
 pub use agent::{AgentPlugin, MatchOutcome};
 pub use loader::{LoadError, UnreadableReason};
-pub use provider::{NoSecrets, ProviderPlugin, SecretSigner};
 pub use runtime::{PluginRuntime, RuntimeLimits};

@@ -13,16 +13,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::json;
-use token_station_conformance::{
-    AgentAdapter, AgentFamily, FixturePack, ProviderAdapter, ProviderFamily, run_agent_suite,
-    run_provider_suite,
-};
-use token_station_plugin_runtime::{
-    AgentPlugin, LoadError, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
-};
+use token_station_conformance::{AgentAdapter, AgentFamily, FixturePack, run_agent_suite};
+use token_station_plugin_runtime::{AgentPlugin, LoadError, PluginRuntime, RuntimeLimits};
 use token_station_protocol::{
-    AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, Extensions,
-    FinishReason, HeaderDigest, Principal, ProviderConfig, ResponseFormat, StreamEvent, ToolChoice,
+    AgentRequestEnvelope, ChatResponse, ErrorCode, ErrorEnvelope, Extensions, FinishReason,
+    HeaderDigest, Principal, ResponseFormat, StreamEvent, ToolChoice,
 };
 
 fn repo_root() -> &'static Path {
@@ -60,11 +55,6 @@ fn build_package(plugin: &str) -> PathBuf {
     .expect("manifest copies");
     std::fs::copy(&wasm, package.join("adapter.wasm")).expect("wasm copies");
     package
-}
-
-fn provider_package() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| build_package("provider-openai-compatible"))
 }
 
 fn agent_package() -> &'static Path {
@@ -124,21 +114,6 @@ fn response_sse_events(rendered: &serde_json::Value) -> Vec<serde_json::Value> {
                 .map(|data| serde_json::from_str(data).expect("Responses SSE data is JSON"))
         })
         .collect()
-}
-
-#[test]
-fn the_official_provider_adapter_passes_the_full_suite_as_wasm() {
-    let plugin =
-        ProviderPlugin::load(&runtime(), provider_package(), NoSecrets).expect("loads clean");
-
-    let fixtures = repo_root().join("plugins/official/provider-openai-compatible/fixtures");
-    let pack: FixturePack<ProviderFamily> =
-        FixturePack::load(&fixtures).expect("the shipped pack loads");
-
-    let report = run_provider_suite(&plugin, &pack);
-
-    assert!(report.is_passing(), "{report}");
-    assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
 }
 
 #[test]
@@ -816,9 +791,11 @@ fn chat_completions_structured_output_is_rejected_by_the_real_wasm() {
 
 #[test]
 fn anthropic_server_tools_are_refused_but_client_tools_remain_functions() {
-    // Canonical IR has no execution/result representation for Anthropic server
-    // tools. Refuse those before routing instead of pretending an empty-schema
-    // function is equivalent. Client-executed schema tools remain functions.
+    // A server tool *declaration* has no IR carrier: `ToolDef` has no `type`,
+    // so the declaration would reach the provider as an empty-schema function
+    // nobody executes. Refuse it before routing. (History *blocks* from a
+    // server tool are a different matter — see the `Unknown` test below.)
+    // Client-executed schema tools remain functions.
     let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
     let request = |tools: serde_json::Value| {
         envelope(
@@ -894,11 +871,11 @@ fn anthropic_server_tools_are_refused_but_client_tools_remain_functions() {
 
 #[test]
 fn anthropic_tool_choice_is_translated_not_refused() {
-    // The old code 400'd every tool_choice except "auto" with a message that
-    // wrongly blamed the Canonical IR. Now: "any" -> Required (lossless),
-    // "tool" -> Auto (honest degrade on the translate path), "auto" -> Auto, and
-    // a genuinely unknown type is a clean capability error naming the real
-    // constraint (the chat provider), never the IR.
+    // "any" -> Required (lossless), "tool" -> `ToolChoice::Other` in the
+    // OpenAI object form (the Anthropic renderer maps it back to
+    // `{type:tool,name}`; stage A′ retired the old degrade to `auto`),
+    // "auto" -> Auto, and a genuinely unknown type is a clean capability error
+    // naming the real constraint (the chat provider), never the IR.
     let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
     let request = |choice: serde_json::Value| {
         envelope(
@@ -920,8 +897,14 @@ fn anthropic_tool_choice_is_translated_not_refused() {
 
     let tool = plugin
         .normalize_inbound(&request(json!({"type": "tool", "name": "read_file"})))
-        .expect("a forced tool translates (degraded)");
-    assert_eq!(tool.tool_choice, Some(ToolChoice::Auto));
+        .expect("a forced tool is carried, not degraded");
+    assert_eq!(
+        tool.tool_choice,
+        Some(ToolChoice::Other(json!({
+            "type": "function",
+            "function": {"name": "read_file"}
+        })))
+    );
 
     let auto = plugin
         .normalize_inbound(&request(json!({"type": "auto"})))
@@ -1015,76 +998,63 @@ fn anthropic_adaptive_thinking_normalizes_without_losing_compatibility_metadata(
     assert_eq!(unknown.code, ErrorCode::Capability);
 }
 
+/// Stage A′: blocks this adapter cannot model ride through the IR verbatim as
+/// `ContentPart::Unknown`. The adapter runs before routing, so it is not the
+/// place to decide what a renderer can express — the Anthropic renderer writes
+/// these back unchanged and any other renderer refuses them by name.
 #[test]
-fn anthropic_reasoning_effort_requires_an_explicit_provider_capability() {
-    let plugin =
-        ProviderPlugin::load(&runtime(), provider_package(), NoSecrets).expect("loads clean");
-    let request: ChatRequest = serde_json::from_value(json!({
-        "model": "deepseek-v4-flash",
-        "messages": [{"role": "user", "content": "hi"}],
-        "anthropic_thinking": {"type": "adaptive"},
-        "reasoning_effort": "medium"
-    }))
-    .expect("valid canonical request");
-    let config = |supported_parameters: serde_json::Value| -> ProviderConfig {
-        serde_json::from_value(json!({
-            "provider": "openai-compatible",
-            "base_url": "https://api.deepseek.example/v1",
-            "models": [{
-                "model": "deepseek-v4-flash",
-                "supported_parameters": supported_parameters
-            }]
-        }))
-        .expect("valid provider config")
-    };
-
-    let undeclared = plugin
-        .build_http_request(&request, &config(json!([])))
-        .expect("request builds");
-    assert!(
-        undeclared
-            .body
-            .as_ref()
-            .is_some_and(|body| body.get("reasoning_effort").is_none()),
-        "adaptive effort must be omitted when the model did not declare support"
-    );
-
-    let declared = plugin
-        .build_http_request(&request, &config(json!(["reasoning_effort"])))
-        .expect("request builds");
-    assert_eq!(
-        declared
-            .body
-            .as_ref()
-            .and_then(|body| body.get("reasoning_effort")),
-        Some(&json!("medium"))
-    );
-}
-
-#[test]
-fn anthropic_server_tool_history_blocks_fail_with_capability() {
+fn anthropic_unmodelled_blocks_survive_verbatim_as_unknown_parts() {
     let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
-    let request = |block: serde_json::Value| {
+    let request = |role: &str, block: serde_json::Value| {
         envelope(
             "anthropic-messages",
             serde_json::json!({
                 "model": "claude-x",
                 "max_tokens": 256,
-                "messages": [{"role": "assistant", "content": [block]}]
+                "messages": [{"role": role, "content": [block]}]
             }),
         )
     };
-    for block in [
-        serde_json::json!({"type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": {}}),
-        serde_json::json!({"type": "web_search_tool_result", "tool_use_id": "srv_1", "content": []}),
-        serde_json::json!({"type": "search_result", "content": []}),
+    for (role, block) in [
+        (
+            "assistant",
+            serde_json::json!({"type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": {}}),
+        ),
+        (
+            "assistant",
+            serde_json::json!({"type": "web_search_tool_result", "tool_use_id": "srv_1", "content": []}),
+        ),
+        (
+            "user",
+            serde_json::json!({"type": "search_result", "source": "s", "title": "t", "content": []}),
+        ),
+        (
+            "user",
+            serde_json::json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "d"}}),
+        ),
+        (
+            "user",
+            serde_json::json!({"type": "wholly_unknown_block", "payload": {"k": 1}}),
+        ),
     ] {
-        let error = plugin
-            .normalize_inbound(&request(block))
-            .expect_err("server-tool history has no IR representation");
-        assert_eq!(error.code, ErrorCode::Capability);
-        assert_eq!(error.http_status, 400);
+        let normalized = plugin
+            .normalize_inbound(&request(role, block.clone()))
+            .expect("an unmodelled block is carried, not refused");
+        let parts = match &normalized.messages[0].content {
+            Some(token_station_protocol::Content::Parts(parts)) => parts.clone(),
+            other => panic!("a block array normalizes to parts: {other:?}"),
+        };
+        assert_eq!(
+            parts,
+            vec![token_station_protocol::ContentPart::Unknown(block.clone())],
+            "{block}"
+        );
     }
+
+    let untyped = plugin
+        .normalize_inbound(&request("user", serde_json::json!({"no_type": true})))
+        .expect_err("a block without a type is malformed, not unmodelled");
+    assert_eq!(untyped.code, ErrorCode::InvalidRequest);
 }
 
 #[test]
@@ -1465,22 +1435,12 @@ fn responses_match_inbound_owns_only_post_responses() {
 }
 
 #[test]
-fn the_two_kinds_do_not_load_through_each_other() {
-    // An agent package through the provider loader and vice versa: refused at
-    // the kind check, before any wasm is instantiated.
-    let wrong = ProviderPlugin::load(&runtime(), agent_package(), NoSecrets);
-    assert!(matches!(wrong, Err(LoadError::WrongKind(_))), "{wrong:?}");
-
-    let wrong = AgentPlugin::load(&runtime(), provider_package());
-    assert!(matches!(wrong, Err(LoadError::WrongKind(_))), "{wrong:?}");
-}
-
-#[test]
 fn an_agent_component_that_asks_to_name_credentials_is_refused() {
-    // The provider world may import `token-station:adapter/host`; the agent
-    // world may not — an agent adapter cannot even *name* a credential. The
-    // WIT declares that; this proves the loader enforces it on a compiled
-    // artifact that ignored the declaration.
+    // `token-station:adapter/host` was the retired southbound world's
+    // credential-naming import; the agent world may not carry it — an agent
+    // adapter cannot even *name* a credential. The WIT declares that; this
+    // proves the loader enforces it on a compiled artifact that ignored the
+    // declaration.
     let wat = r#"(component
         (import "token-station:adapter/host@1.0.0" (instance))
     )"#;

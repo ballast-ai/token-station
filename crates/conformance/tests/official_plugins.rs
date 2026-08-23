@@ -13,8 +13,6 @@ const AGENT_OPENAI_RESPONSES: &str =
 const AGENT_ANTHROPIC: &str =
     include_str!("../../../plugins/official/agent-anthropic/manifest.json");
 const AGENT_GEMINI: &str = include_str!("../../../plugins/official/agent-gemini/manifest.json");
-const PROVIDER_OPENAI_COMPATIBLE: &str =
-    include_str!("../../../plugins/official/provider-openai-compatible/manifest.json");
 
 fn parse(source: &str) -> AdapterManifest {
     serde_json::from_str(source).expect("official manifest must match the schema")
@@ -42,20 +40,6 @@ fn official_agent_adapter_passes_the_manifest_gate() {
 }
 
 #[test]
-fn official_provider_adapter_passes_the_manifest_gate() {
-    let manifest = parse(PROVIDER_OPENAI_COMPATIBLE);
-
-    assert_eq!(accepts_manifest(&manifest), Ok(()));
-    assert_eq!(manifest.kind, AdapterKind::Provider);
-    assert_eq!(manifest.providers, ["openai-compatible", "azure-openai-v1"]);
-    assert_eq!(manifest.permissions.secrets, ["provider_api_key"]);
-    assert!(
-        !manifest.capabilities.contains(&Capability::AgentHint),
-        "a provider adapter never sees an inbound request"
-    );
-}
-
-#[test]
 fn openai_agent_manifests_do_not_overclaim_structured_output() {
     for source in [AGENT_OPENAI, AGENT_OPENAI_RESPONSES] {
         let manifest = parse(source);
@@ -77,10 +61,6 @@ fn manifest_name_matches_the_directory_that_holds_it() {
     assert_eq!(parse(AGENT_OPENAI_RESPONSES).name, "agent-openai-responses");
     assert_eq!(parse(AGENT_ANTHROPIC).name, "agent-anthropic");
     assert_eq!(parse(AGENT_GEMINI).name, "agent-gemini");
-    assert_eq!(
-        parse(PROVIDER_OPENAI_COMPATIBLE).name,
-        "provider-openai-compatible"
-    );
 }
 
 #[test]
@@ -93,7 +73,6 @@ fn official_manifests_round_trip_exactly() {
         AGENT_OPENAI_RESPONSES,
         AGENT_ANTHROPIC,
         AGENT_GEMINI,
-        PROVIDER_OPENAI_COMPATIBLE,
     ] {
         let expected: serde_json::Value =
             serde_json::from_str(source).expect("manifest is valid JSON");

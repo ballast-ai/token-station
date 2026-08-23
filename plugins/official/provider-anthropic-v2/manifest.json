@@ -1,0 +1,34 @@
+{
+  "name": "provider-anthropic",
+  "version": "1.0.1",
+  "api_version": "provider-adapter-v2",
+  "providers": [
+    "anthropic"
+  ],
+  "capabilities": [
+    "chat",
+    "stream",
+    "tool_call"
+  ],
+  "auth_arms": [
+    "header_secret"
+  ],
+  "permissions": {
+    "network": false,
+    "filesystem": false,
+    "secrets": [
+      "provider_api_key"
+    ]
+  },
+  "conformance": {
+    "required_suite": "south.provider-component.v1",
+    "fixtures": "fixtures-anthropic/"
+  },
+  "compatibility": {
+    "ir_schema_id": "token-station-protocol@0.3.0/v0.2.0",
+    "kernel_version": "0.2.0",
+    "kernel_revision": "72458e3a11fe157f9ac04818c44b62a3dd2cb09c",
+    "wit_package": "token-station:adapter@2.0.0",
+    "south_runtime": "0.15.0"
+  }
+}

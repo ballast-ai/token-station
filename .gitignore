@@ -22,6 +22,9 @@ dist/
 # Internal design records belong in the private token-station-doc repository.
 /docs/design/
 
+# Engineering lessons are an internal working log; they stay out of the public repo.
+/docs/lessons.md
+
 # plugin build 把 adapter.wasm 放到 manifest 旁以便直接 install——产物不入库。
 plugins/official/*/adapter.wasm
 

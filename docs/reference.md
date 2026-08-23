@@ -26,7 +26,9 @@ Provider presets are editable starting points, not availability guarantees. Mode
 
 Provider requests, model discovery, and health probes can use direct access, HTTP CONNECT, or SOCKS5, with validated `no_proxy` rules and separate proxy credentials. These flows do not inherit ambient proxy environment variables. The desktop updater uses its own HTTP stack and may follow system or environment proxy settings.
 
-Legacy is the default Provider execution engine. Eligible OpenAI-compatible Bearer requests can opt in to South for buffered calls or for buffered and streaming calls. Azure OpenAI v1 uses the separate cumulative `south_v1_buffered_streaming_header_auth` opt-in and a fixed `api-key` header. See [Azure OpenAI v1 with South Header Auth](guides/azure-openai-v1-south-header-auth.md).
+South is the default Provider execution engine: buffered and streaming calls, Bearer credentials, and the fixed `api-key` header for Azure OpenAI v1. A call South cannot carry — a proxied egress, a file-backed credential, a non-translated API dialect, a dialect without a builtin South component — runs on the legacy engine instead, decided before any credential is read, and the attempt receipt records `south_fallback_reason`. A South attempt never replays through legacy. To pin an upstream to legacy, set `"provider_call": "legacy"` on it. See [Azure OpenAI v1 with South Header Auth](guides/azure-openai-v1-south-header-auth.md).
+
+Anthropic-wire upstreams (`provider: anthropic`, the Anthropic API itself or a compatible `/anthropic/v1` endpoint) are translated through the Anthropic provider component like every other upstream: thinking, a forced `tool_choice`, and server-tool history blocks all round-trip. One thing the Canonical IR cannot carry is a tool the upstream executes itself (`web_search`, `web_fetch`, `code_execution`, `tool_search`, `mcp`, `advisor`). For that, set `"api_dialect": "anthropic-native"` on the upstream: an Anthropic Messages request that declares such a tool is then forwarded verbatim to `base_url` + `/messages` (only `model` is rewritten), while every other request to that upstream still takes the translated path. The setting requires `provider: anthropic` and a `base_url` ending at the version segment. It is edited in the configuration file; the desktop does not offer it.
 
 ## Desktop
 
@@ -103,7 +105,7 @@ npm --prefix apps/desktop ci
 npm --prefix apps/desktop run tauri:dev
 ```
 
-Use the repository `tauri:dev` command. It builds and embeds the five official WASM adapters before starting Tauri. For frontend-only work, use `npm --prefix apps/desktop run dev`.
+Use the repository `tauri:dev` command. It builds and embeds the official WASM packages (four agent adapters and two South provider components) before starting Tauri. For frontend-only work, use `npm --prefix apps/desktop run dev`.
 
 ```bash
 scripts/build-desktop.sh --local
@@ -120,7 +122,7 @@ cargo build -p token-station-cli
 ./target/debug/token-station-cli --help
 ```
 
-A normal debug or release-profile Cargo build does not embed the five official adapters. Supply an external plugin directory when serving locally. Official packaging uses `scripts/build-release.sh <target-triple>`.
+A normal debug or release-profile Cargo build does not embed the official packages. Supply an external plugin directory when serving locally. Official packaging uses `scripts/build-release.sh <target-triple>`.
 
 The Tauri crate is excluded from the root Cargo workspace, so its Rust checks must run separately.
 
@@ -147,7 +149,8 @@ See the [CI workflow](../.github/workflows/ci.yml) for the complete matrix.
 apps/cli/                    Native CLI and local gateway
 apps/desktop/                React and Tauri desktop app
 crates/                      Shared routing, protocol, storage, and security crates
-plugins/official/            Five official WASM adapters
+plugins/official/            Official WASM packages: four northbound agent adapters and two
+                             South provider components (token-station-south)
 docs/guides/                 Agent integration guides
 scripts/                     Build, release, validation, and maintenance scripts
 ```

@@ -1,22 +1,30 @@
-//! Plugin discovery: the registry mapping a provider dialect to the package
-//! that speaks it (architecture section 12.2, stages B0-B1).
+//! Plugin discovery: the registry mapping a provider dialect to the South
+//! component that speaks it, and naming the agent packages the gateway may
+//! load (architecture section 12.2).
+//!
+//! Two package kinds live in one directory, told apart by `manifest.json`'s
+//! `api_version` before either schema is parsed:
+//!
+//! - `agent-adapter-v1` — northbound agent adapters, this repository's
+//!   `token-station-plugin-api` schema, `adapter.wasm`, loaded by
+//!   `token-station-plugin-runtime`.
+//! - `provider-adapter-v2` — southbound provider components, South's
+//!   `ComponentManifestV1` schema, `component.wasm`, loaded by
+//!   `south-provider-runtime`.
 //!
 //! Sources, merged in this order:
 //!
 //! 1. **Builtin packages** — official packages compiled into the binary by
 //!    the release pipeline (`--features builtin-plugins`). A plain
-//!    `cargo build` has none; an official release binary serves
-//!    `openai-compatible` with an empty plugins directory.
-//! 2. **Discovered packages** — one subdirectory of `plugins.dir` each
-//!    (`manifest.json` + `adapter.wasm`), registered under every provider
-//!    dialect their manifest declares. Dropping a package into the directory
-//!    is all the registration there is.
+//!    `cargo build` has none.
+//! 2. **Discovered packages** — one subdirectory of `plugins.dir` each,
+//!    registered under every provider dialect their manifest declares.
+//!    Dropping a package into the directory is all the registration there is.
 //! 3. **Explicit `plugins.providers` entries** — operator intent from the
 //!    config file, honored even when the package directory does not exist
-//!    yet; the gateway reports the missing package at load, exactly as it
-//!    did before discovery existed. A newly reserved official dialect refuses
-//!    a conflicting pre-existing local or explicit binding instead of
-//!    silently changing that operator's traffic on upgrade.
+//!    yet; the gateway reports the missing package at load. A newly reserved
+//!    official dialect refuses a conflicting pre-existing local or explicit
+//!    binding instead of silently changing that operator's traffic on upgrade.
 //!
 //! Conflicts within a tier are refused, not resolved: two local packages
 //! claiming the same dialect, or an explicit entry disagreeing with a
@@ -26,17 +34,19 @@
 //! the embedded copy and a `plugins-dist/` copy of the same package must
 //! start, so the loser is noted in `plugin list` instead of refused.
 //!
-//! # Trust (architecture section 12.3, stage B2)
+//! # Trust (architecture section 12.3)
 //!
 //! Dropping a package into the directory registers it in the catalog, but is
-//! not enough to receive traffic. A discovered package binds its dialects
-//! only when one of three things vouches for it: it is builtin (shipped
-//! inside the signed binary), `plugin install` ran the conformance suite on
-//! it and left a [`Receipts`] entry matching its current `adapter.wasm`
-//! hash, or the operator wrote it down — an explicit `plugins.providers`
-//! entry, or `plugins.allow_unsigned = true` for the whole directory.
-//! Receipts live in the data directory, not the package directory, so a
-//! downloaded package cannot ship its own approval.
+//! not enough to receive traffic. A discovered provider component binds its
+//! dialects only when one of three things vouches for it: it is builtin
+//! (shipped inside the signed binary, past South's own conformance gates), a
+//! [`Receipts`] entry matches its current package digest, or the operator
+//! wrote it down — an explicit `plugins.providers` entry, or
+//! `plugins.allow_unsigned = true` for the whole directory. Receipts live in
+//! the data directory, not the package directory, so a downloaded package
+//! cannot ship its own approval. `plugin install` admits agent packages by
+//! running their conformance suite here; provider components are South's to
+//! admit, so this host never writes a receipt for one.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -45,6 +55,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use south_provider_api::{ComponentManifestV1, PROVIDER_WORLD};
 use token_station_plugin_api::{AdapterKind, AdapterManifest, validate_plugin_name};
 use token_station_release::{plugin_package_digest, sha256_file};
 
@@ -63,13 +74,14 @@ fn newly_reserved_official_dialect(dialect: &str) -> bool {
 /// The builtin tier's raw material. With the feature off the slice is empty
 /// and everything below degrades to pure directory discovery.
 mod builtin {
-    pub(super) struct Package {
+    pub(crate) struct Package {
         pub manifest_source: &'static str,
         pub wasm: &'static [u8],
     }
 
+    /// Northbound agent packages (`agent-adapter-v1`).
     #[cfg(feature = "builtin-plugins")]
-    pub(super) const PACKAGES: &[Package] = &[
+    pub(super) const AGENTS: &[Package] = &[
         Package {
             manifest_source: include_str!(env!("TS_BUILTIN_AGENT_OPENAI_MANIFEST")),
             wasm: include_bytes!(env!("TS_BUILTIN_AGENT_OPENAI_WASM")),
@@ -86,14 +98,26 @@ mod builtin {
             manifest_source: include_str!(env!("TS_BUILTIN_AGENT_GEMINI_MANIFEST")),
             wasm: include_bytes!(env!("TS_BUILTIN_AGENT_GEMINI_WASM")),
         },
+    ];
+
+    #[cfg(not(feature = "builtin-plugins"))]
+    pub(super) const AGENTS: &[Package] = &[];
+
+    /// Southbound South provider components (`provider-adapter-v2`).
+    #[cfg(feature = "builtin-plugins")]
+    pub(super) const PROVIDERS: &[Package] = &[
         Package {
-            manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_MANIFEST")),
-            wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_WASM")),
+            manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_MANIFEST")),
+            wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_WASM")),
+        },
+        Package {
+            manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_ANTHROPIC_V2_MANIFEST")),
+            wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_ANTHROPIC_V2_WASM")),
         },
     ];
 
     #[cfg(not(feature = "builtin-plugins"))]
-    pub(super) const PACKAGES: &[Package] = &[];
+    pub(super) const PROVIDERS: &[Package] = &[];
 }
 
 /// Where a package's bytes come from. The loader runs the same gates on both.
@@ -117,12 +141,113 @@ impl PackageSource {
     }
 }
 
+/// A package's parsed, validated manifest — one of the two schemas the
+/// directory scan dispatches on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageManifest {
+    /// `agent-adapter-v1`, this repository's schema.
+    Agent(AdapterManifest),
+    /// `provider-adapter-v2`, South's component schema.
+    Provider(ComponentManifestV1),
+}
+
+impl PackageManifest {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Agent(manifest) => &manifest.name,
+            Self::Provider(manifest) => &manifest.name,
+        }
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        match self {
+            Self::Agent(manifest) => &manifest.version,
+            Self::Provider(manifest) => &manifest.version,
+        }
+    }
+
+    #[must_use]
+    pub fn api_version(&self) -> &str {
+        match self {
+            Self::Agent(manifest) => &manifest.api_version,
+            Self::Provider(manifest) => &manifest.api_version,
+        }
+    }
+
+    /// The conformance suite that admits this kind, as the manifest names it.
+    #[must_use]
+    pub fn required_suite(&self) -> &str {
+        match self {
+            Self::Agent(manifest) => &manifest.conformance.required_suite,
+            Self::Provider(manifest) => &manifest.conformance.required_suite,
+        }
+    }
+
+    /// The provider dialects a component declares; empty for an agent.
+    #[must_use]
+    pub fn providers(&self) -> &[String] {
+        match self {
+            Self::Agent(_) => &[],
+            Self::Provider(manifest) => &manifest.providers,
+        }
+    }
+
+    /// The binary this package's loader reads beside `manifest.json`.
+    #[must_use]
+    pub const fn wasm_file_name(&self) -> &'static str {
+        match self {
+            Self::Agent(_) => "adapter.wasm",
+            Self::Provider(_) => "component.wasm",
+        }
+    }
+
+    fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Agent(_) => "agent-adapter",
+            Self::Provider(_) => "provider-component",
+        }
+    }
+
+    /// Parses whichever schema `api_version` names, then validates it.
+    ///
+    /// `api_version` is read first, on its own, so an unknown world is refused
+    /// by name instead of as one schema's unknown-field error.
+    fn parse(source: &str) -> Result<Self, String> {
+        let probe: serde_json::Value =
+            serde_json::from_str(source).map_err(|error| error.to_string())?;
+        let api_version = probe
+            .get("api_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "manifest declares no api_version".to_owned())?;
+        match api_version {
+            "agent-adapter-v1" => {
+                let manifest: AdapterManifest =
+                    serde_json::from_str(source).map_err(|error| error.to_string())?;
+                manifest.validate().map_err(|error| error.to_string())?;
+                Ok(Self::Agent(manifest))
+            }
+            world if world == PROVIDER_WORLD => {
+                let manifest: ComponentManifestV1 =
+                    serde_json::from_str(source).map_err(|error| error.to_string())?;
+                manifest.validate().map_err(|error| error.to_string())?;
+                Ok(Self::Provider(manifest))
+            }
+            other => Err(format!(
+                "api_version `{other}` is not one this host loads (agent-adapter-v1, \
+                 {PROVIDER_WORLD})"
+            )),
+        }
+    }
+}
+
 /// A package the registry knows: its parsed, validated manifest and where its
 /// bytes live. Trusted only as far as a manifest can be — the identity gate
 /// (manifest vs `metadata()`) still runs when the WASM loads.
 #[derive(Debug)]
 pub struct DiscoveredPackage {
-    pub manifest: AdapterManifest,
+    pub manifest: PackageManifest,
     pub source: PackageSource,
     /// Builtin, or carries a conformance receipt matching its current
     /// package digest. Packages without conformance are catalogued but bind no
@@ -212,16 +337,16 @@ pub enum Origin {
     Configured,
 }
 
-/// Whether the exact package bytes bound to a provider dialect passed the
-/// local provider conformance suite. Operator permission to load unsigned
-/// bytes is deliberately a different state.
+/// Whether the exact package bytes bound to a provider dialect carry
+/// conformance evidence. Operator permission to load unsigned bytes is
+/// deliberately a different state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderPackageVerificationV1 {
     ConformancePassed,
     NotConformanceVerified,
 }
 
-/// Where a provider dialect resolves to.
+/// Where a provider dialect resolves to: a South provider component.
 #[derive(Debug)]
 pub struct ProviderBinding {
     /// The package name an operator can `ls` (directory name) or `plugin
@@ -283,7 +408,7 @@ impl PluginRegistry {
         Self::discover(&config.plugins, &receipts)
     }
 
-    /// The binding serving `dialect`, if any plugin speaks it.
+    /// The binding serving `dialect`, if any component speaks it.
     #[must_use]
     pub fn provider_binding(&self, dialect: &str) -> Option<&ProviderBinding> {
         self.providers.get(dialect)
@@ -291,7 +416,7 @@ impl PluginRegistry {
 
     /// Returns byte-bound conformance evidence for the package serving a
     /// provider dialect. A configured or globally allowed unsigned package
-    /// remains loadable, but is not eligible for the first South slice.
+    /// remains loadable, but is not eligible for the South transport slice.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn provider_package_verification(
@@ -303,15 +428,15 @@ impl PluginRegistry {
             .map(|binding| binding.package_verification)
     }
 
-    /// True only when `dialect` resolves to the named official package and the
-    /// exact bytes carry conformance evidence. The first South slice accepts
-    /// only packages embedded by the signed release pipeline. A persisted
-    /// publisher claim is not cryptographic identity.
+    /// True only when `dialect` resolves to a component embedded by the signed
+    /// release pipeline. The builtin tier is the one whose bytes passed
+    /// South's component conformance at build time; a discovered package —
+    /// receipt or not — is local evidence, not publisher identity, and the
+    /// South transport slice accepts only the former.
     #[must_use]
-    pub fn provider_package_south_approved(&self, dialect: &str, package: &str) -> bool {
+    pub fn provider_package_south_approved(&self, dialect: &str) -> bool {
         self.providers.get(dialect).is_some_and(|binding| {
-            binding.package == package
-                && binding.package_verification == ProviderPackageVerificationV1::ConformancePassed
+            binding.package_verification == ProviderPackageVerificationV1::ConformancePassed
                 && binding.origin == Origin::Builtin
         })
     }
@@ -331,8 +456,8 @@ impl PluginRegistry {
             .iter()
             .find(|candidate| {
                 matches!(candidate.source, PackageSource::Builtin { .. })
-                    && candidate.manifest.kind == AdapterKind::Agent
-                    && candidate.manifest.name == package
+                    && matches!(&candidate.manifest, PackageManifest::Agent(manifest)
+                        if manifest.kind == AdapterKind::Agent && manifest.name == package)
             })
             .map_or_else(
                 || PackageSource::Dir(self.plugins_dir.join(package)),
@@ -345,7 +470,7 @@ impl PluginRegistry {
     #[must_use]
     pub fn package(&self, name: &str) -> Option<&DiscoveredPackage> {
         self.packages.iter().find(|package| match &package.source {
-            PackageSource::Builtin { .. } => package.manifest.name == name,
+            PackageSource::Builtin { .. } => package.manifest.name() == name,
             PackageSource::Dir(dir) => package_dir_name(dir) == name,
         })
     }
@@ -378,18 +503,16 @@ impl PluginRegistry {
         );
         for package in &self.packages {
             let manifest = &package.manifest;
-            let (kind, bindings) = match manifest.kind {
-                AdapterKind::Provider => (
-                    "provider-adapter",
-                    format!("providers: {}", manifest.providers.join(", ")),
-                ),
-                AdapterKind::Agent => (
-                    "agent-adapter",
-                    format!("protocols: {}", manifest.agent_protocols.join(", ")),
-                ),
+            let bindings = match manifest {
+                PackageManifest::Provider(component) => {
+                    format!("providers: {}", component.providers.join(", "))
+                }
+                PackageManifest::Agent(agent) => {
+                    format!("protocols: {}", agent.agent_protocols.join(", "))
+                }
             };
             let name = match &package.source {
-                PackageSource::Builtin { .. } => manifest.name.clone(),
+                PackageSource::Builtin { .. } => manifest.name().to_owned(),
                 PackageSource::Dir(dir) => package_dir_name(dir),
             };
             let trust = if package.conformance_passed {
@@ -403,8 +526,9 @@ impl PluginRegistry {
             };
             let _ = writeln!(
                 out,
-                "  {name} {} {kind} ({}) [{trust}] — {bindings}",
-                manifest.version,
+                "  {name} {} {} ({}) [{trust}] — {bindings}",
+                manifest.version(),
+                manifest.kind_label(),
                 package.source.describe(),
             );
         }
@@ -426,12 +550,9 @@ fn binding_dir_exists(binding: &ProviderBinding) -> bool {
 /// pipeline; a plain build has nothing to parse.
 fn builtin_packages() -> Result<Vec<DiscoveredPackage>, String> {
     let mut packages = Vec::new();
-    for package in builtin::PACKAGES {
-        let manifest: AdapterManifest = serde_json::from_str(package.manifest_source)
+    for package in builtin::AGENTS.iter().chain(builtin::PROVIDERS) {
+        let manifest = PackageManifest::parse(package.manifest_source)
             .map_err(|error| format!("builtin plugin manifest: {error}"))?;
-        manifest
-            .validate()
-            .map_err(|error| format!("builtin plugin manifest `{}`: {error}", manifest.name))?;
         packages.push(DiscoveredPackage {
             manifest,
             source: PackageSource::Builtin {
@@ -455,26 +576,25 @@ fn bind_declared_dialects(
     let mut providers: BTreeMap<String, ProviderBinding> = BTreeMap::new();
     let mut shadowed = Vec::new();
     for package in packages {
-        if package.manifest.kind != AdapterKind::Provider {
+        let PackageManifest::Provider(component) = &package.manifest else {
             continue;
-        }
+        };
         if !package.conformance_passed && !allow_unsigned {
             if let PackageSource::Dir(dir) = &package.source {
                 shadowed.push(format!(
                     "package `{}` has no conformance receipt; its dialects [{}] are not served \
-                     — run `plugin install {}`, or set plugins.allow_unsigned",
+                     — vouch for it with a plugins.providers entry, or set plugins.allow_unsigned",
                     package_dir_name(dir),
-                    package.manifest.providers.join(", "),
-                    dir.display(),
+                    component.providers.join(", "),
                 ));
             }
             continue;
         }
         let (name, origin) = match &package.source {
-            PackageSource::Builtin { .. } => (package.manifest.name.clone(), Origin::Builtin),
+            PackageSource::Builtin { .. } => (component.name.clone(), Origin::Builtin),
             PackageSource::Dir(dir) => (package_dir_name(dir), Origin::Discovered),
         };
-        for dialect in &package.manifest.providers {
+        for dialect in &component.providers {
             match providers.get(dialect) {
                 None => {
                     providers.insert(
@@ -492,9 +612,14 @@ fn bind_declared_dialects(
                     );
                 }
                 // The builtin tier is not overridable; the shipped layout
-                // (embedded copy + plugins-dist copy) must start.
+                // (embedded copy + plugins-dist copy) must start. The staged
+                // copy is recognised by its manifest name: its directory may
+                // carry a suffix (`provider-openai-compatible-v2`) the builtin
+                // name does not.
                 Some(existing) if existing.origin == Origin::Builtin => {
-                    if newly_reserved_official_dialect(dialect) && existing.package != name {
+                    if newly_reserved_official_dialect(dialect)
+                        && existing.package != component.name
+                    {
                         return Err(format!(
                             "provider dialect `{dialect}` is now reserved by the builtin `{}`, but \
                              package `{name}` also claims it; rename that third-party dialect or \
@@ -566,7 +691,7 @@ fn merge_explicit_entries(
                 let scanned = packages.iter().find(
                     |candidate| matches!(&candidate.source, PackageSource::Dir(d) if *d == dir),
                 );
-                if scanned.is_some_and(|found| !found.manifest.providers.contains(dialect)) {
+                if scanned.is_some_and(|found| !found.manifest.providers().contains(dialect)) {
                     return Err(format!(
                         "plugins.providers maps `{dialect}` to `{package}`, but its manifest ({}) \
                          does not declare that dialect",
@@ -589,7 +714,7 @@ fn merge_explicit_entries(
 }
 
 /// Reads every `<dir>/<package>/manifest.json`, in name order, checking each
-/// package's `adapter.wasm` against the receipt store.
+/// package's bytes against the receipt store.
 fn scan(dir: &Path, receipts: &Receipts) -> Result<Vec<DiscoveredPackage>, String> {
     if !dir.is_dir() {
         return Ok(Vec::new());
@@ -607,10 +732,7 @@ fn scan(dir: &Path, receipts: &Receipts) -> Result<Vec<DiscoveredPackage>, Strin
         let manifest_path = package_dir.join("manifest.json");
         let source = fs::read_to_string(&manifest_path)
             .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
-        let manifest: AdapterManifest = serde_json::from_str(&source)
-            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
-        manifest
-            .validate()
+        let manifest = PackageManifest::parse(&source)
             .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
         // Approval follows the complete recursive package bytes. Legacy
         // receipts without a package digest fail closed and require reinstall.
@@ -619,7 +741,7 @@ fn scan(dir: &Path, receipts: &Receipts) -> Result<Vec<DiscoveredPackage>, Strin
                 .matching(
                     &package_dir_name(&package_dir),
                     &digest,
-                    &manifest.conformance.required_suite,
+                    manifest.required_suite(),
                 )
                 .cloned()
         });
@@ -641,23 +763,38 @@ fn package_dir_name(dir: &Path) -> String {
     )
 }
 
-/// `plugin install`: the explicit confirmation that turns a package on disk
-/// into one that may serve traffic. Manifest gate, full conformance suite,
-/// copy into `plugins.dir` under the manifest's name, receipt.
+/// `plugin install`: the explicit confirmation that turns an agent package on
+/// disk into one that may serve traffic. Manifest gate, full conformance
+/// suite, copy into `plugins.dir` under the manifest's name, receipt.
+///
+/// Provider components are refused here: their conformance is South's, run
+/// where the component is built. Drop one into `plugins.dir` and vouch for it
+/// (`plugins.providers` or `plugins.allow_unsigned`), or ship it builtin.
 ///
 /// # Errors
 ///
 /// Whatever refused the package first: an unreadable or invalid manifest, a
-/// dialect another package already provides, a failing conformance check
-/// (the report names each failure), or the filesystem.
+/// provider component, a failing conformance check (the report names each
+/// failure), or the filesystem.
 pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
     let manifest_path = source.join("manifest.json");
     let manifest_source = fs::read_to_string(&manifest_path)
         .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
-    let manifest: AdapterManifest = serde_json::from_str(&manifest_source)
-        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
-    token_station_conformance::accepts_manifest(&manifest)
-        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+    let manifest = match PackageManifest::parse(&manifest_source)
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?
+    {
+        PackageManifest::Agent(manifest) => manifest,
+        PackageManifest::Provider(component) => {
+            return Err(format!(
+                "`{}` is a South provider component ({}); its conformance is South's, not this \
+                 host's. Place the package under {} and vouch for it with a plugins.providers \
+                 entry or plugins.allow_unsigned",
+                component.name,
+                component.api_version,
+                config.plugins.dir.display(),
+            ));
+        }
+    };
 
     let name = manifest.name.clone();
     fs::create_dir_all(&config.plugins.dir)
@@ -673,24 +810,6 @@ pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
     }
 
     let mut receipts = Receipts::load(&config.data.dir)?;
-    let registry = PluginRegistry::discover(&config.plugins, &receipts)?;
-    for dialect in &manifest.providers {
-        if let Some(existing) = registry.provider_binding(dialect) {
-            // A binding under this package's own name is agreement, not a
-            // conflict: a `plugins.providers` entry may pre-declare a package
-            // before it is installed (discovery already treats the two
-            // agreeing as redundant), and this install is that package
-            // arriving. An on-disk package by this name was refused above.
-            if existing.package != name {
-                return Err(format!(
-                    "dialect `{dialect}` is already provided by `{}` ({}); two providers for \
-                     one dialect is a conflict",
-                    existing.package,
-                    existing.source.describe(),
-                ));
-            }
-        }
-    }
 
     let mut staging = StagingGuard::create(&plugin_root)?;
     copy_package(
@@ -826,17 +945,21 @@ pub fn info(config: &ClientConfig, name: &str) -> Result<String, String> {
     let manifest = &package.manifest;
 
     let mut out = String::new();
-    let _ = writeln!(out, "name: {}", manifest.name);
-    let _ = writeln!(out, "version: {}", manifest.version);
-    let _ = writeln!(out, "api: {}", manifest.api_version);
+    let _ = writeln!(out, "name: {}", manifest.name());
+    let _ = writeln!(out, "version: {}", manifest.version());
+    let _ = writeln!(out, "api: {}", manifest.api_version());
     let _ = writeln!(out, "source: {}", package.source.describe());
     let _ = writeln!(
         out,
         "conformance: {}",
-        if package.conformance_passed {
-            "passed"
-        } else {
-            "unverified — `plugin install` it to run conformance"
+        match (&package.manifest, package.conformance_passed) {
+            (_, true) => "passed",
+            (PackageManifest::Agent(_), false) => {
+                "unverified — `plugin install` it to run conformance"
+            }
+            (PackageManifest::Provider(_), false) => {
+                "unverified — a South component is admitted by South's suite where it is built"
+            }
         }
     );
     let _ = writeln!(
@@ -848,46 +971,34 @@ pub fn info(config: &ClientConfig, name: &str) -> Result<String, String> {
             "unverified"
         }
     );
-    match manifest.kind {
-        AdapterKind::Provider => {
-            let _ = writeln!(out, "kind: provider-adapter");
-            let _ = writeln!(out, "providers: {}", manifest.providers.join(", "));
-            let _ = writeln!(
-                out,
-                "secrets: {}",
-                if manifest.permissions.secrets.is_empty() {
-                    "none".to_owned()
-                } else {
-                    manifest.permissions.secrets.join(", ")
-                }
-            );
+    match manifest {
+        PackageManifest::Provider(component) => {
+            let _ = writeln!(out, "kind: provider-component");
+            let _ = writeln!(out, "providers: {}", component.providers.join(", "));
         }
-        AdapterKind::Agent => {
+        PackageManifest::Agent(agent) => {
             let _ = writeln!(out, "kind: agent-adapter");
-            let _ = writeln!(out, "protocols: {}", manifest.agent_protocols.join(", "));
+            let _ = writeln!(out, "protocols: {}", agent.agent_protocols.join(", "));
         }
     }
-    let _ = writeln!(out, "suite: {}", manifest.conformance.required_suite);
+    let _ = writeln!(out, "suite: {}", manifest.required_suite());
     if let PackageSource::Dir(dir) = &package.source
-        && let Ok(sha256) = sha256_file(&dir.join("adapter.wasm"))
+        && let Ok(sha256) = sha256_file(&dir.join(manifest.wasm_file_name()))
     {
-        let _ = writeln!(out, "adapter.wasm sha256: {sha256}");
+        let _ = writeln!(out, "{} sha256: {sha256}", manifest.wasm_file_name());
     }
     Ok(out)
 }
 
-/// Loads the package from its source directory and runs the suite its
+/// Loads the agent package from its source directory and runs the suite its
 /// manifest requires — the same gates and the same fixtures a third party
-/// ran in their CI. `plugin test` (scaffold) shares it, which is the point:
-/// there is exactly one suite.
-pub(crate) fn run_conformance(
+/// ran in their CI. There is exactly one suite.
+fn run_conformance(
     source: &Path,
     manifest: &AdapterManifest,
 ) -> Result<token_station_conformance::Report, String> {
-    use token_station_conformance::{FixturePack, run_agent_suite, run_provider_suite};
-    use token_station_plugin_runtime::{
-        AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
-    };
+    use token_station_conformance::{FixturePack, run_agent_suite};
+    use token_station_plugin_runtime::{AgentPlugin, PluginRuntime, RuntimeLimits};
 
     let runtime = PluginRuntime::new(RuntimeLimits::default())
         .map_err(|error| format!("wasm engine: {error}"))?;
@@ -896,11 +1007,6 @@ pub(crate) fn run_conformance(
     let load_failure = |error| format!("{}: {error}", source.display());
 
     match manifest.kind {
-        AdapterKind::Provider => {
-            let plugin = ProviderPlugin::load(&runtime, source, NoSecrets).map_err(load_failure)?;
-            let pack = FixturePack::load(&fixtures).map_err(fixture_failure)?;
-            Ok(run_provider_suite(&plugin, &pack))
-        }
         AdapterKind::Agent => {
             let plugin = AgentPlugin::load(&runtime, source).map_err(load_failure)?;
             let pack = FixturePack::load(&fixtures).map_err(fixture_failure)?;
@@ -1197,20 +1303,29 @@ mod tests {
     use crate::config::PluginsConfig;
 
     use super::{
-        DiscoveredPackage, PackageSource, PluginRegistry, ProviderPackageVerificationV1,
-        bind_declared_dialects, merge_explicit_entries,
+        DiscoveredPackage, PackageManifest, PackageSource, PluginRegistry,
+        ProviderPackageVerificationV1, bind_declared_dialects, merge_explicit_entries,
     };
 
+    /// A South provider component manifest (`provider-adapter-v2`), the only
+    /// southbound schema the registry binds dialects from.
     fn provider_manifest(name: &str, dialects: &[&str]) -> String {
         serde_json::json!({
             "name": name,
             "version": "1.0.0",
-            "kind": "provider-adapter",
-            "api_version": "provider-adapter-v1",
+            "api_version": "provider-adapter-v2",
             "providers": dialects,
             "capabilities": ["chat"],
+            "auth_arms": ["bearer"],
             "permissions": { "network": false, "filesystem": false, "secrets": ["provider_api_key"] },
-            "conformance": { "required_suite": "provider-protocol-v1", "fixtures": "fixtures/" }
+            "conformance": { "required_suite": "south.provider-component.v1", "fixtures": "fixtures/" },
+            "compatibility": {
+                "ir_schema_id": "token-station-protocol@0.3.0/v0.2.0",
+                "kernel_version": "0.2.0",
+                "kernel_revision": "72458e3a11fe157f9ac04818c44b62a3dd2cb09c",
+                "wit_package": "token-station:adapter@2.0.0",
+                "south_runtime": "0.14.0"
+            }
         })
         .to_string()
     }
@@ -1237,7 +1352,7 @@ mod tests {
 
     fn package(name: &str, dialects: &[&str], source: PackageSource) -> DiscoveredPackage {
         DiscoveredPackage {
-            manifest: serde_json::from_str(&provider_manifest(name, dialects))
+            manifest: PackageManifest::parse(&provider_manifest(name, dialects))
                 .expect("the test manifest is valid"),
             source,
             conformance_passed: true,
@@ -1315,6 +1430,25 @@ mod tests {
         );
         // The agent package is listed, not bound to a dialect.
         assert!(registry.render_list().contains("agent-openai"));
+        assert!(registry.render_list().contains("provider-component"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_scan_dispatches_on_api_version_before_parsing_a_schema() {
+        let dir = scratch("dispatch");
+        // A world this host does not load is refused by name, not as one
+        // schema's unknown-field complaint.
+        write_package(
+            &dir,
+            "provider-future",
+            &provider_manifest("provider-future", &["x"])
+                .replace("provider-adapter-v2", "provider-adapter-v9"),
+        );
+
+        let error = discover(&plugins(dir.clone(), &[])).expect_err("unknown world");
+        assert!(error.contains("provider-adapter-v9"), "{error}");
+        assert!(error.contains("manifest.json"), "{error}");
         fs::remove_dir_all(dir).ok();
     }
 
@@ -1501,7 +1635,7 @@ mod tests {
     fn an_unverified_package_binds_nothing_by_default() {
         let dir = scratch("trust-gate");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
-        fs::write(dir.join("provider-x/adapter.wasm"), b"not really wasm")
+        fs::write(dir.join("provider-x/component.wasm"), b"not really wasm")
             .expect("temp dir is writable");
         let mut config = plugins(dir.clone(), &[]);
         config.allow_unsigned = false;
@@ -1519,7 +1653,7 @@ mod tests {
     fn a_receipt_matching_the_package_binds_and_a_stale_one_does_not() {
         let dir = scratch("receipts");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
-        let wasm = dir.join("provider-x/adapter.wasm");
+        let wasm = dir.join("provider-x/component.wasm");
         fs::write(&wasm, b"component bytes").expect("temp dir is writable");
 
         let data = dir.join("data");
@@ -1531,7 +1665,7 @@ mod tests {
                     &dir.join("provider-x"),
                 )
                 .expect("package exists"),
-                suite: "provider-protocol-v1".to_owned(),
+                suite: "south.provider-component.v1".to_owned(),
                 publisher_signature_verified: false,
             },
         );
@@ -1545,7 +1679,6 @@ mod tests {
         assert_eq!(
             registry.provider_package_verification("x"),
             Some(ProviderPackageVerificationV1::ConformancePassed),
-            "a matching full-package receipt is eligible evidence for South"
         );
         assert!(
             registry
@@ -1574,7 +1707,7 @@ mod tests {
             &provider_manifest("provider-openai-compatible", &["forged-openai-compatible"]),
         );
         let package_dir = dir.join("provider-openai-compatible");
-        fs::write(package_dir.join("adapter.wasm"), b"component bytes")
+        fs::write(package_dir.join("component.wasm"), b"component bytes")
             .expect("temp dir is writable");
         let data = dir.join("data");
         let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
@@ -1583,14 +1716,14 @@ mod tests {
             super::Receipt {
                 package_digest: token_station_release::plugin_package_digest(&package_dir)
                     .expect("package exists"),
-                suite: "provider-protocol-v1".to_owned(),
-                publisher_signature_verified: false,
+                suite: "south.provider-component.v1".to_owned(),
+                publisher_signature_verified: true,
             },
         );
         receipts.save().expect("data dir is writable");
         let reloaded = super::Receipts::load(&data).expect("round-trips");
         let registry = PluginRegistry::discover(&plugins(dir.clone(), &[]), &reloaded)
-            .expect("the conformant package remains available to Legacy");
+            .expect("the conformant package remains loadable");
 
         assert!(
             registry
@@ -1598,32 +1731,9 @@ mod tests {
                 .is_some()
         );
         assert!(
-            !registry.provider_package_south_approved(
-                "forged-openai-compatible",
-                "provider-openai-compatible",
-            ),
-            "local conformance does not prove official publisher identity"
-        );
-
-        receipts.record(
-            "provider-openai-compatible".to_owned(),
-            super::Receipt {
-                package_digest: token_station_release::plugin_package_digest(&package_dir)
-                    .expect("package exists"),
-                suite: "provider-protocol-v1".to_owned(),
-                publisher_signature_verified: true,
-            },
-        );
-        receipts.save().expect("data dir is writable");
-        let reloaded = super::Receipts::load(&data).expect("round-trips");
-        let registry = PluginRegistry::discover(&plugins(dir.clone(), &[]), &reloaded)
-            .expect("verified official package is available");
-        assert!(
-            !registry.provider_package_south_approved(
-                "forged-openai-compatible",
-                "provider-openai-compatible",
-            ),
-            "a persisted publisher claim is not cryptographic identity"
+            !registry.provider_package_south_approved("forged-openai-compatible"),
+            "a persisted publisher claim is not cryptographic identity; only the builtin tier \
+             is South-approved"
         );
         fs::remove_dir_all(dir).ok();
     }
@@ -1633,7 +1743,7 @@ mod tests {
         let dir = scratch("receipt-wrong-suite");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
         let package_dir = dir.join("provider-x");
-        fs::write(package_dir.join("adapter.wasm"), b"component bytes")
+        fs::write(package_dir.join("component.wasm"), b"component bytes")
             .expect("temp dir is writable");
         let data = dir.join("data");
         let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
@@ -1666,7 +1776,7 @@ mod tests {
     fn changing_the_manifest_invalidates_a_receipt_even_if_the_wasm_is_identical() {
         let dir = scratch("receipts-manifest");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
-        let wasm = dir.join("provider-x/adapter.wasm");
+        let wasm = dir.join("provider-x/component.wasm");
         fs::write(&wasm, b"component bytes").expect("temp dir is writable");
 
         let data = dir.join("data");
@@ -1678,7 +1788,7 @@ mod tests {
                     &dir.join("provider-x"),
                 )
                 .expect("package exists"),
-                suite: "provider-protocol-v1".to_owned(),
+                suite: "south.provider-component.v1".to_owned(),
                 publisher_signature_verified: false,
             },
         );
@@ -1711,7 +1821,7 @@ mod tests {
     fn a_legacy_receipt_without_a_package_digest_no_longer_verifies() {
         let dir = scratch("receipts-legacy");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
-        let wasm = dir.join("provider-x/adapter.wasm");
+        let wasm = dir.join("provider-x/component.wasm");
         fs::write(&wasm, b"component bytes").expect("temp dir is writable");
 
         let data = dir.join("data");
@@ -1721,7 +1831,7 @@ mod tests {
             "provider-x".to_owned(),
             super::Receipt {
                 package_digest: String::new(),
-                suite: "provider-protocol-v1".to_owned(),
+                suite: "south.provider-component.v1".to_owned(),
                 publisher_signature_verified: false,
             },
         );
@@ -1777,6 +1887,8 @@ mod tests {
             .provider_binding("openai-compatible")
             .expect("the builtin provider registers");
         assert_eq!(binding.package, "provider-openai-compatible");
+        assert!(registry.provider_package_south_approved("openai-compatible"));
+        assert!(registry.provider_package_south_approved("anthropic"));
         assert!(registry.render_list().contains("shadowed"));
         assert!(matches!(
             registry.agent_source("agent-openai"),

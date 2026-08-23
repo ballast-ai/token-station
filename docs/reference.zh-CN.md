@@ -26,7 +26,9 @@
 
 供应商请求、模型发现与健康探测可以使用直连、HTTP CONNECT 或 SOCKS5，并提供经过校验的 `no_proxy` 规则与独立代理凭证。这些流量不会继承环境中的代理变量。桌面更新器使用独立 HTTP 栈，可能遵循系统或环境代理设置。
 
-Legacy 是默认的 Provider 执行引擎。符合条件的 OpenAI-compatible Bearer 请求可以显式启用 South 非流式，或同时启用非流式与流式。Azure OpenAI v1 必须单独选择累计式 `south_v1_buffered_streaming_header_auth`，并固定使用 `api-key` Header。配置方法见 [Azure OpenAI v1 与 South Header Auth](guides/azure-openai-v1-south-header-auth.md)。
+South 是默认的 Provider 执行引擎：覆盖非流式与流式调用、Bearer 凭据，以及 Azure OpenAI v1 固定的 `api-key` Header。South 无法承载的调用——经代理的 Egress、文件凭据、非 translated API 方言、没有内置 South 组件的方言——在读取任何凭据之前就改走 Legacy 引擎，并在回执里记录 `south_fallback_reason`。South 尝试绝不会通过 Legacy 重放。要把某个上游固定在 Legacy，给它设置 `"provider_call": "legacy"`。另见 [Azure OpenAI v1 与 South Header Auth](guides/azure-openai-v1-south-header-auth.md)。
+
+Anthropic 线协议的上游（`provider: anthropic`，即 Anthropic API 本身或兼容的 `/anthropic/v1` 端点）与其它上游一样经 Anthropic Provider 组件翻译：thinking、强制 `tool_choice`、server tool 的历史块都能往返。Canonical IR 唯一承载不了的是"由上游自己执行的工具"（`web_search`、`web_fetch`、`code_execution`、`tool_search`、`mcp`、`advisor`）。为此给上游设置 `"api_dialect": "anthropic-native"`：声明了这类工具的 Anthropic Messages 请求会被原样转发到 `base_url` + `/messages`（只改写 `model`），该上游的其它请求仍走翻译路径。该设置要求 `provider: anthropic`，且 `base_url` 以版本段结尾；它只能在配置文件中编辑，桌面端不提供。
 
 ## 桌面端
 
@@ -103,7 +105,7 @@ npm --prefix apps/desktop ci
 npm --prefix apps/desktop run tauri:dev
 ```
 
-请使用仓库提供的 `tauri:dev` 命令。它会先构建并内嵌 5 个官方 WASM 适配器，再启动 Tauri。只开发前端时，可以使用 `npm --prefix apps/desktop run dev`。
+请使用仓库提供的 `tauri:dev` 命令。它会先构建并内嵌全部官方 WASM 包（4 个 Agent 适配器 + 2 个 South Provider 组件），再启动 Tauri。只开发前端时，可以使用 `npm --prefix apps/desktop run dev`。
 
 ```bash
 scripts/build-desktop.sh --local
@@ -120,7 +122,7 @@ cargo build -p token-station-cli
 ./target/debug/token-station-cli --help
 ```
 
-常规 Debug 或 Release Profile 的 Cargo 构建都不会内嵌 5 个官方适配器。本地启动网关时需要提供外部插件目录。官方打包使用 `scripts/build-release.sh <target-triple>`。
+常规 Debug 或 Release Profile 的 Cargo 构建都不会内嵌官方包。本地启动网关时需要提供外部插件目录。官方打包使用 `scripts/build-release.sh <target-triple>`。
 
 Tauri Crate 被排除在根 Cargo Workspace 之外，因此它的 Rust 检查必须单独执行。
 
@@ -147,7 +149,8 @@ npm --prefix apps/desktop run build
 apps/cli/                    原生 CLI 与本地网关
 apps/desktop/                React 与 Tauri 桌面 App
 crates/                      共享路由、协议、存储和安全 Crate
-plugins/official/            5 个官方 WASM 适配器
+plugins/official/            官方 WASM 包：4 个北向 Agent 适配器 + 2 个 South Provider 组件
+                             （来自 token-station-south）
 docs/guides/                 Agent 接入指南
 scripts/                     构建、发布、校验和维护脚本
 ```

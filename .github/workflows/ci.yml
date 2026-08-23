@@ -7,7 +7,8 @@ name: CI
 #
 # Windows and macOS gates are deliberately NOT part of basic CI — see
 # platform.yml. They largely repeat the checks below at 2x / 10x runner cost,
-# so they run after a change reaches develop / main rather than on every PR.
+# so ordinary branch validation runs only after a change reaches main rather
+# than on pull requests or non-main integration branches.
 on:
   pull_request:
     paths-ignore:
@@ -17,6 +18,7 @@ on:
     branches:
       - main
       - develop
+      - develop-v2
     paths-ignore:
       - '**.md'
       - 'LICENSE'
@@ -44,12 +46,17 @@ jobs:
           components: rustfmt, clippy
           workspaces: |
             .
-            crates/plugin-runtime/tests/guests/test-provider
+            plugins/official/provider-openai-compatible-v2
+            plugins/official/provider-anthropic-v2
       - run: node tests/south-dependency-policy.mjs
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - name: Fetch the locked official component dependency sets
+        shell: bash
+        run: |
+          for manifest in \
+            plugins/official/provider-openai-compatible-v2/Cargo.toml \
+            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
+          done
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -85,14 +92,19 @@ jobs:
           components: llvm-tools-preview
           workspaces: |
             .
-            crates/plugin-runtime/tests/guests/test-provider
+            plugins/official/provider-openai-compatible-v2
+            plugins/official/provider-anthropic-v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - name: Fetch the locked official component dependency sets
+        shell: bash
+        run: |
+          for manifest in \
+            plugins/official/provider-openai-compatible-v2/Cargo.toml \
+            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
+          done
       - run: >-
           cargo llvm-cov --workspace --coverage-host-only --summary-only
           --fail-under-lines 80
@@ -212,6 +224,7 @@ jobs:
           node-version: 22.23.1
       - run: npm --prefix apps/desktop ci
       - run: node scripts/check-ci-msi-trigger-policy.mjs
+      - run: node scripts/check-integration-branch-policy.mjs
       - run: node scripts/check-ci-scaffold-prefetch.mjs
       - run: node scripts/check-macos-dmg-packaging.mjs
       - run: node tests/localized-macos-installation.mjs
@@ -243,7 +256,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/develop-v2' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           key: msrv-1.96
       - run: cargo check --workspace --all-targets
 

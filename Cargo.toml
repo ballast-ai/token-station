@@ -14,11 +14,9 @@ members = [
 # WASM guest test fixture targeting wasm32-wasip2. Keep it out of the main
 # workspace build graph; plugin-runtime tests build it in a cargo subprocess.
 exclude = [
-    "crates/plugin-runtime/tests/guests/test-provider",
     "plugins/official/agent-anthropic",
     "plugins/official/agent-openai",
     "plugins/official/agent-openai-responses",
-    "plugins/official/provider-openai-compatible",
     # Deliberately exclude the Tauri desktop app from the strict workspace so its
     # large GUI dependency tree does not enter clippy-pedantic or cargo-deny gates.
     # Its path dependency on token-station-cli reuses the core without a fork.
@@ -39,11 +37,14 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-south-contracts = { version = "=0.4.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "b8562d3e52c84beed0b6655c360ef58b3a96aa99" }
-south-core = { version = "=0.4.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "b8562d3e52c84beed0b6655c360ef58b3a96aa99" }
-south-provider-conformance = { version = "=0.4.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "b8562d3e52c84beed0b6655c360ef58b3a96aa99" }
-south-testkit = { version = "=0.4.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "b8562d3e52c84beed0b6655c360ef58b3a96aa99" }
-south-transport-reqwest = { version = "=0.4.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "b8562d3e52c84beed0b6655c360ef58b3a96aa99" }
+south-contracts = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-core = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-component-conformance = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-provider-conformance = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-testkit = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-transport-reqwest = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-provider-api = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
+south-provider-runtime = { version = "=0.15.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

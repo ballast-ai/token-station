@@ -1,11 +1,11 @@
 //! The C1#1 exit criteria, exercised for real: an OpenAI-dialect client talks
-//! to the loopback proxy, the proxy routes through the official WASM plugins,
-//! and a mock upstream plays the provider — asserting on exactly what reached
-//! it, credential and all.
+//! to the loopback proxy, the proxy routes through the official WASM agent
+//! adapter and the South provider component, and a mock upstream plays the
+//! provider — asserting on exactly what reached it, credential and all.
 //!
 //! Nothing here mocks the pipeline. The agent plugin, the router, the provider
-//! plugin, the exfiltration gate and the credential injection all run as they
-//! would in production; only the far end of the wire is scripted.
+//! component, the exfiltration gate and the credential injection all run as
+//! they would in production; only the far end of the wire is scripted.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -31,17 +31,20 @@ fn repo_root() -> &'static Path {
         .expect("apps/cli sits two levels below the root")
 }
 
-/// Builds both official plugins once and assembles a plugins directory.
+/// Builds every official package once and assembles a plugins directory:
+/// the four agent adapters (`adapter.wasm`) and the South provider component
+/// (`component.wasm`), side by side, the way a release stages them.
 fn plugins_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("ts-proxy-plugins-{}", std::process::id()));
-        for plugin in [
-            "agent-openai",
-            "agent-openai-responses",
-            "agent-anthropic",
-            "agent-gemini",
-            "provider-openai-compatible",
+        for (plugin, wasm_file) in [
+            ("agent-openai", "adapter.wasm"),
+            ("agent-openai-responses", "adapter.wasm"),
+            ("agent-anthropic", "adapter.wasm"),
+            ("agent-gemini", "adapter.wasm"),
+            ("provider-openai-compatible-v2", "component.wasm"),
+            ("provider-anthropic-v2", "component.wasm"),
         ] {
             let source = repo_root().join("plugins/official").join(plugin);
             let status = Command::new("cargo")
@@ -59,7 +62,7 @@ fn plugins_dir() -> &'static Path {
                 source
                     .join("target/wasm32-wasip2/debug")
                     .join(format!("{}.wasm", plugin.replace('-', "_"))),
-                package.join("adapter.wasm"),
+                package.join(wasm_file),
             )
             .expect("wasm copies");
         }
@@ -678,7 +681,7 @@ fn start_proxy_with_agents_budgets_catalog_price_and_parameters(
         "plugins": {
             "dir": plugins_dir(),
             "agents": agent_plugins,
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "mock_primary": {
@@ -807,11 +810,14 @@ fn start_native_anthropic_proxy_with(
         "plugins": {
             "dir": plugins_dir(),
             "agents": ["agent-anthropic"],
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": {
+                "openai-compatible": "provider-openai-compatible-v2",
+                "anthropic": "provider-anthropic-v2"
+            }
         },
         "upstreams": {
             "deepseek_native": {
-                "provider": "openai-compatible",
+                "provider": "anthropic",
                 "api_dialect": "anthropic-native",
                 "base_url": upstream.base_url(),
                 "auth": { "slot": "provider_api_key", "file": key_file },
@@ -862,7 +868,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         "plugins": {
             "dir": plugins_dir(),
             "agents": ["agent-openai", "agent-anthropic", "agent-openai-responses"],
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "home_upstream": {
@@ -952,7 +958,7 @@ fn start_proxy_with_missing_store_secret(upstream: &MockUpstream) -> Proxy {
         "plugins": {
             "dir": plugins_dir(),
             "agents": ["agent-openai-responses"],
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "deepseek_release": {
@@ -1010,6 +1016,20 @@ fn request_count(data_dir: &Path) -> i64 {
 /// byte); give the recorder a moment.
 fn settle() {
     std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+/// The text of an outbound message's `content`, whichever shape the provider
+/// component rendered it in: a plain string, or an array of text parts.
+fn message_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        other => panic!("message content is neither text nor parts: {other}"),
+    }
 }
 
 fn key_file(name: &str, contents: &str) -> PathBuf {
@@ -3305,6 +3325,62 @@ fn anthropic_native_direct_refuses_tools_before_hitting_an_unsupported_target() 
 }
 
 #[test]
+fn anthropic_upstreams_receive_document_blocks_verbatim_over_the_translated_path() {
+    // A `provider: anthropic` upstream can read a PDF itself. The document block
+    // rides through the IR as an unmodelled part and the Anthropic component
+    // renders it back unchanged — no local text extraction, no marker.
+    let upstream_answer = json!({
+        "id": "msg_doc_verbatim",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "read it"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("anthropic-document-verbatim", "sk-upstream-secret\n");
+    let proxy = start_native_anthropic_proxy(&mock, &key);
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": TEST_TEXT_PDF_BASE64}, "title": "native.pdf"},
+                {"type": "text", "text": "请总结这个 PDF"}
+            ]}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "body={body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "exactly one upstream hit");
+    let forwarded = &seen[0];
+    assert_eq!(forwarded.path, "/v1/messages");
+    assert!(
+        forwarded.body.get("tools").is_none(),
+        "no server tool, so this is the translated path, not passthrough"
+    );
+    assert_eq!(
+        forwarded.body["messages"][0]["content"][0],
+        json!({
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": TEST_TEXT_PDF_BASE64},
+            "title": "native.pdf"
+        }),
+        "the document block reaches an Anthropic upstream untouched"
+    );
+    let wire = forwarded.body.to_string();
+    assert!(
+        !wire.contains("TOKEN_STATION_PDF_TEXT") && !wire.contains("转换为文字"),
+        "no local extraction for an Anthropic upstream: {wire}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
     // Native passthrough keeps server tools and forced tool choice verbatim, but
     // its confirmed text-only target receives localized image and PDF fallback.
@@ -3683,6 +3759,41 @@ fn an_empty_stream_choices_frame_cannot_become_a_successful_done() {
     std::fs::remove_file(key).ok();
 }
 
+/// The other half of the guard above, and the reason it had to move.
+///
+/// Azure OpenAI opens a stream with a `prompt_filter_results` frame carrying
+/// an empty `choices` array. While the adapter refused that shape frame by
+/// frame, the stream died before a single token reached the client — on a
+/// dialect the official package's own manifest declares. The refusal now
+/// applies to the stream rather than the frame, so an opening keepalive costs
+/// nothing and the guarantee above still holds.
+#[test]
+fn an_opening_empty_choices_frame_does_not_kill_the_stream() {
+    let sse = concat!(
+        "data: {\"choices\":[],\"prompt_filter_results\":[{\"prompt_index\":0}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-opening-empty-choices", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("ok"),
+        "the content survived the frame: {body}"
+    );
+    settle();
+    assert_eq!(last_row(&proxy.data_dir)["status"], "Integer(200)");
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn finish_reason_then_clean_eof_is_a_complete_stream() {
     let sse = concat!(
@@ -3939,8 +4050,8 @@ fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
     assert_eq!(custom.hits(), 0);
     for request in home.seen() {
         assert_eq!(
-            request.body["messages"][0]["content"],
-            json!("[Image omitted: the current model does not support visual input.]")
+            message_text(&request.body["messages"][0]["content"]),
+            "[Image omitted: the current model does not support visual input.]"
         );
     }
     std::fs::remove_file(key).ok();
@@ -4001,12 +4112,12 @@ fn media_fallback_localizes_from_the_latest_user_text_and_records_a_real_attempt
     assert_eq!(custom.hits(), 0);
     let seen = home.seen();
     assert_eq!(
-        seen[0].body["messages"][0]["content"],
-        json!("[图片已省略：当前模型不支持视觉输入。]")
+        message_text(&seen[0].body["messages"][0]["content"]),
+        "[图片已省略：当前模型不支持视觉输入。]"
     );
     assert_eq!(
-        seen[0].body["messages"][1]["content"],
-        json!("请继续查看这份报告。")
+        message_text(&seen[0].body["messages"][1]["content"]),
+        "请继续查看这份报告。"
     );
     settle();
     let log = std::fs::read_to_string(proxy.data_dir.join("requests.log")).expect("log exists");
@@ -4062,10 +4173,8 @@ fn codex_responses_input_images_use_the_same_text_only_fallback() {
     assert_eq!(custom.hits(), 1);
     let seen = custom.seen();
     assert_eq!(
-        seen[0].body["messages"][0]["content"],
-        json!(
-            "Continue from the text.[Image omitted: the current model does not support visual input.]"
-        )
+        message_text(&seen[0].body["messages"][0]["content"]),
+        "Continue from the text.[Image omitted: the current model does not support visual input.]"
     );
 
     std::fs::remove_file(key).ok();
@@ -4117,10 +4226,8 @@ fn an_upstream_media_refusal_retries_once_with_localized_markers() {
         "image_url"
     );
     assert_eq!(
-        seen[1].body["messages"][0]["content"],
-        json!(
-            "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
-        )
+        message_text(&seen[1].body["messages"][0]["content"]),
+        "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
     );
     settle();
     let row = last_row(&proxy.data_dir);
@@ -4308,7 +4415,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         "plugins": {
             "dir": plugins_dir(),
             "agent": "agent-openai",
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "mock_primary": upstream(primary),
@@ -4389,7 +4496,7 @@ fn start_direct_proxy_two(first: &MockUpstream, applied: &MockUpstream, key_file
         "plugins": {
             "dir": plugins_dir(),
             "agent": "agent-openai",
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "a_first": upstream(first),
@@ -4489,7 +4596,7 @@ fn start_quota_proxy_two(
         "plugins": {
             "dir": plugins_dir(),
             "agent": "agent-openai",
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "mock_primary": upstream(primary),
@@ -4701,7 +4808,7 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
         "plugins": {
             "dir": plugins_dir(),
             "agent": "agent-openai",
-            "providers": {"openai-compatible": "provider-openai-compatible"}
+            "providers": {"openai-compatible": "provider-openai-compatible-v2"}
         },
         "upstreams": upstreams,
         "router": {
@@ -5495,6 +5602,69 @@ fn production_south_opt_in_keeps_streaming_on_legacy_and_records_the_fallback() 
         receipts[0]["attempt_records"][0]["provider_call_engine"],
         json!("legacy")
     );
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["south_fallback_reason"],
+        json!("buffered_mode_cannot_stream"),
+        "a fallback names its reason: {receipts}"
+    );
+}
+
+/// South is the default: an upstream that names no engine runs on South, and
+/// a South attempt carries no fallback reason.
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn the_default_engine_is_south_and_the_receipt_says_so() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-default-south",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "south"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let (config_path, _) = write_south_probe_config(&mock, "sk-south-default", true);
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South default config reads"))
+            .expect("South default config is JSON");
+    config["data"]["metrics"] = json!(true);
+    assert!(
+        config["upstreams"]["mock_primary"]
+            .get("provider_call")
+            .is_none(),
+        "the fixture names no engine"
+    );
+    let config: ClientConfig = serde_json::from_value(config).expect("South default config parses");
+    let proxy = spawn_proxy(&config);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 1);
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_buffered"),
+        "{receipts}"
+    );
+    assert!(
+        receipts[0]["attempt_records"][0]
+            .get("south_fallback_reason")
+            .is_none(),
+        "a South attempt has nothing to explain: {receipts}"
+    );
 }
 
 #[test]
@@ -6175,10 +6345,8 @@ fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
         "image_url"
     );
     assert_eq!(
-        seen[1].body["messages"][0]["content"],
-        json!(
-            "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
-        )
+        message_text(&seen[1].body["messages"][0]["content"]),
+        "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
     );
     drop(gateway);
     drop(runtime);
@@ -6214,13 +6382,13 @@ fn write_south_probe_config_for_dialect(
     ));
     std::fs::create_dir_all(&data_dir).expect("South CLI data dir is writable");
     if conformance_approved {
-        let provider_dir = plugins_dir().join("provider-openai-compatible");
+        let provider_dir = plugins_dir().join("provider-openai-compatible-v2");
         let package_digest = token_station_release::plugin_package_digest(&provider_dir)
             .expect("assembled official provider package has a stable digest");
         let receipts = json!({
-            "provider-openai-compatible": {
+            "provider-openai-compatible-v2": {
                 "package_digest": package_digest,
-                "suite": "provider-protocol-v1",
+                "suite": "south.provider-component.v1",
                 "publisher_signature_verified": true
             }
         });
@@ -6244,7 +6412,7 @@ fn write_south_probe_config_for_dialect(
         "plugins": {
             "dir": plugins_dir(),
             "agent": "agent-openai",
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "mock_primary": {
@@ -6276,7 +6444,7 @@ fn gateway_for_base_url(base_url: &str, key_file: &Path, plugin_dir: &Path) -> G
         "plugins": {
             "dir": plugin_dir,
             "agent": "agent-openai",
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {
             "mock_primary": {
@@ -7055,4 +7223,179 @@ fn admin_preflight_answers_without_auth_but_stays_loopback() {
             .contains("access-control-allow-origin: http://127.0.0.1:5173"),
         "preflight carries the loopback allowance: {response}"
     );
+}
+
+// -- the South component's ruled behaviors, pinned at the host boundary --------
+//
+// These replaced the v1 provider plugin's behavior when the translated path
+// moved onto the South component. Each is a deliberate ruling (south 0.11.0
+// host-parity slice), recorded in the release notes; the tests keep the host
+// from drifting back.
+
+fn sse_response(sse: &str) -> Vec<Vec<u8>> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        sse.len()
+    );
+    vec![head.into_bytes(), sse.as_bytes().to_vec()]
+}
+
+/// S4 / P1: a bare `reasoning` field (Qwen, `OpenWebUI`) is thinking output,
+/// not dropped content — non-streaming.
+#[test]
+fn a_bare_reasoning_field_surfaces_as_thinking_in_a_reply() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-reasoning",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "42.", "reasoning": "six sevens" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 9, "completion_tokens": 3 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("bare-reasoning", "sk-test-key-abc\n");
+    let proxy = start_proxy(&mock, &key);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": "what is six times seven" }]
+        }),
+        None,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let body: Value = serde_json::from_str(&body).expect("the reply is JSON");
+    assert_eq!(body["choices"][0]["message"]["content"], json!("42."));
+    assert_eq!(
+        body["choices"][0]["message"]["reasoning_content"],
+        json!("six sevens"),
+        "the bare `reasoning` field must reach the client as thinking: {body}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+/// S4: the same for a stream — a bare `reasoning` delta is a thinking delta.
+#[test]
+fn a_bare_reasoning_delta_surfaces_as_thinking_in_a_stream() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"six \"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"42.\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let mock = MockUpstream::start(vec![sse_response(sse)]);
+    let key = key_file("bare-reasoning-stream", "sk-test-key-abc");
+    let proxy = start_proxy(&mock, &key);
+
+    let (status, body) = post_chat_stream(&proxy);
+
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""reasoning_content":"six ""#),
+        "the bare `reasoning` delta must reach the client as thinking: {body}"
+    );
+    assert!(body.contains(r#""content":"42.""#), "{body}");
+    std::fs::remove_file(key).ok();
+}
+
+/// R3: a `redacted_thinking` block in the history is dropped on the way to an
+/// OpenAI-compatible upstream, not refused with `capability` (400).
+#[test]
+fn a_redacted_thinking_block_is_dropped_not_refused() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-redacted",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "still here"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 3}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("redacted-thinking", "sk-test-key-abc\n");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, _, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": [
+                    {"type": "redacted_thinking", "data": "opaque-bytes"},
+                    {"type": "text", "text": "prior answer"}
+                ]},
+                {"role": "user", "content": "and now?"}
+            ]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "the request reaches the upstream");
+    let rendered = seen[0].body["messages"].to_string();
+    assert!(
+        !rendered.contains("redacted"),
+        "the redacted block must not be rendered into an OpenAI message: {rendered}"
+    );
+    assert!(
+        rendered.contains("prior answer"),
+        "the visible text beside it survives: {rendered}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+/// S1: OpenAI's first-frame `delta: {role, content: ""}` opens no text block,
+/// so the Anthropic client's block indexes match the provider's content.
+#[test]
+fn an_empty_first_delta_opens_no_text_block() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let mock = MockUpstream::start(vec![sse_response(sse)]);
+    let key = key_file("empty-first-delta", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, _, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let events = sse_events(&body);
+    let starts: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "content_block_start")
+        .collect();
+    assert_eq!(starts.len(), 1, "exactly one text block opens: {body}");
+    assert_eq!(starts[0]["index"], json!(0));
+    let delta = events
+        .iter()
+        .find(|event| event["delta"]["type"] == "text_delta")
+        .expect("the text delta arrives");
+    assert_eq!(
+        delta["index"],
+        json!(0),
+        "the text lands in block 0: {body}"
+    );
+    assert_eq!(delta["delta"]["text"], json!("Hi"));
+    std::fs::remove_file(key).ok();
 }

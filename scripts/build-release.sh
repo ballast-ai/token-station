@@ -48,8 +48,15 @@ export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap
 rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal >/dev/null
 rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev/null
 
-for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini provider-openai-compatible; do
+for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; do
   (cd "plugins/official/${plugin}" \
+    && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
+done
+
+# The South provider components: same toolchain, staged beside the agents
+# under the South loader's file name (`component.wasm`).
+for component in provider-openai-compatible-v2 provider-anthropic-v2; do
+  (cd "plugins/official/${component}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
 done
 
@@ -58,12 +65,20 @@ STAGE="dist/${NAME}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/plugins-dist"
 
-for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini provider-openai-compatible; do
+for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; do
   mkdir -p "$STAGE/plugins-dist/${plugin}"
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \
      "$STAGE/plugins-dist/${plugin}/adapter.wasm"
   cp -R "plugins/official/${plugin}/fixtures" "$STAGE/plugins-dist/${plugin}/fixtures"
+done
+
+for component in provider-openai-compatible-v2 provider-anthropic-v2; do
+  mkdir -p "$STAGE/plugins-dist/${component}"
+  cp "plugins/official/${component}/manifest.json" \
+     "$STAGE/plugins-dist/${component}/"
+  cp "plugins/official/${component}/target/wasm32-wasip2/release/${component//-/_}.wasm" \
+     "$STAGE/plugins-dist/${component}/component.wasm"
 done
 
 echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2

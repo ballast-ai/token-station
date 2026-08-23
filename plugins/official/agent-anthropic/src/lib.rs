@@ -37,11 +37,13 @@ const KNOWN_REQUEST_FIELDS: &[&str] = &[
     "tool_choice",
 ];
 
-// These are intentionally adapter-local extensions rather than new Canonical
-// IR fields. Thinking configuration and signatures are Anthropic-specific and
-// must remain opaque unless a downstream provider explicitly supports them.
+// `anthropic_thinking` stays an adapter-local extension: it is the request's
+// thinking *configuration*, which no Canonical IR field models. The blocks
+// themselves no longer ride here — `ContentPart::Thinking` has carried them
+// since 0.3.0, and keeping a second channel for the same content is exactly
+// what S0's D5 ruling forbids ("extensions are data, not contract; a key that
+// changes behaviour must become a typed field").
 const ANTHROPIC_THINKING_EXTENSION: &str = "anthropic_thinking";
-const ANTHROPIC_THINKING_BLOCKS_EXTENSION: &str = "anthropic_thinking_blocks";
 
 fn fail(envelope: &ErrorEnvelope) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| {
@@ -186,34 +188,36 @@ fn parse_plain_block(block: &Value) -> Result<ContentPart, String> {
                 .to_owned(),
         }),
         Some("image") => parse_image(block),
-        Some("thinking" | "redacted_thinking") => Err(capability(
-            "Anthropic thinking blocks require an approved Canonical IR extension",
-        )),
-        // Server-tool history blocks. These arrive on a follow-up turn after a
-        // native Anthropic upstream ran a server tool. Canonical IR has no
-        // representation for them, so a multi-turn continuation that carries
-        // server-tool results cannot be replayed. Name them explicitly rather
-        // than reporting a generic "unsupported content block", so the failure
-        // is actionable (native Anthropic route, or an approved IR extension).
-        Some(
-            kind @ ("server_tool_use"
-            | "web_search_tool_result"
-            | "web_fetch_tool_result"
-            | "code_execution_tool_result"
-            | "mcp_tool_use"
-            | "mcp_tool_result"),
-        ) => Err(capability(format!(
-            "Anthropic server-tool history block `{kind}` cannot be replayed through Canonical \
-             IR; continuing a conversation that carries server-tool results needs a native \
-             Anthropic route or an approved IR extension."
-        ))),
-        Some(kind @ ("document" | "search_result")) => Err(capability(format!(
-            "Anthropic tool-result content block `{kind}` has no Canonical IR representation; its \
-             structure would be lost if flattened to plain text."
-        ))),
-        Some(kind) => Err(capability(format!(
-            "unsupported Anthropic content block `{kind}`"
-        ))),
+        Some("thinking") => Ok(ContentPart::Thinking {
+            thinking: block
+                .get("thinking")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("thinking block declares no thinking"))?
+                .to_owned(),
+            signature: block
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }),
+        Some("redacted_thinking") => Ok(ContentPart::RedactedThinking {
+            data: block
+                .get("data")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("redacted_thinking block declares no data"))?
+                .to_owned(),
+        }),
+        // Every other typed block — server-tool history (`server_tool_use`,
+        // `web_search_tool_result`, `mcp_tool_use`, …), `document`,
+        // `search_result`, or a type this adapter has never heard of — rides
+        // through the IR verbatim as `ContentPart::Unknown`. This adapter runs
+        // before routing and cannot know which renderer will serve the
+        // request, so it is not the place to decide what can be expressed:
+        // the Anthropic renderer writes these blocks back unchanged, and a
+        // renderer for another wire refuses them by name at render time
+        // (stage A′; south 0.15.0 renderer refusal). Refusing here used to
+        // turn every such request into a 400 even when an Anthropic upstream
+        // would have served it.
+        Some(_) => Ok(ContentPart::Unknown(block.clone())),
         None => Err(invalid("content block declares no type")),
     }
 }
@@ -338,15 +342,10 @@ fn parse_user_blocks(blocks: &[Value]) -> Result<Vec<Message>, String> {
 fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
     let mut parts = Vec::new();
     let mut tool_calls = Vec::new();
-    let mut thinking_blocks = Vec::new();
 
-    for (index, block) in blocks.iter().enumerate() {
+    for block in blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("tool_use") => tool_calls.push(tool_call(block)?),
-            Some("thinking" | "redacted_thinking") => thinking_blocks.push(json!({
-                "index": index,
-                "block": block,
-            })),
             Some("tool_result") => {
                 return Err(invalid(
                     "assistant messages cannot contain tool_result blocks",
@@ -359,21 +358,13 @@ fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
         }
     }
 
-    let mut extensions = Extensions::new();
-    if !thinking_blocks.is_empty() {
-        extensions.insert(
-            ANTHROPIC_THINKING_BLOCKS_EXTENSION.to_owned(),
-            Value::Array(thinking_blocks),
-        );
-    }
-
     Ok(Message {
         role: Role::Assistant,
         content: content_from_parts(parts),
         tool_calls,
         tool_call_id: None,
         name: None,
-        extensions,
+        extensions: Extensions::new(),
     })
 }
 
@@ -838,19 +829,25 @@ impl Guest for AnthropicClient {
             tools: parse_tools(body)?,
             response_format: None,
             // Translate honestly at the wire boundary. `any` is lossless →
-            // `Required` (every OpenAI-compatible upstream understands it). A
-            // forced specific `tool` degrades to `Auto`: the egress serializes
-            // `ToolChoice` verbatim and the chat wire expects
-            // `{type:function,function:{name}}`, not Anthropic's `{type:tool,name}`
-            // — and the forced tool is frequently a native/server tool the chat
-            // provider can't run. `validate_tool_choice` already refused any other
-            // shape. (The native Anthropic passthrough path preserves `{type:tool}`
-            // and server tools instead of taking this translate path.)
+            // `Required`. A forced specific `tool` is carried as
+            // `ToolChoice::Other` in the OpenAI object form
+            // `{type:function,function:{name}}`: the OpenAI-compatible renderer
+            // serializes it verbatim, and the Anthropic renderer maps it back
+            // to `{type:tool,name}` (stage A′ retired the old degrade to
+            // `auto`, which lost the caller's instruction on every wire).
+            // `validate_tool_choice` already refused any other shape.
             tool_choice: body
                 .get("tool_choice")
                 .filter(|value| !value.is_null())
                 .map(|value| match value.get("type").and_then(Value::as_str) {
                     Some("any") => ToolChoice::Required,
+                    Some("tool") => match value.get("name").and_then(Value::as_str) {
+                        Some(name) => ToolChoice::Other(json!({
+                            "type": "function",
+                            "function": {"name": name}
+                        })),
+                        None => ToolChoice::Auto,
+                    },
                     _ => ToolChoice::Auto,
                 }),
             sampling: Sampling {

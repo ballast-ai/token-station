@@ -9,7 +9,13 @@ readonly plugins=(
   agent-anthropic
   agent-openai-responses
   agent-gemini
-  provider-openai-compatible
+)
+# The South provider components ship beside the agents under the South
+# loader's file name (`component.wasm`); the directory scan dispatches on
+# each manifest's api_version.
+readonly south_components=(
+  provider-openai-compatible-v2
+  provider-anthropic-v2
 )
 
 # Desktop startup tests exercise the real Gateway, whose development config
@@ -23,4 +29,13 @@ for plugin in "${plugins[@]}"; do
     "$output/$plugin/adapter.wasm"
 done
 
-echo "desktop test plugins: PASS (${#plugins[@]} packages in $output)"
+for component in "${south_components[@]}"; do
+  source="$root/plugins/official/$component"
+  cargo build --locked --release --manifest-path "$source/Cargo.toml" --target "$target"
+  mkdir -p "$output/$component"
+  cp "$source/manifest.json" "$output/$component/manifest.json"
+  cp "$source/target/$target/release/${component//-/_}.wasm" \
+    "$output/$component/component.wasm"
+done
+
+echo "desktop test plugins: PASS ($((${#plugins[@]} + ${#south_components[@]})) packages in $output)"
