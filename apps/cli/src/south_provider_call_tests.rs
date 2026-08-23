@@ -4,8 +4,7 @@ use crate::{
     south_provider_call::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
         IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
-        PreparedProviderStreamResultV1, ProviderPackageEligibilityV1, RequestBodyModeV1,
-        ResponseMetadataEligibilityV1, StableProviderCallFailureV1,
+        PreparedProviderStreamResultV1, RequestBodyModeV1, StableProviderCallFailureV1,
         build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
         execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
         open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
@@ -62,21 +61,17 @@ use tokio_util::sync::CancellationToken;
 
 fn eligible_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
         RequestBodyModeV1::Buffered,
-        ResponseMetadataEligibilityV1::Compatible,
     )
 }
 
 fn eligible_streaming_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
         RequestBodyModeV1::Streaming,
-        ResponseMetadataEligibilityV1::Compatible,
     )
 }
 
@@ -322,41 +317,25 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
     let cases = [
         (
             CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Unapproved,
-                ApiDialect::Translated,
-                EgressMode::Direct,
-                RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
-            ),
-            IneligibleV1::ProviderPackageUnapproved,
-        ),
-        (
-            CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Approved,
                 ApiDialect::AnthropicNative,
                 EgressMode::Direct,
                 RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
             ),
             IneligibleV1::ApiDialect,
         ),
         (
             CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Http,
                 RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
             ),
             IneligibleV1::Egress,
         ),
         (
             CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Direct,
                 RequestBodyModeV1::Streaming,
-                ResponseMetadataEligibilityV1::Compatible,
             ),
             IneligibleV1::Streaming,
         ),
@@ -450,25 +429,6 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
     assert_eq!(
         resolver.expect_err("resolver construction must independently reject file sources"),
         IneligibleV1::SecretSource
-    );
-
-    let metadata_incompatible = CommunityCallPolicyV1::new(
-        ProviderPackageEligibilityV1::Approved,
-        ApiDialect::Translated,
-        EgressMode::Direct,
-        RequestBodyModeV1::Buffered,
-        ResponseMetadataEligibilityV1::Incompatible,
-    );
-    let error = prepare_provider_call_v1(
-        metadata_incompatible,
-        &provider_config(),
-        &auth_config(),
-        &descriptor(),
-    )
-    .expect_err("plugins needing more response metadata must not project");
-    assert_eq!(
-        error,
-        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::ResponseMetadata)
     );
 }
 

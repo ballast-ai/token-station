@@ -249,7 +249,6 @@ pub enum SouthFallbackReason {
     /// The provider dialect is outside the South slice.
     ProviderDialect,
     /// The dialect resolves to a package the South slice does not approve.
-    ProviderPackageUnapproved,
     /// The upstream speaks a non-translated API dialect.
     ApiDialect,
     /// Egress goes through a proxy.
@@ -265,7 +264,6 @@ pub enum SouthFallbackReason {
     /// The credential source is outside the slice (a key file, say).
     SecretSource,
     /// Response metadata compatibility could not be asserted.
-    ResponseMetadata,
     /// A descriptor header fails the safe-header contract.
     Headers,
 }
@@ -280,7 +278,6 @@ impl SouthFallbackReason {
             Self::NoProviderRuntime => "no_provider_runtime",
             Self::CredentialResolver => "credential_resolver",
             Self::ProviderDialect => "provider_dialect",
-            Self::ProviderPackageUnapproved => "provider_package_unapproved",
             Self::ApiDialect => "api_dialect",
             Self::Egress => "egress",
             Self::Streaming => "streaming",
@@ -288,20 +285,18 @@ impl SouthFallbackReason {
             Self::Auth => "auth",
             Self::Body => "body",
             Self::SecretSource => "secret_source",
-            Self::ResponseMetadata => "response_metadata",
             Self::Headers => "headers",
         }
     }
 
     /// Every variant, in token order, for schema constraints and parsers.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 14] = [
         Self::ConfiguredLegacy,
         Self::BufferedModeCannotStream,
         Self::UnauthenticatedUpstream,
         Self::NoProviderRuntime,
         Self::CredentialResolver,
         Self::ProviderDialect,
-        Self::ProviderPackageUnapproved,
         Self::ApiDialect,
         Self::Egress,
         Self::Streaming,
@@ -309,7 +304,6 @@ impl SouthFallbackReason {
         Self::Auth,
         Self::Body,
         Self::SecretSource,
-        Self::ResponseMetadata,
         Self::Headers,
     ];
 

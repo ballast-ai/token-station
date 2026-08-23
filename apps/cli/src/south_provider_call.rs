@@ -46,7 +46,6 @@ const PROVIDER_QUOTA_METADATA_FIELDS_V1: [ProviderQuotaMetadataFieldV1; 9] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IneligibleV1 {
     ProviderDialect,
-    ProviderPackageUnapproved,
     ApiDialect,
     Egress,
     Streaming,
@@ -54,26 +53,13 @@ pub(crate) enum IneligibleV1 {
     Auth,
     Body,
     SecretSource,
-    ResponseMetadata,
     Headers,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderPackageEligibilityV1 {
-    Unapproved,
-    Approved,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestBodyModeV1 {
     Streaming,
     Buffered,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResponseMetadataEligibilityV1 {
-    Incompatible,
-    Compatible,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,29 +72,23 @@ enum AuthenticationEligibilityV1 {
 /// Static host facts used before any credential lookup or transport call.
 #[derive(Clone, Copy)]
 pub(crate) struct CommunityCallPolicyV1 {
-    provider_package: ProviderPackageEligibilityV1,
     api_dialect: ApiDialect,
     egress_mode: EgressMode,
     body_mode: RequestBodyModeV1,
-    response_metadata: ResponseMetadataEligibilityV1,
     authentication: AuthenticationEligibilityV1,
 }
 
 impl CommunityCallPolicyV1 {
     #[must_use]
     pub(crate) const fn new(
-        provider_package: ProviderPackageEligibilityV1,
         api_dialect: ApiDialect,
         egress_mode: EgressMode,
         body_mode: RequestBodyModeV1,
-        response_metadata: ResponseMetadataEligibilityV1,
     ) -> Self {
         Self {
-            provider_package,
             api_dialect,
             egress_mode,
             body_mode,
-            response_metadata,
             authentication: AuthenticationEligibilityV1::Bearer,
         }
     }
@@ -140,11 +120,9 @@ impl fmt::Debug for CommunityCallPolicyV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CommunityCallPolicyV1")
-            .field("provider_package", &self.provider_package)
             .field("api_dialect", &self.api_dialect)
             .field("egress_mode", &self.egress_mode)
             .field("body_mode", &self.body_mode)
-            .field("response_metadata", &self.response_metadata)
             .field("authentication", &self.authentication)
             .finish()
     }
@@ -674,9 +652,6 @@ fn check_static_eligibility(
     if !supported_provider {
         return ineligible(IneligibleV1::ProviderDialect);
     }
-    if policy.provider_package != ProviderPackageEligibilityV1::Approved {
-        return ineligible(IneligibleV1::ProviderPackageUnapproved);
-    }
     if policy.api_dialect != ApiDialect::Translated {
         return ineligible(IneligibleV1::ApiDialect);
     }
@@ -685,9 +660,6 @@ fn check_static_eligibility(
     }
     if policy.body_mode != expected_body_mode {
         return ineligible(IneligibleV1::Streaming);
-    }
-    if policy.response_metadata != ResponseMetadataEligibilityV1::Compatible {
-        return ineligible(IneligibleV1::ResponseMetadata);
     }
     if descriptor.method != HttpMethod::Post {
         return ineligible(IneligibleV1::Method);

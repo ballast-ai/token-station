@@ -1454,10 +1454,14 @@ fn settings_error(
 }
 
 fn south_approved_dialects(registry: &PluginRegistry) -> BTreeSet<String> {
+    // Every bound dialect. Provenance is no longer judged here: a component is
+    // admitted at Gateway startup — source trust, compatibility handshake, Wasm
+    // gates, identity — and a package that fails any of them fails startup
+    // rather than quietly losing South. Re-deciding it in a settings view could
+    // only produce a second, weaker opinion.
     registry
         .provider_dialects()
         .into_iter()
-        .filter(|dialect| registry.provider_package_south_approved(dialect))
         .map(str::to_owned)
         .collect()
 }

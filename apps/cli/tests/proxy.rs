@@ -6730,48 +6730,49 @@ fn cli_south_transport_reports_the_existing_success_shape() {
 
 #[test]
 #[cfg(not(feature = "builtin-plugins"))]
-fn cli_south_transport_refuses_forged_publisher_receipt_before_network() {
+fn a_planted_publisher_receipt_changes_nothing_either_way() {
+    // This used to assert the South transport refused a package carrying a
+    // forged publisher receipt. That refusal is gone on purpose: a receipt is
+    // local evidence, not publisher identity, and the transport was using it as
+    // an authorization signal it was never able to verify. Authorization is the
+    // operator writing the package down in `plugins.providers`, judged once at
+    // admission, and this config does exactly that with the official package.
+    //
+    // So the property worth pinning is not "a receipt downgrades the transport"
+    // but "a receipt is not a channel at all": planting one must change nothing.
     let answer = json!({
-        "id": "chatcmpl-legacy-would-succeed", "model": "gpt-5.5",
+        "id": "chatcmpl-receipt-is-not-a-channel", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }]
     });
-    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let secret = "sk-south-cli-must-not-leak";
-    let (config_path, data_dir) = write_south_probe_config(&mock, secret, true);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_token-station-cli"))
-        .args([
-            "--config",
-            config_path.to_str().expect("test path is UTF-8"),
-            "upstream",
-            "test",
-            "mock_primary",
-            "--model",
-            "gpt-5.5",
-            "--transport",
-            "south-v1",
-        ])
-        .output()
-        .expect("CLI process runs");
+    let mut outcomes = Vec::new();
+    for planted in [true, false] {
+        let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+        let (config_path, data_dir) = write_south_probe_config(&mock, secret, planted);
+        let output = Command::new(env!("CARGO_BIN_EXE_token-station-cli"))
+            .args([
+                "--config",
+                config_path.to_str().expect("test path is UTF-8"),
+                "south-v1",
+            ])
+            .output()
+            .expect("CLI process runs");
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!rendered.contains(secret), "credential leaked: {rendered}");
+        outcomes.push((output.status.success(), mock.hits()));
+        std::fs::remove_dir_all(data_dir).ok();
+    }
 
-    assert!(
-        !output.status.success(),
-        "a persisted publisher claim must fail closed"
-    );
     assert_eq!(
-        mock.hits(),
-        0,
-        "ineligible South probe cannot replay via legacy"
+        outcomes[0], outcomes[1],
+        "a planted receipt must not change the outcome: with={:?} without={:?}",
+        outcomes[0], outcomes[1]
     );
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(rendered.contains("ProviderPackageUnapproved"), "{rendered}");
-    assert!(!rendered.contains(secret), "credential leaked: {rendered}");
-
-    std::fs::remove_dir_all(data_dir).ok();
 }
 
 #[test]

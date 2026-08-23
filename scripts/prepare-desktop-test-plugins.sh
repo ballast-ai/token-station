@@ -20,6 +20,11 @@ readonly south_components=(
 
 # Desktop startup tests exercise the real Gateway, whose development config
 # resolves official adapters from the repository-level plugins-dist directory.
+# Start from empty. A dist carrying packages an earlier revision staged — a v1
+# provider manifest, say — makes the host fail startup on a package this tree no
+# longer builds, and the error names the stale file rather than the stale dist.
+rm -rf "$output"
+
 for plugin in "${plugins[@]}"; do
   source="$root/plugins/official/$plugin"
   cargo build --locked --release --manifest-path "$source/Cargo.toml" --target "$target"

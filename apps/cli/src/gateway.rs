@@ -64,8 +64,7 @@ use crate::secrets::SecretStore;
 use crate::south_provider_call::{
     CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
     PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1, PreparedProviderStreamResultV1,
-    ProviderPackageEligibilityV1, RequestBodyModeV1, ResponseMetadataEligibilityV1,
-    StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
+    RequestBodyModeV1, StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
     build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1, map_failure_v1,
     map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
     prepare_provider_stream_v1, project_open_stream_head_v1,
@@ -1102,7 +1101,6 @@ impl ProviderCallOutcome {
 const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
     match reason {
         IneligibleV1::ProviderDialect => SouthFallbackReason::ProviderDialect,
-        IneligibleV1::ProviderPackageUnapproved => SouthFallbackReason::ProviderPackageUnapproved,
         IneligibleV1::ApiDialect => SouthFallbackReason::ApiDialect,
         IneligibleV1::Egress => SouthFallbackReason::Egress,
         IneligibleV1::Streaming => SouthFallbackReason::Streaming,
@@ -1110,7 +1108,6 @@ const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
         IneligibleV1::Auth => SouthFallbackReason::Auth,
         IneligibleV1::Body => SouthFallbackReason::Body,
         IneligibleV1::SecretSource => SouthFallbackReason::SecretSource,
-        IneligibleV1::ResponseMetadata => SouthFallbackReason::ResponseMetadata,
         IneligibleV1::Headers => SouthFallbackReason::Headers,
     }
 }
@@ -1339,9 +1336,6 @@ struct Upstream {
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
     provider_call: ConfiguredProviderCallEngine,
-    /// The dialect resolves to a component embedded by the signed release
-    /// pipeline, which is what the South transport slice requires.
-    south_package_approved: bool,
 }
 
 /// Server-owned asynchronous capability borrowed by the synchronous gateway.
@@ -1413,7 +1407,6 @@ impl SouthComponentSupport {
 fn assemble_upstreams(
     config: &ClientConfig,
     south_component: &SouthComponentSupport,
-    registry: &crate::plugins::PluginRegistry,
 ) -> Result<
     (
         BTreeMap<String, Upstream>,
@@ -1469,7 +1462,6 @@ fn assemble_upstreams(
                 plugin,
                 dialect: entry.api_dialect,
                 provider_call: entry.provider_call,
-                south_package_approved: registry.provider_package_south_approved(&entry.provider),
             },
         );
     }
@@ -2363,7 +2355,7 @@ impl Gateway {
 
         let south_component = south_component_support(config, &registry)?;
 
-        let (upstreams, catalog) = assemble_upstreams(config, &south_component, &registry)?;
+        let (upstreams, catalog) = assemble_upstreams(config, &south_component)?;
 
         let (local_upstreams, free_upstreams) = Self::upstream_boundary_sets(config);
 
@@ -5027,23 +5019,13 @@ impl Gateway {
         body_mode: RequestBodyModeV1,
         allow_header_auth: bool,
     ) -> CommunityCallPolicyV1 {
-        let approved = if upstream.south_package_approved {
-            ProviderPackageEligibilityV1::Approved
-        } else {
-            ProviderPackageEligibilityV1::Unapproved
-        };
-        let metadata = if upstream.south_package_approved {
-            ResponseMetadataEligibilityV1::Compatible
-        } else {
-            ResponseMetadataEligibilityV1::Incompatible
-        };
-        let policy = CommunityCallPolicyV1::new(
-            approved,
-            upstream.dialect,
-            self.egress.policy.mode,
-            body_mode,
-            metadata,
-        );
+        // Provenance is settled at admission, not here. A component that reached
+        // this point passed source trust, the compatibility handshake, the Wasm
+        // gates and the identity check; re-deciding whether its package is
+        // "approved" would be the transport second-guessing a question already
+        // answered, and answering it wrong meant silently dropping to Legacy.
+        let policy =
+            CommunityCallPolicyV1::new(upstream.dialect, self.egress.policy.mode, body_mode);
         if allow_header_auth {
             policy.with_azure_openai_header_auth()
         } else {
