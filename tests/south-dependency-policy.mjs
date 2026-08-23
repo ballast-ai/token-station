@@ -9,6 +9,10 @@ const southRepository = "https://github.com/ballast-ai/token-station-south.git";
 const southRevision = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae";
 const southVersion = "0.15.0";
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
+const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git";
+const kernelRevision = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35";
+const kernelVersion = "0.3.0";
+const kernelSource = `git+${kernelRepository}?tag=v0.2.0#${kernelRevision}`;
 const expectedSouthPackages = new Set([
   "south-component-conformance",
   "south-contracts",
@@ -174,6 +178,34 @@ const desktopSouthPackages = validateSouthClosure(
   desktopMetadata,
   expectedDesktopSouthPackages,
   "the Desktop workspace",
+);
+
+const rootGitPackages = metadata.packages.filter((pkg) =>
+  pkg.source?.startsWith("git+"),
+);
+for (const pkg of rootGitPackages) {
+  assert.ok(
+    pkg.source === southSource || pkg.source === kernelSource,
+    `${pkg.name} must resolve from an exact approved Git source and commit`,
+  );
+}
+const kernelPackages = rootGitPackages.filter(
+  (pkg) => pkg.source === kernelSource,
+);
+assert.equal(
+  kernelPackages.length,
+  1,
+  "the root workspace must resolve exactly one approved kernel package",
+);
+assert.equal(
+  kernelPackages[0].name,
+  "token-station-protocol",
+  "the approved kernel source may supply only the protocol package",
+);
+assert.equal(
+  kernelPackages[0].version,
+  kernelVersion,
+  `the kernel protocol package must stay on ${kernelVersion}`,
 );
 
 const workspaceMemberIds = new Set(metadata.workspace_members);

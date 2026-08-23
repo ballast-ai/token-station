@@ -50,9 +50,16 @@ unmaintained = "workspace"
 yanked = "deny"
 
 [sources]
-# Trust crates.io plus the one independently versioned South repository. Require
-# an immutable revision so no branch movement can change the locked source.
+# Trust crates.io plus the two independently versioned ballast-ai repositories:
+# South, and the kernel mirror of the protocol crate that South's conformance
+# crate names (byte-identical to `crates/protocol`; reached only through the
+# CLI's round-trip ledger dev-dependency). Require a tag or immutable revision.
+# The South dependency policy locks the one tagged kernel source to its resolved
+# commit because cargo-deny cannot set a per-source Git specification.
 unknown-registry = "deny"
 unknown-git = "deny"
-required-git-spec = "rev"
-allow-git = ["https://github.com/ballast-ai/token-station-south"]
+required-git-spec = "tag"
+allow-git = [
+  "https://github.com/ballast-ai/token-station-south",
+  "https://github.com/ballast-ai/token-station-kernel",
+]
