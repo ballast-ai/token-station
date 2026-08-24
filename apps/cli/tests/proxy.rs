@@ -7503,11 +7503,13 @@ fn quota_first_serves_the_native_payload_it_used_to_refuse() {
         "the native payload must reach the upstream once"
     );
 
-    // Deliberately not asserted here: the `requests` row and the attempt receipt.
-    // A native request records neither, and it did not before this change either
-    // — the tiered native path writes zero rows too. That gap is what the plan's
-    // acceptance criterion means by a sent request being filed as `(unrouted)`,
-    // and it is the next slice rather than a claim this test can make today.
+    // The request is recorded like any other. It was not, until the engine
+    // catalogue in `attempts` learned the value this attempt reports: a closed
+    // CHECK rejected the row, and because the parent shares that transaction,
+    // the whole request vanished from metrics rather than losing one column.
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["upstream"], "Text(\"deepseek_native\")");
 
     std::fs::remove_file(key).ok();
 }

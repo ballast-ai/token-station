@@ -55,7 +55,7 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v8: adds content-free transport diagnostics and closed conversion
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// The content-free transport path classification recorded for diagnostics.
 /// Raw, caller-controlled URL paths never enter the receipt.

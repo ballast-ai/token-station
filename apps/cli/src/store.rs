@@ -379,6 +379,54 @@ const MIGRATIONS: &[Migration] = &[
                     'auth', 'body', 'secret_source', 'response_metadata', 'headers'
                 ));",
     },
+    Migration {
+        // v11 -> v12: `native` joins the engine catalogue. The check is a
+        // closed set, so an attempt reporting an engine it does not list fails
+        // the insert — and because the parent row shares that transaction, the
+        // whole request disappears from metrics rather than losing one column.
+        to: 12,
+        sql: "
+            CREATE TABLE attempts_v12 (
+                request_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                upstream TEXT NOT NULL,
+                model TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                http_status INTEGER,
+                error_code TEXT,
+                stream_outcome TEXT CHECK (
+                    stream_outcome IS NULL OR stream_outcome IN (
+                        'complete', 'failed_after_partial', 'failed_before_output', 'client_cancelled'
+                    )
+                ),
+                provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (provider_call_engine IN (
+                        'legacy', 'south_v1_buffered', 'south_v1_streaming', 'native', 'unknown'
+                    )),
+                south_fallback_reason TEXT
+                    CHECK (south_fallback_reason IS NULL OR south_fallback_reason IN (
+                        'configured_legacy', 'buffered_mode_cannot_stream', 'unauthenticated_upstream',
+                        'no_provider_runtime', 'credential_resolver', 'provider_dialect',
+                        'provider_package_unapproved', 'api_dialect', 'egress', 'streaming', 'method',
+                        'auth', 'body', 'secret_source', 'response_metadata', 'headers'
+                    )),
+                fallback_allowed INTEGER NOT NULL,
+                PRIMARY KEY (request_id, ordinal)
+            );
+            INSERT INTO attempts_v12 (
+                request_id, ordinal, upstream, model, latency_ms, http_status,
+                error_code, stream_outcome, provider_call_engine, south_fallback_reason,
+                fallback_allowed
+            )
+            SELECT
+                request_id, ordinal, upstream, model, latency_ms, http_status,
+                error_code, stream_outcome, provider_call_engine, south_fallback_reason,
+                fallback_allowed
+            FROM attempts;
+            DROP TABLE attempts;
+            ALTER TABLE attempts_v12 RENAME TO attempts;
+        ",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -497,7 +545,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     ),
     provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
         CHECK (provider_call_engine IN (
-            'legacy', 'south_v1_buffered', 'south_v1_streaming', 'unknown'
+            'legacy', 'south_v1_buffered', 'south_v1_streaming', 'native', 'unknown'
         )),
     south_fallback_reason TEXT
         CHECK (south_fallback_reason IS NULL OR south_fallback_reason IN (
@@ -956,7 +1004,6 @@ impl SqliteStore {
             |routing| decision_columns(&routing.decided_by),
         );
         let (cost_kind, cost_micros, price_version) = normalized_cost(record);
-
         let mut connection = self.connection.lock().expect("store lock");
         let transaction = connection.transaction()?;
         let inserted = transaction.execute(
@@ -1026,7 +1073,6 @@ impl SqliteStore {
                 ":price_version": price_version,
             },
         )?;
-
         if inserted == 0 {
             transaction.commit()?;
             return Ok(());
