@@ -870,6 +870,62 @@ fn start_native_anthropic_proxy_with(
     spawn_proxy(&config)
 }
 
+/// A native Anthropic upstream with a store-backed credential. South can carry
+/// this source, unlike the key-file fixtures that deliberately exercise the
+/// `secret_source` legacy fallback.
+fn start_native_anthropic_proxy_with_stored_secret(upstream: &MockUpstream, secret: &str) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-native-south-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    token_station_cli::secrets::store_set(
+        &data_dir,
+        "anthropic_native",
+        "provider_api_key",
+        secret,
+    )
+    .expect("native Anthropic secret is stored");
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-anthropic"],
+            "providers": {
+                "openai-compatible": "provider-openai-compatible-v2",
+                "anthropic": "provider-anthropic-v2"
+            }
+        },
+        "upstreams": {
+            "anthropic_native": {
+                "provider": "anthropic",
+                "api_dialect": "anthropic-native",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "store": true },
+                "models": [{
+                    "model": "claude-sonnet-4",
+                    "tool": true,
+                    "tool_state": "verified",
+                    "context_window": 200_000
+                }]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "anthropic_native", "model": "claude-sonnet-4" }
+            ] },
+            "default_pool": "main"
+        }
+    }))
+    .expect("stored-secret native config parses");
+    spawn_proxy(&config)
+}
+
 /// The same native upstream, routed quota-first. Quota mode used to refuse the
 /// native payload outright — the request fell through to the Canonical path,
 /// where the adapter rejects server-tool blocks — so a server-tool conversation
@@ -3646,17 +3702,13 @@ fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
     );
     // Only the model was remapped to the routed upstream model.
     assert_eq!(forwarded.body["model"], json!("deepseek-chat"));
-    // The upstream saw the injected upstream key; the client's own virtual key
-    // never reached it.
+    // Anthropic authenticates with its own header-secret shape. The client uses
+    // Bearer locally, but neither that virtual key nor a fabricated upstream
+    // Bearer header may cross the proxy boundary.
+    assert_eq!(forwarded.x_api_key.as_deref(), Some("sk-upstream-secret"));
     assert_eq!(
-        forwarded.authorization.as_deref(),
-        Some("Bearer sk-upstream-secret")
-    );
-    let client_token = format!("Bearer {}", proxy.virtual_key);
-    assert_ne!(
-        forwarded.authorization.as_deref(),
-        Some(client_token.as_str()),
-        "the client's own token must never reach the upstream"
+        forwarded.authorization, None,
+        "native Anthropic upstreams must never receive Bearer authentication"
     );
     std::fs::remove_file(key).ok();
 }
@@ -7661,8 +7713,11 @@ fn a_native_attempt_that_cannot_reach_its_upstream_hands_over_to_the_next() {
     );
     assert_eq!(
         attempt_engines(&proxy.data_dir),
-        vec![("native".to_owned(), None), ("native".to_owned(), None)],
-        "both attempts are filed, both as native"
+        vec![
+            ("legacy".to_owned(), Some("secret_source".to_owned())),
+            ("legacy".to_owned(), Some("secret_source".to_owned()))
+        ],
+        "file-backed credentials take the explicit South secret-source fallback"
     );
 
     std::fs::remove_file(key).ok();
@@ -7788,6 +7843,195 @@ fn a_translated_anthropic_turn_is_carried_by_south() {
     );
 }
 
+/// A server-tool passthrough is a native payload, not a second transport. With
+/// a store-backed credential it uses South and injects Anthropic's real header.
+#[test]
+fn a_native_anthropic_turn_is_carried_by_south_with_x_api_key() {
+    let served = json!({
+        "id": "msg_native_south",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{"type": "text", "text": "served"}],
+        "usage": {"input_tokens": 3, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &served.to_string())]]);
+    let proxy = start_native_anthropic_proxy_with_stored_secret(&mock, "sk-native-south");
+    let mut turn = native_server_tool_turn();
+    turn["model"] = json!("claude-sonnet-4");
+
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].x_api_key.as_deref(), Some("sk-native-south"));
+    assert_eq!(seen[0].authorization, None);
+    let _ = last_row(&proxy.data_dir);
+    let engines = attempt_engines(&proxy.data_dir);
+    assert_eq!(engines.len(), 1);
+    assert!(
+        engines[0].0.starts_with("south_v1"),
+        "native Anthropic must use South, got {engines:?}"
+    );
+    assert_eq!(engines[0].1, None);
+}
+
+#[test]
+fn native_anthropic_south_stream_is_cancelled_by_server_drain_without_replay() {
+    let mock = MockUpstream::start_hanging();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_native_anthropic_proxy_with_stored_secret(&mock, "sk-native-drain");
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let mut turn = native_server_tool_turn();
+        turn["model"] = json!("claude-sonnet-4");
+        turn["stream"] = json!(true);
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        agent
+            .post(format!("{url}/v1/messages"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .header("anthropic-version", "2023-06-01")
+            .send(&turn.to_string())
+            .expect("proxy answers the drained native stream")
+            .status()
+            .as_u16()
+    });
+
+    let arrival_deadline = Instant::now() + Duration::from_secs(3);
+    while (mock.hits() == 0 || !mock.response_started() || proxy.control.in_flight() == 0)
+        && Instant::now() < arrival_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert!(mock.response_started(), "the native South read is active");
+    assert_eq!(mock.hits(), 1, "the native stream reaches South once");
+    proxy.control.cancel_in_flight();
+    assert_eq!(client.join().expect("client joins"), 503);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+    while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
+        && Instant::now() < cleanup_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(proxy.control.in_flight(), 0);
+    assert!(peer_closed.load(Ordering::SeqCst));
+    assert_eq!(mock.hits(), 1, "drain cannot replay through legacy");
+    mock.finish_hanging();
+
+    settle();
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("south_v1_streaming".to_owned(), None)]
+    );
+}
+
+#[test]
+fn native_anthropic_south_stream_stops_on_client_disconnect_without_replay() {
+    let mock = MockUpstream::start_hanging();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_native_anthropic_proxy_with_stored_secret(&mock, "sk-native-disconnect");
+    let host = proxy.url.strip_prefix("http://").expect("loopback URL");
+    let mut turn = native_server_tool_turn();
+    turn["model"] = json!("claude-sonnet-4");
+    turn["stream"] = json!(true);
+    let body = turn.to_string();
+    let mut client = TcpStream::connect(host).expect("client connects");
+    write!(
+        client,
+        "POST /v1/messages HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {}\r\nAnthropic-Version: 2023-06-01\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        proxy.virtual_key,
+        body.len()
+    )
+    .expect("request writes");
+    client.flush().expect("request flushes");
+
+    let arrival_deadline = Instant::now() + Duration::from_secs(3);
+    while (mock.hits() == 0 || !mock.response_started() || proxy.control.in_flight() == 0)
+        && Instant::now() < arrival_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert!(mock.response_started(), "the native South read is active");
+    client.shutdown(Shutdown::Both).expect("client disconnects");
+    drop(client);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+    while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
+        && Instant::now() < cleanup_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(proxy.control.in_flight(), 0);
+    assert!(peer_closed.load(Ordering::SeqCst));
+    assert_eq!(mock.hits(), 1, "disconnect cannot replay through legacy");
+    mock.finish_hanging();
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(499)");
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("south_v1_streaming".to_owned(), None)]
+    );
+}
+
+#[test]
+fn native_anthropic_south_stream_honors_the_attempt_deadline_without_replay() {
+    let mock = MockUpstream::start_hanging();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_native_anthropic_proxy_with_stored_secret(&mock, "sk-native-deadline");
+    let mut turn = native_server_tool_turn();
+    turn["model"] = json!("claude-sonnet-4");
+    turn["stream"] = json!(true);
+    let ctx = token_station_cli::request_context::RequestContext::detached(
+        Duration::from_secs(2),
+        Duration::from_millis(250),
+    );
+    let mut replies = Vec::new();
+
+    proxy.gateway.chat_scoped(
+        &ctx,
+        None,
+        None,
+        "POST",
+        "/v1/messages",
+        &[("anthropic-version".to_owned(), "2023-06-01".to_owned())],
+        turn.to_string().as_bytes(),
+        &mut |reply| {
+            replies.push(reply);
+            true
+        },
+    );
+
+    assert!(
+        replies
+            .iter()
+            .any(|reply| { matches!(reply, Reply::BeginJson(json) if json.status == 504) }),
+        "deadline produces a 504 before any stream commit"
+    );
+    let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+    while !peer_closed.load(Ordering::SeqCst) && Instant::now() < cleanup_deadline {
+        std::thread::yield_now();
+    }
+    assert!(peer_closed.load(Ordering::SeqCst));
+    assert_eq!(mock.hits(), 1, "deadline cannot replay through legacy");
+    mock.finish_hanging();
+
+    settle();
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("south_v1_streaming".to_owned(), None)]
+    );
+}
+
 /// A native request finds the provider at its concurrency ceiling and takes
 /// the next candidate instead of queueing behind it.
 ///
@@ -7863,8 +8107,8 @@ fn a_native_request_skips_a_provider_at_its_concurrency_ceiling() {
     );
     assert_eq!(
         attempt_engines(&proxy.data_dir),
-        vec![("native".to_owned(), None)],
-        "one attempt, against the backup"
+        vec![("legacy".to_owned(), Some("secret_source".to_owned()))],
+        "one file-secret fallback attempt, against the backup"
     );
 
     primary.finish_hanging();
@@ -7930,6 +8174,46 @@ fn native_failures_are_charged_to_health_and_eject_the_upstream() {
         "an ejected upstream receives no further traffic"
     );
     assert_eq!(backup.hits(), 4);
+
+    std::fs::remove_file(key).ok();
+}
+
+/// Pool exhaustion must charge each failed upstream exactly once. Dispatch
+/// already observes every failed attempt; relaying the final native body used
+/// to return `FailedBeforeOutput`, causing settlement to observe that last
+/// upstream a second time and eject it after only two requests at a threshold
+/// of three.
+#[test]
+fn native_pool_exhaustion_charges_each_failed_attempt_once() {
+    let boom = r#"{"error":{"type":"api_error","message":"down"}}"#;
+    let primary = MockUpstream::start(vec![
+        vec![http_json(503, boom)],
+        vec![http_json(503, boom)],
+        vec![http_json(503, boom)],
+    ]);
+    let backup = MockUpstream::start(vec![
+        vec![http_json(503, boom)],
+        vec![http_json(503, boom)],
+        vec![http_json(503, boom)],
+    ]);
+    let key = key_file("native-health-once", "sk-native-health-once");
+    let proxy = start_two_native_upstreams_proxy(primary.base_url(), backup.base_url(), &key);
+
+    for round in 1..=3 {
+        let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+        assert_eq!(status, 503, "round {round}: {body}");
+    }
+
+    assert_eq!(
+        primary.hits(),
+        3,
+        "the primary receives three real attempts"
+    );
+    assert_eq!(
+        backup.hits(),
+        3,
+        "the terminal attempt is not double-charged and ejected a request early"
+    );
 
     std::fs::remove_file(key).ok();
 }
@@ -8072,9 +8356,79 @@ fn a_retriable_native_failure_tries_the_pool_and_still_relays_the_last_body() {
     assert_eq!(row["status"], "Integer(529)");
     assert_eq!(
         attempt_engines(&proxy.data_dir),
-        vec![("native".to_owned(), None), ("native".to_owned(), None)],
-        "both attempts are filed, both as native"
+        vec![
+            ("legacy".to_owned(), Some("secret_source".to_owned())),
+            ("legacy".to_owned(), Some("secret_source".to_owned()))
+        ],
+        "file-backed credentials take the explicit South secret-source fallback"
     );
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A rescued native turn is a success in both the client response and the
+/// durable receipt. The first 5xx used to write the parent error eagerly, so a
+/// later 200 was persisted with a stale `upstream_unavailable` error code.
+#[test]
+fn a_successful_native_fallback_does_not_keep_the_first_attempts_error() {
+    let boom = r#"{"error":{"type":"api_error","message":"primary is down"}}"#;
+    let served = json!({
+        "id": "msg_native_fallback",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "backup served"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let primary = MockUpstream::start(vec![vec![http_json(503, boom)]]);
+    let backup = MockUpstream::start(vec![vec![http_json(200, &served.to_string())]]);
+    let key = key_file("native-fallback-receipt", "sk-native-fallback-receipt");
+    let proxy = start_two_native_upstreams_proxy(primary.base_url(), backup.base_url(), &key);
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("backup served"), "{body}");
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(
+        row["error_code"], "Null",
+        "a successful fallback cannot retain the first attempt's error"
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A parked raw response belongs only to the attempt that produced it. If the
+/// next candidate fails before receiving a response, the proxy must report
+/// that terminal transport failure instead of replaying the previous
+/// upstream's body and attributing it to the wrong account.
+#[test]
+fn a_later_native_transport_failure_does_not_replay_an_earlier_raw_error() {
+    let stale = r#"{"error":{"type":"api_error","message":"stale primary body"}}"#;
+    let primary = MockUpstream::start(vec![vec![http_json(503, stale)]]);
+    let refused_port = {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        port
+    };
+    let key = key_file("native-stale-raw", "sk-native-stale-raw");
+    let proxy = start_two_native_upstreams_proxy(
+        primary.base_url(),
+        format!("http://127.0.0.1:{refused_port}/v1"),
+        &key,
+    );
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+
+    assert_eq!(status, 502, "{body}");
+    assert!(
+        !body.contains("stale primary body"),
+        "the previous attempt's body cannot become the terminal answer: {body}"
+    );
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["upstream"], "Text(\"native_backup\")");
 
     std::fs::remove_file(key).ok();
 }
@@ -8112,8 +8466,8 @@ fn a_native_client_error_is_relayed_at_once_without_trying_the_pool() {
     assert_eq!(row["status"], "Integer(400)");
     assert_eq!(
         attempt_engines(&proxy.data_dir),
-        vec![("native".to_owned(), None)],
-        "one attempt, filed as native"
+        vec![("legacy".to_owned(), Some("secret_source".to_owned()))],
+        "one native payload attempt through the explicit file-secret fallback"
     );
 
     std::fs::remove_file(key).ok();
@@ -8167,15 +8521,13 @@ fn quota_first_serves_the_native_payload_it_used_to_refuse() {
     assert_eq!(row["status"], "Integer(200)");
     assert_eq!(row["upstream"], "Text(\"deepseek_native\")");
 
-    // And filed as its own engine, not silently as legacy. The parent row
-    // above only proves a row survived the transaction; this proves what the
-    // attempt reported. `south_fallback_reason` is null because a native
-    // attempt never chose South and then retreated — it was never a South
-    // call, so there is nothing to explain.
+    // The fixture uses a key file, which South refuses by policy; the receipt
+    // must therefore name the explicit secret-source fallback rather than a
+    // fabricated native engine.
     assert_eq!(
         attempt_engines(&proxy.data_dir),
-        vec![("native".to_owned(), None)],
-        "a native attempt files one receipt, under the native engine"
+        vec![("legacy".to_owned(), Some("secret_source".to_owned()))],
+        "a native payload files the actual fallback engine and reason"
     );
 
     std::fs::remove_file(key).ok();
@@ -8225,5 +8577,50 @@ fn a_character_split_across_two_reads_reaches_the_client_whole() {
         "and nothing was replaced on the way: {body}"
     );
 
+    std::fs::remove_file(key).ok();
+}
+
+/// A permanently invalid byte is a protocol failure, not an indefinitely
+/// buffered "partial character". The native relay previously treated every
+/// UTF-8 error as an incomplete tail; an invalid byte at offset zero therefore
+/// kept the read buffer forever and never answered while the upstream stayed
+/// open.
+#[test]
+fn a_permanently_invalid_native_stream_fails_closed_without_buffering_forever() {
+    let mock = MockUpstream::start_hanging_with_prefix(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: \xff",
+    );
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let key = key_file("native-invalid-utf8", "sk-native-invalid-utf8");
+    let proxy = start_quota_first_native_proxy(&mock, &key);
+
+    let mut turn = native_server_tool_turn();
+    turn["stream"] = json!(true);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(2)))
+            .http_status_as_error(false)
+            .build(),
+    );
+    let response = agent
+        .post(format!("{}/v1/messages", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .header("anthropic-version", "2023-06-01")
+        .send(&turn.to_string())
+        .expect("the proxy rejects permanent invalid UTF-8 before the client deadline");
+
+    assert_eq!(response.status().as_u16(), 502);
+    let body = response.into_body().read_to_string().expect("body reads");
+    assert!(body.contains("invalid UTF-8"), "{body}");
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+    while !peer_closed.load(Ordering::SeqCst) && Instant::now() < cleanup_deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        peer_closed.load(Ordering::SeqCst),
+        "rejecting the stream drops the upstream reader"
+    );
+    mock.finish_hanging();
     std::fs::remove_file(key).ok();
 }

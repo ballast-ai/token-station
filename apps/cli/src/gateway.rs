@@ -1191,15 +1191,6 @@ impl ProviderCallOutcome {
         }
     }
 
-    /// A verbatim native forward: no translation, so no South engine and no
-    /// fallback reason to report.
-    const fn native() -> Self {
-        Self {
-            engine: RecordedProviderCallEngine::Native,
-            south_fallback_reason: None,
-        }
-    }
-
     const fn south(engine: RecordedProviderCallEngine) -> Self {
         Self {
             engine,
@@ -1211,7 +1202,6 @@ impl ProviderCallOutcome {
 /// The content-free classification of a South eligibility refusal.
 const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
     match reason {
-        IneligibleV1::ApiDialect => SouthFallbackReason::ApiDialect,
         IneligibleV1::Egress => SouthFallbackReason::Egress,
         IneligibleV1::Streaming => SouthFallbackReason::Streaming,
         IneligibleV1::Method => SouthFallbackReason::Method,
@@ -1510,6 +1500,7 @@ enum AttemptPayload<'a> {
 /// An upstream's own error response, kept out of the envelope on purpose.
 #[derive(Debug)]
 struct RawUpstreamError {
+    target: UpstreamModel,
     status: u16,
     body: String,
 }
@@ -4274,12 +4265,8 @@ impl Gateway {
                 // the fallback sweep can eject a bad upstream mid-flight.
                 Ok(outcome) => return Ok((target.clone(), outcome)),
                 Err(mut error) => {
-                    if matches!(
-                        ctx.cancel_reason(),
-                        Some(CancelReason::ServerDrain | CancelReason::Deadline)
-                    ) {
-                        sanitize_attempt_error_for_render(&mut error);
-                        return Err(error);
+                    if let Some(lifecycle) = Self::lifecycle_cancellation(ctx) {
+                        return Err(lifecycle);
                     }
                     if let Some(retry) = self.retry_without_media(
                         ctx,
@@ -4299,12 +4286,8 @@ impl Gateway {
                             Err(retry_error) => error = retry_error,
                         }
                     }
-                    if matches!(
-                        ctx.cancel_reason(),
-                        Some(CancelReason::ServerDrain | CancelReason::Deadline)
-                    ) {
-                        sanitize_attempt_error_for_render(&mut error);
-                        return Err(error);
+                    if let Some(lifecycle) = Self::lifecycle_cancellation(ctx) {
+                        return Err(lifecycle);
                     }
                     let fallback_allowed = take_attempt_fallback_policy(&mut error);
                     self.observe(&target.upstream, &target.model, Err(&error));
@@ -4353,17 +4336,28 @@ impl Gateway {
             }
             StreamOutcome::FailedBeforeOutput => {
                 // Never produced a byte: a genuine "upstream unwell" signal —
-                // charge health so a truly broken upstream is ejected.
+                // charge health so a truly broken upstream is ejected. A
+                // retriable attempt that dispatch already observed is the one
+                // exception: native passthrough may relay its parked body only
+                // after the pool is exhausted, converting dispatch's `Err`
+                // into this terminal outcome. Observing it here as well would
+                // count one network attempt twice.
                 let code = record.error_code.unwrap_or(ErrorCode::UpstreamUnavailable);
                 record.error_code = Some(code);
                 if record.status < 400 {
                     record.status = 502;
                 }
-                self.observe(
-                    upstream,
-                    model,
-                    Err(&ErrorEnvelope::new(code, record.status, "")),
-                );
+                let already_observed = record
+                    .attempt_records
+                    .last()
+                    .is_some_and(|attempt| attempt.fallback_allowed);
+                if !already_observed {
+                    self.observe(
+                        upstream,
+                        model,
+                        Err(&ErrorEnvelope::new(code, record.status, "")),
+                    );
+                }
             }
             StreamOutcome::FailedAfterPartial => {
                 // A mid-stream drop AFTER a 200 (auth, model and generation all
@@ -4765,6 +4759,7 @@ impl Gateway {
                     body,
                     *stream,
                     attempt_timeout,
+                    attempt_deadline,
                     emit,
                     record,
                     upstream_http_status,
@@ -5047,18 +5042,13 @@ impl Gateway {
             .take()
             .filter(|_| result.is_err())
         {
+            record.status = raw.status;
+            record.error_code = Some(passthrough_error_code(raw.status));
             emit(Reply::BeginJson(JsonReply {
                 status: raw.status,
                 body: raw.body,
             }));
-            // `record_actual_attempt_target` already named the upstream that
-            // produced this body; `decision.chosen` is the one the router
-            // picked first, which is what the caller reports for a request
-            // that never settled.
-            return Ok(Some((
-                decision.chosen.clone(),
-                StreamOutcome::FailedBeforeOutput,
-            )));
+            return Ok(Some((raw.target, StreamOutcome::FailedBeforeOutput)));
         }
         result.map(Some)
     }
@@ -5078,6 +5068,7 @@ impl Gateway {
         body: &Value,
         stream: bool,
         attempt_timeout: Duration,
+        attempt_deadline: std::time::Instant,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
         upstream_http_status: &mut Option<u16>,
@@ -5085,6 +5076,10 @@ impl Gateway {
         last_upstream_error: &RefCell<Option<RawUpstreamError>>,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         const ANTHROPIC: &str = "anthropic-messages";
+        // A later dial/auth/protocol failure must never accidentally relay an
+        // earlier upstream's parked body as though it produced the terminal
+        // attempt. A fresh attempt owns this slot from its first operation.
+        last_upstream_error.borrow_mut().take();
         let upstream = self
             .upstreams
             .get(target.upstream.as_str())
@@ -5108,7 +5103,9 @@ impl Gateway {
         );
         descriptor.headers = headers.clone();
         descriptor.body = Some(forwarded);
-        descriptor.auth = upstream.config.auth.clone().map(Auth::bearer);
+        descriptor.auth = upstream.config.auth.clone().map(|secret| {
+            Auth::header("x-api-key", secret).expect("x-api-key is a credential header")
+        });
 
         // The same exfiltration gate as build_provider_request: the URL must sit
         // inside base_url and the credential slot must match, checked before the
@@ -5134,17 +5131,27 @@ impl Gateway {
             None,
         );
 
-        // Claim the engine before the send, the way the South path does. An
-        // attempt that never gets a response was still performed by this
-        // engine, and filing it as `unknown` hides exactly the failures an
-        // operator grouping Stats by engine is looking for.
-        *provider_call_engine = ProviderCallOutcome::native();
-
-        let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
-        {
-            Err(_) if ctx.is_cancelled() => {
-                Self::emit_cancelled(emit);
-                return Ok(StreamOutcome::ClientCancelled);
+        let response = match self.send_provider_call(
+            ctx,
+            attempt_timeout,
+            upstream,
+            &descriptor,
+            target.upstream.as_str(),
+            stream,
+            attempt_deadline,
+            provider_call_engine,
+        ) {
+            Err(error) if ctx.is_cancelled() => {
+                // A caller disconnect is a 499 and nobody's fault. Server
+                // drain and deadline are host lifecycle failures instead;
+                // dispatch owns their sanitized 503/504 rendering. Folding
+                // all three into ClientCancelled made native South drains lie
+                // as 499 while the translated path correctly returned 503.
+                if matches!(ctx.cancel_reason(), Some(CancelReason::ClientDisconnect)) {
+                    Self::emit_cancelled(emit);
+                    return Ok(StreamOutcome::ClientCancelled);
+                }
+                return Err(error);
             }
             Err(error) => {
                 record_conversion(
@@ -5193,8 +5200,6 @@ impl Gateway {
         if response.status >= 400 {
             let code = passthrough_error_code(response.status);
             let parts = response.into_parts()?;
-            record.status = parts.status;
-            record.error_code = Some(code);
             record_conversion(
                 record,
                 ConversionStage::ProviderResponse,
@@ -5217,6 +5222,7 @@ impl Gateway {
             // original body to repair itself. Relaying it at once is right.
             if code.is_retriable_elsewhere() {
                 *last_upstream_error.borrow_mut() = Some(RawUpstreamError {
+                    target: target.clone(),
                     status: parts.status,
                     body: parts.body,
                 });
@@ -5227,6 +5233,8 @@ impl Gateway {
                 ));
             }
 
+            record.status = parts.status;
+            record.error_code = Some(code);
             emit(Reply::BeginJson(JsonReply {
                 status: parts.status,
                 body: parts.body,
@@ -5247,7 +5255,7 @@ impl Gateway {
         );
 
         if stream {
-            Self::relay_raw_sse(ctx, response, emit, record)
+            Self::relay_raw_sse(ctx, attempt_deadline, response, emit, record)
         } else {
             let parts = response.into_parts()?;
             // Read the provider's own usage report off the body we are about
@@ -5275,6 +5283,7 @@ impl Gateway {
     /// post-200 truncation (`FailedAfterPartial` → transient, does not eject).
     fn relay_raw_sse(
         ctx: &RequestContext,
+        attempt_deadline: std::time::Instant,
         response: UpstreamResponse,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
@@ -5284,15 +5293,40 @@ impl Gateway {
         // `message_start`'s input tokens are real whether or not the turn
         // finished.
         let mut tap = AnthropicSseUsageTap::default();
-        let outcome = Self::relay_raw_sse_frames(ctx, response, emit, record, &mut tap);
+        let outcome =
+            Self::relay_raw_sse_frames(ctx, attempt_deadline, response, emit, record, &mut tap);
         if let Some(usage) = tap.into_usage() {
             record.usage = Some(usage);
         }
         outcome
     }
 
+    fn raw_stream_cancellation(
+        ctx: &RequestContext,
+        committed: bool,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Option<Result<StreamOutcome, ErrorEnvelope>> {
+        if !ctx.is_cancelled() {
+            return None;
+        }
+        if let Some(error) = Self::lifecycle_cancellation(ctx) {
+            if !committed {
+                return Some(Err(error));
+            }
+            record.error_code = Some(error.code);
+            record.status = error.http_status;
+            return Some(Ok(StreamOutcome::FailedAfterPartial));
+        }
+        if !committed {
+            Self::emit_cancelled(emit);
+        }
+        Some(Ok(StreamOutcome::ClientCancelled))
+    }
+
     fn relay_raw_sse_frames(
         ctx: &RequestContext,
+        attempt_deadline: std::time::Instant,
         response: UpstreamResponse,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
@@ -5311,11 +5345,8 @@ impl Gateway {
         // did not.
         let mut pending: Vec<u8> = Vec::new();
         loop {
-            if ctx.is_cancelled() {
-                if !committed {
-                    Self::emit_cancelled(emit);
-                }
-                return Ok(StreamOutcome::ClientCancelled);
+            if let Some(outcome) = Self::raw_stream_cancellation(ctx, committed, emit, record) {
+                return outcome;
             }
             match reader.read(&mut buffer) {
                 Ok(0) => {
@@ -5331,31 +5362,56 @@ impl Gateway {
                     return Ok(StreamOutcome::Complete);
                 }
                 Ok(read) => {
-                    if !committed && !emit(Reply::BeginStream) {
-                        return Ok(StreamOutcome::ClientCancelled);
-                    }
-                    committed = true;
                     pending.extend_from_slice(&buffer[..read]);
                     let boundary = match std::str::from_utf8(&pending) {
                         Ok(_) => pending.len(),
-                        Err(error) => error.valid_up_to(),
+                        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                        Err(_) => {
+                            let error = ErrorEnvelope::new(
+                                ErrorCode::ProviderProtocolError,
+                                502,
+                                "upstream stream contains invalid UTF-8",
+                            );
+                            if committed {
+                                record.error_code = Some(error.code);
+                                record.status = error.http_status;
+                                return Ok(StreamOutcome::FailedAfterPartial);
+                            }
+                            return Err(error);
+                        }
                     };
                     if boundary == 0 {
                         continue;
                     }
                     let chunk = String::from_utf8(pending.drain(..boundary).collect())
                         .expect("valid up to the boundary");
+                    if !committed && !emit(Reply::BeginStream) {
+                        return Ok(StreamOutcome::ClientCancelled);
+                    }
+                    committed = true;
                     tap.observe(&chunk);
                     if !emit(Reply::Chunk(chunk)) {
                         return Ok(StreamOutcome::ClientCancelled);
                     }
                 }
                 Err(_) => {
-                    if ctx.is_cancelled() {
-                        if !committed {
-                            Self::emit_cancelled(emit);
+                    if let Some(outcome) =
+                        Self::raw_stream_cancellation(ctx, committed, emit, record)
+                    {
+                        return outcome;
+                    }
+                    if std::time::Instant::now() >= attempt_deadline {
+                        let error = ErrorEnvelope::new(
+                            ErrorCode::Timeout,
+                            504,
+                            "upstream attempt deadline exceeded",
+                        );
+                        if committed {
+                            record.error_code = Some(error.code);
+                            record.status = error.http_status;
+                            return Ok(StreamOutcome::FailedAfterPartial);
                         }
-                        return Ok(StreamOutcome::ClientCancelled);
+                        return Err(error);
                     }
                     if committed {
                         record.error_code = Some(ErrorCode::TransportTruncated);
@@ -5419,7 +5475,6 @@ impl Gateway {
         // "approved" would be the transport second-guessing a question already
         // answered, and answering it wrong meant silently dropping to Legacy.
         CommunityCallPolicyV1::new(
-            upstream.dialect,
             self.egress.policy.mode,
             body_mode,
             upstream.auth_arms.clone(),
