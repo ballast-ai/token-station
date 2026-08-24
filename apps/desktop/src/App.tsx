@@ -303,6 +303,7 @@ function StationApp() {
   const agentConnectInFlightRef = useRef(false);
   const pendingServeRef = useRef<ServeView | null>(null);
   const viewRef = useRef(view);
+  const lastConnectionAgentIdRef = useRef<string | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
   const pendingApplyRevisionRef = useRef<number | null>(null);
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
@@ -390,6 +391,12 @@ function StationApp() {
       setView("agents");
     }
   }, [scanSucceeded, view, visibleRegistry]);
+
+  useEffect(() => {
+    if (view.startsWith("agent:")) {
+      lastConnectionAgentIdRef.current = view.slice("agent:".length);
+    }
+  }, [view]);
 
   const setAgentVisible = useCallback((agentId: string, visible: boolean) => {
     const detected = detectedAgentIdsRef.current.has(agentId);
@@ -781,21 +788,27 @@ function StationApp() {
 
   const navigate = (next: AppView) => {
     if (freeProviderBusy) return;
-    if (next === view) return;
+    const lastConnectionAgentId = lastConnectionAgentIdRef.current;
+    const target = next === "agents"
+      && lastConnectionAgentId
+      && visibleAgentIds.has(lastConnectionAgentId)
+      ? `agent:${lastConnectionAgentId}` as AppView
+      : next;
+    if (target === view) return;
     if (
-      next === "usage" ||
-      next === "usage-management" ||
-      next === "quota-usage" ||
-      next === "settings" ||
-      next === "logs" ||
-      next === "add-provider" ||
-      next === "add-model"
+      target === "usage" ||
+      target === "usage-management" ||
+      target === "quota-usage" ||
+      target === "settings" ||
+      target === "logs" ||
+      target === "add-provider" ||
+      target === "add-model"
     ) {
       viewHistoryRef.current.push(view);
     } else {
       viewHistoryRef.current = [];
     }
-    setView(next);
+    setView(target);
   };
 
   const navigateBack = () => {

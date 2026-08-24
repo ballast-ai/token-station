@@ -14,11 +14,11 @@
 #   - GNU tar ustar format, fixed order, owner, timestamps, and gzip -n make the
 #     archive deterministic.
 #
-# Output goes to dist/: a tar.gz containing the CLI binary, five official plugin
+# Output goes to dist/: a tar.gz containing the CLI binary, six official plugin
 # packages, example configuration, and LICENSE.
 #
 # Official binaries embed official plugins in the builtin tier from architecture
-# section 12.1. Build the five WASM plugins first, then build the CLI with
+# section 12.1. Build the six WASM packages first, then build the CLI with
 # builtin-plugins and TOKEN_STATION_PLUGINS_DIST. include_bytes! embeds plugin
 # bytes so the standalone binary needs no installation. The tarball also carries
 # plugins-dist; registry prefers builtin for the same dialect, so duplication is

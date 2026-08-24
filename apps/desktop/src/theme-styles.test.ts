@@ -117,6 +117,14 @@ describe("retained page theme styles", () => {
     expect(selectedAgentRule).toMatch(/background:\s*var\(--signal-soft\)/);
   });
 
+  it("uses one focus indicator for enterprise connection inputs", () => {
+    const inputFocusRule = appCss.match(
+      /\.enterprise-connection-panel \[data-slot="input"\]:focus-visible\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(inputFocusRule).toMatch(/outline:\s*none/);
+  });
+
   it("keeps the proxy control width stable across runtime states", () => {
     const baseRuntimeRules = Array.from(
       appCss.matchAll(/\.station-runtime-pill\[data-slot="button"\]\s*\{([^}]*)\}/g),

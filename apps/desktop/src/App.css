@@ -5559,15 +5559,6 @@ pre.block {
   background: var(--signal);
 }
 
-.station-nav-alert {
-  width: 5px;
-  height: 5px;
-  margin-left: 1px;
-  border-radius: 50%;
-  background: var(--warning);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 15%, transparent);
-}
-
 .station-header-actions {
   display: flex;
   align-items: center;
@@ -6254,6 +6245,10 @@ pre.block {
   display: grid;
   align-content: start;
   gap: 16px;
+}
+
+.enterprise-connection-panel [data-slot="input"]:focus-visible {
+  outline: none;
 }
 
 .enterprise-credential-grid {

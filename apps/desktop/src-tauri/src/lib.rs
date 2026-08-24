@@ -8418,7 +8418,7 @@ mod tests {
         )
         .expect("the self-test report is JSON");
         assert_eq!(report["passed"], json!(true));
-        assert_eq!(report["plugins"].as_array().map(Vec::len), Some(5));
+        assert_eq!(report["plugins"].as_array().map(Vec::len), Some(6));
         assert_eq!(report["storage"]["credential_read"], json!(false));
         assert_eq!(report["gateway"]["loadable"], json!(true));
         assert!(report["gateway"]["provider_dialects"]

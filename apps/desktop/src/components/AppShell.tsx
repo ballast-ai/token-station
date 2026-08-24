@@ -138,9 +138,6 @@ export default function AppShell({
                 <span data-onboarding-target={item.view === "settings" ? "settings" : undefined}>
                   {label}
                 </span>
-                {item.view === "agents" && agents.length > connectedAgents && (
-                  <span className="station-nav-alert" aria-hidden="true" />
-                )}
               </Button>
             );
           })}

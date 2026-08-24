@@ -1335,6 +1335,7 @@ describe("desktop station navigation", () => {
     expect(nav.getByRole("button", { name: "主页" })).toHaveAttribute("aria-current", "page");
     expect(nav.getByRole("button", { name: "路由" })).toBeInTheDocument();
     expect(nav.getByRole("button", { name: "Agent" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByLabelText("主导航").querySelector(".station-nav-alert")).toBeNull();
     expect(nav.queryByRole("button", { name: "日志" })).toBeNull();
 
     expect(nav.getByRole("button", { name: "主页" })).toHaveAttribute("aria-current", "page");
@@ -1348,6 +1349,26 @@ describe("desktop station navigation", () => {
     expect(within(snapshot).queryByText("额度优先")).toBeNull();
     expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
+  });
+
+  it("returns to the last opened Agent after visiting another primary page", async () => {
+    const user = userEvent.setup();
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openAgent(user, "Codex");
+    await user.click(navigation().getByRole("button", { name: "主页" }));
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+
+    await user.click(navigation().getByRole("button", { name: "Agent" }));
+    expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
+    expect(within(screen.getByRole("navigation", { name: "发现 Agent 列表" }))
+      .getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
   });
 
   it("returns Home after cancelling a provider flow opened from the status menu", async () => {

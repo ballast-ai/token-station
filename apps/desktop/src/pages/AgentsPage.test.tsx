@@ -65,10 +65,17 @@ describe("AgentsPage split workspaces", () => {
     expect(screen.getByRole("heading", { name: "路由配置" })).toBeInTheDocument();
     expect(within(selector).getByRole("button", { name: "全局路由" })).toBeVisible();
     expect(within(selector).getByRole("button", { name: "企业路由" })).toBeVisible();
-    expect(within(selector).getByRole("button", { name: "企业路由" })).toHaveTextContent("端点");
+    const globalRoute = within(selector).getByRole("button", { name: "全局路由" });
+    const enterpriseRoute = within(selector).getByRole("button", { name: "企业路由" });
+    expect(globalRoute).toHaveTextContent("使用中");
+    expect(globalRoute).toHaveAttribute("aria-current", "page");
+    expect(enterpriseRoute).toHaveTextContent("托管端点");
+    expect(enterpriseRoute).not.toHaveAttribute("aria-current");
     expect(within(selector).queryByRole("button", { name: "重新扫描" })).toBeNull();
     expect(within(selector).queryByText("所有 Agent 的默认策略")).toBeNull();
     const disclosure = within(selector).getByRole("button", { name: "Agent 路由" });
+    expect(globalRoute.compareDocumentPosition(disclosure) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(disclosure.compareDocumentPosition(enterpriseRoute) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(disclosure).toHaveAttribute("aria-expanded", "false");
     expect(within(selector).queryByRole("button", { name: "Claude Code" })).toBeNull();
 

@@ -133,22 +133,9 @@ export default function AgentsPage({
                         <TokenStationMark size={36} />
                       </span>
                       <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong></span>
-                      <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认", "預設", "デフォルト")}</Badge>
-                    </Button>
-                    <Button
-                      className="agent-master-item agent-master-enterprise"
-                      variant="ghost"
-                      type="button"
-                      aria-label={copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}
-                      title={copy("Enterprise endpoint connection", "企业端点接入", "企業端點接入", "企業エンドポイント接続")}
-                      aria-current={enterpriseSelected ? "page" : undefined}
-                      onClick={onOpenEnterprise}
-                    >
-                      <span className="agent-master-icon enterprise-route-mark" aria-hidden="true">
-                        <Building2 />
-                      </span>
-                      <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</strong></span>
-                      <Badge variant={enterpriseSelected ? "default" : "outline"}>{copy("Endpoint", "端点", "端點", "エンドポイント")}</Badge>
+                      <Badge variant={homeSelected ? "default" : "outline"}>{homeSelected
+                        ? copy("In use", "使用中", "使用中", "使用中")
+                        : copy("Shared default", "共享默认", "共享預設", "共有デフォルト")}</Badge>
                     </Button>
                   </>
                 )}
@@ -222,6 +209,30 @@ export default function AgentsPage({
                       </div>
                     )}
                   </div>
+                )}
+                {!connections && (
+                  <Button
+                    className="agent-master-item agent-master-enterprise"
+                    variant="ghost"
+                    type="button"
+                    aria-label={copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}
+                    title={copy(
+                      "Connect and use a server-managed routing endpoint",
+                      "接入并使用由企业服务管理模型与策略的路由端点",
+                      "接入並使用由企業服務管理模型與策略的路由端點",
+                      "企業サービスがモデルとポリシーを管理するルーティングエンドポイントに接続して使用します",
+                    )}
+                    aria-current={enterpriseSelected ? "page" : undefined}
+                    onClick={onOpenEnterprise}
+                  >
+                    <span className="agent-master-icon enterprise-route-mark" aria-hidden="true">
+                      <Building2 />
+                    </span>
+                    <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</strong></span>
+                    <Badge variant={enterpriseSelected ? "default" : "outline"}>{enterpriseSelected
+                      ? copy("In use", "使用中", "使用中", "使用中")
+                      : copy("Managed endpoint", "托管端点", "託管端點", "管理対象エンドポイント")}</Badge>
+                  </Button>
                 )}
               </nav>
             </ScrollArea>
