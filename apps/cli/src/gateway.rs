@@ -4981,6 +4981,12 @@ impl Gateway {
             None,
         );
 
+        // Claim the engine before the send, the way the South path does. An
+        // attempt that never gets a response was still performed by this
+        // engine, and filing it as `unknown` hides exactly the failures an
+        // operator grouping Stats by engine is looking for.
+        *provider_call_engine = ProviderCallOutcome::native();
+
         let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
         {
             Err(_) if ctx.is_cancelled() => {
@@ -5000,12 +5006,11 @@ impl Gateway {
             }
             Ok(response) => response,
         };
-        // The attempt record carries the same two facts for a native payload as
-        // for a Canonical one. Without them a served native request showed up in
-        // Stats with no engine and no upstream status — which is how a request
-        // that plainly went out could be filed as `(unrouted)`.
+        // The attempt record carries the upstream's real status too. Without
+        // it a served native request showed up in Stats with no engine and no
+        // upstream status — which is how a request that plainly went out could
+        // be filed as `(unrouted)`.
         *upstream_http_status = Some(response.status);
-        *provider_call_engine = ProviderCallOutcome::native();
 
         if let Err(error) = EgressPolicy::reject_redirect(response.status) {
             record_conversion(

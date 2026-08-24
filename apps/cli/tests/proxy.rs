@@ -864,6 +864,83 @@ fn start_native_anthropic_proxy_with(
 /// native payload outright — the request fell through to the Canonical path,
 /// where the adapter rejects server-tool blocks — so a server-tool conversation
 /// was simply unservable in that mode.
+/// Two native upstreams in one pool, so a failure on the first has somewhere
+/// to go. The point is that native attempts fall over the same way translated
+/// ones do — the escape hatch is a payload shape, not a second router.
+/// The turn shape the native escape hatch exists for: it declares a tool the
+/// upstream runs itself, which Canonical `ToolDef` cannot express.
+fn native_server_tool_turn() -> serde_json::Value {
+    json!({
+        "model": "deepseek-chat",
+        "max_tokens": 256,
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "messages": [
+            {"role": "user", "content": "search it"},
+            {"role": "assistant", "content": [
+                {"type": "server_tool_use", "id": "st_1", "name": "web_search", "input": {}},
+                {"type": "web_search_tool_result", "tool_use_id": "st_1", "content": []}
+            ]},
+            {"role": "user", "content": "and again"}
+        ]
+    })
+}
+
+fn start_two_native_upstreams_proxy(
+    primary_base: String,
+    backup_base: String,
+    key_file: &Path,
+) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-native-pair-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let upstream = |base: String| {
+        json!({
+            "provider": "anthropic",
+            "api_dialect": "anthropic-native",
+            "base_url": base,
+            "auth": { "slot": "provider_api_key", "file": key_file },
+            "models": [
+                {
+                    "model": "deepseek-chat",
+                    "tool": true,
+                    "tool_state": "verified",
+                    "context_window": 128_000
+                }
+            ]
+        })
+    };
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-anthropic"],
+            "providers": {
+                "openai-compatible": "provider-openai-compatible-v2",
+                "anthropic": "provider-anthropic-v2"
+            }
+        },
+        "upstreams": {
+            "native_primary": upstream(primary_base),
+            "native_backup": upstream(backup_base)
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "native_primary", "model": "deepseek-chat" },
+                { "upstream": "native_backup", "model": "deepseek-chat" }
+            ] },
+            "default_pool": "main"
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("paired native config parses");
+    spawn_proxy(&config)
+}
+
 fn start_quota_first_native_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
@@ -1051,6 +1128,26 @@ fn start_proxy_with_missing_store_secret(upstream: &MockUpstream) -> Proxy {
 }
 
 /// One row out of the metrics store, as (column -> debug-rendered value).
+/// Every attempt's engine and fallback reason, in attempt order.
+///
+/// The native path is only "folded into dispatch" if its receipt looks like
+/// every other attempt's. Asserting the parent `requests` row proves a row
+/// survived; asserting this proves *what* was filed.
+fn attempt_engines(data_dir: &Path) -> Vec<(String, Option<String>)> {
+    let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
+    let mut statement = db
+        .prepare(
+            "SELECT provider_call_engine, south_fallback_reason
+               FROM attempts ORDER BY ordinal",
+        )
+        .expect("attempt engine query prepares");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("attempt engine query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("attempt engine rows decode")
+}
+
 fn last_row(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
     let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -7484,6 +7581,112 @@ fn an_empty_first_delta_opens_no_text_block() {
 /// adapter rejects `server_tool_use` blocks — a conversation that Tiered mode
 /// served fine was simply unservable. The payload's shape was deciding which
 /// routing modes existed.
+/// A native attempt that cannot reach its upstream hands over to the next in
+/// the pool, and both attempts are on the receipt.
+///
+/// Before the native payload entered `dispatch`, the passthrough was its own
+/// control plane: one upstream, no pool, no second attempt. Nothing tested
+/// that, because the code could not fall over at all. This is the evidence for
+/// the structural claim, not a detail of it.
+#[test]
+fn a_native_attempt_that_cannot_reach_its_upstream_hands_over_to_the_next() {
+    let served = json!({
+        "id": "msg_native_backup",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "backup served"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    // Bind a port, learn it, drop the listener: an address that refuses.
+    let refused_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        port
+    };
+    let backup = MockUpstream::start(vec![vec![http_json(200, &served.to_string())]]);
+    let key = key_file("native-refused", "sk-native-refused");
+    let proxy = start_two_native_upstreams_proxy(
+        format!("http://127.0.0.1:{refused_port}"),
+        backup.base_url(),
+        &key,
+    );
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+
+    assert_eq!(status, 200, "the backup upstream serves the turn: {body}");
+    assert!(
+        body.contains("backup served"),
+        "the client reads the backup's answer: {body}"
+    );
+    assert_eq!(backup.hits(), 1, "the backup was tried exactly once");
+
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(
+        row["upstream"], "Text(\"native_backup\")",
+        "the receipt names the upstream that settled the request"
+    );
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("native".to_owned(), None), ("native".to_owned(), None)],
+        "both attempts are filed, both as native"
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+/// An HTTP error from a native upstream reaches the client byte for byte, and
+/// the pool's next upstream is never tried.
+///
+/// This diverges from the translated path, which retries a 503 across the
+/// pool. `native_attempt` emits the upstream's status and body the moment it
+/// sees `>= 400` and returns `Ok(FailedBeforeOutput)`, so `dispatch` never
+/// sees an error to fall over on — and could not act on one anyway, the reply
+/// having already been sent. That is deliberate for 4xx: Claude Code reads the
+/// original error body to self-heal, and a wrapped envelope breaks it.
+///
+/// Whether it should also hold for 5xx is a question this test does not
+/// answer. It pins what the code does so the answer is a decision rather than
+/// a discovery. See the corrective plan's retrospective.
+#[test]
+fn a_native_upstream_error_reaches_the_client_verbatim_and_ends_the_request() {
+    let upstream_error = r#"{"error":{"type":"api_error","message":"primary is down"}}"#;
+    let primary = MockUpstream::start(vec![vec![http_json(503, upstream_error)]]);
+    let backup = MockUpstream::start(vec![vec![http_json(
+        200,
+        r#"{"id":"never","type":"message","role":"assistant","model":"deepseek-chat","content":[],"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    )]]);
+    let key = key_file("native-verbatim", "sk-native-verbatim");
+    let proxy = start_two_native_upstreams_proxy(primary.base_url(), backup.base_url(), &key);
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+
+    assert_eq!(status, 503, "the upstream's own status reaches the client");
+    assert_eq!(
+        body.trim(),
+        upstream_error,
+        "and its body byte for byte, not a token-station envelope"
+    );
+    assert_eq!(primary.hits(), 1);
+    assert_eq!(
+        backup.hits(),
+        0,
+        "an emitted reply cannot be unsent, so no second upstream is tried"
+    );
+
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(503)");
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("native".to_owned(), None)],
+        "one attempt, filed as native, with the real status"
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn quota_first_serves_the_native_payload_it_used_to_refuse() {
     let upstream_answer = json!({
@@ -7531,6 +7734,17 @@ fn quota_first_serves_the_native_payload_it_used_to_refuse() {
     let row = last_row(&proxy.data_dir);
     assert_eq!(row["status"], "Integer(200)");
     assert_eq!(row["upstream"], "Text(\"deepseek_native\")");
+
+    // And filed as its own engine, not silently as legacy. The parent row
+    // above only proves a row survived the transaction; this proves what the
+    // attempt reported. `south_fallback_reason` is null because a native
+    // attempt never chose South and then retreated — it was never a South
+    // call, so there is nothing to explain.
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("native".to_owned(), None)],
+        "a native attempt files one receipt, under the native engine"
+    );
 
     std::fs::remove_file(key).ok();
 }
