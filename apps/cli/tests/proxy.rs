@@ -7846,3 +7846,50 @@ fn quota_first_serves_the_native_payload_it_used_to_refuse() {
 
     std::fs::remove_file(key).ok();
 }
+
+/// A character the network splits across two reads reaches the client whole.
+///
+/// The relay's own doc comment promises the client gets the upstream's frames
+/// "byte-for-byte, unmodified". It did not: each read was decoded on its own
+/// with `String::from_utf8_lossy`, so a multi-byte character straddling a read
+/// boundary became U+FFFD — reliably, since a read returns whatever has
+/// arrived rather than a whole number of characters. On a real network with
+/// ~1400-byte segments, any long Chinese, Japanese or emoji-bearing answer
+/// hits this.
+///
+/// The repository had already solved this once: `3fec191`, "byte-level SSE
+/// decoding to preserve UTF-8 across reads". The translated path still has it,
+/// feeding bytes to `SseFrameDecoder`. This relay was written afterwards and
+/// went back to decoding per read, which is why the fix needed making twice
+/// and why this test exists rather than a comment.
+#[test]
+fn a_character_split_across_two_reads_reaches_the_client_whole() {
+    let marker = "界"; // three bytes, deliberately cut between the first and second
+    let marker_bytes = marker.as_bytes();
+    let head = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"";
+    let mut first = head.to_vec();
+    first.push(marker_bytes[0]);
+    let mut second = marker_bytes[1..].to_vec();
+    second.extend_from_slice(b"\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    // MockUpstream writes each segment with its own flush, so the proxy's
+    // reads land inside the character rather than around it.
+    let mock = MockUpstream::start(vec![vec![first, second]]);
+    let key = key_file("native-utf8", "sk-native-utf8");
+    let proxy = start_quota_first_native_proxy(&mock, &key);
+
+    let mut turn = native_server_tool_turn();
+    turn["stream"] = json!(true);
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(marker),
+        "the character arrives intact: {body}"
+    );
+    assert!(
+        !body.contains('\u{fffd}'),
+        "and nothing was replaced on the way: {body}"
+    );
+
+    std::fs::remove_file(key).ok();
+}

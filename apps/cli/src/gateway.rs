@@ -5218,6 +5218,15 @@ impl Gateway {
         let mut reader = response.into_reader();
         let mut buffer = [0u8; STREAM_READ];
         let mut committed = false;
+        // Bytes of a character the last read cut in half. A read returns
+        // whatever has arrived, not a whole number of characters, so a
+        // multi-byte character routinely straddles two of them — and decoding
+        // each read on its own turned every such character into U+FFFD. The
+        // repository has been here before: `3fec191` added byte-level SSE
+        // decoding for exactly this, and the translated path keeps it by
+        // feeding bytes to `SseFrameDecoder`. This relay was written later and
+        // did not.
+        let mut pending: Vec<u8> = Vec::new();
         loop {
             if ctx.is_cancelled() {
                 if !committed {
@@ -5226,13 +5235,33 @@ impl Gateway {
                 return Ok(StreamOutcome::ClientCancelled);
             }
             match reader.read(&mut buffer) {
-                Ok(0) => return Ok(StreamOutcome::Complete),
+                Ok(0) => {
+                    // A stream that ends mid-character really is truncated;
+                    // show the damage rather than drop the bytes.
+                    if !pending.is_empty() {
+                        let tail = String::from_utf8_lossy(&pending).into_owned();
+                        tap.observe(&tail);
+                        if !emit(Reply::Chunk(tail)) {
+                            return Ok(StreamOutcome::ClientCancelled);
+                        }
+                    }
+                    return Ok(StreamOutcome::Complete);
+                }
                 Ok(read) => {
                     if !committed && !emit(Reply::BeginStream) {
                         return Ok(StreamOutcome::ClientCancelled);
                     }
                     committed = true;
-                    let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                    pending.extend_from_slice(&buffer[..read]);
+                    let boundary = match std::str::from_utf8(&pending) {
+                        Ok(_) => pending.len(),
+                        Err(error) => error.valid_up_to(),
+                    };
+                    if boundary == 0 {
+                        continue;
+                    }
+                    let chunk = String::from_utf8(pending.drain(..boundary).collect())
+                        .expect("valid up to the boundary");
                     tap.observe(&chunk);
                     if !emit(Reply::Chunk(chunk)) {
                         return Ok(StreamOutcome::ClientCancelled);
