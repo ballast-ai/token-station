@@ -2411,7 +2411,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "token-station-cli"
-version = "1.2.4"
+version = "1.3.0"
 dependencies = [
  "axum",
  "base64",
