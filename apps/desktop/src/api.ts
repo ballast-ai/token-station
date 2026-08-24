@@ -993,8 +993,6 @@ export const testProvider = (name: string) =>
   invoke<ProviderTestResult[]>("test_provider", { name });
 
 export const testModelChatStream = async (
-  upstream: string,
-  model: string,
   messages: ModelTestMessage[],
   requestId: string,
   onDelta: (event: ModelTestStreamEvent) => void,
@@ -1004,8 +1002,6 @@ export const testModelChatStream = async (
   });
   try {
     return await invoke<ModelTestReply>("test_model_chat_stream", {
-      upstream,
-      model,
       messages,
       requestId,
     });

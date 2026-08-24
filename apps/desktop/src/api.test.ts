@@ -305,8 +305,6 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     });
 
     const reply = await testModelChatStream(
-      "p",
-      "m",
       [{ role: "user", content: "hello" }],
       "model-test-1",
       onDelta,
@@ -314,8 +312,6 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
     expect(listenMock).toHaveBeenCalledWith("model-test-stream", expect.any(Function));
     expect(invokeMock).toHaveBeenCalledWith("test_model_chat_stream", {
-      upstream: "p",
-      model: "m",
       messages: [{ role: "user", content: "hello" }],
       requestId: "model-test-1",
     });

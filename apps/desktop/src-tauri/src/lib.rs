@@ -37,7 +37,7 @@ use token_station_cli::bodylog::{valid_request_id, BodyLog, PlaintextExchange};
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
 use token_station_cli::cancel::{CancelReason, CancelToken};
 use token_station_cli::config::{
-    ClientConfig, EgressConfig, HostRoutingConfig, PluginsConfig, RoutingMode as HostRoutingMode,
+    ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
 };
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, Reply, StageStatus};
 use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
@@ -4724,8 +4724,6 @@ async fn test_model_chat_stream(
     app: AppHandle,
     state: State<'_, AppStateManaged>,
     stream_state: State<'_, ModelTestStreamState>,
-    upstream: String,
-    model: String,
     messages: Vec<ModelTestMessage>,
     request_id: String,
 ) -> Result<ModelTestReply, String> {
@@ -4733,8 +4731,6 @@ async fn test_model_chat_stream(
         app,
         state.inner(),
         stream_state.inner(),
-        upstream,
-        model,
         messages,
         request_id,
     )
@@ -4745,45 +4741,15 @@ async fn run_model_test_chat<R: Runtime>(
     app: AppHandle<R>,
     state: &AppStateManaged,
     stream_state: &ModelTestStreamState,
-    upstream: String,
-    model: String,
     messages: Vec<ModelTestMessage>,
     request_id: String,
 ) -> Result<ModelTestReply, String> {
     validate_model_test_messages(&messages)?;
     validate_model_test_request_id(&request_id)?;
-    let upstream = upstream.trim().to_owned();
-    let model = model.trim().to_owned();
-    let mut config = {
+    let config = {
         let inner = state.0.lock().unwrap();
-        let config = inner.materialize()?;
-        let provider = config
-            .upstreams
-            .get(&upstream)
-            .ok_or_else(|| format!("Provider `{upstream}` is no longer configured"))?;
-        if !provider
-            .models
-            .iter()
-            .any(|candidate| candidate.model == model)
-        {
-            return Err(format!(
-                "Model `{model}` is no longer configured for Provider `{upstream}`"
-            ));
-        }
-        config
+        inner.materialize()?
     };
-
-    let target = UpstreamModel::new(
-        UpstreamRef::new(upstream.clone())
-            .map_err(|error| format!("Provider name is invalid: {error}"))?,
-        model.clone(),
-    );
-    config.routing = Some(HostRoutingConfig {
-        mode: HostRoutingMode::Direct,
-        direct_target: Some(target),
-    });
-    config.router.local_only = false;
-    config.router.allow_cloud_fallback = false;
 
     let request_context =
         RequestContext::detached(Duration::from_secs(120), Duration::from_secs(120))
@@ -4804,7 +4770,7 @@ async fn run_model_test_chat<R: Runtime>(
         let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
         let gateway = Gateway::new_with_provider_runtime(&config, recorder, provider_runtime)?;
         let body = serde_json::to_vec(&json!({
-            "model": model,
+            "model": "auto",
             "messages": messages,
             "stream": true,
             "max_tokens": 1024
@@ -14162,7 +14128,7 @@ mod tests {
     }
 
     #[test]
-    fn model_test_command_uses_an_exact_in_memory_route_and_cleans_registration() {
+    fn model_test_command_uses_the_home_route_and_cleans_registration() {
         let root = scratch_home("model-test-command");
         let (upstream, fixture) = serve_chat_completion("model-test-ok", 1);
         let mut draft = gateway_template_for_test(&root);
@@ -14170,6 +14136,10 @@ mod tests {
             "provider": "openai-compatible",
             "base_url": upstream,
             "models": [{"model": "small"}]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "fixture", "model": "small"}
         });
         let app = tauri::test::mock_app();
         assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
@@ -14183,8 +14153,6 @@ mod tests {
             app.handle().clone(),
             app.state::<AppStateManaged>().inner(),
             app.state::<ModelTestStreamState>().inner(),
-            "fixture".to_owned(),
-            "small".to_owned(),
             vec![ModelTestMessage {
                 role: "user".to_owned(),
                 content: "ping".to_owned(),

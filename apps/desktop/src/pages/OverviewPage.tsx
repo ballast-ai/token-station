@@ -142,16 +142,6 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             "代理运行状态、当前路由、请求与成本，一屏看清。", "代理執行狀態、當前路由、請求與成本，一屏看清。", "プロキシのステータス、現在のルーティング、リクエストとコストを一画面で確認できます。"
           )}</p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="overview-model-test-action"
-          disabled={modelCount === 0}
-          onClick={() => setModelTestOpen(true)}
-        >
-          <MessageSquareText aria-hidden="true" />
-          {copy("Test model", "测试模型", "測試模型", "モデルをテスト")}
-        </Button>
       </header>
 
       <section className="overview-metrics overview-runtime-metrics" aria-label={copy("System summary", "系统摘要", "系統摘要", "システムサマリー")}>
@@ -173,7 +163,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
       </section>
 
       <section className="overview-summary-grid" aria-label={copy("Workspace summaries", "工作区摘要", "工作區摘要", "ワークスペースサマリー")}>
-        <Card className="overview-summary-card" role="region" aria-label={copy("Agent overview", "Agent 概览", "Agent 總覽", "Agentの概要")}>
+        <Card className="overview-summary-card overview-agent-summary" role="region" aria-label={copy("Agent overview", "Agent 概览", "Agent 總覽", "Agentの概要")}>
           <CardHeader>
             <span><Bot aria-hidden="true" />Agent</span>
             <CardTitle>{copy(
@@ -196,6 +186,16 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <button className="overview-summary-link" type="button" aria-label={copy("Open Agents", "打开 Agent", "開啟 Agent", "Agentを開く")} onClick={() => onNavigate("agents")}>
               <ArrowUpRight aria-hidden="true" />
             </button>
+            <Button
+              type="button"
+              variant="outline"
+              className="overview-model-test-action"
+              disabled={modelCount === 0}
+              onClick={() => setModelTestOpen(true)}
+            >
+              <MessageSquareText aria-hidden="true" />
+              {copy("Test model", "测试模型", "測試模型", "モデルをテスト")}
+            </Button>
           </CardContent>
         </Card>
 
@@ -291,8 +291,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
       <ModelTestConsole
         open={modelTestOpen}
         onOpenChange={setModelTestOpen}
-        providers={state.providers}
-        initialTarget={state.direct_target ?? null}
+        routingMode={state.routing_mode}
       />
     </div>
   );

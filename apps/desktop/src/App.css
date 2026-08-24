@@ -10430,6 +10430,9 @@ samp {
 }
 
 .overview-model-test-action[data-slot="button"] {
+  position: absolute;
+  left: 16px;
+  bottom: 12px;
   min-width: 112px;
   height: 34px;
   border-color: color-mix(in srgb, var(--signal) 42%, var(--line));
@@ -10441,6 +10444,10 @@ samp {
 .overview-model-test-action[data-slot="button"]:hover {
   border-color: color-mix(in srgb, var(--signal) 64%, var(--line));
   background: color-mix(in srgb, var(--signal) 12%, var(--surface));
+}
+
+.station-content-overview .overview-agent-summary > [data-slot="card-content"] {
+  padding-bottom: 58px;
 }
 
 .model-test-dialog[data-slot="dialog-content"] {
@@ -10495,6 +10502,42 @@ samp {
   overflow: hidden;
   margin-top: 5px;
   font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-test-route-status {
+  min-width: 0;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 11px;
+  border: 1px solid color-mix(in srgb, var(--signal) 24%, var(--line));
+  border-radius: 10px;
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--signal) 5%, var(--surface));
+}
+.model-test-route-status > svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  color: var(--signal);
+}
+.model-test-route-status > span {
+  min-width: 0;
+  display: grid;
+}
+.model-test-route-status small {
+  color: var(--muted);
+  font-size: 8.5px;
+  line-height: 1.2;
+}
+.model-test-route-status strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 650;
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -10781,7 +10824,7 @@ samp {
     padding: 16px 48px 14px 16px;
   }
   .model-test-heading-copy [data-slot="dialog-description"] { white-space: normal; }
-  .model-test-target-trigger { max-width: 100%; }
+  .model-test-route-status { max-width: 100%; }
   .model-test-transcript { padding: 20px 16px; }
   .model-test-empty { padding: 24px; }
   .model-test-composer-shell { padding: 10px 12px 12px; }

@@ -260,7 +260,11 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "测试模型" }));
+    const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
+    const testButton = within(agentSummary).getByRole("button", { name: "测试模型" });
+    expect(document.querySelector(".overview-heading")?.contains(testButton)).toBe(false);
+
+    await user.click(testButton);
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
   });

@@ -1091,6 +1091,38 @@ it("不显示仅存在于注册表但启动扫描未发现安装的 Agent", asyn
 });
 
 describe("desktop station navigation", () => {
+  it("opens configured Models directly and reuses setup from Add model", async () => {
+    const user = userEvent.setup();
+    const configured = stateFixture({
+      providers: [{
+        name: "openai-main",
+        brand_id: "openai",
+        provider: "openai-compatible",
+        base_url: "https://api.openai.com/v1",
+        models: ["gpt-5.6-sol"],
+        has_auth: true,
+      }],
+    });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return configured;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    const primaryNavigation = within(await screen.findByRole("navigation", { name: /主导航|Main navigation/ }));
+    await user.click(primaryNavigation.getByRole("button", { name: "模型" }));
+
+    expect(await screen.findByRole("heading", { name: "模型", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "选择模型接入方式" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "添加模型" }));
+    const dialog = screen.getByRole("dialog", { name: "选择模型接入方式" });
+    expect(within(dialog).getByRole("button", { name: "先选供应商" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "先搜模型" })).toBeInTheDocument();
+  });
+
   it("keeps destination content and the fixed shell stable without entrance motion", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();
@@ -2868,7 +2900,18 @@ describe("desktop station navigation", () => {
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
     const user = userEvent.setup();
     mockInvokeImplementation(async (command) => {
-      if (["get_state", "add_provider_with_credential"].includes(command)) return stateFixture();
+      if (command === "get_state") return stateFixture();
+      if (command === "add_provider_with_credential") return stateFixture({
+        providers: [{
+          name: "openai",
+          brand_id: "openai",
+          provider: "openai",
+          base_url: "https://api.openai.com/v1",
+          models: ["gpt-5.1"],
+          has_auth: true,
+        }],
+        direct_target: { upstream: "openai", model: "gpt-5.1" },
+      });
       if (command === "preview_provider_endpoints") {
         return {
           chat: "https://api.openai.com/v1/chat/completions",

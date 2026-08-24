@@ -1,5 +1,6 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { ServeView } from "../api";
 import AppShell from "./AppShell";
@@ -21,25 +22,35 @@ function renderShell(
   view: Parameters<typeof AppShell>[0]["view"],
   serveOverride: Partial<ServeView> = {},
   navigationName = "主导航",
+  modelCount = 0,
 ) {
   const onNavigate = vi.fn();
-  render(
-    <LanguageProvider>
+  function ShellHarness() {
+    const [modelEntryOpen, setModelEntryOpen] = useState(false);
+    return (
       <AppShell
         view={view}
         serve={{ ...serve, ...serveOverride }}
         registry={[]}
         agents={[]}
         commandBusy={false}
+        modelCount={modelCount}
+        modelEntryOpen={modelEntryOpen}
+        onModelEntryOpenChange={setModelEntryOpen}
         onNavigate={onNavigate}
         onToggleServe={vi.fn()}
       >
         <div>content</div>
       </AppShell>
+    );
+  }
+  render(
+    <LanguageProvider>
+      <ShellHarness />
     </LanguageProvider>,
   );
   return {
-    navigation: within(screen.getByRole("navigation", { name: navigationName })),
+    navigation: within(document.querySelector(`[aria-label="${navigationName}"]`)!),
     onNavigate,
   };
 }
@@ -77,7 +88,7 @@ describe("AppShell Agent and routing navigation", () => {
   });
 
   it("does not lock scrolling for non-overview workspaces", () => {
-    renderShell("providers");
+    renderShell("providers", {}, "主导航", 1);
 
     expect(document.querySelector(".station-content"))
       .not.toHaveClass("station-content-overview");
@@ -112,13 +123,10 @@ describe("AppShell Agent and routing navigation", () => {
     expect(within(runtimeButton).queryByText("rev 141")).not.toBeInTheDocument();
   });
 
-  it("opens two model setup paths from the Models navigation item", async () => {
+  it("opens two model setup paths on an empty Models page", async () => {
     const user = userEvent.setup();
     const { navigation, onNavigate } = renderShell("overview");
-
     await user.click(navigation.getByRole("button", { name: "模型" }));
-
-    expect(onNavigate).toHaveBeenCalledWith("providers");
     const dialog = screen.getByRole("dialog", { name: "选择模型接入方式" });
     expect(within(dialog).getByRole("button", { name: "先选供应商" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "先搜模型" })).toBeInTheDocument();
@@ -126,5 +134,11 @@ describe("AppShell Agent and routing navigation", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "先搜模型" }));
     expect(onNavigate).toHaveBeenLastCalledWith("add-model");
+  });
+
+  it("does not open setup on a configured Models page", () => {
+    renderShell("providers", {}, "主导航", 1);
+
+    expect(screen.queryByRole("dialog", { name: "选择模型接入方式" })).toBeNull();
   });
 });
