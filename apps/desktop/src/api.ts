@@ -144,7 +144,14 @@ export interface ModelTestMessage {
 
 export interface ModelTestReply {
   content: string;
+  first_token_ms: number;
   latency_ms: number;
+}
+
+export interface ModelTestStreamEvent {
+  request_id: string;
+  delta: string;
+  first_token_ms: number | null;
 }
 
 export interface ModelDiscoveryView {
@@ -985,11 +992,30 @@ export const verifyEnterpriseRoute = (
 export const testProvider = (name: string) =>
   invoke<ProviderTestResult[]>("test_provider", { name });
 
-export const testModelChat = (
+export const testModelChatStream = async (
   upstream: string,
   model: string,
   messages: ModelTestMessage[],
-) => invoke<ModelTestReply>("test_model_chat", { upstream, model, messages });
+  requestId: string,
+  onDelta: (event: ModelTestStreamEvent) => void,
+) => {
+  const unlisten = await listen<ModelTestStreamEvent>("model-test-stream", (event) => {
+    if (event.payload.request_id === requestId) onDelta(event.payload);
+  });
+  try {
+    return await invoke<ModelTestReply>("test_model_chat_stream", {
+      upstream,
+      model,
+      messages,
+      requestId,
+    });
+  } finally {
+    unlisten();
+  }
+};
+
+export const cancelModelTestChat = (requestId: string) =>
+  invoke<void>("cancel_model_test_chat", { requestId });
 
 export const setProviderModelVision = (name: string, model: string, supported: boolean) =>
   invoke<StateView>("set_provider_model_vision", { name, model, supported });

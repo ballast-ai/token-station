@@ -10599,19 +10599,35 @@ samp {
   background: color-mix(in srgb, var(--signal) 10%, var(--surface-2));
 }
 .model-test-message.assistant > p { padding: 0 4px; }
-.model-test-message.error > p {
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--danger, #ef6a6a) 34%, var(--line));
-  border-radius: 10px;
+.model-test-message-error {
+  display: block;
+  width: fit-content;
+  margin: 9px 4px 0;
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--danger, #ef6a6a) 32%, var(--line));
+  border-radius: 8px;
   color: var(--danger, #ef6a6a);
   background: color-mix(in srgb, var(--danger, #ef6a6a) 7%, var(--surface));
+  font-size: 9px;
+  line-height: 1.45;
 }
-.model-test-message.pending > p svg {
+.model-test-waiting svg {
   width: 16px;
   height: 16px;
   color: var(--signal);
   animation: model-test-spin 0.9s linear infinite;
 }
+.model-test-stream-caret {
+  width: 2px;
+  height: 1em;
+  display: inline-block;
+  margin-left: 3px;
+  border-radius: 2px;
+  background: var(--signal);
+  vertical-align: -0.12em;
+  animation: model-test-caret 0.9s steps(2, jump-none) infinite;
+}
+.model-test-message.stopped .model-test-message-meta small { color: var(--muted); }
 
 .model-test-composer-shell {
   padding: 14px 18px 16px;
@@ -10658,9 +10674,10 @@ samp {
   color: var(--primary-foreground);
   background: var(--signal);
 }
-.model-test-spinner { animation: model-test-spin 0.9s linear infinite; }
+.model-test-stop-icon { width: 13px; height: 13px; fill: currentColor; }
 
 @keyframes model-test-spin { to { transform: rotate(360deg); } }
+@keyframes model-test-caret { 50% { opacity: 0.24; } }
 
 @media (max-width: 680px) {
   .station-content-overview .overview-heading { align-items: flex-start; }
@@ -10686,8 +10703,8 @@ samp {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .model-test-message.pending > p svg,
-  .model-test-spinner { animation: none; }
+  .model-test-waiting svg,
+  .model-test-stream-caret { animation: none; }
 }
 
 .station-content-overview .overview-runtime-metrics,

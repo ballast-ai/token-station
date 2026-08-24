@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Bot, LoaderCircle, MessageSquareText, SendHorizontal, Trash2 } from "lucide-react";
+import { Bot, LoaderCircle, MessageSquareText, SendHorizontal, Square, Trash2 } from "lucide-react";
 import type { ModelTestMessage, ProviderView, TierView } from "../api";
-import { testModelChat } from "../api";
+import { cancelModelTestChat, testModelChatStream } from "../api";
 import { ProviderIcon } from "../brandIcons";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Button } from "./ui/button";
@@ -31,7 +31,16 @@ interface ModelTestConsoleProps {
 type TranscriptItem = ModelTestMessage & {
   id: number;
   latencyMs?: number;
-  error?: boolean;
+  firstTokenMs?: number;
+  streaming?: boolean;
+  stopped?: boolean;
+  errorMessage?: string;
+};
+
+type ActiveRequest = {
+  requestId: string;
+  assistantId: number;
+  stopped: boolean;
 };
 
 const targetKey = (upstream: string, model: string) => `${upstream}\u0000${model}`;
@@ -50,7 +59,10 @@ export default function ModelTestConsole({
 }: ModelTestConsoleProps) {
   const { copy } = useLocalizedCopy();
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
   const nextId = useRef(1);
+  const nextRequestId = useRef(1);
+  const activeRequestRef = useRef<ActiveRequest | null>(null);
   const targets = useMemo(() => providers.flatMap((provider) => provider.models.map((model) => ({
     provider,
     model,
@@ -68,31 +80,69 @@ export default function ModelTestConsole({
   const [sending, setSending] = useState(false);
   const focusComposer = (delay = 60) => window.setTimeout(() => composerRef.current?.focus(), delay);
 
+  const cancelActiveRequest = (preservePartial: boolean) => {
+    const active = activeRequestRef.current;
+    if (!active) return;
+    active.stopped = true;
+    activeRequestRef.current = null;
+    void cancelModelTestChat(active.requestId);
+    setSending(false);
+    if (preservePartial) {
+      setItems((current) => current.flatMap((item) => {
+        if (item.id !== active.assistantId) return [item];
+        return item.content
+          ? [{ ...item, streaming: false, stopped: true }]
+          : [];
+      }));
+    }
+  };
+
   useEffect(() => {
     if (!targets.some((target) => target.key === selectedKey)) setSelectedKey(defaultKey);
   }, [defaultKey, selectedKey, targets]);
 
   useEffect(() => {
     if (open) return;
+    cancelActiveRequest(false);
     setItems([]);
     setDraft("");
     setSending(false);
     setSelectedKey(defaultKey);
   }, [defaultKey, open]);
 
+  useEffect(() => () => {
+    const active = activeRequestRef.current;
+    if (!active) return;
+    active.stopped = true;
+    activeRequestRef.current = null;
+    void cancelModelTestChat(active.requestId);
+  }, []);
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+  }, [items]);
+
   const selectedTarget = targets.find((target) => target.key === selectedKey) ?? targets[0];
 
   const clearConversation = () => {
+    cancelActiveRequest(false);
     setItems([]);
     setDraft("");
     focusComposer();
   };
 
   const changeTarget = (key: string) => {
+    cancelActiveRequest(false);
     setSelectedKey(key);
     setItems([]);
     setDraft("");
     focusComposer(220);
+  };
+
+  const stop = () => {
+    cancelActiveRequest(true);
+    focusComposer();
   };
 
   const send = async () => {
@@ -100,33 +150,66 @@ export default function ModelTestConsole({
     if (!selectedTarget || !prompt || sending) return;
 
     const history: ModelTestMessage[] = items
-      .filter((item) => !item.error)
+      .filter((item) => !item.errorMessage && !item.stopped && !item.streaming)
       .map(({ role, content }) => ({ role, content }));
     const requestMessages = [...history.slice(-19), { role: "user" as const, content: prompt }];
     const userItem: TranscriptItem = { id: nextId.current++, role: "user", content: prompt };
-    setItems((current) => [...current, userItem]);
+    const assistantId = nextId.current++;
+    const assistantItem: TranscriptItem = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      streaming: true,
+    };
+    const request: ActiveRequest = {
+      requestId: `model-test-${Date.now()}-${nextRequestId.current++}`,
+      assistantId,
+      stopped: false,
+    };
+    activeRequestRef.current = request;
+    setItems((current) => [...current, userItem, assistantItem]);
     setDraft("");
     setSending(true);
 
     try {
-      const reply = await testModelChat(selectedTarget.provider.name, selectedTarget.model, requestMessages);
-      setItems((current) => [...current, {
-        id: nextId.current++,
-        role: "assistant",
-        content: reply.content,
-        latencyMs: reply.latency_ms,
-      }]);
+      const reply = await testModelChatStream(
+        selectedTarget.provider.name,
+        selectedTarget.model,
+        requestMessages,
+        request.requestId,
+        (event) => {
+          if (activeRequestRef.current !== request || request.stopped) return;
+          setItems((current) => current.map((item) => item.id === assistantId
+            ? {
+              ...item,
+              content: `${item.content}${event.delta}`,
+              firstTokenMs: item.firstTokenMs ?? event.first_token_ms ?? undefined,
+            }
+            : item));
+        },
+      );
+      if (activeRequestRef.current !== request || request.stopped) return;
+      setItems((current) => current.map((item) => item.id === assistantId
+        ? {
+          ...item,
+          content: reply.content,
+          firstTokenMs: reply.first_token_ms,
+          latencyMs: reply.latency_ms,
+          streaming: false,
+        }
+        : item));
     } catch (error) {
-      setItems((current) => [...current, {
-        id: nextId.current++,
-        role: "assistant",
-        content: errorMessage(error),
-        error: true,
-      }]);
+      if (activeRequestRef.current !== request || request.stopped) return;
+      setItems((current) => current.map((item) => item.id === assistantId
+        ? { ...item, streaming: false, errorMessage: errorMessage(error) }
+        : item));
       setDraft(prompt);
     } finally {
-      setSending(false);
-      focusComposer();
+      if (activeRequestRef.current === request) {
+        activeRequestRef.current = null;
+        setSending(false);
+        focusComposer();
+      }
     }
   };
 
@@ -137,7 +220,10 @@ export default function ModelTestConsole({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!nextOpen) cancelActiveRequest(false);
+      onOpenChange(nextOpen);
+    }}>
       <DialogContent
         className="model-test-dialog"
         onOpenAutoFocus={(event) => {
@@ -159,7 +245,7 @@ export default function ModelTestConsole({
             </div>
           </div>
           {selectedTarget && (
-            <Select value={selectedTarget.key} onValueChange={changeTarget} disabled={sending}>
+            <Select value={selectedTarget.key} onValueChange={changeTarget}>
               <SelectTrigger className="model-test-target" aria-label={copy("Test model", "测试模型", "測試模型", "テストモデル")}>
                 <ProviderIcon id={selectedTarget.provider.brand_id} label={selectedTarget.provider.name} size={20} />
                 <span className="model-test-target-copy">
@@ -187,7 +273,7 @@ export default function ModelTestConsole({
           )}
         </DialogHeader>
 
-        <div className="model-test-transcript" aria-live="polite">
+        <div ref={transcriptRef} className="model-test-transcript" aria-live="polite">
           {items.length === 0 ? (
             <div className="model-test-empty">
               <span><Bot aria-hidden="true" /></span>
@@ -202,22 +288,35 @@ export default function ModelTestConsole({
           ) : (
             <ol className="model-test-messages">
               {items.map((item) => (
-                <li key={item.id} className={`model-test-message ${item.role}${item.error ? " error" : ""}`}>
+                <li key={item.id} className={`model-test-message ${item.role}${item.errorMessage ? " error" : ""}${item.streaming ? " streaming" : ""}${item.stopped ? " stopped" : ""}`}>
                   <div className="model-test-message-meta">
                     <span>{item.role === "user"
                       ? copy("You", "你", "你", "あなた")
                       : selectedTarget?.model}</span>
-                    {item.latencyMs != null && <small>{item.latencyMs.toLocaleString()} ms</small>}
+                    {item.stopped ? (
+                      <small>{copy("Stopped", "已停止", "已停止", "停止済み")}</small>
+                    ) : item.firstTokenMs != null && item.latencyMs != null ? (
+                      <small>{copy(
+                        `First text ${item.firstTokenMs.toLocaleString()} ms · Total ${item.latencyMs.toLocaleString()} ms`,
+                        `首字 ${item.firstTokenMs.toLocaleString()} ms · 总计 ${item.latencyMs.toLocaleString()} ms`,
+                        `首字 ${item.firstTokenMs.toLocaleString()} ms · 總計 ${item.latencyMs.toLocaleString()} ms`,
+                        `初回文字 ${item.firstTokenMs.toLocaleString()} ms · 合計 ${item.latencyMs.toLocaleString()} ms`,
+                      )}</small>
+                    ) : null}
                   </div>
-                  <p role={item.error ? "alert" : undefined}>{item.content}</p>
+                  {item.content ? (
+                    <p>
+                      {item.content}
+                      {item.streaming && <span className="model-test-stream-caret" aria-hidden="true" />}
+                    </p>
+                  ) : item.streaming ? (
+                    <p className="model-test-waiting"><LoaderCircle aria-hidden="true" /></p>
+                  ) : null}
+                  {item.errorMessage && (
+                    <small className="model-test-message-error" role="alert">{item.errorMessage}</small>
+                  )}
                 </li>
               ))}
-              {sending && (
-                <li className="model-test-message assistant pending" aria-label={copy("Model is replying", "模型正在回复", "模型正在回覆", "モデルが応答中")}>
-                  <div className="model-test-message-meta"><span>{selectedTarget?.model}</span></div>
-                  <p><LoaderCircle aria-hidden="true" /></p>
-                </li>
-              )}
             </ol>
           )}
         </div>
@@ -241,7 +340,7 @@ export default function ModelTestConsole({
               variant="ghost"
               size="icon-sm"
               aria-label={copy("Clear conversation", "清空对话", "清空對話", "会話を消去")}
-              disabled={items.length === 0 || sending}
+              disabled={items.length === 0}
               onClick={clearConversation}
             >
               <Trash2 aria-hidden="true" />
@@ -251,11 +350,13 @@ export default function ModelTestConsole({
               type="button"
               size="icon"
               className="model-test-send"
-              aria-label={copy("Send message", "发送消息", "傳送訊息", "メッセージを送信")}
-              disabled={!draft.trim() || sending || !selectedTarget}
-              onClick={() => void send()}
+              aria-label={sending
+                ? copy("Stop generating", "停止生成", "停止生成", "生成を停止")
+                : copy("Send message", "发送消息", "傳送訊息", "メッセージを送信")}
+              disabled={!sending && (!draft.trim() || !selectedTarget)}
+              onClick={sending ? stop : () => void send()}
             >
-              {sending ? <LoaderCircle className="model-test-spinner" aria-hidden="true" /> : <SendHorizontal aria-hidden="true" />}
+              {sending ? <Square className="model-test-stop-icon" aria-hidden="true" /> : <SendHorizontal aria-hidden="true" />}
             </Button>
           </div>
         </div>

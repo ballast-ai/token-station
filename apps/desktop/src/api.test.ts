@@ -56,7 +56,8 @@ import {
   setRoutingMode,
   setTier,
   testProvider,
-  testModelChat,
+  cancelModelTestChat,
+  testModelChatStream,
   setProviderModelVision,
   setProviderModelLimits,
   updateProviderModels,
@@ -286,6 +287,44 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     expect(listenMock).toHaveBeenCalledWith("desktop-update-progress", expect.any(Function));
   });
 
+  it("listens before starting a model stream, filters request IDs, and always unlistens", async () => {
+    const onDelta = vi.fn();
+    const unlisten = vi.fn();
+    let streamHandler: ((event: { payload: { request_id: string; delta: string; first_token_ms: number | null } }) => void) | undefined;
+    listenMock.mockImplementation(async (_event, handler) => {
+      streamHandler = handler as typeof streamHandler;
+      return unlisten;
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "test_model_chat_stream") {
+        streamHandler?.({ payload: { request_id: "other", delta: "ignore", first_token_ms: 4 } });
+        streamHandler?.({ payload: { request_id: "model-test-1", delta: "hello", first_token_ms: 8 } });
+        return { content: "hello", first_token_ms: 8, latency_ms: 20 };
+      }
+      return undefined;
+    });
+
+    const reply = await testModelChatStream(
+      "p",
+      "m",
+      [{ role: "user", content: "hello" }],
+      "model-test-1",
+      onDelta,
+    );
+
+    expect(listenMock).toHaveBeenCalledWith("model-test-stream", expect.any(Function));
+    expect(invokeMock).toHaveBeenCalledWith("test_model_chat_stream", {
+      upstream: "p",
+      model: "m",
+      messages: [{ role: "user", content: "hello" }],
+      requestId: "model-test-1",
+    });
+    expect(onDelta).toHaveBeenCalledOnce();
+    expect(onDelta).toHaveBeenCalledWith({ request_id: "model-test-1", delta: "hello", first_token_ms: 8 });
+    expect(reply).toEqual({ content: "hello", first_token_ms: 8, latency_ms: 20 });
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["get state", () => getState(), "get_state", undefined],
     ["get runtime facts", () => getRuntimeState(), "get_runtime_state", undefined],
@@ -358,11 +397,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     ["discover models", () => discoverProviderModels("p", "https://p/v1", null), "discover_provider_models", { name: "p", baseUrl: "https://p/v1", apiKey: null }],
     ["verify enterprise route", () => verifyEnterpriseRoute("enterprise", "https://p/v1", "k"), "verify_enterprise_route", { name: "enterprise", baseUrl: "https://p/v1", apiKey: "k" }],
     ["test provider", () => testProvider("p"), "test_provider", { name: "p" }],
-    ["test model chat", () => testModelChat("p", "m", [{ role: "user", content: "hello" }]), "test_model_chat", {
-      upstream: "p",
-      model: "m",
-      messages: [{ role: "user", content: "hello" }],
-    }],
+    ["cancel model test chat", () => cancelModelTestChat("model-test-1"), "cancel_model_test_chat", { requestId: "model-test-1" }],
     ["declare model vision", () => setProviderModelVision("p", "m", true), "set_provider_model_vision", { name: "p", model: "m", supported: true }],
     ["set model limits", () => setProviderModelLimits("p", "m", 128000, 32768), "set_provider_model_limits", { name: "p", model: "m", contextWindow: 128000, maxOutputTokens: 32768 }],
     ["update models", () => updateProviderModels("p", ["a", "b"]), "update_provider_models", { name: "p", models: ["a", "b"] }],

@@ -35,12 +35,14 @@ use zeroize::Zeroizing;
 
 use token_station_cli::bodylog::{valid_request_id, BodyLog, PlaintextExchange};
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
+use token_station_cli::cancel::{CancelReason, CancelToken};
 use token_station_cli::config::{
     ClientConfig, EgressConfig, HostRoutingConfig, PluginsConfig, RoutingMode as HostRoutingMode,
 };
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, Reply, StageStatus};
 use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
+use token_station_cli::request_context::RequestContext;
 use token_station_cli::{
     secrets, stats,
     store::{ReceiptQuery, SqliteStore},
@@ -1203,7 +1205,67 @@ struct ModelTestMessage {
 #[derive(Serialize)]
 struct ModelTestReply {
     content: String,
+    first_token_ms: u64,
     latency_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct ModelTestStreamEvent {
+    request_id: String,
+    delta: String,
+    first_token_ms: Option<u64>,
+}
+
+#[derive(Default)]
+struct ModelTestStreamRegistry {
+    active: BTreeMap<String, CancelToken>,
+    pending_cancellations: BTreeSet<String>,
+}
+
+impl ModelTestStreamRegistry {
+    fn register(&mut self, request_id: &str, token: CancelToken) -> Result<(), String> {
+        if self.pending_cancellations.remove(request_id) {
+            return Err("Model test cancelled".to_owned());
+        }
+        if self.active.contains_key(request_id) {
+            return Err("This model test request is already active".to_owned());
+        }
+        if self.active.len() >= MODEL_TEST_MAX_ACTIVE_STREAMS {
+            return Err("Too many model test requests are active".to_owned());
+        }
+        self.active.insert(request_id.to_owned(), token);
+        Ok(())
+    }
+
+    fn cancel(&mut self, request_id: String) {
+        if let Some(token) = self.active.get(&request_id).cloned() {
+            token.cancel();
+            return;
+        }
+        if self.pending_cancellations.len() >= MODEL_TEST_MAX_PENDING_CANCELLATIONS {
+            let eviction = self.pending_cancellations.iter().next().cloned();
+            if let Some(eviction) = eviction {
+                self.pending_cancellations.remove(&eviction);
+            }
+        }
+        self.pending_cancellations.insert(request_id);
+    }
+}
+
+#[derive(Clone, Default)]
+struct ModelTestStreamState(Arc<Mutex<ModelTestStreamRegistry>>);
+
+struct ModelTestStreamRegistration {
+    registry: Arc<Mutex<ModelTestStreamRegistry>>,
+    request_id: String,
+}
+
+impl Drop for ModelTestStreamRegistration {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap();
+        registry.active.remove(&self.request_id);
+        registry.pending_cancellations.remove(&self.request_id);
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -4394,6 +4456,144 @@ async fn test_provider(
 const MODEL_TEST_MAX_MESSAGES: usize = 20;
 const MODEL_TEST_MAX_MESSAGE_BYTES: usize = 16_000;
 const MODEL_TEST_MAX_TOTAL_BYTES: usize = 64_000;
+const MODEL_TEST_MAX_REQUEST_ID_BYTES: usize = 64;
+const MODEL_TEST_MAX_ACTIVE_STREAMS: usize = 4;
+const MODEL_TEST_MAX_PENDING_CANCELLATIONS: usize = 32;
+const MODEL_TEST_MAX_SSE_BUFFER_BYTES: usize = 1_048_576;
+const MODEL_TEST_STREAM_EVENT: &str = "model-test-stream";
+
+#[derive(Default)]
+struct ModelTestSseDecoder {
+    buffer: Vec<u8>,
+}
+
+impl ModelTestSseDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, String> {
+        if self.buffer.len().saturating_add(chunk.len()) > MODEL_TEST_MAX_SSE_BUFFER_BYTES {
+            return Err("The model stream exceeded the response buffer limit".to_owned());
+        }
+        self.buffer.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+        while let Some((boundary, delimiter_len)) = find_model_test_sse_boundary(&self.buffer) {
+            let frame = self.buffer.drain(..boundary).collect::<Vec<_>>();
+            self.buffer.drain(..delimiter_len);
+            let frame = String::from_utf8(frame)
+                .map_err(|_| "The model stream returned invalid UTF-8".to_owned())?;
+            if !frame.trim().is_empty() {
+                frames.push(frame);
+            }
+        }
+        Ok(frames)
+    }
+
+    fn finish(&mut self) -> Result<Vec<String>, String> {
+        if self.buffer.iter().all(u8::is_ascii_whitespace) {
+            self.buffer.clear();
+            return Ok(Vec::new());
+        }
+        let frame = String::from_utf8(std::mem::take(&mut self.buffer))
+            .map_err(|_| "The model stream ended with invalid UTF-8".to_owned())?;
+        Ok(vec![frame])
+    }
+}
+
+fn find_model_test_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer.windows(2).position(|window| window == b"\n\n");
+    let crlf = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(left), Some(right)) if left <= right => Some((left, 2)),
+        (Some(_), Some(right)) => Some((right, 4)),
+        (Some(left), None) => Some((left, 2)),
+        (None, Some(right)) => Some((right, 4)),
+        (None, None) => None,
+    }
+}
+
+fn validate_model_test_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.is_empty()
+        || request_id.len() > MODEL_TEST_MAX_REQUEST_ID_BYTES
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("The model test request ID is invalid".to_owned());
+    }
+    Ok(())
+}
+
+fn model_test_stream_delta(frame: &str) -> Result<Option<String>, String> {
+    let data = frame
+        .lines()
+        .filter_map(|line| {
+            let data = line.strip_prefix("data:")?;
+            Some(data.strip_prefix(' ').unwrap_or(data))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(data)
+        .map_err(|_| "The model stream returned invalid JSON".to_owned())?;
+    if value.get("error").is_some() {
+        return Err(bounded_provider_error_code(&value).map_or_else(
+            || "The Provider returned a stream error".to_owned(),
+            |code| format!("The Provider returned a stream error ({code})"),
+        ));
+    }
+    let content = value.pointer("/choices/0/delta/content");
+    if let Some(text) = content
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        return Ok(Some(text.to_owned()));
+    }
+    if let Some(parts) = content.and_then(Value::as_array) {
+        let text = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<String>();
+        if !text.is_empty() {
+            return Ok(Some(text));
+        }
+    }
+    Ok(value
+        .pointer("/choices/0/text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn emit_model_test_frames(
+    app: &AppHandle,
+    request_id: &str,
+    started: Instant,
+    frames: Vec<String>,
+    content: &mut String,
+    first_token_ms: &mut Option<u64>,
+) -> Result<(), String> {
+    for frame in frames {
+        let Some(delta) = model_test_stream_delta(&frame)? else {
+            continue;
+        };
+        if first_token_ms.is_none() {
+            *first_token_ms =
+                Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        }
+        content.push_str(&delta);
+        app.emit(
+            MODEL_TEST_STREAM_EVENT,
+            ModelTestStreamEvent {
+                request_id: request_id.to_owned(),
+                delta,
+                first_token_ms: *first_token_ms,
+            },
+        )
+        .map_err(|_| "The model stream could not reach the test console".to_owned())?;
+    }
+    Ok(())
+}
 
 fn validate_model_test_messages(messages: &[ModelTestMessage]) -> Result<(), String> {
     if messages.is_empty() {
@@ -4488,13 +4688,17 @@ fn extract_model_test_reply(status: u16, body: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn test_model_chat(
+async fn test_model_chat_stream(
+    app: AppHandle,
     state: State<'_, AppStateManaged>,
+    stream_state: State<'_, ModelTestStreamState>,
     upstream: String,
     model: String,
     messages: Vec<ModelTestMessage>,
+    request_id: String,
 ) -> Result<ModelTestReply, String> {
     validate_model_test_messages(&messages)?;
+    validate_model_test_request_id(&request_id)?;
     let upstream = upstream.trim().to_owned();
     let model = model.trim().to_owned();
     let mut config = {
@@ -4528,41 +4732,125 @@ async fn test_model_chat(
     config.router.local_only = false;
     config.router.allow_cloud_fallback = false;
 
+    let request_context =
+        RequestContext::detached(Duration::from_secs(120), Duration::from_secs(120));
+    let registry = Arc::clone(&stream_state.0);
+    {
+        let mut streams = registry.lock().unwrap();
+        streams.register(&request_id, request_context.token())?;
+    }
+    let registration = ModelTestStreamRegistration {
+        registry,
+        request_id: request_id.clone(),
+    };
+
     let provider_runtime = tokio::runtime::Handle::current();
     tauri::async_runtime::spawn_blocking(move || {
+        let _registration = registration;
         let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
         let gateway = Gateway::new_with_provider_runtime(&config, recorder, provider_runtime)?;
         let body = serde_json::to_vec(&json!({
             "model": model,
             "messages": messages,
-            "stream": false,
+            "stream": true,
             "max_tokens": 1024
         }))
         .map_err(|_| "Failed to encode the model test request".to_owned())?;
         let started = Instant::now();
-        let mut response = None;
-        gateway.chat(
+        let mut json_response = None;
+        let mut decoder = ModelTestSseDecoder::default();
+        let mut content = String::new();
+        let mut first_token_ms = None;
+        let mut stream_error = None;
+        gateway.chat_scoped(
+            &request_context,
+            None,
+            None,
             "POST",
             "/v1/chat/completions",
             &[("content-type".to_owned(), "application/json".to_owned())],
             &body,
             &mut |reply| {
-                if let Reply::BeginJson(reply) = reply {
-                    response = Some((reply.status, reply.body));
+                if request_context.is_cancelled() {
+                    return false;
+                }
+                match reply {
+                    Reply::BeginJson(reply) => {
+                        json_response = Some((reply.status, reply.body));
+                    }
+                    Reply::BeginStream => {}
+                    Reply::Chunk(chunk) => match decoder.push(chunk.as_bytes()).and_then(|frames| {
+                        emit_model_test_frames(
+                            &app,
+                            &request_id,
+                            started,
+                            frames,
+                            &mut content,
+                            &mut first_token_ms,
+                        )
+                    }) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            stream_error = Some(error);
+                            request_context.cancel();
+                            return false;
+                        }
+                    },
                 }
                 true
             },
         );
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let (status, body) = response
-            .ok_or_else(|| "The model test ended without a complete response".to_owned())?;
+        if let Some(error) = stream_error {
+            return Err(error);
+        }
+        if let Some(reason) = request_context.cancel_reason() {
+            return Err(match reason {
+                CancelReason::Deadline => "The model request timed out".to_owned(),
+                CancelReason::ClientDisconnect | CancelReason::ServerDrain => {
+                    "Model test cancelled".to_owned()
+                }
+            });
+        }
+        if let Some((status, body)) = json_response {
+            let content = extract_model_test_reply(status, &body)?;
+            return Ok(ModelTestReply {
+                content,
+                first_token_ms: latency_ms,
+                latency_ms,
+            });
+        }
+        let frames = decoder.finish()?;
+        emit_model_test_frames(
+            &app,
+            &request_id,
+            started,
+            frames,
+            &mut content,
+            &mut first_token_ms,
+        )?;
+        if content.trim().is_empty() {
+            return Err("The model returned no assistant text".to_owned());
+        }
         Ok(ModelTestReply {
-            content: extract_model_test_reply(status, &body)?,
+            content,
+            first_token_ms: first_token_ms.unwrap_or(latency_ms),
             latency_ms,
         })
     })
     .await
     .map_err(|error| format!("Model test task stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command]
+fn cancel_model_test_chat(
+    stream_state: State<'_, ModelTestStreamState>,
+    request_id: String,
+) -> Result<(), String> {
+    validate_model_test_request_id(&request_id)?;
+    let mut streams = stream_state.0.lock().unwrap();
+    streams.cancel(request_id);
+    Ok(())
 }
 
 /// Update an existing provider's model set while protecting models referenced by routing tiers.
@@ -7418,6 +7706,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let read_only = inner.load_error.is_some();
             app.manage(AppStateManaged(Mutex::new(inner)));
+            app.manage(ModelTestStreamState::default());
 
             // Agent command state must exist before the native menu is built so
             // its initial snapshot and every later refresh share one authority.
@@ -7532,7 +7821,8 @@ pub fn run() {
             discover_provider_models,
             verify_enterprise_route,
             test_provider,
-            test_model_chat,
+            test_model_chat_stream,
+            cancel_model_test_chat,
             set_provider_model_vision,
             set_provider_model_limits,
             update_provider_models,
@@ -13599,5 +13889,66 @@ mod tests {
         assert!(error.contains("invalid_api_key"));
         assert!(!error.contains("prompt"));
         assert!(!error.contains("secret"));
+    }
+
+    #[test]
+    fn model_test_sse_decoder_handles_split_frames_and_utf8_boundaries() {
+        let wire = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n".as_bytes();
+        let chinese = "你".as_bytes();
+        let utf8_start = wire
+            .windows(chinese.len())
+            .position(|window| window == chinese)
+            .expect("fixture contains a multibyte delta");
+        let mut decoder = ModelTestSseDecoder::default();
+
+        assert!(decoder.push(&wire[..utf8_start + 1]).unwrap().is_empty());
+        let frames = decoder.push(&wire[utf8_start + 1..wire.len() - 1]).unwrap();
+        assert!(
+            frames.is_empty(),
+            "an incomplete SSE delimiter must remain buffered"
+        );
+        let frames = decoder.push(&wire[wire.len() - 1..]).unwrap();
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            model_test_stream_delta(&frames[0]).unwrap(),
+            Some("你".to_owned())
+        );
+        assert!(decoder.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn model_test_sse_delta_ignores_metadata_and_recognizes_completion() {
+        assert_eq!(
+            model_test_stream_delta(
+                "event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}"
+            )
+            .unwrap(),
+            Some("hel".to_owned())
+        );
+        assert_eq!(model_test_stream_delta("data: [DONE]").unwrap(), None);
+        assert_eq!(model_test_stream_delta(": keepalive").unwrap(), None);
+    }
+
+    #[test]
+    fn model_test_request_ids_are_bounded_correlation_values() {
+        assert!(validate_model_test_request_id("model-test-1729-aBc_0").is_ok());
+        assert!(validate_model_test_request_id("").is_err());
+        assert!(validate_model_test_request_id("contains spaces").is_err());
+        assert!(validate_model_test_request_id(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn model_test_cancel_before_registration_still_stops_the_request() {
+        let mut registry = ModelTestStreamRegistry::default();
+        registry.cancel("model-test-race".to_owned());
+
+        let error = registry
+            .register("model-test-race", CancelToken::root())
+            .unwrap_err();
+
+        assert_eq!(error, "Model test cancelled");
+        assert!(!registry.active.contains_key("model-test-race"));
+        assert!(!registry.pending_cancellations.contains("model-test-race"));
     }
 }
