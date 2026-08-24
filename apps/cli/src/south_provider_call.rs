@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
-    config::{ApiDialect, AuthConfig, EgressMode},
+    config::{AuthConfig, EgressMode},
     secrets::SecretStore,
 };
 
@@ -51,7 +51,6 @@ const PROVIDER_QUOTA_METADATA_FIELDS_V1: [ProviderQuotaMetadataFieldV1; 9] = [
 /// Host-owned reasons why a call cannot enter the first South rollout slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IneligibleV1 {
-    ApiDialect,
     Egress,
     Streaming,
     Method,
@@ -70,7 +69,6 @@ pub(crate) enum RequestBodyModeV1 {
 /// Static host facts used before any credential lookup or transport call.
 #[derive(Clone)]
 pub(crate) struct CommunityCallPolicyV1 {
-    api_dialect: ApiDialect,
     egress_mode: EgressMode,
     body_mode: RequestBodyModeV1,
     /// The auth shapes the admitted component declares it can carry. Read from
@@ -83,13 +81,11 @@ pub(crate) struct CommunityCallPolicyV1 {
 impl CommunityCallPolicyV1 {
     #[must_use]
     pub(crate) const fn new(
-        api_dialect: ApiDialect,
         egress_mode: EgressMode,
         body_mode: RequestBodyModeV1,
         auth_arms: BTreeSet<AuthArmV1>,
     ) -> Self {
         Self {
-            api_dialect,
             egress_mode,
             body_mode,
             auth_arms,
@@ -101,7 +97,6 @@ impl fmt::Debug for CommunityCallPolicyV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CommunityCallPolicyV1")
-            .field("api_dialect", &self.api_dialect)
             .field("egress_mode", &self.egress_mode)
             .field("body_mode", &self.body_mode)
             .field("auth_arms", &self.auth_arms)
@@ -628,9 +623,6 @@ fn check_static_eligibility(
     descriptor: &HttpRequestDescriptor,
 ) -> Result<(), PrepareProviderCallErrorV1> {
     let ineligible = |reason| Err(PrepareProviderCallErrorV1::Ineligible(reason));
-    if policy.api_dialect != ApiDialect::Translated {
-        return ineligible(IneligibleV1::ApiDialect);
-    }
     if policy.egress_mode != EgressMode::Direct {
         return ineligible(IneligibleV1::Egress);
     }

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use south_provider_api::AuthArmV1;
 
 use crate::{
-    config::{ApiDialect, AuthConfig, ClientConfig, EgressMode},
+    config::{AuthConfig, ClientConfig, EgressMode},
     secrets::{SecretStore, store_set},
     south_provider_call::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
@@ -81,26 +81,15 @@ fn both_arms() -> BTreeSet<AuthArmV1> {
 }
 
 fn eligible_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
-    CommunityCallPolicyV1::new(
-        ApiDialect::Translated,
-        EgressMode::Direct,
-        RequestBodyModeV1::Buffered,
-        arms,
-    )
+    CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Buffered, arms)
 }
 
 fn eligible_streaming_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
-    CommunityCallPolicyV1::new(
-        ApiDialect::Translated,
-        EgressMode::Direct,
-        RequestBodyModeV1::Streaming,
-        arms,
-    )
+    CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Streaming, arms)
 }
 
 fn eligible_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        ApiDialect::Translated,
         EgressMode::Direct,
         RequestBodyModeV1::Buffered,
         bearer_arms(),
@@ -109,7 +98,6 @@ fn eligible_policy() -> CommunityCallPolicyV1 {
 
 fn eligible_streaming_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        ApiDialect::Translated,
         EgressMode::Direct,
         RequestBodyModeV1::Streaming,
         bearer_arms(),
@@ -372,16 +360,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
     let cases = [
         (
             CommunityCallPolicyV1::new(
-                ApiDialect::AnthropicNative,
-                EgressMode::Direct,
-                RequestBodyModeV1::Buffered,
-                bearer_arms(),
-            ),
-            IneligibleV1::ApiDialect,
-        ),
-        (
-            CommunityCallPolicyV1::new(
-                ApiDialect::Translated,
                 EgressMode::Http,
                 RequestBodyModeV1::Buffered,
                 bearer_arms(),
@@ -390,7 +368,6 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
         ),
         (
             CommunityCallPolicyV1::new(
-                ApiDialect::Translated,
                 EgressMode::Direct,
                 RequestBodyModeV1::Streaming,
                 bearer_arms(),
