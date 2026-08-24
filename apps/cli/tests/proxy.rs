@@ -31,9 +31,14 @@ fn repo_root() -> &'static Path {
         .expect("apps/cli sits two levels below the root")
 }
 
-/// Builds every official package once and assembles a plugins directory:
-/// the four agent adapters (`adapter.wasm`) and the South provider component
+/// Builds every official package once and assembles a plugins directory: the
+/// agent adapters (`adapter.wasm`) and the South provider components
 /// (`component.wasm`), side by side, the way a release stages them.
+///
+/// Counts stay out of the prose. The set is declared in
+/// `plugins/official/packages.json` and checked by `official_package_set`;
+/// a comment that says "four" is a copy of the list that nothing verifies,
+/// and it was already wrong about the providers.
 fn plugins_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {

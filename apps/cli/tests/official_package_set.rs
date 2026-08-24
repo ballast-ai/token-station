@@ -117,3 +117,59 @@ fn every_consumer_names_the_whole_set() {
         }
     }
 }
+
+/// A package's declared fixture directory is either present or knowingly
+/// absent — never quietly assumed to be called `fixtures`.
+///
+/// The build scripts used to hardcode that name, so the Anthropic component's
+/// `fixtures-anthropic/` would have shipped nothing even once the directory
+/// existed, and nothing would have said so. They stage the declared path now.
+///
+/// The two South components declare a directory neither this repo nor South
+/// ships today: the fixtures live in `south-component-conformance`, and the
+/// package is distributed as a shell around it. That is South's to publish —
+/// the loader only validates the path's shape and never resolves it, so
+/// nothing breaks at runtime — but the declaration is a promise to anyone
+/// inspecting the package, and this test names exactly who is still owed it.
+#[test]
+fn a_declared_fixture_directory_is_present_or_owed_by_south() {
+    let mut owed = Vec::new();
+    for package in packages() {
+        let dir = repo_root()
+            .join("plugins/official")
+            .join(field(&package, "dir"));
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("manifest.json")).expect("manifest reads"),
+        )
+        .expect("manifest is JSON");
+        let declared = manifest["conformance"]["fixtures"]
+            .as_str()
+            .expect("every manifest declares a fixtures path")
+            .trim_end_matches('/')
+            .to_owned();
+
+        if dir.join(&declared).is_dir() {
+            continue;
+        }
+        assert_eq!(
+            field(&package, "kind"),
+            "south-component",
+            "{} declares `{declared}` and does not ship it; an agent package owns its own fixtures",
+            dir.display()
+        );
+        owed.push(format!("{}: {declared}", field(&package, "id")));
+    }
+    owed.sort();
+
+    // Pinned rather than tolerated: if South starts shipping them, this list
+    // shrinks and the assertion says so, which is the prompt to delete the
+    // carve-out instead of leaving it standing.
+    assert_eq!(
+        owed,
+        vec![
+            "provider-anthropic: fixtures-anthropic".to_owned(),
+            "provider-openai-compatible: fixtures".to_owned(),
+        ],
+        "the set of packages still owed fixtures by South has changed"
+    );
+}

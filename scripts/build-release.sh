@@ -48,6 +48,25 @@ export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap
 rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal >/dev/null
 rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev/null
 
+
+# Stages the fixture directory a package's own manifest declares, rather than
+# assuming it is called `fixtures`. The Anthropic component declares
+# `fixtures-anthropic/`, so a hardcoded name ships nothing for it and says
+# nothing about having skipped it.
+stage_declared_fixtures() {
+  local source="$1" dest="$2"
+  local declared
+  declared="$(node -e '
+    const fs = require("node:fs");
+    const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    process.stdout.write((manifest.conformance && manifest.conformance.fixtures) || "");
+  ' "$source/manifest.json")"
+  [[ -n "$declared" ]] || return 0
+  declared="${declared%/}"
+  [[ -d "$source/$declared" ]] || return 0
+  cp -R "$source/$declared" "$dest/$declared"
+}
+
 for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; do
   (cd "plugins/official/${plugin}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
@@ -58,6 +77,7 @@ done
 for component in provider-openai-compatible-v2 provider-anthropic-v2; do
   (cd "plugins/official/${component}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
+  stage_declared_fixtures "plugins/official/${component}" "$STAGE/plugins-dist/${component}"
 done
 
 NAME="token-station-cli-${VERSION}-${TARGET}"
@@ -70,7 +90,7 @@ for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; 
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \
      "$STAGE/plugins-dist/${plugin}/adapter.wasm"
-  cp -R "plugins/official/${plugin}/fixtures" "$STAGE/plugins-dist/${plugin}/fixtures"
+  stage_declared_fixtures "plugins/official/${plugin}" "$STAGE/plugins-dist/${plugin}"
 done
 
 for component in provider-openai-compatible-v2 provider-anthropic-v2; do
