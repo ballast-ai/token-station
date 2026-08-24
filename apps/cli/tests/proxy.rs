@@ -104,6 +104,10 @@ struct Seen {
     path: String,
     authorization: Option<String>,
     api_key: Option<String>,
+    /// Anthropic's header secret. Kept apart from `api_key`, which is Azure's
+    /// `api-key`: conflating them would let a test pass while the wrong
+    /// provider's header went out.
+    x_api_key: Option<String>,
     content_type: Option<String>,
     body: Value,
 }
@@ -525,6 +529,11 @@ fn read_http_request(stream: &mut TcpStream) -> Seen {
             .starts_with("api-key:")
             .then(|| line.split_once(':').expect("header").1.trim().to_owned())
     });
+    let x_api_key = head.lines().find_map(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("x-api-key:")
+            .then(|| line.split_once(':').expect("header").1.trim().to_owned())
+    });
     let content_type = head.lines().find_map(|line| {
         line.to_ascii_lowercase()
             .starts_with("content-type:")
@@ -536,6 +545,7 @@ fn read_http_request(stream: &mut TcpStream) -> Seen {
         path,
         authorization,
         api_key,
+        x_api_key,
         content_type,
         body,
     }
@@ -7648,6 +7658,126 @@ fn a_native_attempt_that_cannot_reach_its_upstream_hands_over_to_the_next() {
     );
 
     std::fs::remove_file(key).ok();
+}
+
+/// A translated Anthropic turn's receipt says South.
+///
+/// This is the release's headline claim and the third dialect the completion
+/// criterion names — `openai-compatible` and `azure-openai-v1` had receipt
+/// tests and Anthropic did not. It is also the dialect the old transport
+/// eligibility could not carry: the name list was never extended for it, so
+/// the component would translate a request the transport then refused to send,
+/// and the receipt said `legacy` with a fallback reason. Nothing checked.
+#[test]
+fn a_translated_anthropic_turn_is_carried_by_south() {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let served = json!({
+        "id": "msg_translated",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{"type": "text", "text": "served"}],
+        "usage": {"input_tokens": 7, "output_tokens": 3}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &served.to_string())]]);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-anthropic-south-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    // The credential comes from the store, not a key file. South does not
+    // carry a file-sourced secret — an upstream authenticated that way falls
+    // back to legacy with reason `secret_source`, which is how the first
+    // version of this test failed and is worth stating rather than working
+    // around silently.
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    token_station_cli::secrets::store_set(
+        &data_dir,
+        "anthropic_main",
+        "provider_api_key",
+        "sk-anthropic-south",
+    )
+    .expect("test secret is stored");
+    // No `api_dialect`: it defaults to translated, which is the shape an
+    // ordinary Anthropic upstream has. No `provider_call` either — the point
+    // is what the *default* engine is.
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-anthropic"],
+            "providers": {
+                "openai-compatible": "provider-openai-compatible-v2",
+                "anthropic": "provider-anthropic-v2"
+            }
+        },
+        "upstreams": {
+            "anthropic_main": {
+                "provider": "anthropic",
+                "base_url": mock.base_url(),
+                "auth": { "slot": "provider_api_key", "store": true },
+                "models": [
+                    {
+                        "model": "claude-sonnet-4",
+                        "tool": true,
+                        "tool_state": "verified",
+                        "context_window": 200_000
+                    }
+                ]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [ { "upstream": "anthropic_main", "model": "claude-sonnet-4" } ] },
+            "default_pool": "main"
+        }
+    });
+    let config: ClientConfig =
+        serde_json::from_value(config).expect("translated anthropic config parses");
+    let proxy = spawn_proxy(&config);
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "claude-sonnet-4",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hello"}]
+        }),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // `last_row` waits for the receipt to land; `attempt_engines` reads at
+    // once, so it must come second or it races the metrics write.
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    let engines = attempt_engines(&proxy.data_dir);
+    assert_eq!(engines.len(), 1, "one attempt");
+    assert!(
+        engines[0].0.starts_with("south_v1"),
+        "an Anthropic upstream is carried by South by default, not `{}` (reason {:?})",
+        engines[0].0,
+        engines[0].1
+    );
+    assert_eq!(
+        engines[0].1, None,
+        "and with no fallback reason, since it never retreated to legacy"
+    );
+
+    // The wire carries Anthropic's own header secret, never a bearer token.
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].x_api_key.as_deref(),
+        Some("sk-anthropic-south"),
+        "Anthropic authenticates with its own header secret"
+    );
+    assert_eq!(
+        seen[0].authorization, None,
+        "and must not also carry a bearer token"
+    );
 }
 
 /// A native request finds the provider at its concurrency ceiling and takes
