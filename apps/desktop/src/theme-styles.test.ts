@@ -72,6 +72,9 @@ describe("retained page theme styles", () => {
     const pressedNavigationRule = appCss.match(
       /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item:active\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const pointerHoverRule = appCss.match(
+      /\.settings-subnav\[data-input-mode="pointer"\] \[data-slot="button"\]\.settings-subnav-item:hover\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(workspaceRule).toMatch(/overflow:\s*hidden/);
     expect(pageRule).toMatch(/height:\s*100%/);
@@ -80,6 +83,10 @@ describe("retained page theme styles", () => {
     expect(contentRule).toMatch(/scrollbar-gutter:\s*stable/);
     expect(sidebarRule).toMatch(/align-content:\s*start/);
     expect(pressedNavigationRule).toMatch(/transform:\s*none/);
+    expect(pointerHoverRule).toMatch(/background:\s*var\(--surface\)/);
+    expect(appCss).not.toMatch(
+      /(?:^|\n)\.settings-subnav \[data-slot="button"\]\.settings-subnav-item:hover\s*\{/,
+    );
   });
 
   it("uses theme tokens for router JSON code blocks", () => {

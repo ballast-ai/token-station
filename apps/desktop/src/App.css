@@ -9105,7 +9105,7 @@ samp {
   text-align: left;
 }
 
-.settings-subnav [data-slot="button"].settings-subnav-item:hover {
+.settings-subnav[data-input-mode="pointer"] [data-slot="button"].settings-subnav-item:hover {
   color: var(--ink);
   background: var(--surface);
 }

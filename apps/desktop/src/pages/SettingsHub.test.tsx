@@ -118,6 +118,33 @@ describe("SettingsHub clipboard feedback", () => {
     expect(screen.getByRole("heading", { name: "虚拟 API Key" })).toBeInTheDocument();
   });
 
+  it("clears stale pointer hover state while navigating Settings with keys", () => {
+    render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    const navigation = screen.getByRole("navigation", { name: "设置分类" });
+    const general = screen.getByRole("button", { name: /通用/ });
+
+    expect(navigation).toHaveAttribute("data-input-mode", "pointer");
+    general.focus();
+    fireEvent.keyDown(general, { key: "ArrowDown" });
+    expect(navigation).toHaveAttribute("data-input-mode", "keyboard");
+
+    fireEvent.pointerMove(navigation);
+    expect(navigation).toHaveAttribute("data-input-mode", "pointer");
+  });
+
   it("resets only the Settings content pane when the category changes", () => {
     render(
       <ErrorToastProvider>

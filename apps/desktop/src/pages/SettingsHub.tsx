@@ -341,6 +341,7 @@ function SettingsHubContent({
   initialSection = "general",
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  const [navigationInputMode, setNavigationInputMode] = useState<"pointer" | "keyboard">("pointer");
   const navigationRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const contentRef = useRef<HTMLElement | null>(null);
   const { t, copy } = useLanguage();
@@ -363,7 +364,13 @@ function SettingsHubContent({
             <p>{t("settings.generalHint")}</p>
           </div>
         </header>
-        <nav className="settings-subnav" aria-label={t("settings.navLabel")}>
+        <nav
+          className="settings-subnav"
+          aria-label={t("settings.navLabel")}
+          data-input-mode={navigationInputMode}
+          onPointerDown={() => setNavigationInputMode("pointer")}
+          onPointerMove={() => setNavigationInputMode("pointer")}
+        >
           {SECTIONS.map((item, index) => {
             const Icon = item.icon;
             return (
@@ -376,6 +383,9 @@ function SettingsHubContent({
                 aria-current={section === item.id ? "page" : undefined}
                 onClick={() => activateSection(index)}
                 onKeyDown={(event) => {
+                  if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+                    setNavigationInputMode("keyboard");
+                  }
                   if (event.key === "ArrowDown") {
                     event.preventDefault();
                     activateSection(index + 1);
