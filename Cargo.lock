@@ -2154,20 +2154,20 @@ dependencies = [
 
 [[package]]
 name = "south-component-conformance"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "serde",
  "serde_json",
  "south-provider-api",
  "thiserror 2.0.18",
- "token-station-protocol 0.3.0 (git+https://github.com/ballast-ai/token-station-kernel.git?tag=v0.2.0)",
+ "token-station-protocol 0.3.0 (git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35)",
 ]
 
 [[package]]
 name = "south-contracts"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "bytes",
  "http",
@@ -2179,8 +2179,8 @@ dependencies = [
 
 [[package]]
 name = "south-core"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "http",
  "south-contracts",
@@ -2193,8 +2193,8 @@ dependencies = [
 
 [[package]]
 name = "south-provider-api"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2202,16 +2202,16 @@ dependencies = [
 
 [[package]]
 name = "south-provider-conformance"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "south-contracts",
 ]
 
 [[package]]
 name = "south-provider-runtime"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "serde_json",
  "south-provider-api",
@@ -2222,8 +2222,8 @@ dependencies = [
 
 [[package]]
 name = "south-testkit"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "bytes",
  "http",
@@ -2236,8 +2236,8 @@ dependencies = [
 
 [[package]]
 name = "south-transport-reqwest"
-version = "0.15.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae#e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae"
+version = "0.16.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8#efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8"
 dependencies = [
  "bytes",
  "http",
@@ -2411,7 +2411,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "token-station-cli"
-version = "1.2.4"
+version = "1.3.0"
 dependencies = [
  "axum",
  "base64",
@@ -2507,7 +2507,7 @@ dependencies = [
 [[package]]
 name = "token-station-protocol"
 version = "0.3.0"
-source = "git+https://github.com/ballast-ai/token-station-kernel.git?tag=v0.2.0#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
+source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
 dependencies = [
  "serde",
  "serde_json",

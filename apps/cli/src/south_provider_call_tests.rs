@@ -1,11 +1,14 @@
+use std::collections::BTreeSet;
+
+use south_provider_api::AuthArmV1;
+
 use crate::{
     config::{ApiDialect, AuthConfig, ClientConfig, EgressMode},
     secrets::{SecretStore, store_set},
     south_provider_call::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
         IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
-        PreparedProviderStreamResultV1, ProviderPackageEligibilityV1, RequestBodyModeV1,
-        ResponseMetadataEligibilityV1, StableProviderCallFailureV1,
+        PreparedProviderStreamResultV1, RequestBodyModeV1, StableProviderCallFailureV1,
         build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
         execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
         open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
@@ -59,24 +62,57 @@ use token_station_protocol::{
 };
 use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
+/// What a component that carries a bearer token declares.
+fn bearer_arms() -> BTreeSet<AuthArmV1> {
+    BTreeSet::from([AuthArmV1::Bearer])
+}
 
-fn eligible_policy() -> CommunityCallPolicyV1 {
+/// What a component that carries a sanctioned secret header declares — the
+/// Anthropic package's shape.
+fn header_secret_arms() -> BTreeSet<AuthArmV1> {
+    BTreeSet::from([AuthArmV1::HeaderSecret])
+}
+
+/// The OpenAI-compatible package's shape: it serves both the bearer dialects
+/// and Azure's `api-key`, and says so. What used to be a "cumulative" host mode
+/// is now just a component declaring two arms.
+fn both_arms() -> BTreeSet<AuthArmV1> {
+    BTreeSet::from([AuthArmV1::Bearer, AuthArmV1::HeaderSecret])
+}
+
+fn eligible_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
         RequestBodyModeV1::Buffered,
-        ResponseMetadataEligibilityV1::Compatible,
+        arms,
+    )
+}
+
+fn eligible_streaming_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
+    CommunityCallPolicyV1::new(
+        ApiDialect::Translated,
+        EgressMode::Direct,
+        RequestBodyModeV1::Streaming,
+        arms,
+    )
+}
+
+fn eligible_policy() -> CommunityCallPolicyV1 {
+    CommunityCallPolicyV1::new(
+        ApiDialect::Translated,
+        EgressMode::Direct,
+        RequestBodyModeV1::Buffered,
+        bearer_arms(),
     )
 }
 
 fn eligible_streaming_policy() -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(
-        ProviderPackageEligibilityV1::Approved,
         ApiDialect::Translated,
         EgressMode::Direct,
         RequestBodyModeV1::Streaming,
-        ResponseMetadataEligibilityV1::Compatible,
+        bearer_arms(),
     )
 }
 
@@ -135,7 +171,7 @@ fn header_descriptor(name: &str, slot: &str) -> HttpRequestDescriptor {
 #[test]
 fn eligible_descriptor_projects_into_the_south_contract() {
     let prepared = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &descriptor(),
@@ -151,7 +187,7 @@ fn eligible_descriptor_projects_into_the_south_contract() {
 #[test]
 fn eligible_streaming_descriptor_projects_into_the_same_bounded_contract() {
     let prepared = prepare_provider_stream_v1(
-        eligible_streaming_policy(),
+        &eligible_streaming_policy(),
         &provider_config(),
         &auth_config(),
         &descriptor(),
@@ -167,7 +203,7 @@ fn eligible_streaming_descriptor_projects_into_the_same_bounded_contract() {
 #[test]
 fn header_auth_requires_an_independent_explicit_capability() {
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &header_descriptor("x-api-key", "provider_api_key"),
@@ -186,19 +222,21 @@ fn azure_header_auth_requires_the_new_production_capability() {
     request.url = "https://fixture.openai.azure.com/openai/v1/chat/completions".to_owned();
 
     let old_mode = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &azure_provider_config(),
         &auth_config(),
         &request,
     )
-    .expect_err("the old South opt-ins must remain ineligible for Azure Header Auth");
+    .expect_err("a component declaring only bearer must not be handed a header secret");
+    // The reason moved with the judgement: it is no longer "this dialect is not
+    // on the list" but "this component does not carry that auth shape".
     assert_eq!(
         old_mode,
-        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::ProviderDialect)
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
     );
 
     let prepared = prepare_provider_call_v1(
-        eligible_policy().with_azure_openai_header_auth(),
+        &eligible_policy_with(header_secret_arms()),
         &azure_provider_config(),
         &auth_config(),
         &request,
@@ -209,9 +247,9 @@ fn azure_header_auth_requires_the_new_production_capability() {
 }
 
 #[test]
-fn azure_header_auth_capability_remains_cumulative_for_openai_bearer() {
+fn a_component_declaring_both_arms_still_carries_a_bearer() {
     let prepared = prepare_provider_call_v1(
-        eligible_policy().with_azure_openai_header_auth(),
+        &eligible_policy_with(both_arms()),
         &provider_config(),
         &auth_config(),
         &descriptor(),
@@ -227,25 +265,37 @@ fn production_header_auth_does_not_open_the_full_compatibility_catalog() {
     let mut request = header_descriptor("x-api-key", "provider_api_key");
     request.url = "https://fixture.openai.azure.com/openai/v1/chat/completions".to_owned();
 
-    let wrong_header = prepare_provider_call_v1(
-        eligible_policy().with_azure_openai_header_auth(),
+    // A sanctioned header on a component that declares the arm is eligible,
+    // whatever the dialect is called: `x-api-key` is in the catalogue, so the
+    // per-dialect narrowing that used to reject it here is gone on purpose.
+    prepare_provider_call_v1(
+        &eligible_policy_with(header_secret_arms()),
         &azure_provider_config(),
         &auth_config(),
         &request,
     )
-    .expect_err("Azure production eligibility must accept only api-key");
-    assert_eq!(
-        wrong_header,
-        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    .expect("a sanctioned header the component declares it carries is eligible");
+
+    // What still bites is the catalogue, and it bites earlier than the transport:
+    // an arbitrary header name is not a credential header this host knows how to
+    // redact, so `Auth::header` refuses to build the descriptor at all. The
+    // transport never sees the shape it would have had to reject.
+    assert!(
+        Auth::header("x-invented-key", SecretRef::new("provider_api_key")).is_err(),
+        "a header outside the sanctioned catalogue must not become an Auth at all"
     );
 
+    // "Bearer-only" was a host-side restriction, not a property of the package:
+    // the shipped OpenAI-compatible component declares both arms and serves
+    // Azure's `api-key` with them. What refuses a header now is a component that
+    // says it carries only bearers.
     let openai_header = prepare_provider_call_v1(
-        eligible_policy().with_azure_openai_header_auth(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &header_descriptor("api-key", "provider_api_key"),
     )
-    .expect_err("the OpenAI-compatible dialect must remain Bearer-only in production");
+    .expect_err("a bearer-only component must not be handed a header secret");
     assert_eq!(
         openai_header,
         PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
@@ -254,7 +304,7 @@ fn production_header_auth_does_not_open_the_full_compatibility_catalog() {
     let mut azure_bearer = descriptor();
     azure_bearer.url = "https://fixture.openai.azure.com/openai/v1/chat/completions".to_owned();
     let azure_bearer = prepare_provider_call_v1(
-        eligible_policy().with_azure_openai_header_auth(),
+        &eligible_policy_with(header_secret_arms()),
         &azure_provider_config(),
         &auth_config(),
         &azure_bearer,
@@ -276,7 +326,7 @@ async fn explicit_header_auth_maps_only_the_five_south_sanctioned_names() {
         ("ocp-apim-subscription-key", "ocp-apim-subscription-key"),
     ] {
         let prepared = prepare_provider_call_v1(
-            eligible_policy().with_header_secret_auth(),
+            &eligible_policy_with(header_secret_arms()),
             &provider_config(),
             &auth_config(),
             &header_descriptor(input_name, "provider_api_key"),
@@ -305,7 +355,7 @@ async fn explicit_header_auth_maps_only_the_five_south_sanctioned_names() {
     }
 
     let error = prepare_provider_call_v1(
-        eligible_policy().with_header_secret_auth(),
+        &eligible_policy_with(header_secret_arms()),
         &provider_config(),
         &auth_config(),
         &header_descriptor("cookie", "provider_api_key"),
@@ -322,41 +372,28 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
     let cases = [
         (
             CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Unapproved,
-                ApiDialect::Translated,
-                EgressMode::Direct,
-                RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
-            ),
-            IneligibleV1::ProviderPackageUnapproved,
-        ),
-        (
-            CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Approved,
                 ApiDialect::AnthropicNative,
                 EgressMode::Direct,
                 RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
+                bearer_arms(),
             ),
             IneligibleV1::ApiDialect,
         ),
         (
             CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Http,
                 RequestBodyModeV1::Buffered,
-                ResponseMetadataEligibilityV1::Compatible,
+                bearer_arms(),
             ),
             IneligibleV1::Egress,
         ),
         (
             CommunityCallPolicyV1::new(
-                ProviderPackageEligibilityV1::Approved,
                 ApiDialect::Translated,
                 EgressMode::Direct,
                 RequestBodyModeV1::Streaming,
-                ResponseMetadataEligibilityV1::Compatible,
+                bearer_arms(),
             ),
             IneligibleV1::Streaming,
         ),
@@ -364,7 +401,7 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
 
     for (policy, expected) in cases {
         let error =
-            prepare_provider_call_v1(policy, &provider_config(), &auth_config(), &descriptor())
+            prepare_provider_call_v1(&policy, &provider_config(), &auth_config(), &descriptor())
                 .expect_err("unsupported policy must not project");
         assert_eq!(error, PrepareProviderCallErrorV1::Ineligible(expected));
     }
@@ -372,24 +409,23 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
 
 #[test]
 fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
-    let mut wrong_provider = provider_config();
-    wrong_provider.provider = "anthropic".to_owned();
-    let error = prepare_provider_call_v1(
-        eligible_policy(),
-        &wrong_provider,
+    // The dialect's name no longer decides anything: an Anthropic upstream whose
+    // component declares the bearer arm projects like any other. What is refused
+    // below is a shape no admitted component claims to carry.
+    let mut anthropic = provider_config();
+    anthropic.provider = "anthropic".to_owned();
+    prepare_provider_call_v1(
+        &eligible_policy(),
+        &anthropic,
         &auth_config(),
         &descriptor(),
     )
-    .expect_err("a different provider dialect must not project");
-    assert_eq!(
-        error,
-        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::ProviderDialect)
-    );
+    .expect("a dialect name is not an eligibility fact once admission has run");
 
     let mut get = descriptor();
     get.method = HttpMethod::Get;
     let error =
-        prepare_provider_call_v1(eligible_policy(), &provider_config(), &auth_config(), &get)
+        prepare_provider_call_v1(&eligible_policy(), &provider_config(), &auth_config(), &get)
             .expect_err("GET must not project");
     assert_eq!(
         error,
@@ -399,7 +435,7 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
     let mut no_body = descriptor();
     no_body.body = None;
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &no_body,
@@ -416,7 +452,7 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
             .expect("credential header is valid"),
     );
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &header_auth,
@@ -434,7 +470,7 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
         file: Some("secret.txt".into()),
     };
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &file_auth,
         &descriptor(),
@@ -450,25 +486,6 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
     assert_eq!(
         resolver.expect_err("resolver construction must independently reject file sources"),
         IneligibleV1::SecretSource
-    );
-
-    let metadata_incompatible = CommunityCallPolicyV1::new(
-        ProviderPackageEligibilityV1::Approved,
-        ApiDialect::Translated,
-        EgressMode::Direct,
-        RequestBodyModeV1::Buffered,
-        ResponseMetadataEligibilityV1::Incompatible,
-    );
-    let error = prepare_provider_call_v1(
-        metadata_incompatible,
-        &provider_config(),
-        &auth_config(),
-        &descriptor(),
-    )
-    .expect_err("plugins needing more response metadata must not project");
-    assert_eq!(
-        error,
-        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::ResponseMetadata)
     );
 }
 
@@ -521,7 +538,7 @@ fn url_projection_rechecks_raw_path_origin_and_canonical_destination() {
         let mut candidate = descriptor();
         candidate.url = url.to_owned();
         let error = prepare_provider_call_v1(
-            eligible_policy(),
+            &eligible_policy(),
             &provider_config(),
             &auth_config(),
             &candidate,
@@ -533,7 +550,7 @@ fn url_projection_rechecks_raw_path_origin_and_canonical_destination() {
     let mut default_port = descriptor();
     default_port.url = "https://api.example.test:443/v1/chat/completions".to_owned();
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &default_port,
@@ -551,7 +568,7 @@ fn url_projection_rechecks_raw_path_origin_and_canonical_destination() {
     );
     explicit_port_provider.auth = Some(SecretRef::new("provider_api_key"));
     prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &explicit_port_provider,
         &auth_config(),
         &default_port,
@@ -564,7 +581,7 @@ fn invalid_slots_headers_and_oversized_bodies_fail_before_capabilities_exist() {
     let mut invalid_slot = descriptor();
     invalid_slot.auth = Some(Auth::bearer(SecretRef::new("Invalid Slot")));
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &invalid_slot,
@@ -579,7 +596,7 @@ fn invalid_slots_headers_and_oversized_bodies_fail_before_capabilities_exist() {
     reserved_header.headers = SafeHeaders::try_new([("user-agent", "provider-owned")])
         .expect("legacy policy permits this South-owned header");
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &reserved_header,
@@ -595,7 +612,7 @@ fn invalid_slots_headers_and_oversized_bodies_fail_before_capabilities_exist() {
         "x".repeat(MAX_JSON_REQUEST_BODY_BYTES),
     ));
     let error = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &oversized,
@@ -635,7 +652,7 @@ fn adapter_debug_surfaces_only_shape_and_counts() {
     descriptor.body = Some(serde_json::json!({"value": body_sentinel}));
     descriptor.auth = Some(Auth::bearer(SecretRef::new(slot_sentinel)));
 
-    let prepared = prepare_provider_call_v1(eligible_policy(), &provider, &auth, &descriptor)
+    let prepared = prepare_provider_call_v1(&eligible_policy(), &provider, &auth, &descriptor)
         .expect("sentinel descriptor should project");
     let rendered = format!("{prepared:?}");
     for sentinel in [
@@ -776,7 +793,7 @@ impl AsyncHttpTransport for HeaderInspectingTransport<'_> {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn assembled_execution_uses_real_south_core_and_projects_the_response() {
     let prepared = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &descriptor(),
@@ -1062,7 +1079,7 @@ async fn community_resolver_enforces_slot_and_secret_size_without_background_wor
         CommunityCredentialResolverV1::try_new(&secrets, "openai_personal", &resolver_auth)
             .expect("store-backed resolver should be eligible");
     let prepared = prepare_provider_call_v1(
-        eligible_policy(),
+        &eligible_policy(),
         &provider_config(),
         &auth_config(),
         &descriptor(),
@@ -1164,7 +1181,7 @@ async fn real_streaming_adapter_opens_at_headers_and_pulls_the_exact_body_once()
     let mut request = descriptor();
     request.url = format!("{base_url}/chat/completions");
     let prepared = prepare_provider_stream_v1(
-        eligible_streaming_policy(),
+        &eligible_streaming_policy(),
         &provider,
         &auth_config(),
         &request,
@@ -1243,7 +1260,7 @@ async fn run_real_buffered_header_auth() -> String {
     let mut request = header_descriptor("x-api-key", "provider_api_key");
     request.url = format!("{base_url}/chat/completions");
     let prepared = prepare_provider_call_v1(
-        eligible_policy().with_header_secret_auth(),
+        &eligible_policy_with(header_secret_arms()),
         &provider,
         &auth_config(),
         &request,
@@ -1293,7 +1310,7 @@ async fn run_real_streaming_header_auth() -> String {
     let mut request = header_descriptor("x-goog-api-key", "provider_api_key");
     request.url = format!("{base_url}/chat/completions");
     let prepared = prepare_provider_stream_v1(
-        eligible_streaming_policy().with_header_secret_auth(),
+        &eligible_streaming_policy_with(header_secret_arms()),
         &provider,
         &auth_config(),
         &request,
@@ -1375,7 +1392,7 @@ async fn real_streaming_rejections_are_bounded_projected_and_never_become_live_s
     let mut request = descriptor();
     request.url = format!("{base_url}/chat/completions");
     let prepared = prepare_provider_stream_v1(
-        eligible_streaming_policy(),
+        &eligible_streaming_policy(),
         &provider,
         &auth_config(),
         &request,
@@ -1437,7 +1454,7 @@ async fn truncated_streaming_rejection_preserves_the_upstream_status() {
     let mut request = descriptor();
     request.url = format!("{base_url}/chat/completions");
     let prepared = prepare_provider_stream_v1(
-        eligible_streaming_policy(),
+        &eligible_streaming_policy(),
         &provider,
         &auth_config(),
         &request,
@@ -1714,16 +1731,15 @@ fn prepare_header_auth_conformance_fixture(
         .expect("canonical Header Auth fixture uses a host-redacted name"),
     );
     let policy = if streaming {
-        eligible_streaming_policy()
+        eligible_streaming_policy_with(header_secret_arms())
     } else {
-        eligible_policy()
-    }
-    .with_header_secret_auth();
+        eligible_policy_with(header_secret_arms())
+    };
 
     if streaming {
-        prepare_provider_stream_v1(policy, &provider, &auth, &descriptor)
+        prepare_provider_stream_v1(&policy, &provider, &auth, &descriptor)
     } else {
-        prepare_provider_call_v1(policy, &provider, &auth, &descriptor)
+        prepare_provider_call_v1(&policy, &provider, &auth, &descriptor)
     }
 }
 
@@ -2012,7 +2028,7 @@ fn prepare_stream_conformance_input(
         input.requested_credential_slot(),
     )));
 
-    prepare_provider_stream_v1(eligible_streaming_policy(), &provider, &auth, &descriptor)
+    prepare_provider_stream_v1(&eligible_streaming_policy(), &provider, &auth, &descriptor)
 }
 
 async fn pull_community_stream_until_terminal(
@@ -2169,7 +2185,7 @@ fn prepare_conformance_input(
         input.requested_credential_slot(),
     )));
 
-    prepare_provider_call_v1(eligible_policy(), &provider, &auth, &descriptor)
+    prepare_provider_call_v1(&eligible_policy(), &provider, &auth, &descriptor)
 }
 
 impl CommunityConformanceExecutorV1 {
@@ -2773,7 +2789,7 @@ async fn execute_south_quota_fixture_with_response(
     descriptor.body = Some(serde_json::json!({"model": "quota-parity"}));
     descriptor.auth = Some(Auth::bearer(SecretRef::new("provider_api_key")));
     let prepared =
-        prepare_provider_call_v1(eligible_policy(), &provider, &auth_config(), &descriptor)
+        prepare_provider_call_v1(&eligible_policy(), &provider, &auth_config(), &descriptor)
             .expect("South loopback request projects");
     let resolver = ImmediateResolver {
         calls: AtomicUsize::new(0),

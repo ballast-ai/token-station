@@ -23,7 +23,7 @@ export function formatBudgetAmount(micros: number): string {
   return amount.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-type GroupValue = "agent" | "upstream" | "model" | "status";
+type GroupValue = "agent" | "upstream" | "model" | "status" | "engine" | "fallback";
 
 const EMPTY_AGG: AggView = {
   requests: 0,
@@ -187,6 +187,11 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
     { value: "upstream", label: copy("By provider", "按供应商", "按供應商", "プロバイダーごと"), shortLabel: copy("Provider", "供应商", "供應商", "プロバイダー") },
     { value: "model", label: copy("By model", "按模型", "按模型", "モデルごと"), shortLabel: copy("Model", "模型", "模型", "モデル") },
     { value: "status", label: copy("By status", "按状态", "按狀態", "ステータスごと"), shortLabel: copy("Status", "状态", "狀態", "ステータス") },
+    // Which transport carried each attempt, and — when one did not use South —
+    // why. Together they answer "is my traffic actually on the new path", which
+    // the totals alone cannot.
+    { value: "engine", label: copy("By engine", "按引擎", "按引擎", "エンジンごと"), shortLabel: copy("Engine", "引擎", "引擎", "エンジン") },
+    { value: "fallback", label: copy("By fallback reason", "按回退原因", "按回退原因", "フォールバック理由ごと"), shortLabel: copy("Fallback", "回退原因", "回退原因", "フォールバック") },
   ];
   const [since, setSince] = useState("24h");
   const [activeGroup, setActiveGroup] = useState<GroupValue>("agent");

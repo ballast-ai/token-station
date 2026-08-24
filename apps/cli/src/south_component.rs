@@ -11,6 +11,9 @@
 
 use std::path::Path;
 
+use std::collections::BTreeSet;
+
+use south_provider_api::{AuthArmV1, HostExpectationsV1};
 use south_provider_runtime::{
     CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, LoadedComponentV1, NoSecretsV1,
     RuntimeLimitsV1,
@@ -98,6 +101,37 @@ pub fn south_component_runtime() -> Result<ComponentRuntimeV1, String> {
         .map_err(|error| format!("south component runtime: {error:#}"))
 }
 
+/// What this host was built against, for the tuple handshake South's loader
+/// now requires.
+///
+/// **The one place.** Every component this host admits is judged against these
+/// four values, so a second copy would be a second opinion. South owns the
+/// comparison; the host owns the expectation.
+///
+/// These are declarations rather than derivations because nothing in the
+/// dependency graph carries them: South exposes no version constant, and the
+/// kernel revision names an upstream `token-station` commit the mirror tracks,
+/// which no crate in this build can look up. A declaration that nobody checks
+/// is exactly what let the tuple rot unnoticed for three releases, so
+/// `tests/south-dependency-policy.mjs` asserts `SOUTH_RUNTIME` against the
+/// pinned South version and the shipped manifests: drift turns a gate red
+/// rather than turning the handshake into a formality again.
+pub(crate) const IR_SCHEMA_ID: &str = "token-station-protocol@0.3.0/v0.2.0";
+pub(crate) const KERNEL_VERSION: &str = "0.2.0";
+pub(crate) const KERNEL_REVISION: &str = "72458e3a11fe157f9ac04818c44b62a3dd2cb09c";
+pub(crate) const SOUTH_RUNTIME: &str = "0.16.0";
+
+/// The expectation every component is admitted against.
+#[must_use]
+pub fn host_expectations() -> HostExpectationsV1 {
+    HostExpectationsV1 {
+        ir_schema_id: IR_SCHEMA_ID.to_owned(),
+        kernel_version: KERNEL_VERSION.to_owned(),
+        kernel_revision: KERNEL_REVISION.to_owned(),
+        south_runtime: SOUTH_RUNTIME.to_owned(),
+    }
+}
+
 /// A v2 component, loaded through the South gates.
 pub struct SouthComponentAdapter {
     component: LoadedComponentV1,
@@ -114,9 +148,14 @@ impl SouthComponentAdapter {
         manifest_source: &str,
         wasm: &[u8],
     ) -> Result<Self, String> {
-        let component =
-            LoadedComponentV1::load_embedded(runtime, manifest_source, wasm, NoSecretsV1)
-                .map_err(|error| format!("south v2 component: {error}"))?;
+        let component = LoadedComponentV1::load_embedded(
+            runtime,
+            manifest_source,
+            wasm,
+            &host_expectations(),
+            NoSecretsV1,
+        )
+        .map_err(|error| format!("south v2 component: {error}"))?;
         Ok(Self { component })
     }
 
@@ -127,7 +166,7 @@ impl SouthComponentAdapter {
     ///
     /// The South loader's refusal, formatted with the directory.
     pub fn load_dir(runtime: &ComponentRuntimeV1, dir: &Path) -> Result<Self, String> {
-        let component = LoadedComponentV1::load(runtime, dir, NoSecretsV1)
+        let component = LoadedComponentV1::load(runtime, dir, &host_expectations(), NoSecretsV1)
             .map_err(|error| format!("south v2 component at {}: {error}", dir.display()))?;
         Ok(Self { component })
     }
@@ -136,6 +175,18 @@ impl SouthComponentAdapter {
     #[must_use]
     pub fn dialects(&self) -> Vec<String> {
         self.component.manifest().providers.clone()
+    }
+
+    /// The auth shapes this component's manifest declares it can carry.
+    ///
+    /// Transport eligibility reads this instead of matching on provider names.
+    /// A name-based allowlist has to be edited for every dialect the host ever
+    /// admits — and it was, which is why the Anthropic component could translate
+    /// a request the transport then refused to send. The manifest already states
+    /// the answer, and admission has already verified the manifest.
+    #[must_use]
+    pub fn auth_arms(&self) -> BTreeSet<AuthArmV1> {
+        self.component.manifest().auth_arms.clone()
     }
 
     /// The package name its manifest reports, for diagnostics that have to name

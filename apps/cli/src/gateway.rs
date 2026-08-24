@@ -42,12 +42,14 @@ use token_station_protocol::{
     AgentRequestEnvelope, Auth, CapabilityState, ChatRequest, ChatResponse, Content, ContentPart,
     ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts,
     Message, ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders,
-    SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
+    SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef, Usage,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, NoRoute, Router, RouterConfig, RoutingMode,
     UnmetRequirement, UpstreamModel, UpstreamRef,
 };
+
+use std::cell::RefCell;
 
 use crate::admission::Admission;
 use crate::bodylog::{BodyLog, BoundedBody};
@@ -64,8 +66,7 @@ use crate::secrets::SecretStore;
 use crate::south_provider_call::{
     CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
     PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1, PreparedProviderStreamResultV1,
-    ProviderPackageEligibilityV1, RequestBodyModeV1, ResponseMetadataEligibilityV1,
-    StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
+    RequestBodyModeV1, StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
     build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1, map_failure_v1,
     map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
     prepare_provider_stream_v1, project_open_stream_head_v1,
@@ -103,6 +104,100 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// points are the network's, which is exactly what conformance drilled the
 /// parser on.
 const STREAM_READ: usize = 8 * 1024;
+
+/// Reads Anthropic's wire `usage` object into the canonical [`Usage`].
+///
+/// The native path relays the provider's own bytes, so nothing upstream of it
+/// ever builds a `ChatResponse` — and `record.usage` stayed `None`. That one
+/// gap reached three places: pricing skips a request with no usage, budgets
+/// therefore show a native turn as free, and `quota.record` is guarded on
+/// `record.usage` too, so consumption-aware routing kept believing an account
+/// it had just spent was untouched.
+fn anthropic_wire_usage(usage: &serde_json::Value) -> Option<Usage> {
+    let field = |name: &str| usage.get(name).and_then(serde_json::Value::as_u64);
+    let tier = |name: &str| {
+        usage
+            .get("cache_creation")
+            .and_then(|creation| creation.get(name))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let parsed = Usage {
+        input_tokens: field("input_tokens").unwrap_or(0),
+        output_tokens: field("output_tokens").unwrap_or(0),
+        cache_read_tokens: field("cache_read_input_tokens").unwrap_or(0),
+        cache_write_tokens: field("cache_creation_input_tokens").unwrap_or(0),
+        cache_write_5m_tokens: tier("ephemeral_5m_input_tokens"),
+        cache_write_1h_tokens: tier("ephemeral_1h_input_tokens"),
+        reasoning_tokens: 0,
+    };
+    // An object with none of the fields we understand is not a usage report;
+    // recording zeros would claim a free turn rather than an unknown one.
+    (parsed != Usage::default()).then_some(parsed)
+}
+
+/// Pulls usage out of a relayed Anthropic SSE stream without altering a byte
+/// of it.
+///
+/// Anthropic reports usage twice — `message_start` carries the input buckets,
+/// `message_delta` the final output count — which is exactly the shape
+/// [`Usage::absorb`] exists for. The tap is line-oriented so it never needs
+/// the whole stream in memory, and it gives up rather than grow without bound
+/// if a peer sends no newline.
+#[derive(Default)]
+struct AnthropicSseUsageTap {
+    partial: String,
+    usage: Option<Usage>,
+    abandoned: bool,
+}
+
+impl AnthropicSseUsageTap {
+    /// A single SSE line far beyond any real Anthropic event. Past this the
+    /// peer is not sending frames and the tap stops looking.
+    const MAX_LINE: usize = 256 * 1024;
+
+    fn observe(&mut self, chunk: &str) {
+        if self.abandoned {
+            return;
+        }
+        self.partial.push_str(chunk);
+        while let Some(end) = self.partial.find('\n') {
+            let line = self.partial[..end].trim_end_matches('\r').to_owned();
+            self.partial.drain(..=end);
+            self.observe_line(&line);
+        }
+        if self.partial.len() > Self::MAX_LINE {
+            self.abandoned = true;
+            self.partial = String::new();
+        }
+    }
+
+    fn observe_line(&mut self, line: &str) {
+        let Some(payload) = line.strip_prefix("data:") else {
+            return;
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(payload.trim()) else {
+            return;
+        };
+        // `message_start` nests usage under `message`; `message_delta` puts it
+        // at the top level beside `delta`.
+        let found = event
+            .get("usage")
+            .or_else(|| {
+                event
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+            })
+            .and_then(anthropic_wire_usage);
+        if let Some(found) = found {
+            self.usage.get_or_insert_with(Usage::default).absorb(found);
+        }
+    }
+
+    fn into_usage(self) -> Option<Usage> {
+        self.usage
+    }
+}
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REQUEST_FALLBACK: AtomicU64 = AtomicU64::new(1);
 const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
@@ -1090,6 +1185,15 @@ impl ProviderCallOutcome {
         }
     }
 
+    /// A verbatim native forward: no translation, so no South engine and no
+    /// fallback reason to report.
+    const fn native() -> Self {
+        Self {
+            engine: RecordedProviderCallEngine::Native,
+            south_fallback_reason: None,
+        }
+    }
+
     const fn south(engine: RecordedProviderCallEngine) -> Self {
         Self {
             engine,
@@ -1101,8 +1205,6 @@ impl ProviderCallOutcome {
 /// The content-free classification of a South eligibility refusal.
 const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
     match reason {
-        IneligibleV1::ProviderDialect => SouthFallbackReason::ProviderDialect,
-        IneligibleV1::ProviderPackageUnapproved => SouthFallbackReason::ProviderPackageUnapproved,
         IneligibleV1::ApiDialect => SouthFallbackReason::ApiDialect,
         IneligibleV1::Egress => SouthFallbackReason::Egress,
         IneligibleV1::Streaming => SouthFallbackReason::Streaming,
@@ -1110,7 +1212,6 @@ const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
         IneligibleV1::Auth => SouthFallbackReason::Auth,
         IneligibleV1::Body => SouthFallbackReason::Body,
         IneligibleV1::SecretSource => SouthFallbackReason::SecretSource,
-        IneligibleV1::ResponseMetadata => SouthFallbackReason::ResponseMetadata,
         IneligibleV1::Headers => SouthFallbackReason::Headers,
     }
 }
@@ -1316,6 +1417,41 @@ fn quota_session_key(request: &ChatRequest) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// The same conversation key as [`quota_session_key`], read off the Anthropic
+/// wire instead of the Canonical IR.
+///
+/// Prompt-cache affinity is the reason both exist: a follow-up turn should land
+/// on the account that already holds the prefix. The native payload has no IR
+/// to hash, but it has the same first two turns, so the key is derivable without
+/// normalising the body — which is precisely what the native path exists to
+/// avoid doing.
+fn native_quota_session_key(body: &Value) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for message in body
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(2)
+    {
+        match message.get("content") {
+            Some(Value::String(text)) => text.hash(&mut hasher),
+            Some(Value::Array(blocks)) => {
+                for text in blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                {
+                    text.hash(&mut hasher);
+                }
+            }
+            _ => {}
+        }
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 fn record_actual_attempt_target(
     record: &mut RequestRecord,
     decision: &Decision,
@@ -1327,6 +1463,51 @@ fn record_actual_attempt_target(
     record.routing = Some(routing);
 }
 
+/// What one attempt puts on the wire.
+///
+/// Both shapes go through `dispatch`, which is the point: the attempt budget,
+/// provider admission, fallback, deadline, health, quota and receipts are the
+/// host's, not the payload's. A verbatim Anthropic body used to reach the
+/// upstream through its own path — no budget, no lease, no attempt record, and
+/// Quota-first routing simply refused to serve it — because the payload's shape
+/// had been allowed to decide the control plane.
+enum AttemptPayload<'a> {
+    /// The Canonical IR. Each attempt's target renders it with its own
+    /// component, so the wire bytes differ per upstream.
+    Canonical(&'a ChatRequest),
+    /// The caller's Anthropic Messages body, forwarded verbatim. Only the
+    /// routed model is rewritten, so the bytes are the same whichever
+    /// `anthropic-native` upstream serves them.
+    ///
+    /// This shape exists because the Canonical IR cannot carry Anthropic's
+    /// server-tool history — the one gap left after stage A′ — so the caller's
+    /// own bytes are the only faithful payload for those turns.
+    AnthropicNative {
+        body: &'a Value,
+        /// Curated once by the caller: `SafeHeaders` already refuses any
+        /// credential or host-owned name, so the client's own auth can never
+        /// ride upstream.
+        headers: &'a SafeHeaders,
+        stream: bool,
+        /// Where an attempt parks the upstream's own error response so the
+        /// caller can relay it byte for byte once the pool is exhausted.
+        ///
+        /// It is deliberately *not* on the `ErrorEnvelope`. `ErrorCode`'s own
+        /// docs forbid putting an upstream's raw body there, because a body
+        /// may echo the request and the envelope reaches `requests.log`, which
+        /// promises to hold no request content. This channel goes only to the
+        /// client that already sent the request.
+        last_upstream_error: &'a RefCell<Option<RawUpstreamError>>,
+    },
+}
+
+/// An upstream's own error response, kept out of the envelope on purpose.
+#[derive(Debug)]
+struct RawUpstreamError {
+    status: u16,
+    body: String,
+}
+
 /// One configured upstream, resolved and ready to serve.
 struct Upstream {
     config: ProviderConfig,
@@ -1334,14 +1515,15 @@ struct Upstream {
     /// The translation engine: the South provider component that speaks this
     /// upstream's dialect, resolved at assembly.
     plugin: Arc<dyn ProviderAdapter + Send + Sync>,
+    /// The auth shapes the admitted component declares, read from its manifest
+    /// once at assembly. Transport eligibility judges by these instead of by
+    /// the dialect's name.
+    auth_arms: std::collections::BTreeSet<south_provider_api::AuthArmV1>,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
     provider_call: ConfiguredProviderCallEngine,
-    /// The dialect resolves to a component embedded by the signed release
-    /// pipeline, which is what the South transport slice requires.
-    south_package_approved: bool,
 }
 
 /// Server-owned asynchronous capability borrowed by the synchronous gateway.
@@ -1413,7 +1595,6 @@ impl SouthComponentSupport {
 fn assemble_upstreams(
     config: &ClientConfig,
     south_component: &SouthComponentSupport,
-    registry: &crate::plugins::PluginRegistry,
 ) -> Result<
     (
         BTreeMap<String, Upstream>,
@@ -1428,10 +1609,12 @@ fn assemble_upstreams(
         // `.clone()` rather than `Arc::clone`: the unsized coercion to the
         // trait-object field must not flow backward into the map's concrete
         // value type.
-        let plugin: Arc<dyn ProviderAdapter + Send + Sync> = south_component
+        let admitted = south_component
             .adapter_for(&entry.provider)
             .expect("the caller loaded a component for every configured dialect")
             .clone();
+        let auth_arms = admitted.auth_arms();
+        let plugin: Arc<dyn ProviderAdapter + Send + Sync> = admitted;
 
         let mut provider_config =
             ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
@@ -1466,10 +1649,10 @@ fn assemble_upstreams(
             Upstream {
                 config: provider_config,
                 auth_config: entry.auth.clone(),
+                auth_arms,
                 plugin,
                 dialect: entry.api_dialect,
                 provider_call: entry.provider_call,
-                south_package_approved: registry.provider_package_south_approved(&entry.provider),
             },
         );
     }
@@ -2363,7 +2546,7 @@ impl Gateway {
 
         let south_component = south_component_support(config, &registry)?;
 
-        let (upstreams, catalog) = assemble_upstreams(config, &south_component, &registry)?;
+        let (upstreams, catalog) = assemble_upstreams(config, &south_component)?;
 
         let (local_upstreams, free_upstreams) = Self::upstream_boundary_sets(config);
 
@@ -2812,13 +2995,10 @@ impl Gateway {
             .plugin
             .build_http_request(&request, &upstream.config)
             .map_err(describe)?;
-        let policy = self.community_call_policy(
-            upstream,
-            RequestBodyModeV1::Buffered,
-            upstream.config.provider == "azure-openai-v1",
-        );
-        let prepared = prepare_provider_call_v1(policy, &upstream.config, auth_config, &descriptor)
-            .map_err(describe_prepare_failure)?;
+        let policy = self.community_call_policy(upstream, RequestBodyModeV1::Buffered);
+        let prepared =
+            prepare_provider_call_v1(&policy, &upstream.config, auth_config, &descriptor)
+                .map_err(describe_prepare_failure)?;
 
         let clock = std::time::Instant::now();
         let response = execute_prepared_provider_call_v1(
@@ -3775,7 +3955,7 @@ impl Gateway {
         // verbatim route. The decision runs on a minimal request (model only).
         if agent.protocol == "anthropic-messages"
             && let Some(served) =
-                self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
+                self.try_anthropic_passthrough(ctx, agent, router, headers, body, emit, record)?
         {
             return Ok(served);
         }
@@ -3869,7 +4049,7 @@ impl Gateway {
         let result = self.dispatch(
             ctx,
             agent,
-            &request,
+            &AttemptPayload::Canonical(&request),
             &inbound_tools,
             &decision,
             emit,
@@ -3937,7 +4117,7 @@ impl Gateway {
         &self,
         ctx: &RequestContext,
         agent: &LoadedAgent,
-        request: &ChatRequest,
+        payload: &AttemptPayload<'_>,
         inbound_tools: &Value,
         decision: &Decision,
         target: &UpstreamModel,
@@ -3950,7 +4130,13 @@ impl Gateway {
         if *media_retried || !is_unsupported_media_error(error) {
             return None;
         }
-        let mut fallback_request = request.clone();
+        // Media fallback rewrites Canonical content parts. A verbatim payload
+        // has already had its own fallback applied before it reached the wire,
+        // and rewriting it here would mean editing the caller's bytes.
+        let AttemptPayload::Canonical(request) = payload else {
+            return None;
+        };
+        let mut fallback_request = (*request).clone();
         let replaced = replace_canonical_images(&mut fallback_request);
         if replaced == 0 || !budget.try_begin(None) {
             return None;
@@ -3969,7 +4155,7 @@ impl Gateway {
             ctx,
             budget.per_attempt_timeout,
             agent,
-            &fallback_request,
+            &AttemptPayload::Canonical(&fallback_request),
             inbound_tools,
             target,
             emit,
@@ -3999,7 +4185,7 @@ impl Gateway {
         &self,
         ctx: &RequestContext,
         agent: &LoadedAgent,
-        request: &ChatRequest,
+        payload: &AttemptPayload<'_>,
         inbound_tools: &Value,
         decision: &Decision,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -4049,7 +4235,7 @@ impl Gateway {
                 ctx,
                 budget.per_attempt_timeout,
                 agent,
-                request,
+                payload,
                 inbound_tools,
                 target,
                 emit,
@@ -4085,7 +4271,7 @@ impl Gateway {
                     if let Some(retry) = self.retry_without_media(
                         ctx,
                         agent,
-                        request,
+                        payload,
                         inbound_tools,
                         decision,
                         target,
@@ -4524,12 +4710,13 @@ impl Gateway {
 
     /// One upstream attempt: build, authorize, inject, send, translate back.
     #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
+    #[allow(clippy::too_many_lines)] // payload choice, eligibility and dispatch stay one path
     fn try_upstream(
         &self,
         ctx: &RequestContext,
         attempt_timeout: Duration,
         agent: &LoadedAgent,
-        request: &ChatRequest,
+        payload: &AttemptPayload<'_>,
         inbound_tools: &Value,
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -4551,8 +4738,32 @@ impl Gateway {
                 )
             })?;
 
-        // Routing may have picked a different model than the caller named.
-        let request = Self::request_for_attempt(upstream, target, request);
+        let request = match payload {
+            AttemptPayload::AnthropicNative {
+                body,
+                headers,
+                stream,
+                last_upstream_error,
+            } => {
+                return self.native_attempt(
+                    ctx,
+                    target,
+                    headers,
+                    body,
+                    *stream,
+                    attempt_timeout,
+                    emit,
+                    record,
+                    upstream_http_status,
+                    provider_call_engine,
+                    last_upstream_error,
+                );
+            }
+            // Routing may have picked a different model than the caller named.
+            AttemptPayload::Canonical(request) => {
+                Self::request_for_attempt(upstream, target, request)
+            }
+        };
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
         let response = match self.send_provider_call(
@@ -4657,9 +4868,11 @@ impl Gateway {
     /// not a passthrough and the caller must fall through to the Canonical-IR
     /// pipeline. Never runs `normalize_inbound`.
     #[allow(clippy::too_many_arguments)] // decision, fallbacks and dispatch stay one path
+    #[allow(clippy::too_many_lines)] // routing probe, fallbacks, lease and dispatch are one decision
     fn try_anthropic_passthrough(
         &self,
         ctx: &RequestContext,
+        agent: &LoadedAgent,
         router: &Router,
         raw_headers: &[(String, String)],
         body: &[u8],
@@ -4707,10 +4920,29 @@ impl Gateway {
                 parameters: json!({}),
             });
         }
-        let candidates = self.candidates(std::time::Instant::now(), None);
+        // Quota-first used to bail out here, which meant a server-tool turn was
+        // simply unservable in that mode: the request fell through to the
+        // Canonical path, where the adapter refuses the blocks. The payload's
+        // shape was deciding which routing modes existed. It gets the same
+        // treatment as any other request now — consumption-aware candidates, a
+        // conversation-affine account, an in-flight lease and a settlement.
+        let (quota_now_ms, session) = if router.routing_mode() == RoutingMode::QuotaFirst {
+            (Some(unix_millis()), native_quota_session_key(&body_value))
+        } else {
+            (None, String::new())
+        };
+        let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
         let decision_result = match router.routing_mode() {
             RoutingMode::Tiered => router.route(&mini, &[], &candidates),
-            RoutingMode::QuotaFirst => return Ok(None),
+            RoutingMode::QuotaFirst => {
+                let last = self
+                    .quota
+                    .lock()
+                    .expect("quota lock")
+                    .last_account(&session)
+                    .cloned();
+                router.route_quota_first(&mini, &candidates, last.as_ref())
+            }
         };
         let Ok(decision) = decision_result else {
             return Ok(None);
@@ -4760,18 +4992,62 @@ impl Gateway {
         record.stream = stream;
         record_route_decision(record, &decision);
 
-        let attempt_timeout = AttemptBudget::for_request(ctx).per_attempt_timeout;
-        let outcome = self.passthrough_upstream(
+        // The native body is now just another attempt payload. Everything below
+        // this line — budget, provider admission, fallback, deadline, health,
+        // quota and receipts — is the same machinery every Canonical request
+        // gets, which is the whole point of folding it in here.
+        let headers = Self::curate_passthrough_headers(raw_headers)?;
+        // Same lease discipline as the Canonical path: take an in-flight lease
+        // on the chosen account before dispatch so concurrent requests see the
+        // load and spread, then settle whatever actually served.
+        let lease = quota_now_ms.map(|now_ms| {
+            self.quota
+                .lock()
+                .expect("quota lock")
+                .grant(decision.chosen.upstream.as_str(), now_ms)
+        });
+        let last_upstream_error = RefCell::new(None);
+        let result = self.dispatch(
             ctx,
-            &decision.chosen,
-            raw_headers,
-            &body_value,
-            stream,
-            attempt_timeout,
+            agent,
+            &AttemptPayload::AnthropicNative {
+                body: &body_value,
+                headers: &headers,
+                stream,
+                last_upstream_error: &last_upstream_error,
+            },
+            &json!({}),
+            &decision,
             emit,
             record,
-        )?;
-        Ok(Some((decision.chosen, outcome)))
+        );
+        if let Some(now_ms) = quota_now_ms {
+            self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
+        }
+
+        // The pool is exhausted and every attempt was a retriable upstream
+        // failure. The passthrough contract still holds for the answer the
+        // client finally gets: relay the last upstream's own status and body,
+        // not a token-station envelope built from them.
+        if let Some(raw) = last_upstream_error
+            .borrow_mut()
+            .take()
+            .filter(|_| result.is_err())
+        {
+            emit(Reply::BeginJson(JsonReply {
+                status: raw.status,
+                body: raw.body,
+            }));
+            // `record_actual_attempt_target` already named the upstream that
+            // produced this body; `decision.chosen` is the one the router
+            // picked first, which is what the caller reports for a request
+            // that never settled.
+            return Ok(Some((
+                decision.chosen.clone(),
+                StreamOutcome::FailedBeforeOutput,
+            )));
+        }
+        result.map(Some)
     }
 
     /// Forwards the caller's Anthropic Messages body verbatim (only the routed
@@ -4781,16 +5057,19 @@ impl Gateway {
     /// are preserved; the client's own auth headers can never reach the upstream.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_lines)] // authorize, send and terminal mapping form one state machine
-    fn passthrough_upstream(
+    fn native_attempt(
         &self,
         ctx: &RequestContext,
         target: &UpstreamModel,
-        raw_headers: &[(String, String)],
+        headers: &SafeHeaders,
         body: &Value,
         stream: bool,
         attempt_timeout: Duration,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
+        upstream_http_status: &mut Option<u16>,
+        provider_call_engine: &mut ProviderCallOutcome,
+        last_upstream_error: &RefCell<Option<RawUpstreamError>>,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         const ANTHROPIC: &str = "anthropic-messages";
         let upstream = self
@@ -4814,7 +5093,7 @@ impl Gateway {
             HttpMethod::Post,
             upstream.config.base_url.resolve(ProviderApi::Messages),
         );
-        descriptor.headers = Self::curate_passthrough_headers(raw_headers)?;
+        descriptor.headers = headers.clone();
         descriptor.body = Some(forwarded);
         descriptor.auth = upstream.config.auth.clone().map(Auth::bearer);
 
@@ -4842,6 +5121,12 @@ impl Gateway {
             None,
         );
 
+        // Claim the engine before the send, the way the South path does. An
+        // attempt that never gets a response was still performed by this
+        // engine, and filing it as `unknown` hides exactly the failures an
+        // operator grouping Stats by engine is looking for.
+        *provider_call_engine = ProviderCallOutcome::native();
+
         let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
         {
             Err(_) if ctx.is_cancelled() => {
@@ -4861,6 +5146,11 @@ impl Gateway {
             }
             Ok(response) => response,
         };
+        // The attempt record carries the upstream's real status too. Without
+        // it a served native request showed up in Stats with no engine and no
+        // upstream status — which is how a request that plainly went out could
+        // be filed as `(unrouted)`.
+        *upstream_http_status = Some(response.status);
 
         if let Err(error) = EgressPolicy::reject_redirect(response.status) {
             record_conversion(
@@ -4900,6 +5190,30 @@ impl Gateway {
                 false,
                 Some(code),
             );
+
+            // A 5xx or a rate limit is the upstream's fault, not the request's:
+            // the host already classifies these as retriable elsewhere, and the
+            // translated path acts on that by trying the rest of the pool. This
+            // path used to relay the first one and stop, so the same outage was
+            // survivable on one route and fatal on the other. Park the response
+            // and hand `dispatch` an error it can fall over on; the caller
+            // relays whatever the last upstream said if the pool runs out.
+            //
+            // A 4xx is not retried, and the reasoning is the opposite: the same
+            // request fails the same way everywhere, and Claude Code reads the
+            // original body to repair itself. Relaying it at once is right.
+            if code.is_retriable_elsewhere() {
+                *last_upstream_error.borrow_mut() = Some(RawUpstreamError {
+                    status: parts.status,
+                    body: parts.body,
+                });
+                return Err(ErrorEnvelope::new(
+                    code,
+                    parts.status,
+                    "upstream refused the native passthrough",
+                ));
+            }
+
             emit(Reply::BeginJson(JsonReply {
                 status: parts.status,
                 body: parts.body,
@@ -4923,6 +5237,17 @@ impl Gateway {
             Self::relay_raw_sse(ctx, response, emit, record)
         } else {
             let parts = response.into_parts()?;
+            // Read the provider's own usage report off the body we are about
+            // to relay. Nothing is rewritten: the client still gets the exact
+            // bytes, the host just stops pretending the turn was free.
+            if let Some(usage) = serde_json::from_str::<serde_json::Value>(&parts.body)
+                .ok()
+                .as_ref()
+                .and_then(|body| body.get("usage"))
+                .and_then(anthropic_wire_usage)
+            {
+                record.usage = Some(usage);
+            }
             emit(Reply::BeginJson(JsonReply {
                 status: parts.status,
                 body: parts.body,
@@ -4941,9 +5266,37 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
+        // The tap reads the frames going past; it never changes them. Its
+        // result is written on every exit, including a truncated stream, since
+        // `message_start`'s input tokens are real whether or not the turn
+        // finished.
+        let mut tap = AnthropicSseUsageTap::default();
+        let outcome = Self::relay_raw_sse_frames(ctx, response, emit, record, &mut tap);
+        if let Some(usage) = tap.into_usage() {
+            record.usage = Some(usage);
+        }
+        outcome
+    }
+
+    fn relay_raw_sse_frames(
+        ctx: &RequestContext,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+        tap: &mut AnthropicSseUsageTap,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
         let mut reader = response.into_reader();
         let mut buffer = [0u8; STREAM_READ];
         let mut committed = false;
+        // Bytes of a character the last read cut in half. A read returns
+        // whatever has arrived, not a whole number of characters, so a
+        // multi-byte character routinely straddles two of them — and decoding
+        // each read on its own turned every such character into U+FFFD. The
+        // repository has been here before: `3fec191` added byte-level SSE
+        // decoding for exactly this, and the translated path keeps it by
+        // feeding bytes to `SseFrameDecoder`. This relay was written later and
+        // did not.
+        let mut pending: Vec<u8> = Vec::new();
         loop {
             if ctx.is_cancelled() {
                 if !committed {
@@ -4952,13 +5305,34 @@ impl Gateway {
                 return Ok(StreamOutcome::ClientCancelled);
             }
             match reader.read(&mut buffer) {
-                Ok(0) => return Ok(StreamOutcome::Complete),
+                Ok(0) => {
+                    // A stream that ends mid-character really is truncated;
+                    // show the damage rather than drop the bytes.
+                    if !pending.is_empty() {
+                        let tail = String::from_utf8_lossy(&pending).into_owned();
+                        tap.observe(&tail);
+                        if !emit(Reply::Chunk(tail)) {
+                            return Ok(StreamOutcome::ClientCancelled);
+                        }
+                    }
+                    return Ok(StreamOutcome::Complete);
+                }
                 Ok(read) => {
                     if !committed && !emit(Reply::BeginStream) {
                         return Ok(StreamOutcome::ClientCancelled);
                     }
                     committed = true;
-                    let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                    pending.extend_from_slice(&buffer[..read]);
+                    let boundary = match std::str::from_utf8(&pending) {
+                        Ok(_) => pending.len(),
+                        Err(error) => error.valid_up_to(),
+                    };
+                    if boundary == 0 {
+                        continue;
+                    }
+                    let chunk = String::from_utf8(pending.drain(..boundary).collect())
+                        .expect("valid up to the boundary");
+                    tap.observe(&chunk);
                     if !emit(Reply::Chunk(chunk)) {
                         return Ok(StreamOutcome::ClientCancelled);
                     }
@@ -5025,30 +5399,18 @@ impl Gateway {
         &self,
         upstream: &Upstream,
         body_mode: RequestBodyModeV1,
-        allow_header_auth: bool,
     ) -> CommunityCallPolicyV1 {
-        let approved = if upstream.south_package_approved {
-            ProviderPackageEligibilityV1::Approved
-        } else {
-            ProviderPackageEligibilityV1::Unapproved
-        };
-        let metadata = if upstream.south_package_approved {
-            ResponseMetadataEligibilityV1::Compatible
-        } else {
-            ResponseMetadataEligibilityV1::Incompatible
-        };
-        let policy = CommunityCallPolicyV1::new(
-            approved,
+        // Provenance is settled at admission, not here. A component that reached
+        // this point passed source trust, the compatibility handshake, the Wasm
+        // gates and the identity check; re-deciding whether its package is
+        // "approved" would be the transport second-guessing a question already
+        // answered, and answering it wrong meant silently dropping to Legacy.
+        CommunityCallPolicyV1::new(
             upstream.dialect,
             self.egress.policy.mode,
             body_mode,
-            metadata,
-        );
-        if allow_header_auth {
-            policy.with_azure_openai_header_auth()
-        } else {
-            policy
-        }
+            upstream.auth_arms.clone(),
+        )
     }
 
     /// Resolves the descriptor into a real HTTP exchange.
@@ -5087,16 +5449,11 @@ impl Gateway {
         } else {
             RequestBodyModeV1::Buffered
         };
-        let policy = self.community_call_policy(
-            upstream,
-            body_mode,
-            upstream.provider_call
-                == ConfiguredProviderCallEngine::SouthV1BufferedStreamingHeaderAuth,
-        );
+        let policy = self.community_call_policy(upstream, body_mode);
         let prepared = match if streaming {
-            prepare_provider_stream_v1(policy, &upstream.config, auth_config, descriptor)
+            prepare_provider_stream_v1(&policy, &upstream.config, auth_config, descriptor)
         } else {
-            prepare_provider_call_v1(policy, &upstream.config, auth_config, descriptor)
+            prepare_provider_call_v1(&policy, &upstream.config, auth_config, descriptor)
         } {
             Ok(prepared) => prepared,
             Err(PrepareProviderCallErrorV1::Ineligible(reason)) => {

@@ -337,15 +337,6 @@ pub enum Origin {
     Configured,
 }
 
-/// Whether the exact package bytes bound to a provider dialect carry
-/// conformance evidence. Operator permission to load unsigned bytes is
-/// deliberately a different state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderPackageVerificationV1 {
-    ConformancePassed,
-    NotConformanceVerified,
-}
-
 /// Where a provider dialect resolves to: a South provider component.
 #[derive(Debug)]
 pub struct ProviderBinding {
@@ -354,7 +345,6 @@ pub struct ProviderBinding {
     pub package: String,
     pub source: PackageSource,
     pub origin: Origin,
-    package_verification: ProviderPackageVerificationV1,
 }
 
 /// The provider dialects this installation can speak, and the packages that
@@ -412,33 +402,6 @@ impl PluginRegistry {
     #[must_use]
     pub fn provider_binding(&self, dialect: &str) -> Option<&ProviderBinding> {
         self.providers.get(dialect)
-    }
-
-    /// Returns byte-bound conformance evidence for the package serving a
-    /// provider dialect. A configured or globally allowed unsigned package
-    /// remains loadable, but is not eligible for the South transport slice.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn provider_package_verification(
-        &self,
-        dialect: &str,
-    ) -> Option<ProviderPackageVerificationV1> {
-        self.providers
-            .get(dialect)
-            .map(|binding| binding.package_verification)
-    }
-
-    /// True only when `dialect` resolves to a component embedded by the signed
-    /// release pipeline. The builtin tier is the one whose bytes passed
-    /// South's component conformance at build time; a discovered package —
-    /// receipt or not — is local evidence, not publisher identity, and the
-    /// South transport slice accepts only the former.
-    #[must_use]
-    pub fn provider_package_south_approved(&self, dialect: &str) -> bool {
-        self.providers.get(dialect).is_some_and(|binding| {
-            binding.package_verification == ProviderPackageVerificationV1::ConformancePassed
-                && binding.origin == Origin::Builtin
-        })
     }
 
     /// Every dialect an `upstream add --provider` may name, sorted.
@@ -603,11 +566,6 @@ fn bind_declared_dialects(
                             package: name.clone(),
                             source: package.source.clone(),
                             origin,
-                            package_verification: if package.conformance_passed {
-                                ProviderPackageVerificationV1::ConformancePassed
-                            } else {
-                                ProviderPackageVerificationV1::NotConformanceVerified
-                            },
                         },
                     );
                 }
@@ -704,7 +662,6 @@ fn merge_explicit_entries(
                         package: package.clone(),
                         source: PackageSource::Dir(dir),
                         origin: Origin::Configured,
-                        package_verification: ProviderPackageVerificationV1::NotConformanceVerified,
                     },
                 );
             }
@@ -1303,8 +1260,8 @@ mod tests {
     use crate::config::PluginsConfig;
 
     use super::{
-        DiscoveredPackage, PackageManifest, PackageSource, PluginRegistry,
-        ProviderPackageVerificationV1, bind_declared_dialects, merge_explicit_entries,
+        DiscoveredPackage, PackageManifest, PackageSource, PluginRegistry, bind_declared_dialects,
+        merge_explicit_entries,
     };
 
     /// A South provider component manifest (`provider-adapter-v2`), the only
@@ -1319,12 +1276,15 @@ mod tests {
             "auth_arms": ["bearer"],
             "permissions": { "network": false, "filesystem": false, "secrets": ["provider_api_key"] },
             "conformance": { "required_suite": "south.provider-component.v1", "fixtures": "fixtures/" },
+            // Derived, not repeated: this fixture drifted to 0.14.0 while the
+            // host moved on, and a fixture that disagrees with the host tests
+            // nothing once the handshake is enforced.
             "compatibility": {
-                "ir_schema_id": "token-station-protocol@0.3.0/v0.2.0",
-                "kernel_version": "0.2.0",
-                "kernel_revision": "72458e3a11fe157f9ac04818c44b62a3dd2cb09c",
+                "ir_schema_id": crate::south_component::IR_SCHEMA_ID,
+                "kernel_version": crate::south_component::KERNEL_VERSION,
+                "kernel_revision": crate::south_component::KERNEL_REVISION,
                 "wit_package": "token-station:adapter@2.0.0",
-                "south_runtime": "0.14.0"
+                "south_runtime": crate::south_component::SOUTH_RUNTIME
             }
         })
         .to_string()
@@ -1676,10 +1636,6 @@ mod tests {
         let reloaded = super::Receipts::load(&data).expect("round-trips");
         let registry = PluginRegistry::discover(&config, &reloaded).expect("a receipt vouches");
         assert!(registry.provider_binding("x").is_some());
-        assert_eq!(
-            registry.provider_package_verification("x"),
-            Some(ProviderPackageVerificationV1::ConformancePassed),
-        );
         assert!(
             registry
                 .package("provider-x")
@@ -1730,10 +1686,18 @@ mod tests {
                 .provider_binding("forged-openai-compatible")
                 .is_some()
         );
-        assert!(
-            !registry.provider_package_south_approved("forged-openai-compatible"),
-            "a persisted publisher claim is not cryptographic identity; only the builtin tier \
-             is South-approved"
+        // A persisted publisher claim is not cryptographic identity. The
+        // registry no longer decides whether that makes a package usable — it
+        // finds candidates and binds dialects, and admission at Gateway startup
+        // rules on trust — so the fact under test is the one the registry still
+        // owns: this package's origin is not the builtin tier the release build
+        // vouches for.
+        assert_ne!(
+            registry
+                .provider_binding("forged-openai-compatible")
+                .expect("bound as a candidate")
+                .origin,
+            super::Origin::Builtin,
         );
         fs::remove_dir_all(dir).ok();
     }
@@ -1764,10 +1728,15 @@ mod tests {
         let registry = PluginRegistry::discover(&config, &reloaded)
             .expect("operator entry may still bind the package");
 
-        assert_eq!(
-            registry.provider_package_verification("x"),
-            Some(ProviderPackageVerificationV1::NotConformanceVerified),
-            "suite identity is part of conformance evidence"
+        // Suite identity is part of conformance evidence: a receipt naming the
+        // wrong suite leaves the package bound (the operator entry says so) but
+        // not conformance-verified.
+        assert!(registry.provider_binding("x").is_some());
+        assert!(
+            !registry
+                .package("provider-x")
+                .expect("catalogued")
+                .conformance_passed
         );
         fs::remove_dir_all(dir).ok();
     }
@@ -1860,10 +1829,12 @@ mod tests {
 
         let registry = discover(&config).expect("the hand-written entry is the confirmation");
         assert!(registry.provider_binding("x").is_some());
-        assert_eq!(
-            registry.provider_package_verification("x"),
-            Some(ProviderPackageVerificationV1::NotConformanceVerified),
-            "operator permission to load is not South conformance evidence"
+        // Operator permission to load is not South conformance evidence.
+        assert!(
+            !registry
+                .package("provider-x")
+                .expect("catalogued")
+                .conformance_passed
         );
         fs::remove_dir_all(dir).ok();
     }
@@ -1887,8 +1858,23 @@ mod tests {
             .provider_binding("openai-compatible")
             .expect("the builtin provider registers");
         assert_eq!(binding.package, "provider-openai-compatible");
-        assert!(registry.provider_package_south_approved("openai-compatible"));
-        assert!(registry.provider_package_south_approved("anthropic"));
+        // Provenance is no longer the registry's call; it binds candidates and
+        // admission rules on trust. What the registry still owns is that the
+        // builtin tier wins the dialect over a shadowing imposter.
+        assert_eq!(
+            registry
+                .provider_binding("openai-compatible")
+                .expect("bound")
+                .origin,
+            super::Origin::Builtin,
+        );
+        assert_eq!(
+            registry
+                .provider_binding("anthropic")
+                .expect("bound")
+                .origin,
+            super::Origin::Builtin,
+        );
         assert!(registry.render_list().contains("shadowed"));
         assert!(matches!(
             registry.agent_source("agent-openai"),

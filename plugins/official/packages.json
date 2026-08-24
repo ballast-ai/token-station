@@ -1,0 +1,11 @@
+{
+  "$comment": "The official package set, in one place. Every build script, the CLI's builtin embedding, the desktop bundle check and the artifact audit read this file instead of repeating the list — it had drifted into eight copies, and the Anthropic component reached three of them before the rest noticed.",
+  "packages": [
+    { "dir": "agent-openai", "id": "agent-openai", "kind": "agent", "wasm": "adapter.wasm", "env": "AGENT_OPENAI" },
+    { "dir": "agent-anthropic", "id": "agent-anthropic", "kind": "agent", "wasm": "adapter.wasm", "env": "AGENT_ANTHROPIC" },
+    { "dir": "agent-openai-responses", "id": "agent-openai-responses", "kind": "agent", "wasm": "adapter.wasm", "env": "AGENT_OPENAI_RESPONSES" },
+    { "dir": "agent-gemini", "id": "agent-gemini", "kind": "agent", "wasm": "adapter.wasm", "env": "AGENT_GEMINI" },
+    { "dir": "provider-openai-compatible-v2", "id": "provider-openai-compatible", "kind": "south-component", "wasm": "component.wasm", "env": "PROVIDER_OPENAI_V2" },
+    { "dir": "provider-anthropic-v2", "id": "provider-anthropic", "kind": "south-component", "wasm": "component.wasm", "env": "PROVIDER_ANTHROPIC_V2" }
+  ]
+}

@@ -55,7 +55,7 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v8: adds content-free transport diagnostics and closed conversion
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// The content-free transport path classification recorded for diagnostics.
 /// Raw, caller-controlled URL paths never enter the receipt.
@@ -246,10 +246,6 @@ pub enum SouthFallbackReason {
     NoProviderRuntime,
     /// The credential resolver could not be built for this upstream.
     CredentialResolver,
-    /// The provider dialect is outside the South slice.
-    ProviderDialect,
-    /// The dialect resolves to a package the South slice does not approve.
-    ProviderPackageUnapproved,
     /// The upstream speaks a non-translated API dialect.
     ApiDialect,
     /// Egress goes through a proxy.
@@ -264,10 +260,24 @@ pub enum SouthFallbackReason {
     Body,
     /// The credential source is outside the slice (a key file, say).
     SecretSource,
-    /// Response metadata compatibility could not be asserted.
-    ResponseMetadata,
     /// A descriptor header fails the safe-header contract.
     Headers,
+    /// The provider dialect is outside the South slice.
+    ///
+    /// Retired: eligibility stopped matching a provider's *name* against a
+    /// list. v1.3.0 cannot produce this, but v1.2.4 wrote it, so it stays
+    /// parseable — see [`Self::RETIRED`].
+    ProviderDialect,
+    /// The dialect resolves to a package the South slice does not approve.
+    ///
+    /// Retired: an admitted component's package is not re-judged. Kept
+    /// parseable for v1.2.4 history — see [`Self::RETIRED`].
+    ProviderPackageUnapproved,
+    /// Response metadata compatibility could not be asserted.
+    ///
+    /// Retired: eligibility no longer asks about response metadata. Kept
+    /// parseable for v1.2.4 history — see [`Self::RETIRED`].
+    ResponseMetadata,
 }
 
 impl SouthFallbackReason {
@@ -279,8 +289,6 @@ impl SouthFallbackReason {
             Self::UnauthenticatedUpstream => "unauthenticated_upstream",
             Self::NoProviderRuntime => "no_provider_runtime",
             Self::CredentialResolver => "credential_resolver",
-            Self::ProviderDialect => "provider_dialect",
-            Self::ProviderPackageUnapproved => "provider_package_unapproved",
             Self::ApiDialect => "api_dialect",
             Self::Egress => "egress",
             Self::Streaming => "streaming",
@@ -288,20 +296,27 @@ impl SouthFallbackReason {
             Self::Auth => "auth",
             Self::Body => "body",
             Self::SecretSource => "secret_source",
-            Self::ResponseMetadata => "response_metadata",
             Self::Headers => "headers",
+            Self::ProviderDialect => "provider_dialect",
+            Self::ProviderPackageUnapproved => "provider_package_unapproved",
+            Self::ResponseMetadata => "response_metadata",
         }
     }
 
-    /// Every variant, in token order, for schema constraints and parsers.
+    /// Every variant a database may contain, in token order, for schema
+    /// constraints and parsers.
+    ///
+    /// This is deliberately wider than what v1.3.0 can produce. Shrinking it
+    /// to the producible set broke reading a v1.2.4 database: `parse` returned
+    /// `None` for a retired token and the row read failed, so `stats` and the
+    /// desktop usage view errored for exactly the users who had history worth
+    /// looking at. The three in [`Self::RETIRED`] stay here for that reason.
     pub const ALL: [Self; 16] = [
         Self::ConfiguredLegacy,
         Self::BufferedModeCannotStream,
         Self::UnauthenticatedUpstream,
         Self::NoProviderRuntime,
         Self::CredentialResolver,
-        Self::ProviderDialect,
-        Self::ProviderPackageUnapproved,
         Self::ApiDialect,
         Self::Egress,
         Self::Streaming,
@@ -309,8 +324,18 @@ impl SouthFallbackReason {
         Self::Auth,
         Self::Body,
         Self::SecretSource,
-        Self::ResponseMetadata,
         Self::Headers,
+        Self::ProviderDialect,
+        Self::ProviderPackageUnapproved,
+        Self::ResponseMetadata,
+    ];
+
+    /// The reasons v1.3.0 can no longer produce, retained so a database
+    /// written by v1.2.4 still reads. Nothing may emit these.
+    pub const RETIRED: [Self; 3] = [
+        Self::ProviderDialect,
+        Self::ProviderPackageUnapproved,
+        Self::ResponseMetadata,
     ];
 
     /// The inverse of [`Self::as_str`].
@@ -329,6 +354,11 @@ pub enum ProviderCallEngine {
     Legacy,
     SouthV1Buffered,
     SouthV1Streaming,
+    /// The caller's own bytes, forwarded verbatim to an `anthropic-native`
+    /// upstream. Distinct from `Legacy` on purpose: nothing fell back here, and
+    /// a reader asking why an attempt did not use South deserves to see that
+    /// this payload never had a translated form to begin with.
+    Native,
     #[default]
     Unknown,
 }
@@ -340,6 +370,7 @@ impl ProviderCallEngine {
             Self::Legacy => "legacy",
             Self::SouthV1Buffered => "south_v1_buffered",
             Self::SouthV1Streaming => "south_v1_streaming",
+            Self::Native => "native",
             Self::Unknown => "unknown",
         }
     }

@@ -3373,6 +3373,8 @@ mod tests {
         }
     }
 
+    // Only these three tests use it, and they are off under this feature.
+    #[cfg(not(feature = "bundled-plugins"))]
     fn running_app_with_adapters(
         label: &str,
         installed_agents: &[&str],
@@ -3435,6 +3437,8 @@ mod tests {
         (root, AppStateManaged(Mutex::new(inner)))
     }
 
+    // Only these three tests use it, and they are off under this feature.
+    #[cfg(not(feature = "bundled-plugins"))]
     fn running_app_with_skipped_openai_adapter(label: &str) -> (PathBuf, AppStateManaged) {
         running_app_with_adapters(
             label,
@@ -3443,6 +3447,8 @@ mod tests {
         )
     }
 
+    // Only these three tests use it, and they are off under this feature.
+    #[cfg(not(feature = "bundled-plugins"))]
     fn stop_running_app(state: &AppStateManaged) {
         let running = {
             let mut inner = state.0.lock().unwrap();
@@ -4197,6 +4203,14 @@ mod tests {
         }
     }
 
+    // Not under `bundled-plugins`. This test needs `agent-openai` to be a
+    // *skipped* adapter, which it arranges by leaving the package out of the
+    // fixture's plugin directory. With the adapters compiled in, the builtin
+    // tier wins across tiers (see `plugins.rs`), so the package loads anyway
+    // and the scenario cannot exist. The feature's own comment says ordinary
+    // unit tests keep it disabled; saying so here turns three confusing
+    // failures into a skip for anyone who runs the suite with it on.
+    #[cfg(not(feature = "bundled-plugins"))]
     #[test]
     fn commands_runtime_readiness_comes_from_loaded_adapters_not_configured_names() {
         let (root, state) = running_app_with_skipped_openai_adapter("runtime-readiness");
@@ -4223,6 +4237,14 @@ mod tests {
         assert!(plan_rejection.contains("未加载 agent-openai"));
     }
 
+    // Not under `bundled-plugins`. This test needs `agent-openai` to be a
+    // *skipped* adapter, which it arranges by leaving the package out of the
+    // fixture's plugin directory. With the adapters compiled in, the builtin
+    // tier wins across tiers (see `plugins.rs`), so the package loads anyway
+    // and the scenario cannot exist. The feature's own comment says ordinary
+    // unit tests keep it disabled; saying so here turns three confusing
+    // failures into a skip for anyone who runs the suite with it on.
+    #[cfg(not(feature = "bundled-plugins"))]
     #[test]
     fn commands_runtime_readiness_during_apply_comes_from_the_serving_old_instance() {
         let (root, state) = running_app_with_skipped_openai_adapter("applying-readiness");
@@ -4253,6 +4275,14 @@ mod tests {
         );
     }
 
+    // Not under `bundled-plugins`. This test needs `agent-openai` to be a
+    // *skipped* adapter, which it arranges by leaving the package out of the
+    // fixture's plugin directory. With the adapters compiled in, the builtin
+    // tier wins across tiers (see `plugins.rs`), so the package loads anyway
+    // and the scenario cannot exist. The feature's own comment says ordinary
+    // unit tests keep it disabled; saying so here turns three confusing
+    // failures into a skip for anyone who runs the suite with it on.
+    #[cfg(not(feature = "bundled-plugins"))]
     #[test]
     fn commands_runtime_readiness_tracks_each_replacement_running_instance() {
         let (old_root, old_state) =
