@@ -7870,14 +7870,12 @@ fn a_native_request_skips_a_provider_at_its_concurrency_ceiling() {
     std::fs::remove_file(key).ok();
 }
 
-/// Native failures are charged to health: three 503s eject the upstream, and
-/// the next turn goes to the backup without trying it.
+/// Native failures are charged to health: after three, the upstream is ejected
+/// and later turns are not routed to it at all.
 ///
-/// This is the part of fallback the native path does have. A native 5xx is
-/// relayed verbatim and does not fall over *within* one request, so without
-/// health accounting a dead upstream would be re-picked forever and every turn
-/// would fail. Ejection is what keeps that from happening, which makes it the
-/// load-bearing half — and it had no test.
+/// Fallover rescues the turn in front of it; ejection is what stops the pool
+/// paying for a dead upstream on every subsequent turn. Both are needed, and
+/// neither had a test on this path.
 #[test]
 fn native_failures_are_charged_to_health_and_eject_the_upstream() {
     let boom = r#"{"error":{"type":"api_error","message":"down"}}"#;
@@ -7889,8 +7887,8 @@ fn native_failures_are_charged_to_health_and_eject_the_upstream() {
         "content": [{"type": "text", "text": "backup served"}],
         "usage": {"input_tokens": 1, "output_tokens": 1}
     });
-    // `eject_after` is 3, so the primary answers three 503s and then must not
-    // be asked again. A fourth response is queued to catch it if it is.
+    // `eject_after` is 3, so the primary answers three 503s and must not be
+    // asked a fourth time. Extra responses are queued to catch it if it is.
     let primary = MockUpstream::start(vec![
         vec![http_json(503, boom)],
         vec![http_json(503, boom)],
@@ -7900,6 +7898,8 @@ fn native_failures_are_charged_to_health_and_eject_the_upstream() {
     let backup = MockUpstream::start(vec![
         vec![http_json(200, &served.to_string())],
         vec![http_json(200, &served.to_string())],
+        vec![http_json(200, &served.to_string())],
+        vec![http_json(200, &served.to_string())],
     ]);
     let key = key_file("native-health", "sk-native-health");
     let proxy = start_two_native_upstreams_proxy(primary.base_url(), backup.base_url(), &key);
@@ -7907,26 +7907,27 @@ fn native_failures_are_charged_to_health_and_eject_the_upstream() {
     for round in 1..=3 {
         let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
         assert_eq!(
-            status, 503,
-            "round {round}: a native 5xx is relayed, not retried elsewhere: {body}"
+            status, 200,
+            "round {round}: the backup rescues the turn the primary failed: {body}"
         );
     }
-    assert_eq!(primary.hits(), 3);
-    assert_eq!(backup.hits(), 0, "no request fell over within a turn");
-
-    // Fourth turn: the primary is ejected, so routing skips it entirely.
-    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
     assert_eq!(
-        status, 200,
-        "the backup serves once the primary is out: {body}"
+        primary.hits(),
+        3,
+        "the primary was tried on each of the three"
     );
-    assert!(body.contains("backup served"), "{body}");
+    assert_eq!(backup.hits(), 3, "and the backup served each of them");
+
+    // Fourth turn: three consecutive failures have ejected the primary, so
+    // routing skips it rather than spending another attempt on it.
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
     assert_eq!(
         primary.hits(),
         3,
         "an ejected upstream receives no further traffic"
     );
-    assert_eq!(backup.hits(), 1);
+    assert_eq!(backup.hits(), 4);
 
     std::fs::remove_file(key).ok();
 }
@@ -8029,51 +8030,88 @@ fn a_streamed_native_turn_reports_usage_from_both_halves_of_the_stream() {
     std::fs::remove_file(key).ok();
 }
 
-/// An HTTP error from a native upstream reaches the client byte for byte, and
-/// the pool's next upstream is never tried.
+/// A retriable native failure is tried against the rest of the pool, and the
+/// last upstream's own body still reaches the client byte for byte.
 ///
-/// This diverges from the translated path, which retries a 503 across the
-/// pool. `native_attempt` emits the upstream's status and body the moment it
-/// sees `>= 400` and returns `Ok(FailedBeforeOutput)`, so `dispatch` never
-/// sees an error to fall over on — and could not act on one anyway, the reply
-/// having already been sent. That is deliberate for 4xx: Claude Code reads the
-/// original error body to self-heal, and a wrapped envelope breaks it.
+/// Both halves matter and they used to be in tension. The relay emitted the
+/// first `>= 400` immediately and returned `Ok`, so `dispatch` never saw an
+/// error to fall over on — and could not have acted on one, the reply already
+/// being sent. The same outage was therefore survivable on the translated path
+/// and fatal on this one, even though `passthrough_error_code` maps 5xx to
+/// `UpstreamUnavailable`, which the host itself calls retriable elsewhere.
 ///
-/// Whether it should also hold for 5xx is a question this test does not
-/// answer. It pins what the code does so the answer is a decision rather than
-/// a discovery. See the corrective plan's retrospective.
+/// The upstream's response is parked outside the `ErrorEnvelope` — `ErrorCode`
+/// forbids putting a raw body there, since a body may echo the request and the
+/// envelope reaches `requests.log`, which promises to carry none.
 #[test]
-fn a_native_upstream_error_reaches_the_client_verbatim_and_ends_the_request() {
-    let upstream_error = r#"{"error":{"type":"api_error","message":"primary is down"}}"#;
-    let primary = MockUpstream::start(vec![vec![http_json(503, upstream_error)]]);
-    let backup = MockUpstream::start(vec![vec![http_json(
-        200,
-        r#"{"id":"never","type":"message","role":"assistant","model":"deepseek-chat","content":[],"usage":{"input_tokens":0,"output_tokens":0}}"#,
-    )]]);
+fn a_retriable_native_failure_tries_the_pool_and_still_relays_the_last_body() {
+    let boom_primary = r#"{"error":{"type":"api_error","message":"primary is down"}}"#;
+    let boom_backup = r#"{"error":{"type":"overloaded_error","message":"backup is overloaded"}}"#;
+    let primary = MockUpstream::start(vec![vec![http_json(503, boom_primary)]]);
+    let backup = MockUpstream::start(vec![vec![http_json(529, boom_backup)]]);
     let key = key_file("native-verbatim", "sk-native-verbatim");
     let proxy = start_two_native_upstreams_proxy(primary.base_url(), backup.base_url(), &key);
 
     let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
 
-    assert_eq!(status, 503, "the upstream's own status reaches the client");
+    assert_eq!(primary.hits(), 1, "the primary was tried");
+    assert_eq!(backup.hits(), 1, "and so was the rest of the pool");
+    assert_eq!(
+        status, 529,
+        "the client gets the last upstream's status, not the first one's"
+    );
     assert_eq!(
         body.trim(),
-        upstream_error,
+        boom_backup,
         "and its body byte for byte, not a token-station envelope"
     );
+
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(529)");
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("native".to_owned(), None), ("native".to_owned(), None)],
+        "both attempts are filed, both as native"
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A 4xx is not retried, and reaches the client verbatim from the first
+/// upstream.
+///
+/// The opposite reasoning to the test above: the same request fails the same
+/// way on every upstream, so trying the pool spends time and tokens to reach
+/// the same answer. Claude Code reads the original error body to repair
+/// itself, which a wrapped envelope would break.
+#[test]
+fn a_native_client_error_is_relayed_at_once_without_trying_the_pool() {
+    let refusal = r#"{"error":{"type":"invalid_request_error","message":"max_tokens too large"}}"#;
+    let primary = MockUpstream::start(vec![vec![http_json(400, refusal)]]);
+    let backup = MockUpstream::start(vec![vec![http_json(
+        200,
+        r#"{"id":"never","type":"message","role":"assistant","model":"deepseek-chat","content":[],"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    )]]);
+    let key = key_file("native-4xx", "sk-native-4xx");
+    let proxy = start_two_native_upstreams_proxy(primary.base_url(), backup.base_url(), &key);
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+
+    assert_eq!(status, 400, "the upstream's own status reaches the client");
+    assert_eq!(body.trim(), refusal, "and its body byte for byte");
     assert_eq!(primary.hits(), 1);
     assert_eq!(
         backup.hits(),
         0,
-        "an emitted reply cannot be unsent, so no second upstream is tried"
+        "a request the upstream rejects fails the same way everywhere"
     );
 
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(503)");
+    assert_eq!(row["status"], "Integer(400)");
     assert_eq!(
         attempt_engines(&proxy.data_dir),
         vec![("native".to_owned(), None)],
-        "one attempt, filed as native, with the real status"
+        "one attempt, filed as native"
     );
 
     std::fs::remove_file(key).ok();

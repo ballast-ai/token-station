@@ -49,6 +49,8 @@ use token_station_router_core::{
     UnmetRequirement, UpstreamModel, UpstreamRef,
 };
 
+use std::cell::RefCell;
+
 use crate::admission::Admission;
 use crate::bodylog::{BodyLog, BoundedBody};
 use crate::cancel::{CancelReason, CancelToken};
@@ -1487,7 +1489,23 @@ enum AttemptPayload<'a> {
         /// ride upstream.
         headers: &'a SafeHeaders,
         stream: bool,
+        /// Where an attempt parks the upstream's own error response so the
+        /// caller can relay it byte for byte once the pool is exhausted.
+        ///
+        /// It is deliberately *not* on the `ErrorEnvelope`. `ErrorCode`'s own
+        /// docs forbid putting an upstream's raw body there, because a body
+        /// may echo the request and the envelope reaches `requests.log`, which
+        /// promises to hold no request content. This channel goes only to the
+        /// client that already sent the request.
+        last_upstream_error: &'a RefCell<Option<RawUpstreamError>>,
     },
+}
+
+/// An upstream's own error response, kept out of the envelope on purpose.
+#[derive(Debug)]
+struct RawUpstreamError {
+    status: u16,
+    body: String,
 }
 
 /// One configured upstream, resolved and ready to serve.
@@ -4725,6 +4743,7 @@ impl Gateway {
                 body,
                 headers,
                 stream,
+                last_upstream_error,
             } => {
                 return self.native_attempt(
                     ctx,
@@ -4737,6 +4756,7 @@ impl Gateway {
                     record,
                     upstream_http_status,
                     provider_call_engine,
+                    last_upstream_error,
                 );
             }
             // Routing may have picked a different model than the caller named.
@@ -4986,6 +5006,7 @@ impl Gateway {
                 .expect("quota lock")
                 .grant(decision.chosen.upstream.as_str(), now_ms)
         });
+        let last_upstream_error = RefCell::new(None);
         let result = self.dispatch(
             ctx,
             agent,
@@ -4993,6 +5014,7 @@ impl Gateway {
                 body: &body_value,
                 headers: &headers,
                 stream,
+                last_upstream_error: &last_upstream_error,
             },
             &json!({}),
             &decision,
@@ -5001,6 +5023,29 @@ impl Gateway {
         );
         if let Some(now_ms) = quota_now_ms {
             self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
+        }
+
+        // The pool is exhausted and every attempt was a retriable upstream
+        // failure. The passthrough contract still holds for the answer the
+        // client finally gets: relay the last upstream's own status and body,
+        // not a token-station envelope built from them.
+        if let Some(raw) = last_upstream_error
+            .borrow_mut()
+            .take()
+            .filter(|_| result.is_err())
+        {
+            emit(Reply::BeginJson(JsonReply {
+                status: raw.status,
+                body: raw.body,
+            }));
+            // `record_actual_attempt_target` already named the upstream that
+            // produced this body; `decision.chosen` is the one the router
+            // picked first, which is what the caller reports for a request
+            // that never settled.
+            return Ok(Some((
+                decision.chosen.clone(),
+                StreamOutcome::FailedBeforeOutput,
+            )));
         }
         result.map(Some)
     }
@@ -5024,6 +5069,7 @@ impl Gateway {
         record: &mut RequestRecord,
         upstream_http_status: &mut Option<u16>,
         provider_call_engine: &mut ProviderCallOutcome,
+        last_upstream_error: &RefCell<Option<RawUpstreamError>>,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         const ANTHROPIC: &str = "anthropic-messages";
         let upstream = self
@@ -5144,6 +5190,30 @@ impl Gateway {
                 false,
                 Some(code),
             );
+
+            // A 5xx or a rate limit is the upstream's fault, not the request's:
+            // the host already classifies these as retriable elsewhere, and the
+            // translated path acts on that by trying the rest of the pool. This
+            // path used to relay the first one and stop, so the same outage was
+            // survivable on one route and fatal on the other. Park the response
+            // and hand `dispatch` an error it can fall over on; the caller
+            // relays whatever the last upstream said if the pool runs out.
+            //
+            // A 4xx is not retried, and the reasoning is the opposite: the same
+            // request fails the same way everywhere, and Claude Code reads the
+            // original body to repair itself. Relaying it at once is right.
+            if code.is_retriable_elsewhere() {
+                *last_upstream_error.borrow_mut() = Some(RawUpstreamError {
+                    status: parts.status,
+                    body: parts.body,
+                });
+                return Err(ErrorEnvelope::new(
+                    code,
+                    parts.status,
+                    "upstream refused the native passthrough",
+                ));
+            }
+
             emit(Reply::BeginJson(JsonReply {
                 status: parts.status,
                 body: parts.body,
