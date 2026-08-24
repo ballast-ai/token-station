@@ -17,6 +17,7 @@ pub struct RequestContext {
     cancel: CancelToken,
     deadline: Instant,
     per_attempt_timeout: Duration,
+    upstream_response_limit: Option<u64>,
 }
 
 impl RequestContext {
@@ -27,6 +28,7 @@ impl RequestContext {
             cancel: drain.child(),
             deadline: Instant::now() + total,
             per_attempt_timeout: per_attempt,
+            upstream_response_limit: None,
         }
     }
 
@@ -35,6 +37,24 @@ impl RequestContext {
     #[must_use]
     pub fn detached(total: Duration, per_attempt: Duration) -> Self {
         Self::new(&CancelToken::root(), total, per_attempt)
+    }
+
+    /// Applies a caller-specific raw upstream response limit before Provider parsing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `bytes` is zero.
+    #[must_use]
+    pub fn with_upstream_response_limit(mut self, bytes: u64) -> Self {
+        assert!(bytes > 0, "upstream response limit must be positive");
+        self.upstream_response_limit = Some(bytes);
+        self
+    }
+
+    /// Returns the caller-specific raw upstream response limit, when present.
+    #[must_use]
+    pub const fn upstream_response_limit(&self) -> Option<u64> {
+        self.upstream_response_limit
     }
 
     /// Trip this request's cancel — the client disconnected.
@@ -142,5 +162,13 @@ mod tests {
         let short_request =
             RequestContext::detached(Duration::from_secs(1), Duration::from_mins(1));
         assert!(short_request.attempt_deadline() <= short_request.deadline());
+    }
+
+    #[test]
+    fn a_scoped_upstream_response_limit_is_explicit_and_immutable() {
+        let ctx = RequestContext::detached(Duration::from_secs(1), Duration::from_secs(1))
+            .with_upstream_response_limit(4 * 1024 * 1024);
+
+        assert_eq!(ctx.upstream_response_limit(), Some(4 * 1024 * 1024));
     }
 }

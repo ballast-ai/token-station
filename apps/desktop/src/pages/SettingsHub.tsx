@@ -346,12 +346,21 @@ function SettingsHubContent({
   const contentRef = useRef<HTMLElement | null>(null);
   const { t, copy } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
-  useEffect(() => setSection(initialSection), [initialSection]);
+  const resetScroll = () => {
+    if (!contentRef.current) return;
+    contentRef.current.scrollTop = 0;
+    const workspace = contentRef.current.closest<HTMLElement>(".station-content-settings");
+    if (workspace) workspace.scrollTop = 0;
+  };
+  useEffect(() => {
+    setSection(initialSection);
+    resetScroll();
+  }, [initialSection]);
 
   const activateSection = (index: number) => {
     const nextIndex = (index + SECTIONS.length) % SECTIONS.length;
     navigationRefs.current[nextIndex]?.focus({ preventScroll: true });
-    if (contentRef.current) contentRef.current.scrollTop = 0;
+    resetScroll();
     setSection(SECTIONS[nextIndex].id);
   };
 
@@ -381,7 +390,10 @@ function SettingsHubContent({
                 variant={section === item.id ? "secondary" : "ghost"}
                 type="button"
                 aria-current={section === item.id ? "page" : undefined}
-                onClick={() => activateSection(index)}
+                onClick={(event) => {
+                  if (event.detail === 0) setNavigationInputMode("keyboard");
+                  activateSection(index);
+                }}
                 onKeyDown={(event) => {
                   if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
                     setNavigationInputMode("keyboard");

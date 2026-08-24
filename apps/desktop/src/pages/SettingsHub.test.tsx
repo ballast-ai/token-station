@@ -143,6 +143,9 @@ describe("SettingsHub clipboard feedback", () => {
 
     fireEvent.pointerMove(navigation);
     expect(navigation).toHaveAttribute("data-input-mode", "pointer");
+
+    fireEvent.click(general, { detail: 0 });
+    expect(navigation).toHaveAttribute("data-input-mode", "keyboard");
   });
 
   it("resets only the Settings content pane when the category changes", () => {
@@ -167,6 +170,51 @@ describe("SettingsHub clipboard feedback", () => {
     fireEvent.click(screen.getByRole("button", { name: /关于/ }));
 
     expect(content).toHaveProperty("scrollTop", 0);
+  });
+
+  it("resets both possible Settings scrollers when the parent changes the section", () => {
+    const view = render(
+      <ErrorToastProvider>
+        <div className="station-content-settings">
+          <SettingsHub
+            settings={settings}
+            serve={serve}
+            registry={registry}
+            visibleAgentIds={new Set()}
+            onAgentVisibilityChange={vi.fn()}
+            onOpenFirstRunGuide={vi.fn()}
+            onSaved={vi.fn()}
+            initialSection="request-logs"
+          />
+        </div>
+      </ErrorToastProvider>,
+    );
+    const content = document.querySelector<HTMLElement>(".settings-content");
+    const workspace = document.querySelector<HTMLElement>(".station-content-settings");
+    expect(content).not.toBeNull();
+    expect(workspace).not.toBeNull();
+    content!.scrollTop = 240;
+    workspace!.scrollTop = 180;
+
+    view.rerender(
+      <ErrorToastProvider>
+        <div className="station-content-settings">
+          <SettingsHub
+            settings={settings}
+            serve={serve}
+            registry={registry}
+            visibleAgentIds={new Set()}
+            onAgentVisibilityChange={vi.fn()}
+            onOpenFirstRunGuide={vi.fn()}
+            onSaved={vi.fn()}
+            initialSection="general"
+          />
+        </div>
+      </ErrorToastProvider>,
+    );
+
+    expect(content).toHaveProperty("scrollTop", 0);
+    expect(workspace).toHaveProperty("scrollTop", 0);
   });
 
   it("switches Settings categories without entrance motion", async () => {

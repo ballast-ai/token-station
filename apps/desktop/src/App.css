@@ -9586,8 +9586,14 @@ samp {
 }
 
 @media (max-width: 820px) {
+  .station-content.station-content-settings {
+    overflow: auto;
+  }
+
   .settings-page {
     display: flex;
+    height: auto;
+    min-height: 100%;
     gap: 16px;
   }
 
@@ -9599,6 +9605,9 @@ samp {
   .settings-page .settings-content {
     height: auto;
     flex: 1;
+    overflow-y: visible;
+    overscroll-behavior: auto;
+    scrollbar-gutter: auto;
   }
 
   .settings-heading {
@@ -10727,6 +10736,12 @@ samp {
 .model-test-composer:focus {
   border-color: color-mix(in srgb, var(--signal) 58%, var(--line));
   box-shadow: 0 -1px 0 color-mix(in srgb, var(--signal) 20%, transparent);
+}
+.model-test-composer-error {
+  color: var(--danger);
+  font-size: 10px;
+  line-height: 1.35;
+  padding: 0 2px;
 }
 .model-test-composer-actions {
   min-height: 38px;

@@ -89,6 +89,26 @@ describe("retained page theme styles", () => {
     );
   });
 
+  it("returns Settings scrolling to the outer workspace on narrow windows", () => {
+    const narrowStart = appCss.lastIndexOf("@media (max-width: 820px)");
+    const narrowEnd = appCss.indexOf("/* Final cascade guard", narrowStart);
+    const narrowRules = appCss.slice(narrowStart, narrowEnd);
+    const workspaceRule = narrowRules.match(
+      /\.station-content\.station-content-settings\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const pageRule = narrowRules.match(/\.settings-page\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const contentRule = narrowRules.match(
+      /\.settings-page \.settings-content\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(workspaceRule).toMatch(/overflow:\s*auto/);
+    expect(pageRule).toMatch(/height:\s*auto/);
+    expect(pageRule).toMatch(/min-height:\s*100%/);
+    expect(contentRule).toMatch(/overflow-y:\s*visible/);
+    expect(contentRule).toMatch(/overscroll-behavior:\s*auto/);
+    expect(contentRule).toMatch(/scrollbar-gutter:\s*auto/);
+  });
+
   it("uses theme tokens for router JSON code blocks", () => {
     const codeBlockRule = appCss.match(/pre\.block\s*\{([^}]*)\}/s)?.[1] ?? "";
 

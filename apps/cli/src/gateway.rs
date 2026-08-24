@@ -111,6 +111,12 @@ const CONTINUATION_SCOPE_EXTENSION: &str = "token_station_continuation_scope";
 const TOOL_NAMESPACES_EXTENSION: &str = "responses_tool_namespaces";
 const NO_ATTEMPT_FALLBACK_EXTENSION: &str = "token_station_private_no_attempt_fallback";
 
+fn upstream_body_limit(ctx: &RequestContext) -> u64 {
+    ctx.upstream_response_limit()
+        .unwrap_or(MAX_UPSTREAM_BODY)
+        .min(MAX_UPSTREAM_BODY)
+}
+
 /// One logical request's fallback limits. Count, wall-clock and per-attempt
 /// timeout are always active. Cost is optional until the router has a trusted
 /// preflight estimator; when configured, an unknown estimate fails closed.
@@ -1360,6 +1366,7 @@ impl SouthProviderRuntime {
         deadline: tokio::time::Instant,
         cancellation: &tokio_util::sync::CancellationToken,
         disposition: CancellationDispositionV1,
+        max_body_bytes: u64,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
         let opened = self
             .handle
@@ -1374,10 +1381,16 @@ impl SouthProviderRuntime {
         Ok(match opened {
             PreparedProviderStreamResultV1::Opened(stream) => {
                 let (status, headers) = project_open_stream_head_v1(&stream);
-                UpstreamResponse::from_south_stream(status, headers, self.handle.clone(), stream)
+                UpstreamResponse::from_south_stream(
+                    status,
+                    headers,
+                    self.handle.clone(),
+                    stream,
+                    max_body_bytes,
+                )
             }
             PreparedProviderStreamResultV1::Rejected(response) => {
-                UpstreamResponse::from_parts(response)
+                UpstreamResponse::from_parts_with_limit(response, max_body_bytes)
             }
         })
     }
@@ -5147,6 +5160,7 @@ impl Gateway {
                 deadline,
                 &cancellation,
                 Self::south_cancellation_disposition(ctx),
+                upstream_body_limit(ctx),
             );
         }
 
@@ -5172,7 +5186,10 @@ impl Gateway {
         let response = response.map_err(|failure| {
             map_failure_v1(failure, Self::south_cancellation_disposition(ctx))
         })?;
-        Ok(UpstreamResponse::from_parts(response))
+        Ok(UpstreamResponse::from_parts_with_limit(
+            response,
+            upstream_body_limit(ctx),
+        ))
     }
 
     fn south_cancellation_disposition(ctx: &RequestContext) -> CancellationDispositionV1 {
@@ -5194,7 +5211,7 @@ impl Gateway {
         let http = cancel_aware_agent(&self.egress, &self.secrets, timeout, ctx.token()).map_err(
             |detail| ErrorEnvelope::new(ErrorCode::Auth, 401, format!("egress proxy: {detail}")),
         )?;
-        self.send_raw_with(&http, descriptor, upstream_name)
+        self.send_raw_with(&http, descriptor, upstream_name, upstream_body_limit(ctx))
     }
 
     /// [`Gateway::send`] over a caller-chosen agent — the probe path brings
@@ -5205,7 +5222,7 @@ impl Gateway {
         descriptor: &HttpRequestDescriptor,
         upstream_name: &str,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
-        let response = self.send_raw_with(http, descriptor, upstream_name)?;
+        let response = self.send_raw_with(http, descriptor, upstream_name, MAX_UPSTREAM_BODY)?;
         EgressPolicy::reject_redirect(response.status)?;
         Ok(response)
     }
@@ -5220,6 +5237,7 @@ impl Gateway {
         http: &ureq::Agent,
         descriptor: &HttpRequestDescriptor,
         upstream_name: &str,
+        max_body_bytes: u64,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
         let auth_header = descriptor
             .auth
@@ -5264,7 +5282,7 @@ impl Gateway {
                 }
             }
         };
-        sent.map(UpstreamResponse::from)
+        sent.map(|response| UpstreamResponse::from(response, max_body_bytes))
             .map_err(map_transport_error)
     }
 
@@ -5741,11 +5759,39 @@ struct UpstreamResponse {
     status: u16,
     headers: BTreeMap<String, String>,
     body: UpstreamBody,
+    max_body_bytes: u64,
 }
 
 enum UpstreamBody {
     Streaming(Box<dyn Read + Send>),
     Buffered(String),
+}
+
+struct BoundedUpstreamReader {
+    inner: Box<dyn Read + Send>,
+    remaining: u64,
+}
+
+impl Read for BoundedUpstreamReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut probe = [0_u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(io::Error::other(
+                    "upstream response exceeded its scoped limit",
+                )),
+            };
+        }
+        let allowed = usize::try_from(self.remaining.min(output.len() as u64))
+            .expect("bounded read length fits usize");
+        let read = self.inner.read(&mut output[..allowed])?;
+        self.remaining = self.remaining.saturating_sub(read as u64);
+        Ok(read)
+    }
 }
 
 struct SouthStreamReader {
@@ -5794,7 +5840,7 @@ impl Read for SouthStreamReader {
 }
 
 impl UpstreamResponse {
-    fn from(response: ureq::http::Response<ureq::Body>) -> Self {
+    fn from(response: ureq::http::Response<ureq::Body>, max_body_bytes: u64) -> Self {
         let status = response.status().as_u16();
         let mut headers = BTreeMap::new();
         for (name, value) in response.headers() {
@@ -5805,20 +5851,25 @@ impl UpstreamResponse {
         let reader = response
             .into_body()
             .into_with_config()
-            .limit(MAX_UPSTREAM_BODY)
+            // Leave one byte for the outer bounded reader to distinguish an exact-size
+            // body from an oversized one. ureq's limiter errors as soon as its counter
+            // reaches zero, even when the underlying body ends at that boundary.
+            .limit(max_body_bytes.saturating_add(1))
             .reader();
         Self {
             status,
             headers,
             body: UpstreamBody::Streaming(Box::new(reader)),
+            max_body_bytes,
         }
     }
 
-    fn from_parts(parts: HttpResponseParts) -> Self {
+    fn from_parts_with_limit(parts: HttpResponseParts, max_body_bytes: u64) -> Self {
         Self {
             status: parts.status,
             headers: parts.headers,
             body: UpstreamBody::Buffered(parts.body),
+            max_body_bytes,
         }
     }
 
@@ -5827,6 +5878,7 @@ impl UpstreamResponse {
         headers: BTreeMap<String, String>,
         handle: tokio::runtime::Handle,
         stream: south_core::StreamingCallV1,
+        max_body_bytes: u64,
     ) -> Self {
         Self {
             status,
@@ -5836,19 +5888,39 @@ impl UpstreamResponse {
                 stream,
                 pending: None,
             })),
+            max_body_bytes,
         }
     }
 
     fn into_parts(self) -> Result<HttpResponseParts, ErrorEnvelope> {
-        let body = match self.body {
-            UpstreamBody::Buffered(body) => body,
-            UpstreamBody::Streaming(mut reader) => {
+        let Self {
+            status,
+            headers,
+            body,
+            max_body_bytes,
+        } = self;
+        let body = match body {
+            UpstreamBody::Buffered(body) => {
+                if body.len() as u64 > max_body_bytes {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCode::TransportTruncated,
+                        502,
+                        "upstream response exceeded its scoped limit",
+                    ));
+                }
+                body
+            }
+            UpstreamBody::Streaming(inner) => {
+                let mut reader = BoundedUpstreamReader {
+                    inner,
+                    remaining: max_body_bytes,
+                };
                 let mut bytes = Vec::new();
                 reader.read_to_end(&mut bytes).map_err(|_| {
                     ErrorEnvelope::new(
                         ErrorCode::TransportTruncated,
                         502,
-                        "upstream connection closed before the response body completed",
+                        "upstream response exceeded its limit or ended early",
                     )
                 })?;
                 String::from_utf8(bytes).map_err(|_| {
@@ -5861,18 +5933,22 @@ impl UpstreamResponse {
             }
         };
         Ok(HttpResponseParts {
-            status: self.status,
-            headers: self.headers,
+            status,
+            headers,
             body,
             extensions: token_station_protocol::Extensions::new(),
         })
     }
 
     fn into_reader(self) -> Box<dyn Read + Send> {
-        match self.body {
+        let inner: Box<dyn Read + Send> = match self.body {
             UpstreamBody::Streaming(reader) => reader,
             UpstreamBody::Buffered(body) => Box::new(std::io::Cursor::new(body.into_bytes())),
-        }
+        };
+        Box::new(BoundedUpstreamReader {
+            inner,
+            remaining: self.max_body_bytes,
+        })
     }
 }
 
@@ -6569,23 +6645,69 @@ mod unsupported_media_tests {
 
 #[cfg(test)]
 mod upstream_response_tests {
-    use super::{HttpResponseParts, UpstreamResponse};
+    use super::{HttpResponseParts, UpstreamBody, UpstreamResponse};
     use std::collections::BTreeMap;
 
     #[test]
     fn a_buffered_south_body_keeps_its_allocation_through_host_handoff() {
         let body = "x".repeat(1024);
         let original = body.as_ptr();
-        let response = UpstreamResponse::from_parts(HttpResponseParts {
-            status: 200,
-            headers: BTreeMap::new(),
-            body,
-            extensions: token_station_protocol::Extensions::new(),
-        });
+        let response = UpstreamResponse::from_parts_with_limit(
+            HttpResponseParts {
+                status: 200,
+                headers: BTreeMap::new(),
+                body,
+                extensions: token_station_protocol::Extensions::new(),
+            },
+            super::MAX_UPSTREAM_BODY,
+        );
 
         let restored = response.into_parts().expect("buffered body remains valid");
 
         assert_eq!(restored.body.as_ptr(), original);
+    }
+
+    #[test]
+    fn a_scoped_limit_rejects_upstream_bytes_before_provider_parsing() {
+        let response = UpstreamResponse::from_parts_with_limit(
+            HttpResponseParts {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: "oversized".to_owned(),
+                extensions: token_station_protocol::Extensions::new(),
+            },
+            4,
+        );
+
+        let error = response.into_parts().unwrap_err();
+
+        assert_eq!(
+            error.code,
+            token_station_protocol::ErrorCode::TransportTruncated
+        );
+        assert!(!error.message.contains("oversized"));
+    }
+
+    #[test]
+    fn a_streaming_limit_accepts_the_exact_boundary_and_rejects_one_more_byte() {
+        let response = UpstreamResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body: UpstreamBody::Streaming(Box::new(std::io::Cursor::new(b"four"))),
+            max_body_bytes: 4,
+        };
+        assert_eq!(response.into_parts().unwrap().body, "four");
+
+        let oversized = UpstreamResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body: UpstreamBody::Streaming(Box::new(std::io::Cursor::new(b"fifth"))),
+            max_body_bytes: 4,
+        };
+        assert_eq!(
+            oversized.into_parts().unwrap_err().code,
+            token_station_protocol::ErrorCode::TransportTruncated
+        );
     }
 }
 

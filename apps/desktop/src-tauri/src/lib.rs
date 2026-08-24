@@ -4460,7 +4460,41 @@ const MODEL_TEST_MAX_REQUEST_ID_BYTES: usize = 64;
 const MODEL_TEST_MAX_ACTIVE_STREAMS: usize = 4;
 const MODEL_TEST_MAX_PENDING_CANCELLATIONS: usize = 32;
 const MODEL_TEST_MAX_SSE_BUFFER_BYTES: usize = 1_048_576;
+const MODEL_TEST_MAX_RESPONSE_BYTES: usize = 16_000;
+const MODEL_TEST_MAX_STREAM_EVENTS: usize = 1_024;
+const MODEL_TEST_MAX_STREAM_BYTES: usize = 4 * 1_048_576;
 const MODEL_TEST_STREAM_EVENT: &str = "model-test-stream";
+
+#[derive(Default)]
+struct ModelTestOutputBudget {
+    bytes: usize,
+    events: usize,
+    wire_bytes: usize,
+}
+
+impl ModelTestOutputBudget {
+    fn accept_wire(&mut self, bytes: usize) -> Result<(), String> {
+        let next_bytes = self.wire_bytes.saturating_add(bytes);
+        if next_bytes > MODEL_TEST_MAX_STREAM_BYTES {
+            return Err("The model stream exceeded the wire response limit".to_owned());
+        }
+        self.wire_bytes = next_bytes;
+        Ok(())
+    }
+
+    fn accept(&mut self, delta: &str) -> Result<(), String> {
+        let next_bytes = self.bytes.saturating_add(delta.len());
+        if next_bytes > MODEL_TEST_MAX_RESPONSE_BYTES {
+            return Err("The model output exceeded the response limit".to_owned());
+        }
+        if self.events >= MODEL_TEST_MAX_STREAM_EVENTS {
+            return Err("The model output exceeded the stream event limit".to_owned());
+        }
+        self.bytes = next_bytes;
+        self.events += 1;
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct ModelTestSseDecoder {
@@ -4537,10 +4571,7 @@ fn model_test_stream_delta(frame: &str) -> Result<Option<String>, String> {
     let value: Value = serde_json::from_str(data)
         .map_err(|_| "The model stream returned invalid JSON".to_owned())?;
     if value.get("error").is_some() {
-        return Err(bounded_provider_error_code(&value).map_or_else(
-            || "The Provider returned a stream error".to_owned(),
-            |code| format!("The Provider returned a stream error ({code})"),
-        ));
+        return Err("The Provider returned a stream error".to_owned());
     }
     let content = value.pointer("/choices/0/delta/content");
     if let Some(text) = content
@@ -4565,18 +4596,20 @@ fn model_test_stream_delta(frame: &str) -> Result<Option<String>, String> {
         .map(ToOwned::to_owned))
 }
 
-fn emit_model_test_frames(
-    app: &AppHandle,
+fn emit_model_test_frames<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: &str,
     started: Instant,
     frames: Vec<String>,
     content: &mut String,
     first_token_ms: &mut Option<u64>,
+    output_budget: &mut ModelTestOutputBudget,
 ) -> Result<(), String> {
     for frame in frames {
         let Some(delta) = model_test_stream_delta(&frame)? else {
             continue;
         };
+        output_budget.accept(&delta)?;
         if first_token_ms.is_none() {
             *first_token_ms =
                 Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
@@ -4606,9 +4639,13 @@ fn validate_model_test_messages(messages: &[ModelTestMessage]) -> Result<(), Str
     }
 
     let mut total_bytes = 0usize;
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         if !matches!(message.role.as_str(), "user" | "assistant") {
             return Err("Model test messages support only user and assistant roles".to_owned());
+        }
+        let expected_role = if index % 2 == 0 { "user" } else { "assistant" };
+        if message.role != expected_role {
+            return Err("Model test messages must alternate user and assistant roles".to_owned());
         }
         let message_bytes = message.content.len();
         if message_bytes == 0 || message.content.trim().is_empty() {
@@ -4632,20 +4669,7 @@ fn validate_model_test_messages(messages: &[ModelTestMessage]) -> Result<(), Str
     Ok(())
 }
 
-fn bounded_provider_error_code(body: &Value) -> Option<String> {
-    let code = body.pointer("/error/code").and_then(Value::as_str)?.trim();
-    if code.is_empty()
-        || code.len() > 64
-        || !code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return None;
-    }
-    Some(code.to_owned())
-}
-
-fn model_test_http_error(status: u16, body: &Value) -> String {
+fn model_test_http_error(status: u16) -> String {
     let summary = match status {
         400 => "The model rejected the request. Check the prompt and model limits",
         401 | 403 => "Provider authentication failed. Check this Provider credential",
@@ -4657,10 +4681,7 @@ fn model_test_http_error(status: u16, body: &Value) -> String {
         500..=599 => "The Provider is temporarily unavailable",
         _ => "The model request failed",
     };
-    bounded_provider_error_code(body).map_or_else(
-        || format!("{summary} (HTTP {status})"),
-        |code| format!("{summary} (HTTP {status}, {code})"),
-    )
+    format!("{summary} (HTTP {status})")
 }
 
 fn model_test_assistant_content(body: &Value) -> Option<String> {
@@ -4678,13 +4699,20 @@ fn model_test_assistant_content(body: &Value) -> Option<String> {
 }
 
 fn extract_model_test_reply(status: u16, body: &str) -> Result<String, String> {
+    if body.len() > MODEL_TEST_MAX_STREAM_BYTES {
+        return Err("The model response exceeded the wire response limit".to_owned());
+    }
     let value: Value = serde_json::from_str(body)
         .map_err(|_| format!("The model returned invalid JSON (HTTP {status})"))?;
     if !(200..300).contains(&status) {
-        return Err(model_test_http_error(status, &value));
+        return Err(model_test_http_error(status));
     }
-    model_test_assistant_content(&value)
-        .ok_or_else(|| "The model returned no assistant text".to_owned())
+    let content = model_test_assistant_content(&value)
+        .ok_or_else(|| "The model returned no assistant text".to_owned())?;
+    if content.len() > MODEL_TEST_MAX_RESPONSE_BYTES {
+        return Err("The model output exceeded the response limit".to_owned());
+    }
+    Ok(content)
 }
 
 #[tauri::command]
@@ -4692,6 +4720,27 @@ async fn test_model_chat_stream(
     app: AppHandle,
     state: State<'_, AppStateManaged>,
     stream_state: State<'_, ModelTestStreamState>,
+    upstream: String,
+    model: String,
+    messages: Vec<ModelTestMessage>,
+    request_id: String,
+) -> Result<ModelTestReply, String> {
+    run_model_test_chat(
+        app,
+        state.inner(),
+        stream_state.inner(),
+        upstream,
+        model,
+        messages,
+        request_id,
+    )
+    .await
+}
+
+async fn run_model_test_chat<R: Runtime>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    stream_state: &ModelTestStreamState,
     upstream: String,
     model: String,
     messages: Vec<ModelTestMessage>,
@@ -4733,7 +4782,8 @@ async fn test_model_chat_stream(
     config.router.allow_cloud_fallback = false;
 
     let request_context =
-        RequestContext::detached(Duration::from_secs(120), Duration::from_secs(120));
+        RequestContext::detached(Duration::from_secs(120), Duration::from_secs(120))
+            .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64);
     let registry = Arc::clone(&stream_state.0);
     {
         let mut streams = registry.lock().unwrap();
@@ -4761,6 +4811,7 @@ async fn test_model_chat_stream(
         let mut decoder = ModelTestSseDecoder::default();
         let mut content = String::new();
         let mut first_token_ms = None;
+        let mut output_budget = ModelTestOutputBudget::default();
         let mut stream_error = None;
         gateway.chat_scoped(
             &request_context,
@@ -4779,16 +4830,20 @@ async fn test_model_chat_stream(
                         json_response = Some((reply.status, reply.body));
                     }
                     Reply::BeginStream => {}
-                    Reply::Chunk(chunk) => match decoder.push(chunk.as_bytes()).and_then(|frames| {
-                        emit_model_test_frames(
-                            &app,
-                            &request_id,
-                            started,
-                            frames,
-                            &mut content,
-                            &mut first_token_ms,
-                        )
-                    }) {
+                    Reply::Chunk(chunk) => match output_budget
+                        .accept_wire(chunk.len())
+                        .and_then(|()| decoder.push(chunk.as_bytes()))
+                        .and_then(|frames| {
+                            emit_model_test_frames(
+                                &app,
+                                &request_id,
+                                started,
+                                frames,
+                                &mut content,
+                                &mut first_token_ms,
+                                &mut output_budget,
+                            )
+                        }) {
                         Ok(()) => {}
                         Err(error) => {
                             stream_error = Some(error);
@@ -4828,6 +4883,7 @@ async fn test_model_chat_stream(
             frames,
             &mut content,
             &mut first_token_ms,
+            &mut output_budget,
         )?;
         if content.trim().is_empty() {
             return Err("The model returned no assistant text".to_owned());
@@ -8663,22 +8719,46 @@ mod tests {
                     String::from_utf8_lossy(&request).contains("/v1/chat/completions"),
                     "gateway must call the configured chat endpoint"
                 );
-                let body = json!({
-                    "id": format!("fixture-{marker}"),
-                    "object": "chat.completion",
-                    "created": 1,
-                    "model": "small",
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": marker},
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-                })
-                .to_string();
+                let streaming = String::from_utf8_lossy(&request).contains(r#""stream":true"#);
+                let (content_type, body) = if streaming {
+                    (
+                        "text/event-stream",
+                        format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            json!({
+                                "id": format!("fixture-{marker}"),
+                                "object": "chat.completion.chunk",
+                                "created": 1,
+                                "model": "small",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": marker},
+                                    "finish_reason": null
+                                }]
+                            })
+                        ),
+                    )
+                } else {
+                    (
+                        "application/json",
+                        json!({
+                            "id": format!("fixture-{marker}"),
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "small",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": marker},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                        })
+                        .to_string(),
+                    )
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .expect("chat fixture responds");
@@ -13851,6 +13931,30 @@ mod tests {
         }];
         assert!(validate_model_test_messages(&assistant_last).is_err());
 
+        let assistant_first = [
+            ModelTestMessage {
+                role: "assistant".to_owned(),
+                content: "orphan".to_owned(),
+            },
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "question".to_owned(),
+            },
+        ];
+        assert!(validate_model_test_messages(&assistant_first).is_err());
+
+        let consecutive_users = [
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "first".to_owned(),
+            },
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "second".to_owned(),
+            },
+        ];
+        assert!(validate_model_test_messages(&consecutive_users).is_err());
+
         let oversized = [ModelTestMessage {
             role: "user".to_owned(),
             content: "x".repeat(MODEL_TEST_MAX_MESSAGE_BYTES + 1),
@@ -13864,6 +13968,36 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(validate_model_test_messages(&too_many).is_err());
+
+        let empty = [ModelTestMessage {
+            role: "user".to_owned(),
+            content: "  ".to_owned(),
+        }];
+        assert!(validate_model_test_messages(&empty).is_err());
+
+        let total_too_large = [
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "x".repeat(MODEL_TEST_MAX_MESSAGE_BYTES),
+            },
+            ModelTestMessage {
+                role: "assistant".to_owned(),
+                content: "x".repeat(MODEL_TEST_MAX_MESSAGE_BYTES),
+            },
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "x".repeat(MODEL_TEST_MAX_MESSAGE_BYTES),
+            },
+            ModelTestMessage {
+                role: "assistant".to_owned(),
+                content: "x".repeat(MODEL_TEST_MAX_MESSAGE_BYTES),
+            },
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "x".to_owned(),
+            },
+        ];
+        assert!(validate_model_test_messages(&total_too_large).is_err());
     }
 
     #[test]
@@ -13886,9 +14020,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("authentication failed"));
-        assert!(error.contains("invalid_api_key"));
+        assert!(!error.contains("invalid_api_key"));
         assert!(!error.contains("prompt"));
         assert!(!error.contains("secret"));
+
+        let oversized = format!(
+            r#"{{"choices":[{{"message":{{"content":"{}"}}}}]}}"#,
+            "x".repeat(MODEL_TEST_MAX_RESPONSE_BYTES + 1)
+        );
+        assert!(extract_model_test_reply(200, &oversized)
+            .unwrap_err()
+            .contains("response limit"));
+
+        let oversized_envelope = format!(
+            r#"{{"id":"{}","choices":[{{"message":{{"content":"ok"}}}}]}}"#,
+            "x".repeat(MODEL_TEST_MAX_STREAM_BYTES)
+        );
+        assert!(extract_model_test_reply(200, &oversized_envelope)
+            .unwrap_err()
+            .contains("wire response limit"));
     }
 
     #[test]
@@ -13915,6 +14065,20 @@ mod tests {
             Some("你".to_owned())
         );
         assert!(decoder.finish().unwrap().is_empty());
+
+        let mut trailing = ModelTestSseDecoder::default();
+        assert!(trailing.push(b"data: tail").unwrap().is_empty());
+        assert_eq!(trailing.finish().unwrap(), ["data: tail"]);
+
+        assert_eq!(
+            find_model_test_sse_boundary(b"a\n\nb\r\n\r\n"),
+            Some((1, 2))
+        );
+        assert_eq!(
+            find_model_test_sse_boundary(b"a\r\n\r\nb\n\n"),
+            Some((1, 4))
+        );
+        assert_eq!(find_model_test_sse_boundary(b"a\r\n\r\n"), Some((1, 4)));
     }
 
     #[test]
@@ -13928,6 +14092,100 @@ mod tests {
         );
         assert_eq!(model_test_stream_delta("data: [DONE]").unwrap(), None);
         assert_eq!(model_test_stream_delta(": keepalive").unwrap(), None);
+
+        assert_eq!(
+            model_test_stream_delta(
+                "data: {\"choices\":[{\"delta\":{\"content\":[{\"text\":\"part \"},{\"text\":\"two\"}]}}]}"
+            )
+            .unwrap(),
+            Some("part two".to_owned())
+        );
+        assert_eq!(
+            model_test_stream_delta("data: {\"choices\":[{\"text\":\"legacy\"}]}").unwrap(),
+            Some("legacy".to_owned())
+        );
+
+        let coded_error = model_test_stream_delta(
+            "data: {\"error\":{\"code\":\"stream_rejected\",\"message\":\"secret\"}}",
+        )
+        .unwrap_err();
+        assert!(!coded_error.contains("stream_rejected"));
+        assert!(!coded_error.contains("secret"));
+        assert_eq!(
+            model_test_stream_delta("data: {\"error\":{\"message\":\"secret\"}}").unwrap_err(),
+            "The Provider returned a stream error"
+        );
+    }
+
+    #[test]
+    fn model_test_output_budget_rejects_many_individually_valid_deltas() {
+        let mut budget = ModelTestOutputBudget::default();
+        for _ in 0..MODEL_TEST_MAX_STREAM_EVENTS {
+            budget.accept("x").unwrap();
+        }
+        assert!(budget.accept("x").unwrap_err().contains("event limit"));
+
+        let mut byte_budget = ModelTestOutputBudget::default();
+        byte_budget
+            .accept(&"x".repeat(MODEL_TEST_MAX_RESPONSE_BYTES))
+            .unwrap();
+        assert!(byte_budget
+            .accept("x")
+            .unwrap_err()
+            .contains("response limit"));
+
+        let mut wire_budget = ModelTestOutputBudget::default();
+        wire_budget
+            .accept_wire(MODEL_TEST_MAX_STREAM_BYTES)
+            .unwrap();
+        assert!(wire_budget
+            .accept_wire(1)
+            .unwrap_err()
+            .contains("wire response limit"));
+    }
+
+    #[test]
+    fn model_test_command_uses_an_exact_in_memory_route_and_cleans_registration() {
+        let root = scratch_home("model-test-command");
+        let (upstream, fixture) = serve_chat_completion("model-test-ok", 1);
+        let mut draft = gateway_template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": upstream,
+            "models": [{"model": "small"}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+        assert!(app.manage(ModelTestStreamState::default()));
+
+        let reply = tauri::async_runtime::block_on(run_model_test_chat(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            app.state::<ModelTestStreamState>().inner(),
+            "fixture".to_owned(),
+            "small".to_owned(),
+            vec![ModelTestMessage {
+                role: "user".to_owned(),
+                content: "ping".to_owned(),
+            }],
+            "model-test-command".to_owned(),
+        ))
+        .unwrap();
+
+        assert_eq!(reply.content, "model-test-ok");
+        assert!(app
+            .state::<ModelTestStreamState>()
+            .0
+            .lock()
+            .unwrap()
+            .active
+            .is_empty());
+        fixture.join().unwrap();
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

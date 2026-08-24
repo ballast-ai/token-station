@@ -28,8 +28,9 @@ interface ModelTestConsoleProps {
   initialTarget: TierView | null;
 }
 
-type TranscriptItem = ModelTestMessage & {
+export type TranscriptItem = ModelTestMessage & {
   id: number;
+  turnId: string;
   latencyMs?: number;
   firstTokenMs?: number;
   streaming?: boolean;
@@ -37,10 +38,84 @@ type TranscriptItem = ModelTestMessage & {
   errorMessage?: string;
 };
 
+const MODEL_TEST_MAX_MESSAGES = 20;
+const MODEL_TEST_MAX_MESSAGE_BYTES = 16_000;
+const MODEL_TEST_MAX_TOTAL_BYTES = 64_000;
+const MODEL_TEST_MAX_TRANSCRIPT_TURNS = 10;
+const textEncoder = new TextEncoder();
+
+type ModelTestRequestMessages = {
+  messages: ModelTestMessage[];
+  error: "message_too_large" | null;
+};
+
+export function buildModelTestRequestMessages(
+  items: readonly TranscriptItem[],
+  prompt: string,
+): ModelTestRequestMessages {
+  const promptBytes = textEncoder.encode(prompt).byteLength;
+  if (promptBytes > MODEL_TEST_MAX_MESSAGE_BYTES) {
+    return { messages: [], error: "message_too_large" };
+  }
+
+  const turns = new Map<string, { user?: TranscriptItem; assistant?: TranscriptItem }>();
+  items.forEach((item) => {
+    const turn = turns.get(item.turnId) ?? {};
+    if (item.role === "user" && !turn.user) turn.user = item;
+    if (item.role === "assistant" && !turn.assistant) turn.assistant = item;
+    turns.set(item.turnId, turn);
+  });
+  const completedTurns = [...turns.values()].filter((turn): turn is {
+    user: TranscriptItem;
+    assistant: TranscriptItem;
+  } => Boolean(
+    turn.user
+    && turn.assistant
+    && !turn.assistant.errorMessage
+    && !turn.assistant.stopped
+    && !turn.assistant.streaming
+    && turn.assistant.content.trim(),
+  ));
+
+  const messages: ModelTestMessage[] = [{ role: "user", content: prompt }];
+  let totalBytes = promptBytes;
+  for (let index = completedTurns.length - 1; index >= 0; index -= 1) {
+    const { user, assistant } = completedTurns[index];
+    const userBytes = textEncoder.encode(user.content).byteLength;
+    const assistantBytes = textEncoder.encode(assistant.content).byteLength;
+    if (
+      userBytes > MODEL_TEST_MAX_MESSAGE_BYTES
+      || assistantBytes > MODEL_TEST_MAX_MESSAGE_BYTES
+      || messages.length + 2 > MODEL_TEST_MAX_MESSAGES
+      || totalBytes + userBytes + assistantBytes > MODEL_TEST_MAX_TOTAL_BYTES
+    ) break;
+    messages.unshift(
+      { role: "user", content: user.content },
+      { role: "assistant", content: assistant.content },
+    );
+    totalBytes += userBytes + assistantBytes;
+  }
+  return { messages, error: null };
+}
+
+export function trimModelTestTranscript(items: readonly TranscriptItem[]): TranscriptItem[] {
+  const retainedTurnIds = new Set<string>();
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    retainedTurnIds.add(items[index].turnId);
+    if (retainedTurnIds.size === MODEL_TEST_MAX_TRANSCRIPT_TURNS) break;
+  }
+  return items.filter((item) => retainedTurnIds.has(item.turnId));
+}
+
 type ActiveRequest = {
   requestId: string;
   assistantId: number;
   stopped: boolean;
+  cancelling: boolean;
+  cancelPromise: Promise<boolean> | null;
+  flushTimer: number | null;
+  pendingDelta: string;
+  pendingFirstTokenMs: number | null;
 };
 
 const targetKey = (upstream: string, model: string) => `${upstream}\u0000${model}`;
@@ -77,26 +152,69 @@ export default function ModelTestConsole({
   const [selectedKey, setSelectedKey] = useState(defaultKey);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [draft, setDraft] = useState("");
+  const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [targetMenuOpen, setTargetMenuOpen] = useState(false);
   const [pickerProviderName, setPickerProviderName] = useState<string | null>(null);
   const focusComposer = (delay = 60) => window.setTimeout(() => composerRef.current?.focus(), delay);
 
-  const cancelActiveRequest = (preservePartial: boolean) => {
+  const takePendingDelta = (request: ActiveRequest) => {
+    if (request.flushTimer != null) window.clearTimeout(request.flushTimer);
+    request.flushTimer = null;
+    const pending = {
+      delta: request.pendingDelta,
+      firstTokenMs: request.pendingFirstTokenMs,
+    };
+    request.pendingDelta = "";
+    request.pendingFirstTokenMs = null;
+    return pending;
+  };
+
+  const cancelActiveRequest = async (preservePartial: boolean): Promise<boolean> => {
     const active = activeRequestRef.current;
-    if (!active) return;
-    active.stopped = true;
-    activeRequestRef.current = null;
-    void cancelModelTestChat(active.requestId);
-    setSending(false);
-    if (preservePartial) {
-      setItems((current) => current.flatMap((item) => {
-        if (item.id !== active.assistantId) return [item];
-        return item.content
-          ? [{ ...item, streaming: false, stopped: true }]
-          : [];
-      }));
-    }
+    if (!active) return true;
+    if (active.cancelPromise) return active.cancelPromise;
+    active.cancelling = true;
+    setCancelling(true);
+    const cancellation = cancelModelTestChat(active.requestId).then(() => {
+      const pending = takePendingDelta(active);
+      active.stopped = true;
+      if (activeRequestRef.current === active) activeRequestRef.current = null;
+      setSending(false);
+      setCancelling(false);
+      if (preservePartial) {
+        setItems((current) => current.flatMap((item) => {
+          if (item.id !== active.assistantId) return [item];
+          const content = `${item.content}${pending.delta}`;
+          return content
+            ? [{
+              ...item,
+              content,
+              firstTokenMs: item.firstTokenMs ?? pending.firstTokenMs ?? undefined,
+              streaming: false,
+              stopped: true,
+            }]
+            : [];
+        }));
+      }
+      return true;
+    }).catch(() => {
+      if (activeRequestRef.current === active) {
+        active.cancelling = false;
+        active.cancelPromise = null;
+        setCancelling(false);
+        setComposerError(copy(
+          "Could not stop the request. Generation is still running.",
+          "无法停止请求，生成仍在继续。",
+          "無法停止請求，生成仍在繼續。",
+          "リクエストを停止できませんでした。生成はまだ続いています。",
+        ));
+      }
+      return false;
+    });
+    active.cancelPromise = cancellation;
+    return cancellation;
   };
 
   useEffect(() => {
@@ -105,21 +223,26 @@ export default function ModelTestConsole({
 
   useEffect(() => {
     if (open) return;
-    cancelActiveRequest(false);
-    setItems([]);
-    setDraft("");
-    setSending(false);
-    setSelectedKey(defaultKey);
-    setTargetMenuOpen(false);
-    setPickerProviderName(null);
+    void (async () => {
+      if (!(await cancelActiveRequest(false))) return;
+      setItems([]);
+      setDraft("");
+      setComposerError(null);
+      setSending(false);
+      setCancelling(false);
+      setSelectedKey(defaultKey);
+      setTargetMenuOpen(false);
+      setPickerProviderName(null);
+    })();
   }, [defaultKey, open]);
 
   useEffect(() => () => {
     const active = activeRequestRef.current;
     if (!active) return;
     active.stopped = true;
+    takePendingDelta(active);
     activeRequestRef.current = null;
-    void cancelModelTestChat(active.requestId);
+    void cancelModelTestChat(active.requestId).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -131,51 +254,85 @@ export default function ModelTestConsole({
   const selectableProviders = providers.filter((provider) => provider.models.length > 0);
   const pickerProvider = selectableProviders.find((provider) => provider.name === pickerProviderName);
 
-  const clearConversation = () => {
-    cancelActiveRequest(false);
+  const clearConversation = async () => {
+    if (!(await cancelActiveRequest(false))) return;
     setItems([]);
     setDraft("");
+    setComposerError(null);
     focusComposer();
   };
 
-  const changeTarget = (key: string) => {
-    cancelActiveRequest(false);
+  const changeTarget = async (key: string) => {
+    if (!(await cancelActiveRequest(false))) return;
     setSelectedKey(key);
     setItems([]);
     setDraft("");
+    setComposerError(null);
     setTargetMenuOpen(false);
     setPickerProviderName(null);
     focusComposer(220);
   };
 
-  const stop = () => {
-    cancelActiveRequest(true);
+  const stop = async () => {
+    if (!(await cancelActiveRequest(true))) return;
     focusComposer();
+  };
+
+  const closeConsole = async () => {
+    if (!(await cancelActiveRequest(false))) return;
+    setItems([]);
+    setDraft("");
+    setComposerError(null);
+    setSending(false);
+    setCancelling(false);
+    setSelectedKey(defaultKey);
+    setTargetMenuOpen(false);
+    setPickerProviderName(null);
+    onOpenChange(false);
   };
 
   const send = async () => {
     const prompt = draft.trim();
     if (!selectedTarget || !prompt || sending) return;
 
-    const history: ModelTestMessage[] = items
-      .filter((item) => !item.errorMessage && !item.stopped && !item.streaming)
-      .map(({ role, content }) => ({ role, content }));
-    const requestMessages = [...history.slice(-19), { role: "user" as const, content: prompt }];
-    const userItem: TranscriptItem = { id: nextId.current++, role: "user", content: prompt };
+    const requestMessages = buildModelTestRequestMessages(items, prompt);
+    if (requestMessages.error) {
+      setComposerError(copy(
+        "A message cannot exceed 16,000 UTF-8 bytes.",
+        "消息不能超过 16,000 个 UTF-8 字节。",
+        "訊息不能超過 16,000 個 UTF-8 位元組。",
+        "メッセージは 16,000 UTF-8 バイトを超えることはできません。",
+      ));
+      return;
+    }
+    setComposerError(null);
+    const requestId = `model-test-${Date.now()}-${nextRequestId.current++}`;
+    const userItem: TranscriptItem = {
+      id: nextId.current++,
+      turnId: requestId,
+      role: "user",
+      content: prompt,
+    };
     const assistantId = nextId.current++;
     const assistantItem: TranscriptItem = {
       id: assistantId,
+      turnId: requestId,
       role: "assistant",
       content: "",
       streaming: true,
     };
     const request: ActiveRequest = {
-      requestId: `model-test-${Date.now()}-${nextRequestId.current++}`,
+      requestId,
       assistantId,
       stopped: false,
+      cancelling: false,
+      cancelPromise: null,
+      flushTimer: null,
+      pendingDelta: "",
+      pendingFirstTokenMs: null,
     };
     activeRequestRef.current = request;
-    setItems((current) => [...current, userItem, assistantItem]);
+    setItems((current) => trimModelTestTranscript([...current, userItem, assistantItem]));
     setDraft("");
     setSending(true);
 
@@ -183,20 +340,32 @@ export default function ModelTestConsole({
       const reply = await testModelChatStream(
         selectedTarget.provider.name,
         selectedTarget.model,
-        requestMessages,
+        requestMessages.messages,
         request.requestId,
         (event) => {
           if (activeRequestRef.current !== request || request.stopped) return;
-          setItems((current) => current.map((item) => item.id === assistantId
-            ? {
-              ...item,
-              content: `${item.content}${event.delta}`,
-              firstTokenMs: item.firstTokenMs ?? event.first_token_ms ?? undefined,
-            }
-            : item));
+          request.pendingDelta += event.delta;
+          request.pendingFirstTokenMs ??= event.first_token_ms;
+          if (request.flushTimer != null) return;
+          request.flushTimer = window.setTimeout(() => {
+            const pending = takePendingDelta(request);
+            if (activeRequestRef.current !== request || request.stopped || !pending.delta) return;
+            setItems((current) => current.map((item) => item.id === assistantId
+              ? {
+                ...item,
+                content: `${item.content}${pending.delta}`,
+                firstTokenMs: item.firstTokenMs ?? pending.firstTokenMs ?? undefined,
+              }
+              : item));
+          }, 32);
         },
       );
+      if (request.cancelling && request.cancelPromise) {
+        const cancelled = await request.cancelPromise;
+        if (cancelled) return;
+      }
       if (activeRequestRef.current !== request || request.stopped) return;
+      takePendingDelta(request);
       setItems((current) => current.map((item) => item.id === assistantId
         ? {
           ...item,
@@ -207,15 +376,29 @@ export default function ModelTestConsole({
         }
         : item));
     } catch (error) {
+      if (request.cancelling && request.cancelPromise) {
+        const cancelled = await request.cancelPromise;
+        if (cancelled) return;
+      }
       if (activeRequestRef.current !== request || request.stopped) return;
+      const pending = takePendingDelta(request);
+      setComposerError(null);
       setItems((current) => current.map((item) => item.id === assistantId
-        ? { ...item, streaming: false, errorMessage: errorMessage(error) }
+        ? {
+          ...item,
+          content: `${item.content}${pending.delta}`,
+          firstTokenMs: item.firstTokenMs ?? pending.firstTokenMs ?? undefined,
+          streaming: false,
+          errorMessage: errorMessage(error),
+        }
         : item));
       setDraft(prompt);
     } finally {
       if (activeRequestRef.current === request) {
+        takePendingDelta(request);
         activeRequestRef.current = null;
         setSending(false);
+        setCancelling(false);
         focusComposer();
       }
     }
@@ -229,8 +412,8 @@ export default function ModelTestConsole({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => {
-      if (!nextOpen) cancelActiveRequest(false);
-      onOpenChange(nextOpen);
+      if (nextOpen) onOpenChange(true);
+      else void closeConsole();
     }}>
       <DialogContent
         className="model-test-dialog"
@@ -298,7 +481,7 @@ export default function ModelTestConsole({
                     {pickerProvider.models.map((model) => {
                       const key = targetKey(pickerProvider.name, model);
                       return (
-                        <DropdownMenuItem key={key} onSelect={() => changeTarget(key)}>
+                        <DropdownMenuItem key={key} onSelect={() => void changeTarget(key)}>
                           <span className="model-test-model-name">{model}</span>
                           {selectedKey === key && <Check aria-hidden="true" />}
                         </DropdownMenuItem>
@@ -388,17 +571,23 @@ export default function ModelTestConsole({
             maxLength={16_000}
             rows={2}
             disabled={!selectedTarget}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setComposerError(null);
+            }}
             onKeyDown={onComposerKeyDown}
           />
+          {composerError && (
+            <small className="model-test-composer-error" role="alert">{composerError}</small>
+          )}
           <div className="model-test-composer-actions">
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
               aria-label={copy("Clear conversation", "清空对话", "清空對話", "会話を消去")}
-              disabled={items.length === 0}
-              onClick={clearConversation}
+              disabled={items.length === 0 || cancelling}
+              onClick={() => void clearConversation()}
             >
               <Trash2 aria-hidden="true" />
             </Button>
@@ -407,11 +596,13 @@ export default function ModelTestConsole({
               type="button"
               size="icon"
               className="model-test-send"
-              aria-label={sending
-                ? copy("Stop generating", "停止生成", "停止生成", "生成を停止")
+              aria-label={cancelling
+                ? copy("Stopping generation", "正在停止生成", "正在停止生成", "生成を停止しています")
+                : sending
+                  ? copy("Stop generating", "停止生成", "停止生成", "生成を停止")
                 : copy("Send message", "发送消息", "傳送訊息", "メッセージを送信")}
-              disabled={!sending && (!draft.trim() || !selectedTarget)}
-              onClick={sending ? stop : () => void send()}
+              disabled={cancelling || (!sending && (!draft.trim() || !selectedTarget))}
+              onClick={sending ? () => void stop() : () => void send()}
             >
               {sending ? <Square className="model-test-stop-icon" aria-hidden="true" /> : <SendHorizontal aria-hidden="true" />}
             </Button>
