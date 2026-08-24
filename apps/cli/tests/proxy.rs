@@ -1874,7 +1874,13 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                // 15s, matching `a_hung_upstream_is_force_cancelled_after_the_five_second_grace_...`,
+                // which exercises the same grace. This was 5s — exactly the length of
+                // the grace the request may have to wait through, so the client
+                // aborted first whenever a loaded runner added any overhead at all.
+                // Raising it weakens nothing: the claim is that the proxy answers
+                // rather than hangs, and a hang is unbounded.
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
                 .http_status_as_error(false)
                 .build(),
         );
