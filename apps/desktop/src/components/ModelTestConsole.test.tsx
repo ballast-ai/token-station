@@ -29,7 +29,7 @@ const providers: ProviderView[] = [
     brand_id: "deepseek",
     provider: "openai-compatible",
     base_url: "https://api.deepseek.com/v1",
-    models: ["deepseek-v4"],
+    models: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4"],
     has_auth: true,
   },
 ];
@@ -56,8 +56,9 @@ describe("ModelTestConsole", () => {
     renderConsole();
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveTextContent("gpt-5.6-terra");
-    expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveTextContent("openai-main");
+    const targetButton = screen.getByRole("button", { name: /选择模型/ });
+    expect(targetButton).toHaveTextContent("gpt-5.6-terra");
+    expect(targetButton).toHaveTextContent("openai-main");
     await waitFor(() => expect(screen.getByRole("textbox", { name: "消息" })).toHaveFocus());
     expect(screen.getByText("每次发送都会产生一次真实的模型请求，可能计入供应商用量。")).toBeInTheDocument();
   });
@@ -93,16 +94,47 @@ describe("ModelTestConsole", () => {
     expect(composer).toHaveValue("");
   });
 
-  it("returns to the composer after selecting another exact target", async () => {
+  it("uses one button to select a Provider first and then one of its models", async () => {
     const user = userEvent.setup();
     renderConsole();
 
-    await user.click(screen.getByRole("combobox", { name: "测试模型" }));
-    await user.click(screen.getByRole("option", { name: /deepseek-v4/ }));
+    const targetButton = screen.getByRole("button", { name: /选择模型/ });
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    await user.click(targetButton);
 
-    expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveTextContent("deepseek-v4");
-    expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveTextContent("deepseek-main");
+    expect(screen.getByText("选择供应商")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "openai-main" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "deepseek-main" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /gpt-5.6/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /deepseek-v4/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: "deepseek-main" }));
+
+    expect(screen.getByText("选择模型")).toBeInTheDocument();
+    expect(screen.getByText("deepseek-main")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "deepseek-chat" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "deepseek-reasoner" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "deepseek-v4" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /gpt-5.6/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: "deepseek-reasoner" }));
+
+    expect(targetButton).toHaveTextContent("deepseek-reasoner");
+    expect(targetButton).toHaveTextContent("deepseek-main");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "消息" })).toHaveFocus());
+  });
+
+  it("shows the official Provider avatar once and keeps model options text-only", async () => {
+    const user = userEvent.setup();
+    renderConsole();
+
+    expect(document.querySelectorAll('[data-provider-brand="openai"]')).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: /选择模型/ }));
+    await user.click(screen.getByRole("menuitem", { name: "deepseek-main" }));
+    expect(screen.getAllByRole("menuitem")).toHaveLength(4);
+    expect(document.querySelector('[data-slot="dropdown-menu-content"] [data-provider-brand="openai"]')).toBeNull();
+    document.querySelectorAll(".model-test-model-name").forEach((modelName) => {
+      expect(modelName.closest('[data-slot="dropdown-menu-item"]')?.querySelector("[data-provider-brand]")).toBeNull();
+    });
   });
 
   it("keeps the failed prompt available and blocks duplicate sends", async () => {
@@ -164,8 +196,9 @@ describe("ModelTestConsole", () => {
     await user.keyboard("{Enter}");
     expect(await screen.findByText("旧模型回复")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "测试模型" }));
-    await user.click(screen.getByRole("option", { name: /deepseek-v4/ }));
+    await user.click(screen.getByRole("button", { name: /选择模型/ }));
+    await user.click(screen.getByRole("menuitem", { name: "deepseek-main" }));
+    await user.click(screen.getByRole("menuitem", { name: "deepseek-chat" }));
 
     expect(cancelModelTestChat).toHaveBeenCalledWith(expect.any(String));
     expect(screen.queryByText("旧模型回复")).not.toBeInTheDocument();

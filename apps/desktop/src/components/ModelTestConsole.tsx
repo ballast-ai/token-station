@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Bot, LoaderCircle, MessageSquareText, SendHorizontal, Square, Trash2 } from "lucide-react";
+import { Bot, Check, ChevronLeft, ChevronRight, ChevronsUpDown, LoaderCircle, MessageSquareText, SendHorizontal, Square, Trash2 } from "lucide-react";
 import type { ModelTestMessage, ProviderView, TierView } from "../api";
 import { cancelModelTestChat, testModelChatStream } from "../api";
 import { ProviderIcon } from "../brandIcons";
@@ -13,13 +13,13 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-} from "./ui/select";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 
 interface ModelTestConsoleProps {
   open: boolean;
@@ -78,6 +78,8 @@ export default function ModelTestConsole({
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [targetMenuOpen, setTargetMenuOpen] = useState(false);
+  const [pickerProviderName, setPickerProviderName] = useState<string | null>(null);
   const focusComposer = (delay = 60) => window.setTimeout(() => composerRef.current?.focus(), delay);
 
   const cancelActiveRequest = (preservePartial: boolean) => {
@@ -108,6 +110,8 @@ export default function ModelTestConsole({
     setDraft("");
     setSending(false);
     setSelectedKey(defaultKey);
+    setTargetMenuOpen(false);
+    setPickerProviderName(null);
   }, [defaultKey, open]);
 
   useEffect(() => () => {
@@ -124,6 +128,8 @@ export default function ModelTestConsole({
   }, [items]);
 
   const selectedTarget = targets.find((target) => target.key === selectedKey) ?? targets[0];
+  const selectableProviders = providers.filter((provider) => provider.models.length > 0);
+  const pickerProvider = selectableProviders.find((provider) => provider.name === pickerProviderName);
 
   const clearConversation = () => {
     cancelActiveRequest(false);
@@ -137,6 +143,8 @@ export default function ModelTestConsole({
     setSelectedKey(key);
     setItems([]);
     setDraft("");
+    setTargetMenuOpen(false);
+    setPickerProviderName(null);
     focusComposer(220);
   };
 
@@ -245,31 +253,80 @@ export default function ModelTestConsole({
             </div>
           </div>
           {selectedTarget && (
-            <Select value={selectedTarget.key} onValueChange={changeTarget}>
-              <SelectTrigger className="model-test-target" aria-label={copy("Test model", "测试模型", "測試模型", "テストモデル")}>
-                <ProviderIcon id={selectedTarget.provider.brand_id} label={selectedTarget.provider.name} size={20} />
-                <span className="model-test-target-copy">
-                  <strong>{selectedTarget.model}</strong>
-                  <small>{selectedTarget.provider.name}</small>
-                </span>
-              </SelectTrigger>
-              <SelectContent position="popper" align="end" className="model-test-target-menu">
-                {providers.map((provider) => (
-                  <SelectGroup key={provider.name}>
-                    <SelectLabel>{provider.name}</SelectLabel>
-                    {provider.models.map((model) => (
-                      <SelectItem key={targetKey(provider.name, model)} value={targetKey(provider.name, model)}>
-                        <ProviderIcon id={provider.brand_id} label={provider.name} size={18} />
-                        <span className="model-test-option-copy">
-                          <strong>{model}</strong>
-                          <small>{provider.name}</small>
-                        </span>
-                      </SelectItem>
+            <DropdownMenu open={targetMenuOpen} onOpenChange={(nextOpen) => {
+              setTargetMenuOpen(nextOpen);
+              if (nextOpen) setPickerProviderName(null);
+            }}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="model-test-target-trigger"
+                  aria-label={copy(
+                    `Choose model. Current: ${selectedTarget.model}, Provider: ${selectedTarget.provider.name}`,
+                    `选择模型，当前：${selectedTarget.model}，供应商：${selectedTarget.provider.name}`,
+                    `選擇模型，目前：${selectedTarget.model}，供應商：${selectedTarget.provider.name}`,
+                    `モデルを選択。現在：${selectedTarget.model}、プロバイダー：${selectedTarget.provider.name}`,
+                  )}
+                >
+                  <ProviderIcon id={selectedTarget.provider.brand_id} label={selectedTarget.provider.name} size={20} />
+                  <span className="model-test-target-copy">
+                    <strong>{selectedTarget.model}</strong>
+                    <small>{selectedTarget.provider.name}</small>
+                  </span>
+                  <ChevronsUpDown aria-hidden="true" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" sideOffset={8} className="model-test-target-menu">
+                {pickerProvider ? (
+                  <>
+                    <DropdownMenuItem
+                      className="model-test-picker-back"
+                      aria-label={copy("Back to Providers", "返回供应商", "返回供應商", "プロバイダーに戻る")}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        setPickerProviderName(null);
+                      }}
+                    >
+                      <ChevronLeft aria-hidden="true" />
+                      <ProviderIcon id={pickerProvider.brand_id} label={pickerProvider.name} size={20} />
+                      <span className="model-test-picker-heading">
+                        <small>{copy("Choose model", "选择模型", "選擇模型", "モデルを選択")}</small>
+                        <strong>{pickerProvider.name}</strong>
+                      </span>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    {pickerProvider.models.map((model) => {
+                      const key = targetKey(pickerProvider.name, model);
+                      return (
+                        <DropdownMenuItem key={key} onSelect={() => changeTarget(key)}>
+                          <span className="model-test-model-name">{model}</span>
+                          {selectedKey === key && <Check aria-hidden="true" />}
+                        </DropdownMenuItem>
+                      );
+                    })}
+                  </>
+                ) : (
+                  <>
+                    <DropdownMenuLabel>{copy("Choose Provider", "选择供应商", "選擇供應商", "プロバイダーを選択")}</DropdownMenuLabel>
+                    {selectableProviders.map((provider) => (
+                      <DropdownMenuItem
+                        key={provider.name}
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          setPickerProviderName(provider.name);
+                        }}
+                      >
+                        <ProviderIcon id={provider.brand_id} label={provider.name} size={20} />
+                        <strong>{provider.name}</strong>
+                        {provider.name === selectedTarget.provider.name
+                          ? <Check aria-hidden="true" />
+                          : <ChevronRight aria-hidden="true" />}
+                      </DropdownMenuItem>
                     ))}
-                  </SelectGroup>
-                ))}
-              </SelectContent>
-            </Select>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </DialogHeader>
 

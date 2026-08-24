@@ -48,7 +48,7 @@ describe("ProviderIcon", () => {
 
     const icon = container.querySelector('[data-provider-brand="deepseek"]');
     expect(icon).toHaveAttribute("aria-hidden", "true");
-    expect(icon?.querySelector("svg")).toBeInTheDocument();
+    expect(icon?.querySelector("svg")).toHaveClass("provider-brand-avatar-icon", "size-full");
   });
 
   it("uses a self-contained fallback for unknown brand identifiers", () => {

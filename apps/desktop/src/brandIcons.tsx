@@ -46,10 +46,11 @@ import {
 } from "@lobehub/icons";
 
 type BrandGlyph = ComponentType<{ size: number }>;
+type BrandAvatar = ComponentType<{ size: number; iconClassName?: string }>;
 
 /** Base lobehub icons render directly; most brands also expose `.Color`, and all expose `.Avatar`. */
 type BrandIcon = BrandGlyph & {
-  Avatar: BrandGlyph;
+  Avatar: BrandAvatar;
   Color?: BrandGlyph;
 };
 
@@ -197,7 +198,7 @@ export function ProviderIcon({ id, label, size = 28 }: { id?: string | null; lab
       style={{ width: size, height: size }}
     >
       {Icon
-        ? <Icon.Avatar size={size} />
+        ? <Icon.Avatar size={size} iconClassName="provider-brand-avatar-icon size-full" />
         : <Fallback text={label.slice(0, 1).toUpperCase()} size={size} />}
     </span>
   );
