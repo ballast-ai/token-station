@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use south_provider_api::AuthArmV1;
 use token_station_cli::south_component::{
     ProviderAdapter, SouthComponentAdapter, south_component_runtime,
 };
@@ -185,5 +186,50 @@ fn a_component_from_the_previous_south_release_is_refused() {
     assert!(
         message.contains("0.15.0"),
         "the refusal must name the stale version so an operator can act on it: {message}"
+    );
+}
+
+// -- transport eligibility by declared arm (P2) --------------------------------
+
+/// The manifest already states which auth shapes a component can carry, and
+/// admission has already verified the manifest. Transport eligibility reads
+/// that instead of matching provider names — a name allowlist has to be edited
+/// for every dialect the host admits, and it was not, which is how the Anthropic
+/// component came to translate requests the transport then refused to send.
+#[test]
+fn each_component_declares_the_auth_arms_transport_should_judge_it_by() {
+    let runtime = south_component_runtime().expect("the south runtime builds");
+    let load = |package: &str, stem: &str| {
+        let wasm = std::fs::read(build_wasm(package, stem)).expect("component builds");
+        let manifest = std::fs::read_to_string(
+            repo_root()
+                .join("plugins/official")
+                .join(package)
+                .join("manifest.json"),
+        )
+        .expect("manifest reads");
+        SouthComponentAdapter::load_embedded(&runtime, &manifest, &wasm).expect("loads")
+    };
+
+    let anthropic = load("provider-anthropic-v2", "provider_anthropic_v2");
+    let arms = anthropic.auth_arms();
+    assert!(
+        arms.contains(&AuthArmV1::HeaderSecret),
+        "Anthropic authenticates with `x-api-key`, a header secret"
+    );
+    assert!(
+        !arms.contains(&AuthArmV1::Bearer),
+        "and not with a bearer token, so the transport must not offer it one"
+    );
+
+    let openai = load(
+        "provider-openai-compatible-v2",
+        "provider_openai_compatible_v2",
+    );
+    let arms = openai.auth_arms();
+    assert!(arms.contains(&AuthArmV1::Bearer));
+    assert!(
+        arms.contains(&AuthArmV1::HeaderSecret),
+        "the same package serves Azure, which authenticates with `api-key`"
     );
 }

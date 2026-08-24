@@ -1,6 +1,12 @@
 //! Community-host adapter for South provider-call v1.
 
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    time::Duration,
+};
+
+use south_provider_api::AuthArmV1;
 
 use south_contracts::{
     BearerAuthV1, ContractErrorV1, CredentialSlotV1, JsonBodyV1, JsonPostRequestV1,
@@ -45,7 +51,6 @@ const PROVIDER_QUOTA_METADATA_FIELDS_V1: [ProviderQuotaMetadataFieldV1; 9] = [
 /// Host-owned reasons why a call cannot enter the first South rollout slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IneligibleV1 {
-    ProviderDialect,
     ApiDialect,
     Egress,
     Streaming,
@@ -62,20 +67,17 @@ pub(crate) enum RequestBodyModeV1 {
     Buffered,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AuthenticationEligibilityV1 {
-    Bearer,
-    HeaderSecretCatalog,
-    AzureOpenAiHeader,
-}
-
 /// Static host facts used before any credential lookup or transport call.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct CommunityCallPolicyV1 {
     api_dialect: ApiDialect,
     egress_mode: EgressMode,
     body_mode: RequestBodyModeV1,
-    authentication: AuthenticationEligibilityV1,
+    /// The auth shapes the admitted component declares it can carry. Read from
+    /// its manifest, which admission has already verified — so eligibility asks
+    /// the component what it does rather than matching its dialect against a
+    /// list the host has to remember to extend.
+    auth_arms: BTreeSet<AuthArmV1>,
 }
 
 impl CommunityCallPolicyV1 {
@@ -84,35 +86,14 @@ impl CommunityCallPolicyV1 {
         api_dialect: ApiDialect,
         egress_mode: EgressMode,
         body_mode: RequestBodyModeV1,
+        auth_arms: BTreeSet<AuthArmV1>,
     ) -> Self {
         Self {
             api_dialect,
             egress_mode,
             body_mode,
-            authentication: AuthenticationEligibilityV1::Bearer,
+            auth_arms,
         }
-    }
-
-    /// Enables the isolated Header Auth compatibility path without changing any production
-    /// configuration value. Production callers keep the constructor's Bearer-only default.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the compatibility path remains production-disabled until a later opt-in"
-        )
-    )]
-    #[must_use]
-    pub(crate) const fn with_header_secret_auth(mut self) -> Self {
-        self.authentication = AuthenticationEligibilityV1::HeaderSecretCatalog;
-        self
-    }
-
-    /// Enables the production Header Auth path only for the trusted Azure OpenAI v1 dialect.
-    #[must_use]
-    pub(crate) const fn with_azure_openai_header_auth(mut self) -> Self {
-        self.authentication = AuthenticationEligibilityV1::AzureOpenAiHeader;
-        self
     }
 }
 
@@ -123,7 +104,7 @@ impl fmt::Debug for CommunityCallPolicyV1 {
             .field("api_dialect", &self.api_dialect)
             .field("egress_mode", &self.egress_mode)
             .field("body_mode", &self.body_mode)
-            .field("authentication", &self.authentication)
+            .field("auth_arms", &self.auth_arms)
             .finish()
     }
 }
@@ -264,7 +245,7 @@ impl fmt::Debug for PreparedCommunityProviderCallV1 {
 
 /// Applies every host and contract check before any secret or transport capability is available.
 pub(crate) fn prepare_provider_call_v1(
-    policy: CommunityCallPolicyV1,
+    policy: &CommunityCallPolicyV1,
     provider: &ProviderConfig,
     auth_config: &AuthConfig,
     descriptor: &HttpRequestDescriptor,
@@ -280,7 +261,7 @@ pub(crate) fn prepare_provider_call_v1(
 
 /// Projects an explicitly streaming-eligible descriptor into the same bounded request contract.
 pub(crate) fn prepare_provider_stream_v1(
-    policy: CommunityCallPolicyV1,
+    policy: &CommunityCallPolicyV1,
     provider: &ProviderConfig,
     auth_config: &AuthConfig,
     descriptor: &HttpRequestDescriptor,
@@ -295,7 +276,7 @@ pub(crate) fn prepare_provider_stream_v1(
 }
 
 fn prepare_provider_call_for_mode_v1(
-    policy: CommunityCallPolicyV1,
+    policy: &CommunityCallPolicyV1,
     expected_body_mode: RequestBodyModeV1,
     provider: &ProviderConfig,
     auth_config: &AuthConfig,
@@ -321,7 +302,8 @@ fn prepare_provider_call_for_mode_v1(
             ProviderAuthV1::from(BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?))
         }
         Some(Auth::Header { name, secret })
-            if header_auth_allowed(policy.authentication, &provider.provider, name) =>
+            if policy.auth_arms.contains(&AuthArmV1::HeaderSecret)
+                && sanctioned_secret_header(name).is_some() =>
         {
             let header = sanctioned_secret_header(name)
                 .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
@@ -639,19 +621,13 @@ pub(crate) fn map_stream_read_failure_v1(
 }
 
 fn check_static_eligibility(
-    policy: CommunityCallPolicyV1,
+    policy: &CommunityCallPolicyV1,
     expected_body_mode: RequestBodyModeV1,
     provider: &ProviderConfig,
     auth_config: &AuthConfig,
     descriptor: &HttpRequestDescriptor,
 ) -> Result<(), PrepareProviderCallErrorV1> {
     let ineligible = |reason| Err(PrepareProviderCallErrorV1::Ineligible(reason));
-    let supported_provider = provider.provider == "openai-compatible"
-        || (provider.provider == "azure-openai-v1"
-            && policy.authentication == AuthenticationEligibilityV1::AzureOpenAiHeader);
-    if !supported_provider {
-        return ineligible(IneligibleV1::ProviderDialect);
-    }
     if policy.api_dialect != ApiDialect::Translated {
         return ineligible(IneligibleV1::ApiDialect);
     }
@@ -667,10 +643,14 @@ fn check_static_eligibility(
     if descriptor.body.is_none() {
         return ineligible(IneligibleV1::Body);
     }
+    // The descriptor says what this request needs; the manifest says what the
+    // component carries. Anything else — the dialect's name in particular — is
+    // not the transport's business once admission has run.
     let supported_auth = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { .. }) => provider.provider == "openai-compatible",
+        Some(Auth::Bearer { .. }) => policy.auth_arms.contains(&AuthArmV1::Bearer),
         Some(Auth::Header { name, .. }) => {
-            header_auth_allowed(policy.authentication, &provider.provider, name)
+            policy.auth_arms.contains(&AuthArmV1::HeaderSecret)
+                && sanctioned_secret_header(name).is_some()
         }
         _ => false,
     };
@@ -689,22 +669,6 @@ fn check_static_eligibility(
         return Err(PreparationErrorV1::CredentialBindingMismatch.into());
     }
     Ok(())
-}
-
-fn header_auth_allowed(
-    authentication: AuthenticationEligibilityV1,
-    provider: &str,
-    name: &str,
-) -> bool {
-    match authentication {
-        AuthenticationEligibilityV1::Bearer => false,
-        AuthenticationEligibilityV1::HeaderSecretCatalog => {
-            provider == "openai-compatible" && sanctioned_secret_header(name).is_some()
-        }
-        AuthenticationEligibilityV1::AzureOpenAiHeader => {
-            provider == "azure-openai-v1" && name.eq_ignore_ascii_case("api-key")
-        }
-    }
 }
 
 fn sanctioned_secret_header(name: &str) -> Option<SecretHeaderV1> {

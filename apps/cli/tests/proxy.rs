@@ -5261,7 +5261,7 @@ fn start_azure_production_proxy(
 
 #[test]
 #[cfg(feature = "builtin-plugins")]
-fn old_south_modes_keep_azure_header_auth_on_legacy() {
+fn azure_header_auth_now_runs_on_south_whatever_the_configured_mode() {
     let answer = json!({
         "id": "chatcmpl-azure-legacy", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "legacy" }, "finish_reason": "stop" }],
@@ -5300,8 +5300,14 @@ fn old_south_modes_keep_azure_header_auth_on_legacy() {
         admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
     let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
     assert_eq!(
+        // This used to assert `legacy`: Azure's `api-key` was refused by a
+        // transport allowlist keyed on the dialect's name, so it fell back
+        // however it was configured. Eligibility now reads the arms the admitted
+        // component declares, and the OpenAI-compatible package declares
+        // `header_secret` — exactly what Azure needs. The credential assertions
+        // above are the half that still matters and are unchanged.
         receipts[0]["attempt_records"][0]["provider_call_engine"],
-        json!("legacy")
+        json!("south_v1_buffered")
     );
 }
 

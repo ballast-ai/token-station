@@ -1100,7 +1100,6 @@ impl ProviderCallOutcome {
 /// The content-free classification of a South eligibility refusal.
 const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
     match reason {
-        IneligibleV1::ProviderDialect => SouthFallbackReason::ProviderDialect,
         IneligibleV1::ApiDialect => SouthFallbackReason::ApiDialect,
         IneligibleV1::Egress => SouthFallbackReason::Egress,
         IneligibleV1::Streaming => SouthFallbackReason::Streaming,
@@ -1331,6 +1330,10 @@ struct Upstream {
     /// The translation engine: the South provider component that speaks this
     /// upstream's dialect, resolved at assembly.
     plugin: Arc<dyn ProviderAdapter + Send + Sync>,
+    /// The auth shapes the admitted component declares, read from its manifest
+    /// once at assembly. Transport eligibility judges by these instead of by
+    /// the dialect's name.
+    auth_arms: std::collections::BTreeSet<south_provider_api::AuthArmV1>,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
@@ -1421,10 +1424,12 @@ fn assemble_upstreams(
         // `.clone()` rather than `Arc::clone`: the unsized coercion to the
         // trait-object field must not flow backward into the map's concrete
         // value type.
-        let plugin: Arc<dyn ProviderAdapter + Send + Sync> = south_component
+        let admitted = south_component
             .adapter_for(&entry.provider)
             .expect("the caller loaded a component for every configured dialect")
             .clone();
+        let auth_arms = admitted.auth_arms();
+        let plugin: Arc<dyn ProviderAdapter + Send + Sync> = admitted;
 
         let mut provider_config =
             ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
@@ -1459,6 +1464,7 @@ fn assemble_upstreams(
             Upstream {
                 config: provider_config,
                 auth_config: entry.auth.clone(),
+                auth_arms,
                 plugin,
                 dialect: entry.api_dialect,
                 provider_call: entry.provider_call,
@@ -2804,13 +2810,10 @@ impl Gateway {
             .plugin
             .build_http_request(&request, &upstream.config)
             .map_err(describe)?;
-        let policy = self.community_call_policy(
-            upstream,
-            RequestBodyModeV1::Buffered,
-            upstream.config.provider == "azure-openai-v1",
-        );
-        let prepared = prepare_provider_call_v1(policy, &upstream.config, auth_config, &descriptor)
-            .map_err(describe_prepare_failure)?;
+        let policy = self.community_call_policy(upstream, RequestBodyModeV1::Buffered);
+        let prepared =
+            prepare_provider_call_v1(&policy, &upstream.config, auth_config, &descriptor)
+                .map_err(describe_prepare_failure)?;
 
         let clock = std::time::Instant::now();
         let response = execute_prepared_provider_call_v1(
@@ -5017,20 +5020,18 @@ impl Gateway {
         &self,
         upstream: &Upstream,
         body_mode: RequestBodyModeV1,
-        allow_header_auth: bool,
     ) -> CommunityCallPolicyV1 {
         // Provenance is settled at admission, not here. A component that reached
         // this point passed source trust, the compatibility handshake, the Wasm
         // gates and the identity check; re-deciding whether its package is
         // "approved" would be the transport second-guessing a question already
         // answered, and answering it wrong meant silently dropping to Legacy.
-        let policy =
-            CommunityCallPolicyV1::new(upstream.dialect, self.egress.policy.mode, body_mode);
-        if allow_header_auth {
-            policy.with_azure_openai_header_auth()
-        } else {
-            policy
-        }
+        CommunityCallPolicyV1::new(
+            upstream.dialect,
+            self.egress.policy.mode,
+            body_mode,
+            upstream.auth_arms.clone(),
+        )
     }
 
     /// Resolves the descriptor into a real HTTP exchange.
@@ -5069,16 +5070,11 @@ impl Gateway {
         } else {
             RequestBodyModeV1::Buffered
         };
-        let policy = self.community_call_policy(
-            upstream,
-            body_mode,
-            upstream.provider_call
-                == ConfiguredProviderCallEngine::SouthV1BufferedStreamingHeaderAuth,
-        );
+        let policy = self.community_call_policy(upstream, body_mode);
         let prepared = match if streaming {
-            prepare_provider_stream_v1(policy, &upstream.config, auth_config, descriptor)
+            prepare_provider_stream_v1(&policy, &upstream.config, auth_config, descriptor)
         } else {
-            prepare_provider_call_v1(policy, &upstream.config, auth_config, descriptor)
+            prepare_provider_call_v1(&policy, &upstream.config, auth_config, descriptor)
         } {
             Ok(prepared) => prepared,
             Err(PrepareProviderCallErrorV1::Ineligible(reason)) => {

@@ -247,7 +247,6 @@ pub enum SouthFallbackReason {
     /// The credential resolver could not be built for this upstream.
     CredentialResolver,
     /// The provider dialect is outside the South slice.
-    ProviderDialect,
     /// The dialect resolves to a package the South slice does not approve.
     /// The upstream speaks a non-translated API dialect.
     ApiDialect,
@@ -277,7 +276,6 @@ impl SouthFallbackReason {
             Self::UnauthenticatedUpstream => "unauthenticated_upstream",
             Self::NoProviderRuntime => "no_provider_runtime",
             Self::CredentialResolver => "credential_resolver",
-            Self::ProviderDialect => "provider_dialect",
             Self::ApiDialect => "api_dialect",
             Self::Egress => "egress",
             Self::Streaming => "streaming",
@@ -290,13 +288,12 @@ impl SouthFallbackReason {
     }
 
     /// Every variant, in token order, for schema constraints and parsers.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 13] = [
         Self::ConfiguredLegacy,
         Self::BufferedModeCannotStream,
         Self::UnauthenticatedUpstream,
         Self::NoProviderRuntime,
         Self::CredentialResolver,
-        Self::ProviderDialect,
         Self::ApiDialect,
         Self::Egress,
         Self::Streaming,

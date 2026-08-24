@@ -11,7 +11,9 @@
 
 use std::path::Path;
 
-use south_provider_api::HostExpectationsV1;
+use std::collections::BTreeSet;
+
+use south_provider_api::{AuthArmV1, HostExpectationsV1};
 use south_provider_runtime::{
     CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, LoadedComponentV1, NoSecretsV1,
     RuntimeLimitsV1,
@@ -173,6 +175,18 @@ impl SouthComponentAdapter {
     #[must_use]
     pub fn dialects(&self) -> Vec<String> {
         self.component.manifest().providers.clone()
+    }
+
+    /// The auth shapes this component's manifest declares it can carry.
+    ///
+    /// Transport eligibility reads this instead of matching on provider names.
+    /// A name-based allowlist has to be edited for every dialect the host ever
+    /// admits — and it was, which is why the Anthropic component could translate
+    /// a request the transport then refused to send. The manifest already states
+    /// the answer, and admission has already verified the manifest.
+    #[must_use]
+    pub fn auth_arms(&self) -> BTreeSet<AuthArmV1> {
+        self.component.manifest().auth_arms.clone()
     }
 
     /// The package name its manifest reports, for diagnostics that have to name
