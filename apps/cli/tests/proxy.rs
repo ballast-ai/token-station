@@ -1891,7 +1891,10 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
     );
     proxy.control.cancel_in_flight();
 
-    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    // Windows releases the cancelled socket and the server guard on separate
+    // scheduler turns. Keep this bounded, but allow the same three-second
+    // cleanup window used by the South cancellation acceptance tests.
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !mock.peer_closed())
         && std::time::Instant::now() < cleanup_deadline
     {
