@@ -8422,7 +8422,20 @@ mod tests {
         )
         .expect("the self-test report is JSON");
         assert_eq!(report["passed"], json!(true));
-        assert_eq!(report["plugins"].as_array().map(Vec::len), Some(5));
+        // The set, not a count. This assertion used to read `Some(5)`, and it
+        // went stale the moment `provider-anthropic` joined the bundle — the
+        // desktop crate is excluded from the workspace, so
+        // `cargo test --workspace` never ran it and only the desktop build
+        // gate noticed. `official_package_set.rs` checks that every consumer
+        // *names* each package; a bare integer is not a name, so it could not
+        // see this one. Naming them puts this test back under that gate.
+        let reported: Vec<&str> = report["plugins"]
+            .as_array()
+            .expect("the report lists the bundled plugins")
+            .iter()
+            .map(|plugin| plugin["id"].as_str().expect("a plugin id is a string"))
+            .collect();
+        assert_eq!(reported, BUNDLED_PLUGIN_IDS.to_vec());
         assert_eq!(report["storage"]["credential_read"], json!(false));
         assert_eq!(report["gateway"]["loadable"], json!(true));
         assert!(report["gateway"]["provider_dialects"]

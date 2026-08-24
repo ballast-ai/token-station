@@ -56,10 +56,15 @@ rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev
 stage_declared_fixtures() {
   local source="$1" dest="$2"
   local declared
-  declared="$(node -e '
-    const fs = require("node:fs");
-    const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    process.stdout.write((manifest.conformance && manifest.conformance.fixtures) || "");
+  # python3, not node: these scripts are otherwise buildable with nothing
+  # beyond the Rust toolchain and `npx`, and `tests/build-desktop-verbosity.sh`
+  # runs them under `PATH=$fake_bin:/usr/bin:/bin` to prove that. Reaching for
+  # node here made that test fail with `node: command not found` and took CI
+  # red for three commits. python3 lives in /usr/bin on both runners.
+  declared="$(python3 -c '
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+sys.stdout.write((manifest.get("conformance") or {}).get("fixtures") or "")
   ' "$source/manifest.json")"
   [[ -n "$declared" ]] || return 0
   declared="${declared%/}"
