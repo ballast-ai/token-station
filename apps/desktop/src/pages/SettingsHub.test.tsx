@@ -50,6 +50,46 @@ const serve: ServeView = {
 const registry: AgentUiMetadataView[] = [];
 
 describe("SettingsHub clipboard feedback", () => {
+  it("moves and activates Settings sections with vertical navigation keys", async () => {
+    const user = userEvent.setup();
+    render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    const general = screen.getByRole("button", { name: /通用/ });
+    const agentVisibility = screen.getByRole("button", { name: /Agent 显示/ });
+    const about = screen.getByRole("button", { name: /关于/ });
+
+    general.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(agentVisibility).toHaveFocus();
+    expect(agentVisibility).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
+
+    await user.keyboard("{ArrowUp}");
+    expect(general).toHaveFocus();
+    expect(general).toHaveAttribute("aria-current", "page");
+
+    await user.keyboard("{ArrowUp}");
+    expect(about).toHaveFocus();
+    expect(about).toHaveAttribute("aria-current", "page");
+
+    await user.keyboard("{Home}");
+    expect(general).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(about).toHaveFocus();
+  });
+
   it("switches Settings categories without entrance motion", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();

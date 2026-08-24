@@ -102,10 +102,12 @@ export default function ProviderList({
                 <span className={`auth ${provider.has_auth ? "yes" : "no"}`}>
                   {provider.has_auth
                     ? copy(
-                      `Credential: ${provider.credential_source ?? "store"}`,
-                      `凭据：${provider.credential_source ?? "store"}`, `憑據：${provider.credential_source ?? "store"}`, `資格：${provider.credential_source ?? "store"}`
+                      "Credential ready",
+                      "凭据已配置", "憑據已設定", "認証情報設定済み"
                     )
-                    : copy("No authentication", "无鉴权", "無認證", "認証なし")}
+                    : provider.credential_source === "none"
+                      ? copy("No credential required", "无需凭据", "無需憑據", "認証情報は不要")
+                      : copy("Credential missing", "缺少凭据", "缺少憑據", "認証情報がありません")}
                 </span>
                 <button
                   className="btn tiny"
@@ -115,7 +117,7 @@ export default function ProviderList({
                 >
                   {managedProvider === provider.name
                     ? copy("Close", "收起", "關閉", "閉じる")
-                    : copy("Manage", "管理详情", "管理", "管理")}
+                    : copy("Manage", "管理", "管理", "管理")}
                 </button>
                 <button className="btn tiny danger" type="button" disabled={busy} onClick={() => void inspectRemoval(provider.name)}>
                   {copy("Delete", "删除", "刪除", "削除")}

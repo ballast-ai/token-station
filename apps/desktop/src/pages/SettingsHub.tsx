@@ -341,9 +341,17 @@ function SettingsHubContent({
   initialSection = "general",
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  const navigationRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const { t, copy } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   useEffect(() => setSection(initialSection), [initialSection]);
+
+  const moveSection = (index: number) => {
+    const nextIndex = (index + SECTIONS.length) % SECTIONS.length;
+    setSection(SECTIONS[nextIndex].id);
+    navigationRefs.current[nextIndex]?.focus();
+  };
+
   return (
     <div className="page-stack settings-page">
       <aside className="settings-sidebar">
@@ -354,16 +362,32 @@ function SettingsHubContent({
           </div>
         </header>
         <nav className="settings-subnav" aria-label={t("settings.navLabel")}>
-          {SECTIONS.map((item) => {
+          {SECTIONS.map((item, index) => {
             const Icon = item.icon;
             return (
               <Button
                 key={item.id}
+                ref={(node) => { navigationRefs.current[index] = node; }}
                 className="settings-subnav-item"
                 variant={section === item.id ? "secondary" : "ghost"}
                 type="button"
                 aria-current={section === item.id ? "page" : undefined}
                 onClick={() => setSection(item.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    moveSection(index + 1);
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    moveSection(index - 1);
+                  } else if (event.key === "Home") {
+                    event.preventDefault();
+                    moveSection(0);
+                  } else if (event.key === "End") {
+                    event.preventDefault();
+                    moveSection(SECTIONS.length - 1);
+                  }
+                }}
               >
                 <Icon className="settings-subnav-icon" aria-hidden="true" />
                 <span>

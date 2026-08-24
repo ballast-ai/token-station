@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   CatalogModelView,
   ModelDiscoveryView,
@@ -166,6 +166,8 @@ export default function ProviderModelManager({
     provider.credential_reference ?? "",
   );
   const [editing, setEditing] = useState(false);
+  const [task, setTask] = useState<"models" | "connection" | "diagnostics">("models");
+  const taskRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const capabilities = useMemo(() => {
     const byModel = new Map((provider.model_capabilities ?? []).map((item) => [item.model, item]));
@@ -184,6 +186,12 @@ export default function ProviderModelManager({
   }, [catalog, capabilities, provider.models]);
   const operationDisabled = disabled || refreshing || saving || testing || editing
     || capabilitySaving !== null || limitSaving !== null;
+  const taskOrder = ["models", "connection", "diagnostics"] as const;
+  const moveTask = (index: number) => {
+    const nextIndex = (index + taskOrder.length) % taskOrder.length;
+    setTask(taskOrder[nextIndex]);
+    taskRefs.current[nextIndex]?.focus();
+  };
   const capabilityLabel: Record<CapabilityState, string> = {
     verified: copy("Verified", "已验证", "已驗證", "確認済み"),
     declared: copy("Declared", "已声明", "已宣告", "宣言済み"),
@@ -493,9 +501,66 @@ export default function ProviderModelManager({
 
   return (
     <div className="provider-model-manager">
+      <div className="provider-manager-heading">
+        <div>
+          <strong>{copy(`Manage ${provider.name}`, `管理 ${provider.name}`, `管理 ${provider.name}`, `${provider.name} を管理`)}</strong>
+          <span>{copy(
+            "Choose one task. Changes apply only after you use its save action.",
+            "每次只处理一项任务；点击对应的保存按钮后才会生效。",
+            "每次只處理一項任務；點選對應的儲存按鈕後才會生效。",
+            "1回に1つのタスクを行い、対応する操作で保存します。",
+          )}</span>
+        </div>
+        <span className="provider-manager-count">{copy(
+          `${selected.length} active models`,
+          `${selected.length} 个已启用模型`,
+          `${selected.length} 個已啟用模型`,
+          `${selected.length} 個の有効なモデル`,
+        )}</span>
+      </div>
+      <div
+        className="provider-manager-tab-list"
+        role="tablist"
+        aria-label={copy("Provider management tasks", "供应商管理任务", "供應商管理任務", "プロバイダー管理タスク")}
+      >
+        {taskOrder.map((value, index) => (
+          <button
+            key={value}
+            ref={(node) => { taskRefs.current[index] = node; }}
+            className="provider-manager-tab"
+            type="button"
+            role="tab"
+            aria-selected={task === value}
+            tabIndex={task === value ? 0 : -1}
+            onClick={() => setTask(value)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                moveTask(index + 1);
+              } else if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                moveTask(index - 1);
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                moveTask(0);
+              } else if (event.key === "End") {
+                event.preventDefault();
+                moveTask(taskOrder.length - 1);
+              }
+            }}
+          >
+            {value === "models"
+              ? copy("Models", "模型", "模型", "モデル")
+              : value === "connection"
+                ? copy("Connection", "连接", "連線", "接続")
+                : copy("Diagnostics", "连接诊断", "連線診斷", "接続診斷")}
+          </button>
+        ))}
+      </div>
+      {task === "diagnostics" && (
       <div className="provider-detail-summary">
         <div>
-          <strong>{copy("Provider details", "供应商详情", "供應商詳情", "プロバイダーの詳細")}</strong>
+          <strong>{copy("Usage and health", "用量与健康状态", "用量與健康狀態", "利用状況とヘルス")}</strong>
           <span>{usage}</span>
         </div>
         <div className="provider-health-actions">
@@ -520,6 +585,18 @@ export default function ProviderModelManager({
             "该测试会向真实 Provider 发出请求，可能产生费用。", "此測試會向真實供應商發出請求，可能產生費用。", "このテストは実際のプロバイダーにリクエストを送信し、費用が発生する可能性があります。"
           )}</small>
         </div>
+      </div>
+      )}
+      {task === "connection" && (
+      <div className="provider-connection-task">
+      <div className="provider-task-intro">
+        <strong>{copy("Connection settings", "连接设置", "連線設定", "接続設定")}</strong>
+        <span>{copy(
+          "Update the provider address or credential. Leave the key blank to keep it unchanged.",
+          "修改供应商地址或凭据。API Key 留空时保留原值。",
+          "修改供應商位址或憑據。API Key 留空時保留原值。",
+          "プロバイダーのアドレスまたは認証情報を更新します。空の API Key は現在の値を保持します。",
+        )}</span>
       </div>
       <div className="provider-edit-fields">
         <input
@@ -570,9 +647,12 @@ export default function ProviderModelManager({
           />
         )}
         <button className="btn tiny" type="button" disabled={operationDisabled || !endpointPreview} onClick={() => void saveProviderDetails()}>
-          {editing ? copy("Saving…", "保存中…", "儲存中…", "保存中…") : copy("Save details", "保存基本信息", "儲存詳細資訊", "詳細情報を保存")}
+          {editing ? copy("Saving…", "保存中…", "儲存中…", "保存中…") : copy("Save connection", "保存连接", "儲存連線", "接続を保存")}
         </button>
       </div>
+      </div>
+      )}
+      {task === "diagnostics" && (
       <div className={`provider-transport-status ${transportState}`} role="status">
         <strong>{copy("Transport", "传输引擎", "傳輸引擎", "トランスポート")}</strong>
         <span>
@@ -596,19 +676,20 @@ export default function ProviderModelManager({
               )}
         </small>
       </div>
-      {endpointError && (
+      )}
+      {task === "connection" && endpointError && (
         <p id={endpointErrorId} className="error-text" role="alert">
           {endpointError}
         </p>
       )}
-      {endpointPreview && (
+      {task === "diagnostics" && endpointPreview && (
         <div className="provider-endpoint-list" aria-label={copy("Final provider URLs", "供应商最终地址", "最終提供者 URL", "最終プロバイダー URL")}>
           <code>{endpointPreview.chat}</code>
           <code>{endpointPreview.responses}</code>
           <code>{endpointPreview.messages}</code>
         </div>
       )}
-      {testResults.length > 0 && (
+      {task === "diagnostics" && testResults.length > 0 && (
         <div className="provider-test-results" aria-label={copy("Provider layered test results", "供应商分层测试结果", "提供者分層測試結果", "プロバイダー分層テスト結果")}>
           <p>{copy(
             "The five base layers show cumulative timing (≤) for one live generation probe; capability layers show their own request timing.",
@@ -626,6 +707,8 @@ export default function ProviderModelManager({
           ))}
         </div>
       )}
+      {task === "models" && (
+      <div className="provider-model-task">
       {diff && (diff.added.length > 0 || diff.removed.length > 0) && (
         <div className="catalog-diff" aria-label={copy("Model catalog changes", "模型目录变化", "模型目錄變化", "モデルカタログの変更")}>
           {diff.added.length > 0 && (
@@ -643,6 +726,11 @@ export default function ProviderModelManager({
         </div>
       )}
       {modelRows.length > 0 && (
+        <details className="provider-advanced-models">
+          <summary>
+            <span>{copy("Advanced model settings", "高级模型设置", "進階模型設定", "モデルの詳細設定")}</span>
+            <small>{copy("Capabilities and token limits", "能力与 Token 上限", "能力與 Token 上限", "機能とトークン上限")}</small>
+          </summary>
         <div className="model-ledger" aria-label={copy("Model catalog and capabilities", "模型目录与能力", "模型目錄與能力", "モデルカタログと能力")}>
           {modelRows.map((row) => (
             <div className={`model-ledger-row ${row.catalog?.catalog_state ?? ""}`} key={row.model}>
@@ -751,6 +839,7 @@ export default function ProviderModelManager({
             </div>
           ))}
         </div>
+        </details>
       )}
       <ModelPicker
         models={models}
@@ -784,6 +873,8 @@ export default function ProviderModelManager({
           {saving ? copy("Saving…", "保存中…", "儲存中…", "保存中…") : copy("Save models", "保存模型", "儲存模型", "モデルを保存")}
         </button>
       </div>
+      </div>
+      )}
     </div>
   );
 }

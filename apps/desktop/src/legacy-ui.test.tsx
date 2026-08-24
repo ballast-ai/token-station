@@ -43,6 +43,48 @@ describe("localized provider timestamps", () => {
   });
 });
 
+describe("provider management task hierarchy", () => {
+  it("defaults to Models and separates connection and diagnostics", async () => {
+    const provider: ProviderView = {
+      name: "openai",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["gpt-test"],
+      has_auth: true,
+      credential_source: "store",
+      south_v1_available: true,
+      south_v1_unavailable_reason: null,
+      south_header_auth_v1_available: true,
+      south_header_auth_v1_unavailable_reason: null,
+    };
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+
+    const taskList = screen.getByRole("tablist", { name: "供应商管理任务" });
+    expect(within(taskList).getAllByRole("tab")).toHaveLength(3);
+    const modelsTab = within(taskList).getByRole("tab", { name: "模型" });
+    const connectionTab = within(taskList).getByRole("tab", { name: "连接" });
+    expect(modelsTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "保存模型" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "编辑 Base URL" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "运行分层测试" })).not.toBeInTheDocument();
+
+    modelsTab.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(connectionTab).toHaveFocus();
+    expect(connectionTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("textbox", { name: "编辑 Base URL" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存连接" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存模型" })).not.toBeInTheDocument();
+
+    await user.click(within(taskList).getByRole("tab", { name: "连接诊断" }));
+    expect(screen.getByRole("button", { name: "运行分层测试" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("South 已启用");
+    expect(screen.queryByRole("textbox", { name: "编辑 Base URL" })).not.toBeInTheDocument();
+  });
+});
+
 vi.mock("./api", async (loadOriginal) => {
   const original = await loadOriginal<typeof import("./api")>();
   return {
@@ -568,7 +610,9 @@ describe("model selection and provider model management", () => {
     const onSaved = vi.fn();
     const user = userEvent.setup();
     render(<ErrorToastProvider><ProviderModelManager provider={provider} serveRunning onSaved={onSaved} /></ErrorToastProvider>);
+    await user.click(screen.getByRole("tab", { name: "连接诊断" }));
     expect(await screen.findByText(/150 tokens · 估算成本 1\.2500/)).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "模型" }));
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     const discovered = await screen.findByRole("button", { name: /new/ });
     expect(discovered).toHaveAttribute("aria-pressed", "false");
@@ -600,6 +644,7 @@ describe("model selection and provider model management", () => {
       <ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />,
     );
 
+    await user.click(screen.getByRole("tab", { name: "连接" }));
     expect(container.querySelector('select[aria-label="编辑凭据来源"]')).toBeNull();
     const trigger = screen.getByRole("combobox", { name: "编辑凭据来源" });
     expect(trigger).toHaveAttribute("data-slot", "select-trigger");
@@ -650,9 +695,11 @@ describe("model selection and provider model management", () => {
       </ErrorToastProvider>,
     );
 
+    await user.click(screen.getByRole("tab", { name: "Diagnostics" }));
     expect(screen.getByRole("status")).toHaveTextContent("South active");
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Save details" }));
+    await user.click(screen.getByRole("tab", { name: "Connection" }));
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
     await waitFor(() => expect(editProvider).toHaveBeenCalledWith(
       "openai",
       "https://api.example/v1",
@@ -662,7 +709,7 @@ describe("model selection and provider model management", () => {
     ));
   });
 
-  it("labels a provider pinned to Legacy and says how to return it to South", () => {
+  it("labels a provider pinned to Legacy and says how to return it to South", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {
       name: "openai",
@@ -676,14 +723,16 @@ describe("model selection and provider model management", () => {
       south_v1_unavailable_reason: null,
     };
 
+    const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
 
+    await user.click(screen.getByRole("tab", { name: "Diagnostics" }));
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("Legacy (pinned in configuration)");
     expect(status).toHaveTextContent(/Remove `provider_call`/);
   });
 
-  it("reports a Legacy fallback with the host's reason when South cannot carry the provider", () => {
+  it("reports a Legacy fallback with the host's reason when South cannot carry the provider", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {
       name: "local",
@@ -698,8 +747,10 @@ describe("model selection and provider model management", () => {
       south_header_auth_v1_unavailable_reason: "auth",
     };
 
+    const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
 
+    await user.click(screen.getByRole("tab", { name: "Diagnostics" }));
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("Legacy fallback");
     expect(status).toHaveTextContent(/requires credentials from the local store or an environment variable/);
@@ -718,6 +769,7 @@ describe("model selection and provider model management", () => {
       </ErrorToastProvider>,
     );
 
+    await userEvent.setup().click(screen.getByRole("tab", { name: "连接" }));
     const baseUrl = screen.getByRole("textbox", { name: "编辑 Base URL" });
     const endpointAlert = await screen.findByRole("alert");
     expect(endpointAlert).toHaveTextContent("操作未能完成");
@@ -725,7 +777,7 @@ describe("model selection and provider model management", () => {
     expect(baseUrl).toHaveAttribute("aria-describedby", endpointAlert.id);
     expect(baseUrl).toHaveAttribute("aria-invalid", "true");
     expect(baseUrl).toHaveAccessibleDescription(/操作未能完成/);
-    expect(screen.getByRole("button", { name: "保存基本信息" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存连接" })).toBeDisabled();
     expect(within(screen.getByTestId("error-toast-viewport")).queryByRole("alert")).toBeNull();
   });
 
@@ -797,7 +849,9 @@ describe("model selection and provider model management", () => {
       by: "upstream", empty: false,
     });
 
+    const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("tab", { name: "连接诊断" }));
     expect(await screen.findByText(/5 tokens · 成本未知/)).toBeInTheDocument();
     expect(screen.queryByText(/零成本/)).not.toBeInTheDocument();
   });
@@ -1004,6 +1058,7 @@ describe("model selection and provider model management", () => {
     }]);
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("tab", { name: "连接诊断" }));
     await user.click(screen.getByRole("button", { name: "运行分层测试" }));
     expect(await screen.findByText("流式 · pass · 15ms")).toBeInTheDocument();
     expect(screen.getByText("Tool · pass · 16ms")).toBeInTheDocument();
@@ -1050,6 +1105,7 @@ describe("model selection and provider model management", () => {
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
 
+    await user.click(screen.getByRole("tab", { name: "连接诊断" }));
     await user.click(screen.getByRole("button", { name: "运行分层测试" }));
     expect(await screen.findByLabelText("供应商健康状态：不可用")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "运行分层测试" }));
@@ -1085,6 +1141,9 @@ describe("provider deletion lifecycle", () => {
     expect(within(providerGroup).getByText("team-openai", { selector: ".provider-identity-name" }))
       .toBeInTheDocument();
     expect(within(providerGroup).getByText("1 个模型")).toBeInTheDocument();
+    expect(within(providerGroup).getByText("凭据已配置")).toBeInTheDocument();
+    expect(within(providerGroup).queryByText(/store/)).not.toBeInTheDocument();
+    expect(within(providerGroup).getByRole("button", { name: "管理" })).toBeInTheDocument();
     const modelList = screen.getByRole("list", { name: "team-openai 模型" });
     expect(modelList).toHaveAttribute("data-layout", "compact-three-column");
     expect(within(modelList).getByRole("listitem"))

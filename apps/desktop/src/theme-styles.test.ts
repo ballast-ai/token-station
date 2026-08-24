@@ -43,6 +43,23 @@ describe("retained page theme styles", () => {
     expect(summaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
   });
 
+  it("keeps a one-row global route snapshot at the top of its summary card", () => {
+    const routeSnapshotRule = appCss.match(
+      /\.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(routeSnapshotRule).toMatch(/align-content:\s*start/);
+    expect(routeSnapshotRule).not.toMatch(/align-content:\s*center/);
+  });
+
+  it("hides the duplicate provider model summary while management is expanded", () => {
+    const expandedProviderModelsRule = appCss.match(
+      /\.provider-card\.expanded > \.provider-primary-models\[data-layout="compact-three-column"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(expandedProviderModelsRule).toMatch(/display:\s*none/);
+  });
+
   it("uses theme tokens for router JSON code blocks", () => {
     const codeBlockRule = appCss.match(/pre\.block\s*\{([^}]*)\}/s)?.[1] ?? "";
 
