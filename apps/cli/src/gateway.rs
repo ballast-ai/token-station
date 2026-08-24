@@ -1089,6 +1089,15 @@ impl ProviderCallOutcome {
         }
     }
 
+    /// A verbatim native forward: no translation, so no South engine and no
+    /// fallback reason to report.
+    const fn native() -> Self {
+        Self {
+            engine: RecordedProviderCallEngine::Native,
+            south_fallback_reason: None,
+        }
+    }
+
     const fn south(engine: RecordedProviderCallEngine) -> Self {
         Self {
             engine,
@@ -1335,6 +1344,21 @@ enum AttemptPayload<'a> {
     /// The Canonical IR. Each attempt's target renders it with its own
     /// component, so the wire bytes differ per upstream.
     Canonical(&'a ChatRequest),
+    /// The caller's Anthropic Messages body, forwarded verbatim. Only the
+    /// routed model is rewritten, so the bytes are the same whichever
+    /// `anthropic-native` upstream serves them.
+    ///
+    /// This shape exists because the Canonical IR cannot carry Anthropic's
+    /// server-tool history — the one gap left after stage A′ — so the caller's
+    /// own bytes are the only faithful payload for those turns.
+    AnthropicNative {
+        body: &'a Value,
+        /// Curated once by the caller: `SafeHeaders` already refuses any
+        /// credential or host-owned name, so the client's own auth can never
+        /// ride upstream.
+        headers: &'a SafeHeaders,
+        stream: bool,
+    },
 }
 
 /// One configured upstream, resolved and ready to serve.
@@ -3784,7 +3808,7 @@ impl Gateway {
         // verbatim route. The decision runs on a minimal request (model only).
         if agent.protocol == "anthropic-messages"
             && let Some(served) =
-                self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
+                self.try_anthropic_passthrough(ctx, agent, router, headers, body, emit, record)?
         {
             return Ok(served);
         }
@@ -3962,7 +3986,9 @@ impl Gateway {
         // Media fallback rewrites Canonical content parts. A verbatim payload
         // has already had its own fallback applied before it reached the wire,
         // and rewriting it here would mean editing the caller's bytes.
-        let AttemptPayload::Canonical(request) = payload;
+        let AttemptPayload::Canonical(request) = payload else {
+            return None;
+        };
         let mut fallback_request = (*request).clone();
         let replaced = replace_canonical_images(&mut fallback_request);
         if replaced == 0 || !budget.try_begin(None) {
@@ -4537,6 +4563,7 @@ impl Gateway {
 
     /// One upstream attempt: build, authorize, inject, send, translate back.
     #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
+    #[allow(clippy::too_many_lines)] // payload choice, eligibility and dispatch stay one path
     fn try_upstream(
         &self,
         ctx: &RequestContext,
@@ -4564,9 +4591,30 @@ impl Gateway {
                 )
             })?;
 
-        // Routing may have picked a different model than the caller named.
-        let AttemptPayload::Canonical(request) = payload;
-        let request = Self::request_for_attempt(upstream, target, request);
+        let request = match payload {
+            AttemptPayload::AnthropicNative {
+                body,
+                headers,
+                stream,
+            } => {
+                return self.native_attempt(
+                    ctx,
+                    target,
+                    headers,
+                    body,
+                    *stream,
+                    attempt_timeout,
+                    emit,
+                    record,
+                    upstream_http_status,
+                    provider_call_engine,
+                );
+            }
+            // Routing may have picked a different model than the caller named.
+            AttemptPayload::Canonical(request) => {
+                Self::request_for_attempt(upstream, target, request)
+            }
+        };
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
         let response = match self.send_provider_call(
@@ -4674,6 +4722,7 @@ impl Gateway {
     fn try_anthropic_passthrough(
         &self,
         ctx: &RequestContext,
+        agent: &LoadedAgent,
         router: &Router,
         raw_headers: &[(String, String)],
         body: &[u8],
@@ -4774,18 +4823,25 @@ impl Gateway {
         record.stream = stream;
         record_route_decision(record, &decision);
 
-        let attempt_timeout = AttemptBudget::for_request(ctx).per_attempt_timeout;
-        let outcome = self.passthrough_upstream(
+        // The native body is now just another attempt payload. Everything below
+        // this line — budget, provider admission, fallback, deadline, health,
+        // quota and receipts — is the same machinery every Canonical request
+        // gets, which is the whole point of folding it in here.
+        let headers = Self::curate_passthrough_headers(raw_headers)?;
+        let outcome = self.dispatch(
             ctx,
-            &decision.chosen,
-            raw_headers,
-            &body_value,
-            stream,
-            attempt_timeout,
+            agent,
+            &AttemptPayload::AnthropicNative {
+                body: &body_value,
+                headers: &headers,
+                stream,
+            },
+            &json!({}),
+            &decision,
             emit,
             record,
         )?;
-        Ok(Some((decision.chosen, outcome)))
+        Ok(Some(outcome))
     }
 
     /// Forwards the caller's Anthropic Messages body verbatim (only the routed
@@ -4795,16 +4851,18 @@ impl Gateway {
     /// are preserved; the client's own auth headers can never reach the upstream.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_lines)] // authorize, send and terminal mapping form one state machine
-    fn passthrough_upstream(
+    fn native_attempt(
         &self,
         ctx: &RequestContext,
         target: &UpstreamModel,
-        raw_headers: &[(String, String)],
+        headers: &SafeHeaders,
         body: &Value,
         stream: bool,
         attempt_timeout: Duration,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
+        upstream_http_status: &mut Option<u16>,
+        provider_call_engine: &mut ProviderCallOutcome,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         const ANTHROPIC: &str = "anthropic-messages";
         let upstream = self
@@ -4828,7 +4886,7 @@ impl Gateway {
             HttpMethod::Post,
             upstream.config.base_url.resolve(ProviderApi::Messages),
         );
-        descriptor.headers = Self::curate_passthrough_headers(raw_headers)?;
+        descriptor.headers = headers.clone();
         descriptor.body = Some(forwarded);
         descriptor.auth = upstream.config.auth.clone().map(Auth::bearer);
 
@@ -4875,6 +4933,12 @@ impl Gateway {
             }
             Ok(response) => response,
         };
+        // The attempt record carries the same two facts for a native payload as
+        // for a Canonical one. Without them a served native request showed up in
+        // Stats with no engine and no upstream status — which is how a request
+        // that plainly went out could be filed as `(unrouted)`.
+        *upstream_http_status = Some(response.status);
+        *provider_call_engine = ProviderCallOutcome::native();
 
         if let Err(error) = EgressPolicy::reject_redirect(response.status) {
             record_conversion(

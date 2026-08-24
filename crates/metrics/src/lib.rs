@@ -320,6 +320,11 @@ pub enum ProviderCallEngine {
     Legacy,
     SouthV1Buffered,
     SouthV1Streaming,
+    /// The caller's own bytes, forwarded verbatim to an `anthropic-native`
+    /// upstream. Distinct from `Legacy` on purpose: nothing fell back here, and
+    /// a reader asking why an attempt did not use South deserves to see that
+    /// this payload never had a translated form to begin with.
+    Native,
     #[default]
     Unknown,
 }
@@ -331,6 +336,7 @@ impl ProviderCallEngine {
             Self::Legacy => "legacy",
             Self::SouthV1Buffered => "south_v1_buffered",
             Self::SouthV1Streaming => "south_v1_streaming",
+            Self::Native => "native",
             Self::Unknown => "unknown",
         }
     }
