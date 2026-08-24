@@ -3,7 +3,26 @@ set -euo pipefail
 
 readonly project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/token-station-install-test.XXXXXX")"
-trap 'rm -rf -- "$test_root"' EXIT
+background_pid_one=""
+background_pid_two=""
+blocked_build_signal=""
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  local pid
+  if [[ -n "$blocked_build_signal" ]]; then
+    mkdir -p -- "$(dirname "$blocked_build_signal")"
+    touch -- "$blocked_build_signal"
+  fi
+  for pid in "$background_pid_one" "$background_pid_two"; do
+    [[ -n "$pid" ]] || continue
+    wait "$pid" >/dev/null 2>&1 || true
+  done
+  rm -rf -- "$test_root"
+  exit "$status"
+}
+trap cleanup EXIT
 
 fail() {
   echo "FAIL: $*" >&2
@@ -165,8 +184,10 @@ test_concurrent_install_has_single_owner() {
     echo "$?" > "$fixture/first.status"
   ) &
   local first_pid=$!
+  background_pid_one="$first_pid"
+  blocked_build_signal="$state/release-build"
 
-  for _ in $(seq 1 200); do
+  for _ in $(seq 1 1000); do
     [[ -f "$state/build.log" ]] && [[ "$(wc -l < "$state/build.log")" -ge 1 ]] && break
     sleep 0.01
   done
@@ -178,8 +199,9 @@ test_concurrent_install_has_single_owner() {
     echo "$?" > "$fixture/second.status"
   ) &
   local second_pid=$!
+  background_pid_two="$second_pid"
 
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 1000); do
     [[ -f "$fixture/second.status" ]] && break
     [[ "$(wc -l < "$state/build.log")" -gt 1 ]] && break
     sleep 0.01
@@ -187,6 +209,9 @@ test_concurrent_install_has_single_owner() {
   touch "$state/release-build"
   wait "$first_pid"
   wait "$second_pid"
+  background_pid_one=""
+  background_pid_two=""
+  blocked_build_signal=""
 
   [[ "$(wc -l < "$state/build.log")" -eq 1 ]] \
     || fail "two concurrent installers entered the protected build section"
