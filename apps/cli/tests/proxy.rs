@@ -847,6 +847,55 @@ fn start_native_anthropic_proxy_with(
     spawn_proxy(&config)
 }
 
+/// The same native upstream, routed quota-first. Quota mode used to refuse the
+/// native payload outright — the request fell through to the Canonical path,
+/// where the adapter rejects server-tool blocks — so a server-tool conversation
+/// was simply unservable in that mode.
+fn start_quota_first_native_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-native-quota-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-anthropic"],
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+        },
+        "upstreams": {
+            "deepseek_native": {
+                "provider": "openai-compatible",
+                "api_dialect": "anthropic-native",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [
+                    {
+                        "model": "deepseek-chat",
+                        "tool": true,
+                        "tool_state": "verified",
+                        "context_window": 128_000
+                    }
+                ]
+            }
+        },
+        "router": {
+            "version": 1,
+            "routing_mode": "quota_first",
+            "quota_accounts": [
+                { "upstream": "deepseek_native", "model": "deepseek-chat" }
+            ]
+        }
+    });
+    let config: ClientConfig =
+        serde_json::from_value(config).expect("quota-first native config parses");
+    spawn_proxy(&config)
+}
+
 fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Path) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
@@ -7404,5 +7453,61 @@ fn an_empty_first_delta_opens_no_text_block() {
         "the text lands in block 0: {body}"
     );
     assert_eq!(delta["delta"]["text"], json!("Hi"));
+    std::fs::remove_file(key).ok();
+}
+
+/// P2 acceptance: quota-first serves a native server-tool turn.
+///
+/// It used to refuse one. `try_anthropic_passthrough` returned `Ok(None)` for
+/// quota mode, so the request fell through to the Canonical path, where the
+/// adapter rejects `server_tool_use` blocks — a conversation that Tiered mode
+/// served fine was simply unservable. The payload's shape was deciding which
+/// routing modes existed.
+#[test]
+fn quota_first_serves_the_native_payload_it_used_to_refuse() {
+    let upstream_answer = json!({
+        "id": "msg_quota_native",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "served"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("native-quota", "sk-native-quota");
+    let proxy = start_quota_first_native_proxy(&mock, &key);
+
+    // A turn that declares a server tool: the shape the escape hatch exists for,
+    // since Canonical `ToolDef` has no way to say "the upstream runs this one".
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "deepseek-chat",
+            "max_tokens": 256,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "messages": [
+                {"role": "user", "content": "search it"},
+                {"role": "assistant", "content": [
+                    {"type": "server_tool_use", "id": "st_1", "name": "web_search", "input": {}},
+                    {"type": "web_search_tool_result", "tool_use_id": "st_1", "content": []}
+                ]},
+                {"role": "user", "content": "and again"}
+            ]
+        }),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the native payload must reach the upstream once"
+    );
+
+    // Deliberately not asserted here: the `requests` row and the attempt receipt.
+    // A native request records neither, and it did not before this change either
+    // — the tiered native path writes zero rows too. That gap is what the plan's
+    // acceptance criterion means by a sent request being filed as `(unrouted)`,
+    // and it is the next slice rather than a claim this test can make today.
+
     std::fs::remove_file(key).ok();
 }

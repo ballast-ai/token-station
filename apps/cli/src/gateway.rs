@@ -1321,6 +1321,41 @@ fn quota_session_key(request: &ChatRequest) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// The same conversation key as [`quota_session_key`], read off the Anthropic
+/// wire instead of the Canonical IR.
+///
+/// Prompt-cache affinity is the reason both exist: a follow-up turn should land
+/// on the account that already holds the prefix. The native payload has no IR
+/// to hash, but it has the same first two turns, so the key is derivable without
+/// normalising the body — which is precisely what the native path exists to
+/// avoid doing.
+fn native_quota_session_key(body: &Value) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for message in body
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(2)
+    {
+        match message.get("content") {
+            Some(Value::String(text)) => text.hash(&mut hasher),
+            Some(Value::Array(blocks)) => {
+                for text in blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                {
+                    text.hash(&mut hasher);
+                }
+            }
+            _ => {}
+        }
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 fn record_actual_attempt_target(
     record: &mut RequestRecord,
     decision: &Decision,
@@ -4719,6 +4754,7 @@ impl Gateway {
     /// not a passthrough and the caller must fall through to the Canonical-IR
     /// pipeline. Never runs `normalize_inbound`.
     #[allow(clippy::too_many_arguments)] // decision, fallbacks and dispatch stay one path
+    #[allow(clippy::too_many_lines)] // routing probe, fallbacks, lease and dispatch are one decision
     fn try_anthropic_passthrough(
         &self,
         ctx: &RequestContext,
@@ -4770,10 +4806,29 @@ impl Gateway {
                 parameters: json!({}),
             });
         }
-        let candidates = self.candidates(std::time::Instant::now(), None);
+        // Quota-first used to bail out here, which meant a server-tool turn was
+        // simply unservable in that mode: the request fell through to the
+        // Canonical path, where the adapter refuses the blocks. The payload's
+        // shape was deciding which routing modes existed. It gets the same
+        // treatment as any other request now — consumption-aware candidates, a
+        // conversation-affine account, an in-flight lease and a settlement.
+        let (quota_now_ms, session) = if router.routing_mode() == RoutingMode::QuotaFirst {
+            (Some(unix_millis()), native_quota_session_key(&body_value))
+        } else {
+            (None, String::new())
+        };
+        let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
         let decision_result = match router.routing_mode() {
             RoutingMode::Tiered => router.route(&mini, &[], &candidates),
-            RoutingMode::QuotaFirst => return Ok(None),
+            RoutingMode::QuotaFirst => {
+                let last = self
+                    .quota
+                    .lock()
+                    .expect("quota lock")
+                    .last_account(&session)
+                    .cloned();
+                router.route_quota_first(&mini, &candidates, last.as_ref())
+            }
         };
         let Ok(decision) = decision_result else {
             return Ok(None);
@@ -4828,7 +4883,16 @@ impl Gateway {
         // quota and receipts — is the same machinery every Canonical request
         // gets, which is the whole point of folding it in here.
         let headers = Self::curate_passthrough_headers(raw_headers)?;
-        let outcome = self.dispatch(
+        // Same lease discipline as the Canonical path: take an in-flight lease
+        // on the chosen account before dispatch so concurrent requests see the
+        // load and spread, then settle whatever actually served.
+        let lease = quota_now_ms.map(|now_ms| {
+            self.quota
+                .lock()
+                .expect("quota lock")
+                .grant(decision.chosen.upstream.as_str(), now_ms)
+        });
+        let result = self.dispatch(
             ctx,
             agent,
             &AttemptPayload::AnthropicNative {
@@ -4840,8 +4904,11 @@ impl Gateway {
             &decision,
             emit,
             record,
-        )?;
-        Ok(Some(outcome))
+        );
+        if let Some(now_ms) = quota_now_ms {
+            self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
+        }
+        result.map(Some)
     }
 
     /// Forwards the caller's Anthropic Messages body verbatim (only the routed
