@@ -890,6 +890,15 @@ fn start_two_native_upstreams_proxy(
     backup_base: String,
     key_file: &Path,
 ) -> Proxy {
+    start_two_native_upstreams_proxy_with(primary_base, backup_base, key_file, None)
+}
+
+fn start_two_native_upstreams_proxy_with(
+    primary_base: String,
+    backup_base: String,
+    key_file: &Path,
+    per_provider: Option<u32>,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-native-pair-{}-{}",
@@ -937,6 +946,10 @@ fn start_two_native_upstreams_proxy(
             "default_pool": "main"
         }
     });
+    let mut config = config;
+    if let Some(limit) = per_provider {
+        config["concurrency"] = json!({ "per_provider": limit });
+    }
     let config: ClientConfig = serde_json::from_value(config).expect("paired native config parses");
     spawn_proxy(&config)
 }
@@ -7633,6 +7646,151 @@ fn a_native_attempt_that_cannot_reach_its_upstream_hands_over_to_the_next() {
         vec![("native".to_owned(), None), ("native".to_owned(), None)],
         "both attempts are filed, both as native"
     );
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A native request finds the provider at its concurrency ceiling and takes
+/// the next candidate instead of queueing behind it.
+///
+/// The ceiling lives in `dispatch`'s candidate loop, so this is a direct test
+/// of the structural claim: native attempts pass the same gate as translated
+/// ones. When the passthrough was its own control plane there was no gate to
+/// pass — a saturated upstream would have been dialled anyway.
+#[test]
+fn a_native_request_skips_a_provider_at_its_concurrency_ceiling() {
+    let served = json!({
+        "id": "msg_ceiling",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "backup served"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    });
+    // The primary accepts the connection and never answers, holding its one
+    // provider permit for as long as the test needs.
+    let primary = MockUpstream::start_hanging_buffered();
+    let backup = MockUpstream::start(vec![vec![http_json(200, &served.to_string())]]);
+    let key = key_file("native-ceiling", "sk-native-ceiling");
+    let proxy =
+        start_two_native_upstreams_proxy_with(primary.base_url(), backup.base_url(), &key, Some(1));
+
+    let occupier = {
+        let url = proxy.url.clone();
+        let token = proxy.virtual_key.clone();
+        std::thread::spawn(move || {
+            let agent = ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .build(),
+            );
+            let _ = agent
+                .post(format!("{url}/v1/messages?beta=true"))
+                .header("authorization", &format!("Bearer {token}"))
+                .header("anthropic-version", "2023-06-01")
+                .header("x-claude-code-session-id", "session-occupier")
+                .send(&native_server_tool_turn().to_string());
+        })
+    };
+
+    // Wait until the primary is actually holding the permit; asserting before
+    // that would test nothing but a race.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !primary.response_started() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        primary.response_started(),
+        "the first native request must be in flight before the second is sent"
+    );
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+    assert_eq!(
+        status, 200,
+        "the second turn goes to the backup rather than waiting: {body}"
+    );
+    assert!(body.contains("backup served"), "{body}");
+    assert_eq!(backup.hits(), 1);
+
+    // The discriminator. Reaching the backup is not by itself evidence of a
+    // ceiling: with the limit raised the second turn also ends at the backup,
+    // having queued on the hanging primary until the attempt timed out — same
+    // outcome, ten seconds slower, different mechanism. What separates them is
+    // the attempt count. An admission skip happens before `budget.try_begin`,
+    // so it does not pretend an upstream call happened; a timed-out dial does.
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(
+        row["attempts"], "Integer(1)",
+        "the saturated provider was skipped, not dialled and abandoned"
+    );
+    assert_eq!(
+        attempt_engines(&proxy.data_dir),
+        vec![("native".to_owned(), None)],
+        "one attempt, against the backup"
+    );
+
+    primary.finish_hanging();
+    let _ = occupier.join();
+    std::fs::remove_file(key).ok();
+}
+
+/// Native failures are charged to health: three 503s eject the upstream, and
+/// the next turn goes to the backup without trying it.
+///
+/// This is the part of fallback the native path does have. A native 5xx is
+/// relayed verbatim and does not fall over *within* one request, so without
+/// health accounting a dead upstream would be re-picked forever and every turn
+/// would fail. Ejection is what keeps that from happening, which makes it the
+/// load-bearing half — and it had no test.
+#[test]
+fn native_failures_are_charged_to_health_and_eject_the_upstream() {
+    let boom = r#"{"error":{"type":"api_error","message":"down"}}"#;
+    let served = json!({
+        "id": "msg_after_ejection",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "backup served"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    });
+    // `eject_after` is 3, so the primary answers three 503s and then must not
+    // be asked again. A fourth response is queued to catch it if it is.
+    let primary = MockUpstream::start(vec![
+        vec![http_json(503, boom)],
+        vec![http_json(503, boom)],
+        vec![http_json(503, boom)],
+        vec![http_json(503, boom)],
+    ]);
+    let backup = MockUpstream::start(vec![
+        vec![http_json(200, &served.to_string())],
+        vec![http_json(200, &served.to_string())],
+    ]);
+    let key = key_file("native-health", "sk-native-health");
+    let proxy = start_two_native_upstreams_proxy(primary.base_url(), backup.base_url(), &key);
+
+    for round in 1..=3 {
+        let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+        assert_eq!(
+            status, 503,
+            "round {round}: a native 5xx is relayed, not retried elsewhere: {body}"
+        );
+    }
+    assert_eq!(primary.hits(), 3);
+    assert_eq!(backup.hits(), 0, "no request fell over within a turn");
+
+    // Fourth turn: the primary is ejected, so routing skips it entirely.
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+    assert_eq!(
+        status, 200,
+        "the backup serves once the primary is out: {body}"
+    );
+    assert!(body.contains("backup served"), "{body}");
+    assert_eq!(
+        primary.hits(),
+        3,
+        "an ejected upstream receives no further traffic"
+    );
+    assert_eq!(backup.hits(), 1);
 
     std::fs::remove_file(key).ok();
 }
