@@ -7637,6 +7637,104 @@ fn a_native_attempt_that_cannot_reach_its_upstream_hands_over_to_the_next() {
     std::fs::remove_file(key).ok();
 }
 
+/// A native turn's cost is counted: tokens on the receipt, a price, and the
+/// consumption the quota ledger routes on.
+///
+/// It was counted nowhere. `native_attempt` relays the provider's bytes, so
+/// nothing built a `ChatResponse` and `record.usage` stayed `None` — and three
+/// separate consumers are guarded on exactly that field. Pricing returns
+/// early, so the turn had no cost; budgets are computed from cost, so a native
+/// turn read as free; and `quota.record` is guarded too, so consumption-aware
+/// routing kept believing an account it had just spent was untouched. That
+/// last one is the sharp end: quota-first exists to route on consumption.
+#[test]
+fn a_native_turn_reports_the_usage_the_upstream_billed() {
+    let served = json!({
+        "id": "msg_native_usage",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "served"}],
+        "usage": {
+            "input_tokens": 4321,
+            "output_tokens": 765,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 30
+        }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &served.to_string())]]);
+    let key = key_file("native-usage", "sk-native-usage");
+    let proxy = start_quota_first_native_proxy(&mock, &key);
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("\"input_tokens\":4321"),
+        "the client still receives the provider's own bytes: {body}"
+    );
+
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["input_tokens"], "Integer(4321)");
+    assert_eq!(row["output_tokens"], "Integer(765)");
+    assert_eq!(row["cache_read_tokens"], "Integer(100)");
+    assert_eq!(row["cache_write_tokens"], "Integer(30)");
+
+    std::fs::remove_file(key).ok();
+}
+
+/// The same, for a streamed native turn — the shape Claude Code actually
+/// sends.
+///
+/// Anthropic reports usage twice in a stream: `message_start` carries the
+/// input buckets and `message_delta` the final output count. Fixing only the
+/// buffered path would have left the common case uncounted.
+#[test]
+fn a_streamed_native_turn_reports_usage_from_both_halves_of_the_stream() {
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s\",\"type\":\"message\",",
+        "\"role\":\"assistant\",\"model\":\"deepseek-chat\",\"content\":[],",
+        "\"usage\":{\"input_tokens\":1500,\"cache_read_input_tokens\":25}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,",
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+        "\"usage\":{\"output_tokens\":88}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{sse}"
+    );
+    let mock = MockUpstream::start(vec![vec![response.into_bytes()]]);
+    let key = key_file("native-usage-stream", "sk-native-usage-stream");
+    let proxy = start_quota_first_native_proxy(&mock, &key);
+
+    let mut turn = native_server_tool_turn();
+    turn["stream"] = json!(true);
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("content_block_delta"),
+        "the stream is relayed frame for frame: {body}"
+    );
+
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(
+        row["input_tokens"], "Integer(1500)",
+        "message_start carries the input side"
+    );
+    assert_eq!(
+        row["output_tokens"], "Integer(88)",
+        "message_delta carries the output side, and absorbing the two keeps both"
+    );
+    assert_eq!(row["cache_read_tokens"], "Integer(25)");
+
+    std::fs::remove_file(key).ok();
+}
+
 /// An HTTP error from a native upstream reaches the client byte for byte, and
 /// the pool's next upstream is never tried.
 ///

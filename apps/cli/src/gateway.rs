@@ -42,7 +42,7 @@ use token_station_protocol::{
     AgentRequestEnvelope, Auth, CapabilityState, ChatRequest, ChatResponse, Content, ContentPart,
     ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts,
     Message, ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders,
-    SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
+    SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef, Usage,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, NoRoute, Router, RouterConfig, RoutingMode,
@@ -102,6 +102,100 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// points are the network's, which is exactly what conformance drilled the
 /// parser on.
 const STREAM_READ: usize = 8 * 1024;
+
+/// Reads Anthropic's wire `usage` object into the canonical [`Usage`].
+///
+/// The native path relays the provider's own bytes, so nothing upstream of it
+/// ever builds a `ChatResponse` — and `record.usage` stayed `None`. That one
+/// gap reached three places: pricing skips a request with no usage, budgets
+/// therefore show a native turn as free, and `quota.record` is guarded on
+/// `record.usage` too, so consumption-aware routing kept believing an account
+/// it had just spent was untouched.
+fn anthropic_wire_usage(usage: &serde_json::Value) -> Option<Usage> {
+    let field = |name: &str| usage.get(name).and_then(serde_json::Value::as_u64);
+    let tier = |name: &str| {
+        usage
+            .get("cache_creation")
+            .and_then(|creation| creation.get(name))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let parsed = Usage {
+        input_tokens: field("input_tokens").unwrap_or(0),
+        output_tokens: field("output_tokens").unwrap_or(0),
+        cache_read_tokens: field("cache_read_input_tokens").unwrap_or(0),
+        cache_write_tokens: field("cache_creation_input_tokens").unwrap_or(0),
+        cache_write_5m_tokens: tier("ephemeral_5m_input_tokens"),
+        cache_write_1h_tokens: tier("ephemeral_1h_input_tokens"),
+        reasoning_tokens: 0,
+    };
+    // An object with none of the fields we understand is not a usage report;
+    // recording zeros would claim a free turn rather than an unknown one.
+    (parsed != Usage::default()).then_some(parsed)
+}
+
+/// Pulls usage out of a relayed Anthropic SSE stream without altering a byte
+/// of it.
+///
+/// Anthropic reports usage twice — `message_start` carries the input buckets,
+/// `message_delta` the final output count — which is exactly the shape
+/// [`Usage::absorb`] exists for. The tap is line-oriented so it never needs
+/// the whole stream in memory, and it gives up rather than grow without bound
+/// if a peer sends no newline.
+#[derive(Default)]
+struct AnthropicSseUsageTap {
+    partial: String,
+    usage: Option<Usage>,
+    abandoned: bool,
+}
+
+impl AnthropicSseUsageTap {
+    /// A single SSE line far beyond any real Anthropic event. Past this the
+    /// peer is not sending frames and the tap stops looking.
+    const MAX_LINE: usize = 256 * 1024;
+
+    fn observe(&mut self, chunk: &str) {
+        if self.abandoned {
+            return;
+        }
+        self.partial.push_str(chunk);
+        while let Some(end) = self.partial.find('\n') {
+            let line = self.partial[..end].trim_end_matches('\r').to_owned();
+            self.partial.drain(..=end);
+            self.observe_line(&line);
+        }
+        if self.partial.len() > Self::MAX_LINE {
+            self.abandoned = true;
+            self.partial = String::new();
+        }
+    }
+
+    fn observe_line(&mut self, line: &str) {
+        let Some(payload) = line.strip_prefix("data:") else {
+            return;
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(payload.trim()) else {
+            return;
+        };
+        // `message_start` nests usage under `message`; `message_delta` puts it
+        // at the top level beside `delta`.
+        let found = event
+            .get("usage")
+            .or_else(|| {
+                event
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+            })
+            .and_then(anthropic_wire_usage);
+        if let Some(found) = found {
+            self.usage.get_or_insert_with(Usage::default).absorb(found);
+        }
+    }
+
+    fn into_usage(self) -> Option<Usage> {
+        self.usage
+    }
+}
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REQUEST_FALLBACK: AtomicU64 = AtomicU64::new(1);
 const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
@@ -5073,6 +5167,17 @@ impl Gateway {
             Self::relay_raw_sse(ctx, response, emit, record)
         } else {
             let parts = response.into_parts()?;
+            // Read the provider's own usage report off the body we are about
+            // to relay. Nothing is rewritten: the client still gets the exact
+            // bytes, the host just stops pretending the turn was free.
+            if let Some(usage) = serde_json::from_str::<serde_json::Value>(&parts.body)
+                .ok()
+                .as_ref()
+                .and_then(|body| body.get("usage"))
+                .and_then(anthropic_wire_usage)
+            {
+                record.usage = Some(usage);
+            }
             emit(Reply::BeginJson(JsonReply {
                 status: parts.status,
                 body: parts.body,
@@ -5090,6 +5195,25 @@ impl Gateway {
         response: UpstreamResponse,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        // The tap reads the frames going past; it never changes them. Its
+        // result is written on every exit, including a truncated stream, since
+        // `message_start`'s input tokens are real whether or not the turn
+        // finished.
+        let mut tap = AnthropicSseUsageTap::default();
+        let outcome = Self::relay_raw_sse_frames(ctx, response, emit, record, &mut tap);
+        if let Some(usage) = tap.into_usage() {
+            record.usage = Some(usage);
+        }
+        outcome
+    }
+
+    fn relay_raw_sse_frames(
+        ctx: &RequestContext,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+        tap: &mut AnthropicSseUsageTap,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         let mut reader = response.into_reader();
         let mut buffer = [0u8; STREAM_READ];
@@ -5109,6 +5233,7 @@ impl Gateway {
                     }
                     committed = true;
                     let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                    tap.observe(&chunk);
                     if !emit(Reply::Chunk(chunk)) {
                         return Ok(StreamOutcome::ClientCancelled);
                     }
