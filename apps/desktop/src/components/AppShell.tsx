@@ -174,7 +174,7 @@ export default function AppShell({
         </div>
       </header>
 
-      <main className={`station-content station-content-topnav${activePrimary === "home" || activePrimary === "agents" ? " station-content-agent" : ""}${activePrimary === "overview" ? " station-content-overview" : ""}`}>
+      <main className={`station-content station-content-topnav${activePrimary === "home" || activePrimary === "agents" ? " station-content-agent" : ""}${activePrimary === "overview" ? " station-content-overview" : ""}${activePrimary === "settings" ? " station-content-settings" : ""}`}>
         {children}
       </main>
 

@@ -342,14 +342,16 @@ function SettingsHubContent({
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const navigationRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const contentRef = useRef<HTMLElement | null>(null);
   const { t, copy } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   useEffect(() => setSection(initialSection), [initialSection]);
 
-  const moveSection = (index: number) => {
+  const activateSection = (index: number) => {
     const nextIndex = (index + SECTIONS.length) % SECTIONS.length;
+    navigationRefs.current[nextIndex]?.focus({ preventScroll: true });
+    if (contentRef.current) contentRef.current.scrollTop = 0;
     setSection(SECTIONS[nextIndex].id);
-    navigationRefs.current[nextIndex]?.focus();
   };
 
   return (
@@ -372,20 +374,20 @@ function SettingsHubContent({
                 variant={section === item.id ? "secondary" : "ghost"}
                 type="button"
                 aria-current={section === item.id ? "page" : undefined}
-                onClick={() => setSection(item.id)}
+                onClick={() => activateSection(index)}
                 onKeyDown={(event) => {
                   if (event.key === "ArrowDown") {
                     event.preventDefault();
-                    moveSection(index + 1);
+                    activateSection(index + 1);
                   } else if (event.key === "ArrowUp") {
                     event.preventDefault();
-                    moveSection(index - 1);
+                    activateSection(index - 1);
                   } else if (event.key === "Home") {
                     event.preventDefault();
-                    moveSection(0);
+                    activateSection(0);
                   } else if (event.key === "End") {
                     event.preventDefault();
-                    moveSection(SECTIONS.length - 1);
+                    activateSection(SECTIONS.length - 1);
                   }
                 }}
               >
@@ -409,7 +411,7 @@ function SettingsHubContent({
           })}
         </nav>
       </aside>
-      <main className="settings-content">
+      <main ref={contentRef} className="settings-content">
         {section === "general" && (
           <>
             <VirtualKeyCard serve={serve} />

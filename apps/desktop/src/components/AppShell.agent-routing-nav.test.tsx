@@ -83,6 +83,13 @@ describe("AppShell Agent and routing navigation", () => {
       .not.toHaveClass("station-content-overview");
   });
 
+  it("gives Settings its own stable content-scrolling workspace", () => {
+    renderShell("settings");
+
+    expect(document.querySelector(".station-content"))
+      .toHaveClass("station-content-settings");
+  });
+
   it("maps connection details to Agent and route details to routing", () => {
     let { navigation } = renderShell("agent:claude-code");
     expect(navigation.getByRole("button", { name: "Agent" })).toHaveAttribute("aria-current", "page");

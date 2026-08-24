@@ -60,6 +60,28 @@ describe("retained page theme styles", () => {
     expect(expandedProviderModelsRule).toMatch(/display:\s*none/);
   });
 
+  it("keeps Settings category changes in a stable inner scroller", () => {
+    const workspaceRule = appCss.match(
+      /\.station-content\.station-content-settings\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const pageRule = appCss.match(/(?:^|\n)\.settings-page\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const contentRule = appCss.match(
+      /\.settings-page \.settings-content\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const sidebarRule = appCss.match(/\.settings-sidebar\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const pressedNavigationRule = appCss.match(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item:active\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(workspaceRule).toMatch(/overflow:\s*hidden/);
+    expect(pageRule).toMatch(/height:\s*100%/);
+    expect(pageRule).toMatch(/min-height:\s*0/);
+    expect(contentRule).toMatch(/overflow-y:\s*auto/);
+    expect(contentRule).toMatch(/scrollbar-gutter:\s*stable/);
+    expect(sidebarRule).toMatch(/align-content:\s*start/);
+    expect(pressedNavigationRule).toMatch(/transform:\s*none/);
+  });
+
   it("uses theme tokens for router JSON code blocks", () => {
     const codeBlockRule = appCss.match(/pre\.block\s*\{([^}]*)\}/s)?.[1] ?? "";
 

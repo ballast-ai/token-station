@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentUiMetadataView, ServeView, SettingsView } from "../api";
@@ -88,6 +88,58 @@ describe("SettingsHub clipboard feedback", () => {
     expect(general).toHaveFocus();
     await user.keyboard("{End}");
     expect(about).toHaveFocus();
+  });
+
+  it("keeps pointer-selected Settings navigation under keyboard control in WebView", async () => {
+    const user = userEvent.setup();
+    render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    const about = screen.getByRole("button", { name: /关于/ });
+    const general = screen.getByRole("button", { name: /通用/ });
+
+    fireEvent.click(about);
+    expect(about).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+
+    expect(general).toHaveFocus();
+    expect(general).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "虚拟 API Key" })).toBeInTheDocument();
+  });
+
+  it("resets only the Settings content pane when the category changes", () => {
+    render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    const content = document.querySelector<HTMLElement>(".settings-content");
+    expect(content).not.toBeNull();
+    content!.scrollTop = 240;
+
+    fireEvent.click(screen.getByRole("button", { name: /关于/ }));
+
+    expect(content).toHaveProperty("scrollTop", 0);
   });
 
   it("switches Settings categories without entrance motion", async () => {
