@@ -734,6 +734,14 @@ fn start_proxy_with_agents_budgets_catalog_price_and_parameters(
 /// The shared server-spawn tail: recorders, gateway, virtual key, and a
 /// background server bound to a loopback port.
 fn spawn_proxy(config: &ClientConfig) -> Proxy {
+    // Fixtures deserialize straight into `ClientConfig`, which skips the
+    // validation `ClientConfig::load` runs. Without this a test can prove
+    // behaviour for a shape the product refuses to start on — one already did,
+    // pairing `anthropic-native` with `provider: openai-compatible`.
+    config
+        .validate()
+        .expect("a test fixture must be a configuration the product would load");
+
     let data_dir = config.data.dir.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -870,11 +878,19 @@ fn start_quota_first_native_proxy(upstream: &MockUpstream, key_file: &Path) -> P
         "plugins": {
             "dir": plugins_dir(),
             "agents": ["agent-anthropic"],
-            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+            "providers": {
+                "openai-compatible": "provider-openai-compatible-v2",
+                "anthropic": "provider-anthropic-v2"
+            }
         },
         "upstreams": {
+            // `provider: anthropic` because `validate()` requires it of an
+            // anthropic-native upstream. This fixture skips `validate()` — it
+            // deserializes straight into `ClientConfig` — so an invalid pairing
+            // would have run happily here and proved behaviour for a shape the
+            // product refuses to load.
             "deepseek_native": {
-                "provider": "openai-compatible",
+                "provider": "anthropic",
                 "api_dialect": "anthropic-native",
                 "base_url": upstream.base_url(),
                 "auth": { "slot": "provider_api_key", "file": key_file },
