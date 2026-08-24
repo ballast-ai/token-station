@@ -10,7 +10,7 @@
 # south_provider_api::ADAPTER_WIT by this crate's test.
 [package]
 name = "provider-anthropic-v2"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 publish = false
 
