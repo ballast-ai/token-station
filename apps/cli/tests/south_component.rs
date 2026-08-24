@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use south_provider_api::AuthArmV1;
 use token_station_cli::south_component::{
     ProviderAdapter, SouthComponentAdapter, south_component_runtime,
 };
@@ -97,5 +98,138 @@ fn the_anthropic_component_renders_a_messages_request() {
         descriptor.url.ends_with("/messages"),
         "an Anthropic request addresses /messages: {}",
         descriptor.url
+    );
+}
+
+// -- compatibility admission (P1) ---------------------------------------------
+//
+// South 0.16.0 made the tuple handshake a required loader input, and this host
+// declares the one expectation every component is judged against. Until that
+// release the tuple was declared in every manifest and compared nowhere: these
+// tests exist so "a stale package is refused" stops being a claim about a field
+// and becomes a claim about behaviour.
+
+/// Each of the four host-known fields, tampered one at a time on a package that
+/// is otherwise exactly the one that ships. All four must be refused.
+#[test]
+fn a_component_disagreeing_on_any_tuple_field_is_refused() {
+    let wasm = std::fs::read(build_wasm("provider-anthropic-v2", "provider_anthropic_v2"))
+        .expect("the anthropic component builds");
+    let shipped: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repo_root().join("plugins/official/provider-anthropic-v2/manifest.json"),
+        )
+        .expect("its manifest reads"),
+    )
+    .expect("the manifest is JSON");
+    let runtime = south_component_runtime().expect("the south runtime builds");
+
+    // Shape-valid but different. A malformed value would be refused earlier, by
+    // the manifest schema gate, and would prove nothing about the handshake.
+    for (field, other) in [
+        ("ir_schema_id", "token-station-protocol@0.4.0/v0.2.0"),
+        ("kernel_version", "0.3.0"),
+        (
+            "kernel_revision",
+            "0123456789abcdef0123456789abcdef01234567",
+        ),
+        ("south_runtime", "0.15.0"),
+    ] {
+        let mut tampered = shipped.clone();
+        tampered["compatibility"][field] = serde_json::json!(other);
+        let refused = SouthComponentAdapter::load_embedded(&runtime, &tampered.to_string(), &wasm);
+        let Err(message) = refused else {
+            panic!("a component disagreeing on `{field}` must not be admitted");
+        };
+        assert!(
+            message.contains("not compatible"),
+            "the refusal must name the handshake, not something downstream: {message}"
+        );
+    }
+}
+
+/// The shipped package is admitted. Without this the test above would pass on a
+/// host that refuses everything.
+#[test]
+fn the_shipped_component_satisfies_this_hosts_expectations() {
+    let wasm = std::fs::read(build_wasm("provider-anthropic-v2", "provider_anthropic_v2"))
+        .expect("the anthropic component builds");
+    let manifest = std::fs::read_to_string(
+        repo_root().join("plugins/official/provider-anthropic-v2/manifest.json"),
+    )
+    .expect("its manifest reads");
+    let runtime = south_component_runtime().expect("the south runtime builds");
+    SouthComponentAdapter::load_embedded(&runtime, &manifest, &wasm)
+        .expect("the package this host ships must satisfy the host's own expectations");
+}
+
+/// A package built for the previous South release is refused by name. This is
+/// the case the tuple exists for.
+#[test]
+fn a_component_from_the_previous_south_release_is_refused() {
+    let wasm = std::fs::read(build_wasm("provider-anthropic-v2", "provider_anthropic_v2"))
+        .expect("the anthropic component builds");
+    let mut stale: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repo_root().join("plugins/official/provider-anthropic-v2/manifest.json"),
+        )
+        .expect("its manifest reads"),
+    )
+    .expect("the manifest is JSON");
+    stale["compatibility"]["south_runtime"] = serde_json::json!("0.15.0");
+    let runtime = south_component_runtime().expect("the south runtime builds");
+
+    let Err(message) = SouthComponentAdapter::load_embedded(&runtime, &stale.to_string(), &wasm)
+    else {
+        panic!("a component verified against South 0.15.0 must not load here");
+    };
+    assert!(
+        message.contains("0.15.0"),
+        "the refusal must name the stale version so an operator can act on it: {message}"
+    );
+}
+
+// -- transport eligibility by declared arm (P2) --------------------------------
+
+/// The manifest already states which auth shapes a component can carry, and
+/// admission has already verified the manifest. Transport eligibility reads
+/// that instead of matching provider names — a name allowlist has to be edited
+/// for every dialect the host admits, and it was not, which is how the Anthropic
+/// component came to translate requests the transport then refused to send.
+#[test]
+fn each_component_declares_the_auth_arms_transport_should_judge_it_by() {
+    let runtime = south_component_runtime().expect("the south runtime builds");
+    let load = |package: &str, stem: &str| {
+        let wasm = std::fs::read(build_wasm(package, stem)).expect("component builds");
+        let manifest = std::fs::read_to_string(
+            repo_root()
+                .join("plugins/official")
+                .join(package)
+                .join("manifest.json"),
+        )
+        .expect("manifest reads");
+        SouthComponentAdapter::load_embedded(&runtime, &manifest, &wasm).expect("loads")
+    };
+
+    let anthropic = load("provider-anthropic-v2", "provider_anthropic_v2");
+    let arms = anthropic.auth_arms();
+    assert!(
+        arms.contains(&AuthArmV1::HeaderSecret),
+        "Anthropic authenticates with `x-api-key`, a header secret"
+    );
+    assert!(
+        !arms.contains(&AuthArmV1::Bearer),
+        "and not with a bearer token, so the transport must not offer it one"
+    );
+
+    let openai = load(
+        "provider-openai-compatible-v2",
+        "provider_openai_compatible_v2",
+    );
+    let arms = openai.auth_arms();
+    assert!(arms.contains(&AuthArmV1::Bearer));
+    assert!(
+        arms.contains(&AuthArmV1::HeaderSecret),
+        "the same package serves Azure, which authenticates with `api-key`"
     );
 }

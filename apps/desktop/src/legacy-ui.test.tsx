@@ -290,6 +290,34 @@ describe("legacy desktop read-only pages", () => {
     ));
   });
 
+  /// Engine and fallback answer "is my traffic actually on the South path",
+  /// which the totals cannot: a request that fell back to legacy still counts
+  /// as a request. The CLI has grouped on both since the cutover; the desktop
+  /// had no way to ask.
+  it("groups by transport engine and by fallback reason", async () => {
+    const totals = {
+      requests: 3, errors: 0, p50_latency_ms: 10, p95_latency_ms: 20,
+      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0,
+      cache_write_tokens: 0, reasoning_tokens: 0, cost_micros: 0,
+      priced_requests: 0, unpriced_requests: 3,
+    };
+    vi.mocked(getStats).mockResolvedValue({
+      total: totals,
+      groups: [["south_v1_buffered", totals]],
+      by: "engine",
+      empty: false,
+    });
+    const user = userEvent.setup();
+    render(<Stats />);
+    // The tabs render with the first result, so wait rather than racing it.
+    await screen.findByRole("tab", { name: "引擎" });
+    await user.click(screen.getByRole("tab", { name: "引擎" }));
+    expect(vi.mocked(getStats).mock.calls.some((call) => call[1] === "engine")).toBe(true);
+
+    await user.click(screen.getByRole("tab", { name: "回退原因" }));
+    expect(vi.mocked(getStats).mock.calls.some((call) => call[1] === "fallback")).toBe(true);
+  });
+
   it("shows stats empty and error states", async () => {
     vi.mocked(getStats).mockResolvedValueOnce({
       total: {

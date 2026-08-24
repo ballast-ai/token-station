@@ -6,13 +6,17 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "e5fedf439afdb7b3a41ebbcbef6cb8bb6b5c0aae";
-const southVersion = "0.15.0";
+const southRevision = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8";
+const southVersion = "0.16.0";
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git";
 const kernelRevision = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35";
 const kernelVersion = "0.3.0";
-const kernelSource = `git+${kernelRepository}?tag=v0.2.0#${kernelRevision}`;
+// South 0.16.0 pins the kernel protocol crate by revision rather than by tag
+// (south #45). The revision is unchanged; the form is stricter, because a tag
+// can be moved onto different bytes and a revision cannot. Require the stricter
+// one rather than accepting either.
+const kernelSource = `git+${kernelRepository}?rev=${kernelRevision}#${kernelRevision}`;
 const expectedSouthPackages = new Set([
   "south-component-conformance",
   "south-contracts",
@@ -262,5 +266,52 @@ assert.deepEqual(
   ["south-transport-reqwest"],
   "only the dedicated South transport may directly own reqwest",
 );
+
+// The host declares what it was built against, and South's loader now judges
+// every component against that declaration. Nothing in the dependency graph
+// carries the value, so it is a constant — and a constant nobody checks is
+// precisely what let the compatibility tuple go unenforced for three releases.
+// Close the loop here: the declaration, the pinned South version and every
+// shipped component manifest must agree.
+const southComponentSource = fs.readFileSync(
+  path.join(root, "apps/cli/src/south_component.rs"),
+  "utf8",
+);
+const declaredRuntime = southComponentSource.match(
+  /^(?:pub\(crate\) )?const SOUTH_RUNTIME: &str = "([^"]+)";$/m,
+)?.[1];
+assert.equal(
+  declaredRuntime,
+  southVersion,
+  "the host's declared SOUTH_RUNTIME must equal the pinned South version",
+);
+
+for (const componentDir of ["provider-openai-compatible-v2", "provider-anthropic-v2"]) {
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      path.join(root, "plugins/official", componentDir, "manifest.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(
+    manifest.compatibility.south_runtime,
+    southVersion,
+    `${componentDir} declares a south_runtime the host would refuse at load`,
+  );
+  for (const [field, constant] of [
+    ["ir_schema_id", "IR_SCHEMA_ID"],
+    ["kernel_version", "KERNEL_VERSION"],
+    ["kernel_revision", "KERNEL_REVISION"],
+  ]) {
+    const declared = southComponentSource.match(
+      new RegExp(`^(?:pub\\(crate\\) )?const ${constant}: &str = "([^"]+)";$`, "m"),
+    )?.[1];
+    assert.equal(
+      manifest.compatibility[field],
+      declared,
+      `${componentDir}.${field} disagrees with the host's ${constant}`,
+    );
+  }
+}
 
 console.log("South dependency and MSRV policy check: PASS");

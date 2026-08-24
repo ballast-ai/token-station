@@ -93,6 +93,16 @@ SCRIPT
 
   cat > "$fake_bin/open" <<'SCRIPT'
 #!/usr/bin/env bash
+# `OPEN_FAILURES_BEFORE_SUCCESS` reproduces LaunchServices answering -600 for
+# the first moments after the bundle at this path is replaced.
+attempts_file="$TEST_STATE/open.attempts"
+attempts=$(cat "$attempts_file" 2>/dev/null || echo 0)
+attempts=$((attempts + 1))
+echo "$attempts" > "$attempts_file"
+if [[ "$attempts" -le "${OPEN_FAILURES_BEFORE_SUCCESS:-0}" ]]; then
+  echo "LSOpenURLsWithCompletionHandler() failed with error -600." >&2
+  exit 1
+fi
 touch "$TEST_STATE/opened"
 exit 0
 SCRIPT
@@ -115,6 +125,7 @@ run_installer() {
     DITTO_FAIL="${DITTO_FAIL:-0}" \
     FAIL_INSTALLED_CODESIGN="${FAIL_INSTALLED_CODESIGN:-0}" \
     RUNNING_AFTER_OPEN="${RUNNING_AFTER_OPEN:-0}" \
+    OPEN_FAILURES_BEFORE_SUCCESS="${OPEN_FAILURES_BEFORE_SUCCESS:-0}" \
     WAIT_BUILD="${WAIT_BUILD:-0}" \
     TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS=0 \
     TOKEN_STATION_LAUNCH_CHECK_SAMPLES=2 \
@@ -198,9 +209,40 @@ test_stable_launch_succeeds() {
     || fail "successful installation omitted the success message"
 }
 
+test_a_transient_launch_refusal_is_retried_not_rolled_back() {
+  make_fixture "launch-retry"
+
+  # Replacing a bundle LaunchServices already knows leaves a window in which
+  # `open` answers -600, because the old registration for this bundle id still
+  # points at the directory the installer just moved away. A single attempt
+  # turned a good build into a failed install and restored the old App — which
+  # is what happened reinstalling over a running 1.2.4 while bumping to 1.3.0.
+  OPEN_FAILURES_BEFORE_SUCCESS=2 RUNNING_AFTER_OPEN=1 \
+    TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS=0 run_installer \
+    >"$fixture/output" 2>&1 \
+    || fail "a launch that succeeds on retry was treated as a failed install"
+  [[ ! -f "$installed_app/old.version" ]] \
+    || fail "a retried launch still rolled back to the old App"
+  grep -q "installed and launched" "$fixture/output" \
+    || fail "a retried launch omitted the success message"
+}
+
+test_a_launch_that_never_succeeds_still_rolls_back() {
+  make_fixture "launch-never"
+
+  OPEN_FAILURES_BEFORE_SUCCESS=99 RUNNING_AFTER_OPEN=1 \
+    TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS=0 run_installer \
+    >"$fixture/output" 2>&1 \
+    && fail "an App that never launches must not be reported as installed"
+  [[ -f "$installed_app/old.version" ]] \
+    || fail "a permanently failing launch must restore the old App"
+}
+
 test_copy_failure_preserves_old_app
 test_immediate_exit_restores_old_app
 test_concurrent_install_has_single_owner
 test_stable_launch_succeeds
+test_a_transient_launch_refusal_is_retried_not_rolled_back
+test_a_launch_that_never_succeeds_still_rolls_back
 
 echo "install-local-desktop transaction tests passed"

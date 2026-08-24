@@ -48,6 +48,30 @@ export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap
 rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal >/dev/null
 rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev/null
 
+
+# Stages the fixture directory a package's own manifest declares, rather than
+# assuming it is called `fixtures`. The Anthropic component declares
+# `fixtures-anthropic/`, so a hardcoded name ships nothing for it and says
+# nothing about having skipped it.
+stage_declared_fixtures() {
+  local source="$1" dest="$2"
+  local declared
+  # python3, not node: these scripts are otherwise buildable with nothing
+  # beyond the Rust toolchain and `npx`, and `tests/build-desktop-verbosity.sh`
+  # runs them under `PATH=$fake_bin:/usr/bin:/bin` to prove that. Reaching for
+  # node here made that test fail with `node: command not found` and took CI
+  # red for three commits. python3 lives in /usr/bin on both runners.
+  declared="$(python3 -c '
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+sys.stdout.write((manifest.get("conformance") or {}).get("fixtures") or "")
+  ' "$source/manifest.json")"
+  [[ -n "$declared" ]] || return 0
+  declared="${declared%/}"
+  [[ -d "$source/$declared" ]] || return 0
+  cp -R "$source/$declared" "$dest/$declared"
+}
+
 for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; do
   (cd "plugins/official/${plugin}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
@@ -70,7 +94,7 @@ for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; 
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \
      "$STAGE/plugins-dist/${plugin}/adapter.wasm"
-  cp -R "plugins/official/${plugin}/fixtures" "$STAGE/plugins-dist/${plugin}/fixtures"
+  stage_declared_fixtures "plugins/official/${plugin}" "$STAGE/plugins-dist/${plugin}"
 done
 
 for component in provider-openai-compatible-v2 provider-anthropic-v2; do
@@ -79,6 +103,7 @@ for component in provider-openai-compatible-v2 provider-anthropic-v2; do
      "$STAGE/plugins-dist/${component}/"
   cp "plugins/official/${component}/target/wasm32-wasip2/release/${component//-/_}.wasm" \
      "$STAGE/plugins-dist/${component}/component.wasm"
+  stage_declared_fixtures "plugins/official/${component}" "$STAGE/plugins-dist/${component}"
 done
 
 echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2

@@ -58,6 +58,30 @@ readonly south_components=(
   provider-anthropic-v2
 )
 
+
+# Stages the fixture directory a package's own manifest declares, rather than
+# assuming it is called `fixtures`. The Anthropic component declares
+# `fixtures-anthropic/`, so a hardcoded name ships nothing for it and says
+# nothing about having skipped it.
+stage_declared_fixtures() {
+  local source="$1" dest="$2"
+  local declared
+  # python3, not node: these scripts are otherwise buildable with nothing
+  # beyond the Rust toolchain and `npx`, and `tests/build-desktop-verbosity.sh`
+  # runs them under `PATH=$fake_bin:/usr/bin:/bin` to prove that. Reaching for
+  # node here made that test fail with `node: command not found` and took CI
+  # red for three commits. python3 lives in /usr/bin on both runners.
+  declared="$(python3 -c '
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+sys.stdout.write((manifest.get("conformance") or {}).get("fixtures") or "")
+  ' "$source/manifest.json")"
+  [[ -n "$declared" ]] || return 0
+  declared="${declared%/}"
+  [[ -d "$source/$declared" ]] || return 0
+  cp -R "$source/$declared" "$dest/$declared"
+}
+
 host_os="$(uname -s)"
 readonly host_os
 
@@ -141,9 +165,7 @@ for plugin in "${plugins[@]}"; do
   cp "$source/manifest.json" "$stage/plugins-dist/$plugin/manifest.json"
   cp "$source/target/$wasm_target/release/${plugin//-/_}.wasm" \
     "$stage/plugins-dist/$plugin/adapter.wasm"
-  if [[ -d "$source/fixtures" ]]; then
-    cp -R "$source/fixtures" "$stage/plugins-dist/$plugin/fixtures"
-  fi
+  stage_declared_fixtures "$source" "$stage/plugins-dist/$plugin"
 done
 
 for component in "${south_components[@]}"; do
@@ -153,6 +175,7 @@ for component in "${south_components[@]}"; do
   cp "$source/manifest.json" "$stage/plugins-dist/$component/manifest.json"
   cp "$source/target/$wasm_target/release/${component//-/_}.wasm" \
     "$stage/plugins-dist/$component/component.wasm"
+  stage_declared_fixtures "$source" "$stage/plugins-dist/$component"
 done
 
 export TOKEN_STATION_PLUGINS_DIST="$stage/plugins-dist"
