@@ -137,6 +137,16 @@ export interface ProviderTestResult {
   latency_ms?: number;
 }
 
+export interface ModelTestMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ModelTestReply {
+  content: string;
+  latency_ms: number;
+}
+
 export interface ModelDiscoveryView {
   models: string[];
   source: "live" | "cache" | "preset" | "none";
@@ -974,6 +984,12 @@ export const verifyEnterpriseRoute = (
 
 export const testProvider = (name: string) =>
   invoke<ProviderTestResult[]>("test_provider", { name });
+
+export const testModelChat = (
+  upstream: string,
+  model: string,
+  messages: ModelTestMessage[],
+) => invoke<ModelTestReply>("test_model_chat", { upstream, model, messages });
 
 export const setProviderModelVision = (name: string, model: string, supported: boolean) =>
   invoke<StateView>("set_provider_model_vision", { name, model, supported });

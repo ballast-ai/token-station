@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_updater::UpdaterExt;
@@ -36,9 +36,9 @@ use zeroize::Zeroizing;
 use token_station_cli::bodylog::{valid_request_id, BodyLog, PlaintextExchange};
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
 use token_station_cli::config::{
-    ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
+    ClientConfig, EgressConfig, HostRoutingConfig, PluginsConfig, RoutingMode as HostRoutingMode,
 };
-use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
+use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, Reply, StageStatus};
 use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
 use token_station_cli::{
@@ -1192,6 +1192,18 @@ struct ProviderTestResult {
     stages: Vec<ProviderTestStage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_ms: Option<u64>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ModelTestMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ModelTestReply {
+    content: String,
+    latency_ms: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -4379,6 +4391,180 @@ async fn test_provider(
     .map_err(|error| format!("Provider 测试任务异常结束：{error}"))?
 }
 
+const MODEL_TEST_MAX_MESSAGES: usize = 20;
+const MODEL_TEST_MAX_MESSAGE_BYTES: usize = 16_000;
+const MODEL_TEST_MAX_TOTAL_BYTES: usize = 64_000;
+
+fn validate_model_test_messages(messages: &[ModelTestMessage]) -> Result<(), String> {
+    if messages.is_empty() {
+        return Err("Enter a message before sending".to_owned());
+    }
+    if messages.len() > MODEL_TEST_MAX_MESSAGES {
+        return Err(format!(
+            "A model test supports at most {MODEL_TEST_MAX_MESSAGES} messages"
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    for message in messages {
+        if !matches!(message.role.as_str(), "user" | "assistant") {
+            return Err("Model test messages support only user and assistant roles".to_owned());
+        }
+        let message_bytes = message.content.len();
+        if message_bytes == 0 || message.content.trim().is_empty() {
+            return Err("Model test messages cannot be empty".to_owned());
+        }
+        if message_bytes > MODEL_TEST_MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "One model test message exceeds {MODEL_TEST_MAX_MESSAGE_BYTES} bytes"
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(message_bytes);
+        if total_bytes > MODEL_TEST_MAX_TOTAL_BYTES {
+            return Err(format!(
+                "The model test conversation exceeds {MODEL_TEST_MAX_TOTAL_BYTES} bytes"
+            ));
+        }
+    }
+    if messages.last().map(|message| message.role.as_str()) != Some("user") {
+        return Err("The last model test message must be from the user".to_owned());
+    }
+    Ok(())
+}
+
+fn bounded_provider_error_code(body: &Value) -> Option<String> {
+    let code = body.pointer("/error/code").and_then(Value::as_str)?.trim();
+    if code.is_empty()
+        || code.len() > 64
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return None;
+    }
+    Some(code.to_owned())
+}
+
+fn model_test_http_error(status: u16, body: &Value) -> String {
+    let summary = match status {
+        400 => "The model rejected the request. Check the prompt and model limits",
+        401 | 403 => "Provider authentication failed. Check this Provider credential",
+        402 => "The Provider account has no available balance",
+        404 => "The selected model or endpoint is unavailable",
+        408 | 504 => "The model request timed out",
+        409 => "The Provider rejected the current request state",
+        429 => "The Provider rate limit is active. Try again later",
+        500..=599 => "The Provider is temporarily unavailable",
+        _ => "The model request failed",
+    };
+    bounded_provider_error_code(body).map_or_else(
+        || format!("{summary} (HTTP {status})"),
+        |code| format!("{summary} (HTTP {status}, {code})"),
+    )
+}
+
+fn model_test_assistant_content(body: &Value) -> Option<String> {
+    let content = body.pointer("/choices/0/message/content")?;
+    if let Some(text) = content.as_str().filter(|text| !text.trim().is_empty()) {
+        return Some(text.to_owned());
+    }
+    let parts = content
+        .as_array()?
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    (!parts.trim().is_empty()).then_some(parts)
+}
+
+fn extract_model_test_reply(status: u16, body: &str) -> Result<String, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|_| format!("The model returned invalid JSON (HTTP {status})"))?;
+    if !(200..300).contains(&status) {
+        return Err(model_test_http_error(status, &value));
+    }
+    model_test_assistant_content(&value)
+        .ok_or_else(|| "The model returned no assistant text".to_owned())
+}
+
+#[tauri::command]
+async fn test_model_chat(
+    state: State<'_, AppStateManaged>,
+    upstream: String,
+    model: String,
+    messages: Vec<ModelTestMessage>,
+) -> Result<ModelTestReply, String> {
+    validate_model_test_messages(&messages)?;
+    let upstream = upstream.trim().to_owned();
+    let model = model.trim().to_owned();
+    let mut config = {
+        let inner = state.0.lock().unwrap();
+        let config = inner.materialize()?;
+        let provider = config
+            .upstreams
+            .get(&upstream)
+            .ok_or_else(|| format!("Provider `{upstream}` is no longer configured"))?;
+        if !provider
+            .models
+            .iter()
+            .any(|candidate| candidate.model == model)
+        {
+            return Err(format!(
+                "Model `{model}` is no longer configured for Provider `{upstream}`"
+            ));
+        }
+        config
+    };
+
+    let target = UpstreamModel::new(
+        UpstreamRef::new(upstream.clone())
+            .map_err(|error| format!("Provider name is invalid: {error}"))?,
+        model.clone(),
+    );
+    config.routing = Some(HostRoutingConfig {
+        mode: HostRoutingMode::Direct,
+        direct_target: Some(target),
+    });
+    config.router.local_only = false;
+    config.router.allow_cloud_fallback = false;
+
+    let provider_runtime = tokio::runtime::Handle::current();
+    tauri::async_runtime::spawn_blocking(move || {
+        let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
+        let gateway = Gateway::new_with_provider_runtime(&config, recorder, provider_runtime)?;
+        let body = serde_json::to_vec(&json!({
+            "model": model,
+            "messages": messages,
+            "stream": false,
+            "max_tokens": 1024
+        }))
+        .map_err(|_| "Failed to encode the model test request".to_owned())?;
+        let started = Instant::now();
+        let mut response = None;
+        gateway.chat(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type".to_owned(), "application/json".to_owned())],
+            &body,
+            &mut |reply| {
+                if let Reply::BeginJson(reply) = reply {
+                    response = Some((reply.status, reply.body));
+                }
+                true
+            },
+        );
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let (status, body) = response
+            .ok_or_else(|| "The model test ended without a complete response".to_owned())?;
+        Ok(ModelTestReply {
+            content: extract_model_test_reply(status, &body)?,
+            latency_ms,
+        })
+    })
+    .await
+    .map_err(|error| format!("Model test task stopped unexpectedly: {error}"))?
+}
+
 /// Update an existing provider's model set while protecting models referenced by routing tiers.
 fn replace_provider_models(
     inner: &mut AppInner,
@@ -7346,6 +7532,7 @@ pub fn run() {
             discover_provider_models,
             verify_enterprise_route,
             test_provider,
+            test_model_chat,
             set_provider_model_vision,
             set_provider_model_limits,
             update_provider_models,
@@ -13342,5 +13529,75 @@ mod tests {
         assert!(inner.config_error().is_some());
 
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_test_messages_enforce_roles_order_and_size_bounds() {
+        let valid = vec![
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+            },
+            ModelTestMessage {
+                role: "assistant".to_owned(),
+                content: "hi".to_owned(),
+            },
+            ModelTestMessage {
+                role: "user".to_owned(),
+                content: "status".to_owned(),
+            },
+        ];
+        assert!(validate_model_test_messages(&valid).is_ok());
+
+        let wrong_role = [ModelTestMessage {
+            role: "system".to_owned(),
+            content: "hidden".to_owned(),
+        }];
+        assert!(validate_model_test_messages(&wrong_role).is_err());
+
+        let assistant_last = [ModelTestMessage {
+            role: "assistant".to_owned(),
+            content: "done".to_owned(),
+        }];
+        assert!(validate_model_test_messages(&assistant_last).is_err());
+
+        let oversized = [ModelTestMessage {
+            role: "user".to_owned(),
+            content: "x".repeat(MODEL_TEST_MAX_MESSAGE_BYTES + 1),
+        }];
+        assert!(validate_model_test_messages(&oversized).is_err());
+
+        let too_many = (0..=MODEL_TEST_MAX_MESSAGES)
+            .map(|_| ModelTestMessage {
+                role: "user".to_owned(),
+                content: "x".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        assert!(validate_model_test_messages(&too_many).is_err());
+    }
+
+    #[test]
+    fn model_test_reply_extracts_text_and_keeps_provider_errors_value_free() {
+        let reply =
+            extract_model_test_reply(200, r#"{"choices":[{"message":{"content":"connected"}}]}"#)
+                .unwrap();
+        assert_eq!(reply, "connected");
+
+        let multipart = extract_model_test_reply(
+            200,
+            r#"{"choices":[{"message":{"content":[{"text":"part "},{"text":"two"}]}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(multipart, "part two");
+
+        let error = extract_model_test_reply(
+            401,
+            r#"{"error":{"code":"invalid_api_key","message":"prompt and secret must not escape"}}"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("authentication failed"));
+        assert!(error.contains("invalid_api_key"));
+        assert!(!error.contains("prompt"));
+        assert!(!error.contains("secret"));
     }
 }

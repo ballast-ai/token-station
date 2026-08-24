@@ -10406,6 +10406,290 @@ samp {
   min-height: 40px;
 }
 
+.station-content-overview .overview-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.overview-model-test-action[data-slot="button"] {
+  min-width: 112px;
+  height: 34px;
+  border-color: color-mix(in srgb, var(--signal) 42%, var(--line));
+  color: var(--signal);
+  background: color-mix(in srgb, var(--signal) 7%, var(--surface));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--signal) 8%, transparent);
+}
+
+.overview-model-test-action[data-slot="button"]:hover {
+  border-color: color-mix(in srgb, var(--signal) 64%, var(--line));
+  background: color-mix(in srgb, var(--signal) 12%, var(--surface));
+}
+
+.model-test-dialog[data-slot="dialog-content"] {
+  width: min(780px, calc(100vw - 48px));
+  max-width: 780px;
+  height: min(720px, calc(100vh - 48px));
+  max-height: 720px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--foreground) 9%, transparent);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 28px 90px rgb(0 0 0 / 32%);
+}
+
+.model-test-header {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 240px);
+  align-items: center;
+  gap: 20px;
+  padding: 20px 54px 18px 22px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 70%, var(--surface));
+}
+
+.model-test-heading-copy {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-test-mark {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--signal) 38%, var(--line));
+  border-radius: 11px;
+  color: var(--signal);
+  background: color-mix(in srgb, var(--signal) 10%, var(--surface));
+}
+
+.model-test-mark svg { width: 17px; height: 17px; }
+.model-test-heading-copy > div { min-width: 0; }
+.model-test-heading-copy [data-slot="dialog-title"] { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+.model-test-heading-copy [data-slot="dialog-description"] {
+  overflow: hidden;
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-test-target[data-slot="select-trigger"] {
+  width: 100%;
+  height: 42px;
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 5px 9px;
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.model-test-target > svg:last-child { margin-left: auto; }
+.model-test-target-copy,
+.model-test-option-copy {
+  min-width: 0;
+  display: grid;
+  text-align: left;
+}
+.model-test-target-copy strong,
+.model-test-option-copy strong {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-test-target-copy small,
+.model-test-option-copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 8.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-test-target-menu { width: min(340px, calc(100vw - 60px)); }
+.model-test-target-menu [data-slot="select-item"] { min-height: 42px; }
+.model-test-target-menu [data-slot="select-label"] { font-family: "IBM Plex Mono", monospace; font-size: 9px; }
+
+.model-test-transcript {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 26px 28px;
+  scrollbar-gutter: stable;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-2) 36%, transparent), transparent 112px),
+    var(--surface);
+}
+
+.model-test-empty {
+  min-height: 100%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  padding: 40px;
+  text-align: center;
+}
+.model-test-empty > span {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.model-test-empty > span svg { width: 18px; height: 18px; }
+.model-test-empty h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.model-test-empty p { max-width: 370px; margin: 8px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+
+.model-test-messages {
+  max-width: 660px;
+  display: grid;
+  gap: 24px;
+  margin: 0 auto;
+  padding: 0;
+  list-style: none;
+}
+.model-test-message { min-width: 0; }
+.model-test-message.user {
+  width: fit-content;
+  max-width: 76%;
+  justify-self: end;
+}
+.model-test-message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 4px 6px;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 8.5px;
+}
+.model-test-message-meta small { font: inherit; }
+.model-test-message > p {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.model-test-message.user > p {
+  padding: 10px 13px;
+  border: 1px solid color-mix(in srgb, var(--signal) 22%, var(--line));
+  border-radius: 14px 14px 4px 14px;
+  background: color-mix(in srgb, var(--signal) 10%, var(--surface-2));
+}
+.model-test-message.assistant > p { padding: 0 4px; }
+.model-test-message.error > p {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger, #ef6a6a) 34%, var(--line));
+  border-radius: 10px;
+  color: var(--danger, #ef6a6a);
+  background: color-mix(in srgb, var(--danger, #ef6a6a) 7%, var(--surface));
+}
+.model-test-message.pending > p svg {
+  width: 16px;
+  height: 16px;
+  color: var(--signal);
+  animation: model-test-spin 0.9s linear infinite;
+}
+
+.model-test-composer-shell {
+  padding: 14px 18px 16px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 70%, var(--surface));
+}
+.model-test-composer {
+  width: 100%;
+  min-height: 64px;
+  max-height: 150px;
+  display: block;
+  resize: none;
+  padding: 12px 13px 6px;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 13px 13px 0 0;
+  outline: 0;
+  color: var(--foreground);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.model-test-composer::placeholder { color: var(--muted); }
+.model-test-composer:focus {
+  border-color: color-mix(in srgb, var(--signal) 58%, var(--line));
+  box-shadow: 0 -1px 0 color-mix(in srgb, var(--signal) 20%, transparent);
+}
+.model-test-composer-actions {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 5px 5px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 13px 13px;
+  background: var(--surface);
+}
+.model-test-composer-actions > span { color: var(--muted); font-size: 8.5px; }
+.model-test-send[data-slot="button"] {
+  border-radius: 10px;
+  color: var(--primary-foreground);
+  background: var(--signal);
+}
+.model-test-spinner { animation: model-test-spin 0.9s linear infinite; }
+
+@keyframes model-test-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 680px) {
+  .station-content-overview .overview-heading { align-items: flex-start; }
+  .overview-model-test-action[data-slot="button"] { min-width: auto; }
+  .model-test-dialog[data-slot="dialog-content"] {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    max-height: none;
+    border-radius: 15px;
+  }
+  .model-test-header {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 16px 48px 14px 16px;
+  }
+  .model-test-heading-copy [data-slot="dialog-description"] { white-space: normal; }
+  .model-test-target { max-width: 100%; }
+  .model-test-transcript { padding: 20px 16px; }
+  .model-test-empty { padding: 24px; }
+  .model-test-composer-shell { padding: 10px 12px 12px; }
+  .model-test-composer-actions > span { display: none; }
+  .model-test-composer-actions { grid-template-columns: auto 1fr auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-test-message.pending > p svg,
+  .model-test-spinner { animation: none; }
+}
+
 .station-content-overview .overview-runtime-metrics,
 .station-content-overview .overview-summary-grid {
   min-height: 0;

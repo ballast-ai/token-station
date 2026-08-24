@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentUiMetadataView, AgentView, StateView } from "../api";
 import { LANGUAGE_STORAGE_KEY, LanguageProvider } from "../components/LanguageProvider";
@@ -249,5 +250,33 @@ describe("OverviewPage summaries", () => {
     expect(within(routeSummary).getByText("openai-main")).toBeInTheDocument();
     expect(within(routeSummary).queryByRole("listitem")).toBeNull();
     expect(within(routeSummary).queryByText("Claude Code", { selector: "strong" })).toBeNull();
+  });
+
+  it("opens the model test console from one clear Overview action", async () => {
+    const user = userEvent.setup();
+    render(
+      <LanguageProvider>
+        <OverviewPage state={state} registry={registry} agents={agents} onNavigate={vi.fn()} />
+      </LanguageProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "测试模型" }));
+
+    expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
+  });
+
+  it("keeps the model test action visible but disabled without configured models", () => {
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={{ ...state, providers: [], direct_target: null }}
+          registry={registry}
+          agents={agents}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
   });
 });

@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import { Activity, ArrowUpRight, Bot, Boxes, Clock3, Route, WalletCards } from "lucide-react";
+import { Activity, ArrowUpRight, Bot, Boxes, Clock3, MessageSquareText, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { AgentIcon, ProviderIcon } from "../brandIcons";
+import ModelTestConsole from "../components/ModelTestConsole";
+import { Button } from "../components/ui/button";
 
 interface OverviewPageProps {
   state: StateView;
@@ -43,6 +45,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
   const { copy } = useLocalizedCopy();
   const [stats, setStats] = useState<StatsView | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
+  const [modelTestOpen, setModelTestOpen] = useState(false);
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const connectedAgentIds = new Set(
     agents
@@ -139,6 +142,16 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             "代理运行状态、当前路由、请求与成本，一屏看清。", "代理執行狀態、當前路由、請求與成本，一屏看清。", "プロキシのステータス、現在のルーティング、リクエストとコストを一画面で確認できます。"
           )}</p>
         </div>
+        <Button
+          type="button"
+          variant="outline"
+          className="overview-model-test-action"
+          disabled={modelCount === 0}
+          onClick={() => setModelTestOpen(true)}
+        >
+          <MessageSquareText aria-hidden="true" />
+          {copy("Test model", "测试模型", "測試模型", "モデルをテスト")}
+        </Button>
       </header>
 
       <section className="overview-metrics overview-runtime-metrics" aria-label={copy("System summary", "系统摘要", "系統摘要", "システムサマリー")}>
@@ -275,6 +288,12 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
           </CardContent>
         </Card>
       </section>
+      <ModelTestConsole
+        open={modelTestOpen}
+        onOpenChange={setModelTestOpen}
+        providers={state.providers}
+        initialTarget={state.direct_target ?? null}
+      />
     </div>
   );
 }
