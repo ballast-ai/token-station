@@ -8,6 +8,7 @@ readonly installed_parent="$(dirname "$installed_app")"
 readonly install_lock="$installed_parent/.token-station.install.lock"
 readonly launch_check_interval="${TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS:-1}"
 readonly launch_check_samples="${TOKEN_STATION_LAUNCH_CHECK_SAMPLES:-3}"
+readonly launch_open_attempts="${TOKEN_STATION_LAUNCH_OPEN_ATTEMPTS:-5}"
 
 staging_app=""
 backup_app=""
@@ -171,7 +172,22 @@ if [[ -z "$installed_executable" || "$installed_executable" == */* ]]; then
   exit 1
 fi
 
-if ! open "$installed_app"; then
+# Replacing the bundle at a path LaunchServices already knows leaves a window
+# in which `open` answers -600: the old registration for this bundle id still
+# points at the directory we just moved away. It is transient, so a single
+# attempt turns a good build into a failed install and rolls it back — which is
+# what happens every time someone reinstalls over a running app, the normal
+# case while iterating. Retry on the same bounded-wait idiom as
+# `wait_for_app_exit`.
+launched=0
+for _ in $(seq 1 "$launch_open_attempts"); do
+  if open "$installed_app"; then
+    launched=1
+    break
+  fi
+  sleep "$launch_check_interval"
+done
+if [[ "$launched" -ne 1 ]]; then
   echo "desktop app launch command failed" >&2
   exit 1
 fi
