@@ -1323,6 +1323,20 @@ fn record_actual_attempt_target(
     record.routing = Some(routing);
 }
 
+/// What one attempt puts on the wire.
+///
+/// Both shapes go through `dispatch`, which is the point: the attempt budget,
+/// provider admission, fallback, deadline, health, quota and receipts are the
+/// host's, not the payload's. A verbatim Anthropic body used to reach the
+/// upstream through its own path — no budget, no lease, no attempt record, and
+/// Quota-first routing simply refused to serve it — because the payload's shape
+/// had been allowed to decide the control plane.
+enum AttemptPayload<'a> {
+    /// The Canonical IR. Each attempt's target renders it with its own
+    /// component, so the wire bytes differ per upstream.
+    Canonical(&'a ChatRequest),
+}
+
 /// One configured upstream, resolved and ready to serve.
 struct Upstream {
     config: ProviderConfig,
@@ -3864,7 +3878,7 @@ impl Gateway {
         let result = self.dispatch(
             ctx,
             agent,
-            &request,
+            &AttemptPayload::Canonical(&request),
             &inbound_tools,
             &decision,
             emit,
@@ -3932,7 +3946,7 @@ impl Gateway {
         &self,
         ctx: &RequestContext,
         agent: &LoadedAgent,
-        request: &ChatRequest,
+        payload: &AttemptPayload<'_>,
         inbound_tools: &Value,
         decision: &Decision,
         target: &UpstreamModel,
@@ -3945,7 +3959,11 @@ impl Gateway {
         if *media_retried || !is_unsupported_media_error(error) {
             return None;
         }
-        let mut fallback_request = request.clone();
+        // Media fallback rewrites Canonical content parts. A verbatim payload
+        // has already had its own fallback applied before it reached the wire,
+        // and rewriting it here would mean editing the caller's bytes.
+        let AttemptPayload::Canonical(request) = payload;
+        let mut fallback_request = (*request).clone();
         let replaced = replace_canonical_images(&mut fallback_request);
         if replaced == 0 || !budget.try_begin(None) {
             return None;
@@ -3964,7 +3982,7 @@ impl Gateway {
             ctx,
             budget.per_attempt_timeout,
             agent,
-            &fallback_request,
+            &AttemptPayload::Canonical(&fallback_request),
             inbound_tools,
             target,
             emit,
@@ -3994,7 +4012,7 @@ impl Gateway {
         &self,
         ctx: &RequestContext,
         agent: &LoadedAgent,
-        request: &ChatRequest,
+        payload: &AttemptPayload<'_>,
         inbound_tools: &Value,
         decision: &Decision,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -4044,7 +4062,7 @@ impl Gateway {
                 ctx,
                 budget.per_attempt_timeout,
                 agent,
-                request,
+                payload,
                 inbound_tools,
                 target,
                 emit,
@@ -4080,7 +4098,7 @@ impl Gateway {
                     if let Some(retry) = self.retry_without_media(
                         ctx,
                         agent,
-                        request,
+                        payload,
                         inbound_tools,
                         decision,
                         target,
@@ -4524,7 +4542,7 @@ impl Gateway {
         ctx: &RequestContext,
         attempt_timeout: Duration,
         agent: &LoadedAgent,
-        request: &ChatRequest,
+        payload: &AttemptPayload<'_>,
         inbound_tools: &Value,
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -4547,6 +4565,7 @@ impl Gateway {
             })?;
 
         // Routing may have picked a different model than the caller named.
+        let AttemptPayload::Canonical(request) = payload;
         let request = Self::request_for_attempt(upstream, target, request);
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
