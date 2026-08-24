@@ -1724,6 +1724,73 @@ impl Recorder for SqliteStore {
 }
 
 #[cfg(test)]
+mod fallback_reason_catalogue_tests {
+    use super::SCHEMA;
+    use token_station_metrics::SouthFallbackReason;
+
+    /// Pull the token list out of a `CHECK (... IN ('a', 'b'))` clause.
+    fn check_tokens(sql: &str, column: &str) -> Vec<String> {
+        let start = sql
+            .find(&format!("{column} TEXT"))
+            .unwrap_or_else(|| panic!("`{column}` is declared in the schema"));
+        let open = sql[start..]
+            .find("IN (")
+            .expect("the column carries a CHECK ... IN (...) clause")
+            + start
+            + "IN (".len();
+        let close = sql[open..].find(')').expect("the IN list closes") + open;
+        sql[open..close]
+            .split(',')
+            .map(|token| token.trim().trim_matches('\'').to_owned())
+            .filter(|token| !token.is_empty())
+            .collect()
+    }
+
+    /// The SQL check and the enum must name the same set, in both directions.
+    ///
+    /// Nothing pinned this, and it drifted: shrinking the enum to the reasons
+    /// v1.3.0 can produce left the schema listing three more. That silence was
+    /// the dangerous part — the schema was right and the enum was wrong, but
+    /// with no test to say so the mismatch read as harmless duplication.
+    #[test]
+    fn the_schema_check_names_exactly_the_reasons_the_enum_can_parse() {
+        let mut in_sql = check_tokens(SCHEMA, "south_fallback_reason");
+        in_sql.sort();
+        let mut in_enum: Vec<String> = SouthFallbackReason::ALL
+            .iter()
+            .map(|reason| reason.as_str().to_owned())
+            .collect();
+        in_enum.sort();
+        assert_eq!(
+            in_sql, in_enum,
+            "the attempts CHECK and SouthFallbackReason::ALL must agree"
+        );
+    }
+
+    /// A reason v1.2.4 wrote must still read back.
+    ///
+    /// This is the failure the catalogue drift caused: `parse` returned `None`
+    /// for a retired token, the row read errored, and `stats` broke for anyone
+    /// upgrading with history. `origin/main` produces all three in eleven
+    /// places, so real databases carry them.
+    #[test]
+    fn every_retired_reason_a_v1_2_4_database_may_hold_still_parses() {
+        for retired in SouthFallbackReason::RETIRED {
+            let token = retired.as_str();
+            assert_eq!(
+                SouthFallbackReason::parse(token),
+                Some(retired),
+                "`{token}` appears in v1.2.4 databases and must stay readable"
+            );
+            assert!(
+                SouthFallbackReason::ALL.contains(&retired),
+                "`{token}` must be in ALL so the schema check accepts it"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{ReceiptQuery, SqliteStore, recent_receipts};
     use token_station_metrics::{
@@ -2198,6 +2265,52 @@ mod tests {
             assert_eq!(count, 0, "{table} rolled back");
         }
         drop(connection);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// End-to-end proof for the catalogue: a row a v1.2.4 gateway wrote must
+    /// survive the read path this release uses.
+    ///
+    /// The unit tests next to the schema compare two lists. This one inserts
+    /// the actual token into the actual table and calls the actual reader,
+    /// because the bug was never in the lists — it was that
+    /// `SouthFallbackReason::parse` returning `None` turned one stale column
+    /// into a failed row read, and `recent_receipts` is what the desktop usage
+    /// view and `stats` call.
+    #[test]
+    fn a_retired_fallback_reason_from_a_v1_2_4_database_still_reads() {
+        let path = scratch("retired-reason");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        store.record(&receipt("req-legacy", 100));
+
+        for retired in token_station_metrics::SouthFallbackReason::RETIRED {
+            store
+                .connection
+                .lock()
+                .expect("lock")
+                .execute(
+                    "UPDATE attempts SET provider_call_engine = 'legacy', \
+                     south_fallback_reason = ?1",
+                    [retired.as_str()],
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the schema CHECK must accept `{}`, which v1.2.4 wrote: {error}",
+                        retired.as_str()
+                    )
+                });
+
+            let recent = recent_receipts(&path, usize::MAX).unwrap_or_else(|error| {
+                panic!(
+                    "reading a receipt whose attempt says `{}` must not fail: {error}",
+                    retired.as_str()
+                )
+            });
+            assert_eq!(recent.len(), 1);
+        }
+
+        drop(store);
         std::fs::remove_file(path).ok();
     }
 

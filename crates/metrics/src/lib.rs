@@ -246,8 +246,6 @@ pub enum SouthFallbackReason {
     NoProviderRuntime,
     /// The credential resolver could not be built for this upstream.
     CredentialResolver,
-    /// The provider dialect is outside the South slice.
-    /// The dialect resolves to a package the South slice does not approve.
     /// The upstream speaks a non-translated API dialect.
     ApiDialect,
     /// Egress goes through a proxy.
@@ -262,9 +260,24 @@ pub enum SouthFallbackReason {
     Body,
     /// The credential source is outside the slice (a key file, say).
     SecretSource,
-    /// Response metadata compatibility could not be asserted.
     /// A descriptor header fails the safe-header contract.
     Headers,
+    /// The provider dialect is outside the South slice.
+    ///
+    /// Retired: eligibility stopped matching a provider's *name* against a
+    /// list. v1.3.0 cannot produce this, but v1.2.4 wrote it, so it stays
+    /// parseable — see [`Self::RETIRED`].
+    ProviderDialect,
+    /// The dialect resolves to a package the South slice does not approve.
+    ///
+    /// Retired: an admitted component's package is not re-judged. Kept
+    /// parseable for v1.2.4 history — see [`Self::RETIRED`].
+    ProviderPackageUnapproved,
+    /// Response metadata compatibility could not be asserted.
+    ///
+    /// Retired: eligibility no longer asks about response metadata. Kept
+    /// parseable for v1.2.4 history — see [`Self::RETIRED`].
+    ResponseMetadata,
 }
 
 impl SouthFallbackReason {
@@ -284,11 +297,21 @@ impl SouthFallbackReason {
             Self::Body => "body",
             Self::SecretSource => "secret_source",
             Self::Headers => "headers",
+            Self::ProviderDialect => "provider_dialect",
+            Self::ProviderPackageUnapproved => "provider_package_unapproved",
+            Self::ResponseMetadata => "response_metadata",
         }
     }
 
-    /// Every variant, in token order, for schema constraints and parsers.
-    pub const ALL: [Self; 13] = [
+    /// Every variant a database may contain, in token order, for schema
+    /// constraints and parsers.
+    ///
+    /// This is deliberately wider than what v1.3.0 can produce. Shrinking it
+    /// to the producible set broke reading a v1.2.4 database: `parse` returned
+    /// `None` for a retired token and the row read failed, so `stats` and the
+    /// desktop usage view errored for exactly the users who had history worth
+    /// looking at. The three in [`Self::RETIRED`] stay here for that reason.
+    pub const ALL: [Self; 16] = [
         Self::ConfiguredLegacy,
         Self::BufferedModeCannotStream,
         Self::UnauthenticatedUpstream,
@@ -302,6 +325,17 @@ impl SouthFallbackReason {
         Self::Body,
         Self::SecretSource,
         Self::Headers,
+        Self::ProviderDialect,
+        Self::ProviderPackageUnapproved,
+        Self::ResponseMetadata,
+    ];
+
+    /// The reasons v1.3.0 can no longer produce, retained so a database
+    /// written by v1.2.4 still reads. Nothing may emit these.
+    pub const RETIRED: [Self; 3] = [
+        Self::ProviderDialect,
+        Self::ProviderPackageUnapproved,
+        Self::ResponseMetadata,
     ];
 
     /// The inverse of [`Self::as_str`].
