@@ -1874,13 +1874,13 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                // 15s, matching `a_hung_upstream_is_force_cancelled_after_the_five_second_grace_...`,
-                // which exercises the same grace. This was 5s — exactly the length of
-                // the grace the request may have to wait through, so the client
-                // aborted first whenever a loaded runner added any overhead at all.
-                // Raising it weakens nothing: the claim is that the proxy answers
-                // rather than hangs, and a hang is unbounded.
-                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                // 60s. This was 5s, then 15s, and the coverage job still hit
+                // `Timeout(Global)` under llvm-cov instrumentation on a loaded
+                // 4-core runner. The claim is that the proxy answers rather
+                // than hangs, and a hang is unbounded — a wide margin proves
+                // it exactly as well as a tight one, and stops re-proving the
+                // runner's scheduler instead.
+                .timeout_global(Some(std::time::Duration::from_mins(1)))
                 .http_status_as_error(false)
                 .build(),
         );
@@ -1899,7 +1899,9 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
             .as_u16()
     });
 
-    let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    // 10s, not 3s: the same coverage-runner starvation that broke the client's
+    // 15s budget would break a 3s arrival wait first.
+    let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while (mock.hits() == 0 || proxy.control.in_flight() == 0)
         && std::time::Instant::now() < arrival_deadline
     {
