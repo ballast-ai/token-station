@@ -77,7 +77,6 @@ done
 for component in provider-openai-compatible-v2 provider-anthropic-v2; do
   (cd "plugins/official/${component}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
-  stage_declared_fixtures "plugins/official/${component}" "$STAGE/plugins-dist/${component}"
 done
 
 NAME="token-station-cli-${VERSION}-${TARGET}"
@@ -99,6 +98,7 @@ for component in provider-openai-compatible-v2 provider-anthropic-v2; do
      "$STAGE/plugins-dist/${component}/"
   cp "plugins/official/${component}/target/wasm32-wasip2/release/${component//-/_}.wasm" \
      "$STAGE/plugins-dist/${component}/component.wasm"
+  stage_declared_fixtures "plugins/official/${component}" "$STAGE/plugins-dist/${component}"
 done
 
 echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2
