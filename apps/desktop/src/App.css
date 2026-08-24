@@ -10544,7 +10544,9 @@ samp {
   white-space: nowrap;
 }
 .model-test-target-menu {
-  width: min(280px, calc(100vw - 48px));
+  width: var(--radix-dropdown-menu-trigger-width);
+  min-width: var(--radix-dropdown-menu-trigger-width);
+  max-width: calc(100vw - 48px);
   padding: 6px;
 }
 .model-test-target-menu [data-slot="dropdown-menu-label"] {
