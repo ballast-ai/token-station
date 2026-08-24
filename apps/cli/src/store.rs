@@ -1767,6 +1767,55 @@ mod fallback_reason_catalogue_tests {
         );
     }
 
+    /// The retired reasons are readable, and nothing may produce one.
+    ///
+    /// Keeping them parseable is what lets a v1.2.4 database load, but it also
+    /// puts three tokens back within reach of a careless `match` arm. The
+    /// completion criterion for the cutover says the host must no longer
+    /// contain `ProviderPackageUnapproved`; the honest form of that is that no
+    /// host code may name it. `ProviderPackageEligibilityV1`, the type that
+    /// used to decide it, is gone outright.
+    #[test]
+    fn no_host_code_can_produce_a_retired_fallback_reason() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // The variant names come from `Debug`, not from literals. Writing them
+        // out would put the very identifiers this test forbids into the file
+        // it scans — which is exactly how the first version failed, reporting
+        // itself as the offender.
+        let retired: Vec<String> = token_station_metrics::SouthFallbackReason::RETIRED
+            .iter()
+            .map(|reason| format!("{reason:?}"))
+            .collect();
+
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("host sources are readable") {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("source reads");
+                for name in &retired {
+                    // `SouthFallbackReason::` qualifies it; a bare match arm
+                    // would be `Self::` inside the enum's own crate, which is
+                    // not this one.
+                    if source.contains(&format!("SouthFallbackReason::{name}")) {
+                        offenders.push(format!("{}: {name}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these reasons are retired and no host code may emit one: {offenders:?}"
+        );
+    }
+
     /// A reason v1.2.4 wrote must still read back.
     ///
     /// This is the failure the catalogue drift caused: `parse` returned `None`
