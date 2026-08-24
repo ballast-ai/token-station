@@ -6947,6 +6947,17 @@ pre.block {
   padding-inline: 12px;
 }
 
+.agent-route-disclosure-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-route-disclosure-label [data-slot="badge"] {
+  min-width: 24px;
+  padding-inline: 6px;
+}
+
 .agent-route-disclosure-trigger svg {
   transition: transform 120ms ease;
 }

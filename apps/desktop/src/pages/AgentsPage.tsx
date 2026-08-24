@@ -91,23 +91,25 @@ export default function AgentsPage({
               <CardTitle><h2>{connections ? copy("Detected Agents", "发现 Agents", "檢測到的 Agent", "検出されたエージェント") : copy("Routing scopes", "路由范围", "路由範圍", "ルーティングスコープ")}</h2></CardTitle>
             </div>
             <div className="agent-master-actions">
-              <Badge variant="outline">{registry.length}</Badge>
               {connections && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  type="button"
-                  data-onboarding-target="agent-rescan"
-                  onClick={onRescan}
-                  disabled={scanBusy}
-                >
-                  <RefreshCw
-                    data-icon="inline-start"
-                    className={cn(scanBusy && "is-spinning")}
-                    aria-hidden="true"
-                  />
-                  {scanBusy ? copy("Scanning…", "扫描中…", "掃描中…", "スキャン中…") : copy("Rescan", "重新扫描", "重新掃描", "再スキャン")}
-                </Button>
+                <>
+                  <Badge variant="outline">{registry.length}</Badge>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    type="button"
+                    data-onboarding-target="agent-rescan"
+                    onClick={onRescan}
+                    disabled={scanBusy}
+                  >
+                    <RefreshCw
+                      data-icon="inline-start"
+                      className={cn(scanBusy && "is-spinning")}
+                      aria-hidden="true"
+                    />
+                    {scanBusy ? copy("Scanning…", "扫描中…", "掃描中…", "スキャン中…") : copy("Rescan", "重新扫描", "重新掃描", "再スキャン")}
+                  </Button>
+                </>
               )}
             </div>
           </CardHeader>
@@ -134,8 +136,8 @@ export default function AgentsPage({
                       </span>
                       <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong></span>
                       <Badge variant={homeSelected ? "default" : "outline"}>{homeSelected
-                        ? copy("In use", "使用中", "使用中", "使用中")
-                        : copy("Shared default", "共享默认", "共享預設", "共有デフォルト")}</Badge>
+                        ? copy("Current", "当前", "當前", "表示中")
+                        : copy("Switch", "切换", "切換", "切替")}</Badge>
                     </Button>
                   </>
                 )}
@@ -179,7 +181,10 @@ export default function AgentsPage({
                       aria-controls="agent-route-list"
                       onClick={() => setRouteListOpen((open) => !open)}
                     >
-                      <span>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</span>
+                      <span className="agent-route-disclosure-label">
+                        <span>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</span>
+                        <Badge variant="outline">{registry.length}</Badge>
+                      </span>
                       <ChevronDown aria-hidden="true" />
                     </Button>
                     {routeListOpen && (
@@ -230,8 +235,8 @@ export default function AgentsPage({
                     </span>
                     <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</strong></span>
                     <Badge variant={enterpriseSelected ? "default" : "outline"}>{enterpriseSelected
-                      ? copy("In use", "使用中", "使用中", "使用中")
-                      : copy("Managed endpoint", "托管端点", "託管端點", "管理対象エンドポイント")}</Badge>
+                      ? copy("Current", "当前", "當前", "表示中")
+                      : copy("Switch", "切换", "切換", "切替")}</Badge>
                   </Button>
                 )}
               </nav>
