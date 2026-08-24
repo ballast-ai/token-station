@@ -623,6 +623,36 @@ pub struct AuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
 }
+/// Drops the per-upstream `south_component` setting a v1.2.4 file may carry.
+///
+/// Every other load migration runs after deserialization, which cannot help
+/// here: `UpstreamConfig` denies unknown fields, so a config naming a retired
+/// key fails to parse before any migration sees it. The v1.3.0 notes promise
+/// this setting is *ignored*, and the promise has to be kept somewhere earlier
+/// than the struct — otherwise an operator following the upgrade instructions
+/// gets a host that will not start, naming a field the notes told them to leave
+/// alone.
+///
+/// Retired rather than translated: the shadow lane and the three-way mode it
+/// selected are gone, so there is no setting left to carry the value into.
+fn retire_south_component_setting(document: &mut serde_json::Value) {
+    let Some(upstreams) = document
+        .get_mut("upstreams")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    for (name, upstream) in upstreams.iter_mut() {
+        if let Some(object) = upstream.as_object_mut()
+            && object.remove("south_component").is_some()
+        {
+            eprintln!(
+                "config migration -> upstream `{name}`: dropped the retired `south_component` \
+                 setting; every dialect is translated by its South component now"
+            );
+        }
+    }
+}
 
 impl ClientConfig {
     /// Deserializes one JSON source and applies the same legacy field
@@ -637,7 +667,9 @@ impl ClientConfig {
     /// Returns Serde's structural error when the JSON cannot be represented as
     /// a [`ClientConfig`].
     pub fn parse_with_load_migrations(source: &str) -> Result<Self, serde_json::Error> {
-        let mut config: Self = serde_json::from_str(source)?;
+        let mut document: serde_json::Value = serde_json::from_str(source)?;
+        retire_south_component_setting(&mut document);
+        let mut config: Self = serde_json::from_value(document)?;
         config.apply_load_migrations();
         Ok(config)
     }
@@ -2232,5 +2264,92 @@ mod tests {
         assert!(ClientConfig::load(&path).is_err());
 
         fs::remove_file(path).ok();
+    }
+}
+
+#[cfg(test)]
+mod v1_2_4_upgrade_tests {
+    use super::ClientConfig;
+
+    /// A real v1.2.4 upstream block, `south_component` and all.
+    ///
+    /// The setting was written by every host that ran the shadow lane, and
+    /// v1.2.4 wrote `shadow` by default — so this is not an exotic file, it is
+    /// what the previous release left on disk.
+    fn v1_2_4_config() -> String {
+        serde_json::json!({
+            "version": 1,
+            "server": { "listen": "127.0.0.1:8787" },
+            "plugins": { "dir": "/tmp/ts-plugins", "agent": "agent-openai" },
+            "upstreams": {
+                "primary": {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.example.com/v1",
+                    "south_component": "shadow",
+                    "auth": { "slot": "provider_api_key", "store": true },
+                    "models": [{ "model": "gpt-5.5", "context_window": 128_000 }]
+                },
+                "secondary": {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.other.com/v1",
+                    "south_component": "primary",
+                    "models": [{ "model": "gpt-5.5-mini", "context_window": 64_000 }]
+                }
+            },
+            "router": {
+                "version": 1,
+                "pools": { "main": [{ "upstream": "primary", "model": "gpt-5.5" }] },
+                "default_pool": "main"
+            }
+        })
+        .to_string()
+    }
+
+    /// The v1.3.0 notes promise the setting is ignored. Before the migration it
+    /// was not ignored — it was fatal, because `UpstreamConfig` denies unknown
+    /// fields, so an operator following the upgrade instructions got a host that
+    /// would not start.
+    #[test]
+    fn a_v1_2_4_config_still_loads_after_the_setting_was_retired() {
+        let config = ClientConfig::parse_with_load_migrations(&v1_2_4_config())
+            .expect("a config the previous release wrote must still load");
+        assert_eq!(config.upstreams.len(), 2);
+        assert_eq!(
+            config.upstreams["primary"].base_url.as_str(),
+            "https://api.example.com/v1"
+        );
+    }
+
+    /// Dropped, not carried: saving the migrated config writes no trace of the
+    /// retired key, which is the other half of what the notes promise.
+    #[test]
+    fn the_retired_setting_does_not_survive_a_round_trip() {
+        let config = ClientConfig::parse_with_load_migrations(&v1_2_4_config())
+            .expect("the v1.2.4 config loads");
+        let rewritten = serde_json::to_string(&config).expect("config serialises");
+        assert!(
+            !rewritten.contains("south_component"),
+            "the retired setting must not be written back: {rewritten}"
+        );
+    }
+
+    /// A genuinely unknown key still fails. The migration retires one named
+    /// setting; it is not a licence to ignore typos.
+    #[test]
+    fn an_unrelated_unknown_field_is_still_refused() {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&v1_2_4_config()).expect("the fixture is JSON");
+        let upstream = document["upstreams"]["primary"]
+            .as_object_mut()
+            .expect("an upstream object");
+        upstream.remove("south_component");
+        upstream.insert("souht_component".to_owned(), serde_json::json!("shadow"));
+        let source = document.to_string();
+        let error = ClientConfig::parse_with_load_migrations(&source)
+            .expect_err("a misspelled key is a mistake, not a migration");
+        assert!(
+            error.to_string().contains("souht_component"),
+            "the refusal must name the field: {error}"
+        );
     }
 }

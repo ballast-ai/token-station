@@ -296,12 +296,22 @@ fn all_bodies() -> impl Iterator<Item = (String, Value)> {
 #[test]
 fn the_generated_sweep_finds_no_unregistered_class() {
     let mut unlisted: BTreeMap<String, u64> = BTreeMap::new();
+    let mut refusals: BTreeMap<String, u64> = BTreeMap::new();
     for seed in 1..=SWEEP_CASES {
         let body = generated_body(seed);
+        let observed = observe(&body);
+        // A refusal is a failure now. Stage A′ let unmodelled Anthropic blocks
+        // through the IR, so the translated route is supposed to carry every
+        // shape this generator produces; one that still refuses is a coverage
+        // gap, not a measurement.
+        if let Outcome::Refused(reason) = &observed {
+            refusals.entry(reason.clone()).or_insert(seed);
+            continue;
+        }
         let Outcome::Divergent {
             passthrough,
             component,
-        } = observe(&body)
+        } = observed
         else {
             continue;
         };
@@ -315,6 +325,16 @@ fn the_generated_sweep_finds_no_unregistered_class() {
             .join(" | ");
         unlisted.entry(signature).or_insert(seed);
     }
+    assert!(
+        refusals.is_empty(),
+        "{} shape(s) the translated route still refuses:\n{}",
+        refusals.len(),
+        refusals
+            .iter()
+            .map(|(reason, seed)| format!("  seed {seed}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert!(
         unlisted.is_empty(),
         "{} unregistered class(es) survived every eraser:\n{}",
