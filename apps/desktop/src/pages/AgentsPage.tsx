@@ -137,7 +137,7 @@ export default function AgentsPage({
                       onClick={onOpenHome}
                     >
                       <span className="agent-master-icon global-route-mark" aria-hidden="true">
-                        <TokenStationMark size={28} />
+                        <TokenStationMark size={36} />
                       </span>
                       <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong></span>
                       <Badge variant={homeSelected ? "secondary" : "ghost"}>{homeSelected
