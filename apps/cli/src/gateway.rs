@@ -3982,23 +3982,11 @@ impl Gateway {
         // leases, conversation affinity); tiered routing touches none of it, so
         // the whole quota path is gated on the mode (`quota_now_ms.is_some()`)
         // and costs the tiered path nothing.
-        let (quota_now_ms, session) = Self::quota_preamble(router, &request);
-        let quota_mode = quota_now_ms.is_some();
+        let (quota_now_ms, session) = Self::quota_preamble(router, || quota_session_key(&request));
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let route = |request: &ChatRequest| match router.routing_mode() {
-            RoutingMode::Tiered => router.route(request, &hints, &candidates),
-            RoutingMode::QuotaFirst => {
-                let last = self
-                    .quota
-                    .lock()
-                    .expect("quota lock")
-                    .last_account(&session)
-                    .cloned();
-                router.route_quota_first(request, &candidates, last.as_ref())
-            }
-        };
-        let mut decision = match route(&request) {
+        let mut decision = match self.route_with_mode(router, &request, &hints, &candidates, &session)
+        {
             Ok(decision) => decision,
             Err(no_route) if is_vision_no_route(&no_route) => {
                 let replaced = replace_canonical_images(&mut request);
@@ -4008,7 +3996,8 @@ impl Gateway {
                 eprintln!(
                     "media fallback -> replaced {replaced} image block(s) before text-only routing"
                 );
-                route(&request).map_err(|error| route_error(&error))?
+                self.route_with_mode(router, &request, &hints, &candidates, &session)
+                    .map_err(|error| route_error(&error))?
             }
             Err(no_route) => return Err(route_error(&no_route)),
         };
@@ -4024,47 +4013,19 @@ impl Gateway {
             decision.decided_by,
             decision.fallbacks.len()
         );
-        record_route_decision(record, &decision);
-        // In quota mode, record why this account was chosen — its window/rate
-        // picture at decision time — for the receipt ("why this account").
-        if quota_mode
-            && let Some(candidate) = candidates.iter().find(|c| c.target == decision.chosen)
-            && let Some(recorded) = record.decision.as_mut()
-        {
-            recorded.quota = Some(token_station_metrics::QuotaDecisionSnapshot {
-                reset_ms: candidate.quota.reset.as_ref().map(|r| r.ms_until_reset),
-                remaining_permille: candidate.quota.reset.as_ref().map(|r| r.remaining_permille),
-                headroom_permille: candidate.quota.rate_headroom_permille,
-                pressured: candidate.quota.rate_pressured,
-                exhausted: candidate.quota.exhausted,
-            });
-        }
 
-        // In quota mode, take an in-flight lease on the chosen account before
-        // dispatch so concurrent requests see the load and spread; settle the
-        // account below once the exchange finishes.
-        let lease = quota_now_ms.map(|now_ms| {
-            self.quota
-                .lock()
-                .expect("quota lock")
-                .grant(decision.chosen.upstream.as_str(), now_ms)
-        });
-
-        let result = self.dispatch(
+        self.execute_routed_attempt(
             ctx,
             agent,
             &AttemptPayload::Canonical(&request),
             &inbound_tools,
             &decision,
+            &candidates,
+            quota_now_ms,
+            &session,
             emit,
             record,
-        );
-
-        if let Some(now_ms) = quota_now_ms {
-            self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
-        }
-
-        result
+        )
     }
 
     /// Quota-first plans keyed by upstream, from the config. Only upstreams that
@@ -4081,13 +4042,90 @@ impl Gateway {
     }
 
     /// Quota-first preamble: whether quota mode is on (as `Some(now_ms)` with a
-    /// single wall-clock read) and the conversation's affinity key. Returns
-    /// `(None, "")` outside quota-first mode so the caller pays nothing for it.
-    fn quota_preamble(router: &Router, request: &ChatRequest) -> (Option<u64>, String) {
+    /// single wall-clock read) and the conversation's affinity key. The key
+    /// derivation differs per payload shape (IR vs. Anthropic wire), so the
+    /// caller passes it; it runs lazily, and `(None, "")` outside quota-first
+    /// mode costs the caller nothing.
+    fn quota_preamble(router: &Router, session_key: impl FnOnce() -> String) -> (Option<u64>, String) {
         if router.routing_mode() != RoutingMode::QuotaFirst {
             return (None, String::new());
         }
-        (Some(unix_millis()), quota_session_key(request))
+        (Some(unix_millis()), session_key())
+    }
+
+    /// The shared routing step: Tiered consults the router alone; Quota-first
+    /// additionally seeds it with the conversation's last-serving account.
+    fn route_with_mode(
+        &self,
+        router: &Router,
+        request: &ChatRequest,
+        hints: &[token_station_protocol::AgentHint],
+        candidates: &[Candidate],
+        session: &str,
+    ) -> Result<Decision, NoRoute> {
+        match router.routing_mode() {
+            RoutingMode::Tiered => router.route(request, hints, candidates),
+            RoutingMode::QuotaFirst => {
+                let last = self
+                    .quota
+                    .lock()
+                    .expect("quota lock")
+                    .last_account(session)
+                    .cloned();
+                router.route_quota_first(request, candidates, last.as_ref())
+            }
+        }
+    }
+
+    /// The shared back half of one routed exchange, identical for every
+    /// payload shape: the receipt's routing record and quota snapshot, the
+    /// in-flight lease, the dispatch, and the settlement. What varies by
+    /// payload — how the request was parsed, routed, and prepared — stays with
+    /// the caller; what the host owns lives here, so the two entry paths
+    /// cannot drift.
+    #[allow(clippy::too_many_arguments)] // one routed attempt's full control-plane context
+    fn execute_routed_attempt(
+        &self,
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        payload: &AttemptPayload<'_>,
+        inbound_tools: &Value,
+        decision: &Decision,
+        candidates: &[Candidate],
+        quota_now_ms: Option<u64>,
+        session: &str,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        record_route_decision(record, decision);
+        // In quota mode, record why this account was chosen — its window/rate
+        // picture at decision time — for the receipt ("why this account").
+        if quota_now_ms.is_some()
+            && let Some(candidate) = candidates.iter().find(|c| c.target == decision.chosen)
+            && let Some(recorded) = record.decision.as_mut()
+        {
+            recorded.quota = Some(token_station_metrics::QuotaDecisionSnapshot {
+                reset_ms: candidate.quota.reset.as_ref().map(|r| r.ms_until_reset),
+                remaining_permille: candidate.quota.reset.as_ref().map(|r| r.remaining_permille),
+                headroom_permille: candidate.quota.rate_headroom_permille,
+                pressured: candidate.quota.rate_pressured,
+                exhausted: candidate.quota.exhausted,
+            });
+        }
+        // In quota mode, take an in-flight lease on the chosen account before
+        // dispatch so concurrent requests see the load and spread; settle the
+        // account below once the exchange finishes.
+        let lease = quota_now_ms.map(|now_ms| {
+            self.quota
+                .lock()
+                .expect("quota lock")
+                .grant(decision.chosen.upstream.as_str(), now_ms)
+        });
+        let result = self.dispatch(ctx, agent, payload, inbound_tools, decision, emit, record);
+        if let Some(now_ms) = quota_now_ms {
+            self.settle_quota(session, lease.as_ref(), now_ms, record, &result);
+        }
+        result
     }
 
     /// After a quota-first exchange: release its in-flight lease, charge the
@@ -4934,25 +4972,10 @@ impl Gateway {
         // shape was deciding which routing modes existed. It gets the same
         // treatment as any other request now — consumption-aware candidates, a
         // conversation-affine account, an in-flight lease and a settlement.
-        let (quota_now_ms, session) = if router.routing_mode() == RoutingMode::QuotaFirst {
-            (Some(unix_millis()), native_quota_session_key(&body_value))
-        } else {
-            (None, String::new())
-        };
+        let (quota_now_ms, session) =
+            Self::quota_preamble(router, || native_quota_session_key(&body_value));
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let decision_result = match router.routing_mode() {
-            RoutingMode::Tiered => router.route(&mini, &[], &candidates),
-            RoutingMode::QuotaFirst => {
-                let last = self
-                    .quota
-                    .lock()
-                    .expect("quota lock")
-                    .last_account(&session)
-                    .cloned();
-                router.route_quota_first(&mini, &candidates, last.as_ref())
-            }
-        };
-        let Ok(decision) = decision_result else {
+        let Ok(decision) = self.route_with_mode(router, &mini, &[], &candidates, &session) else {
             return Ok(None);
         };
         let Some(upstream) = self.upstreams.get(decision.chosen.upstream.as_str()) else {
@@ -4992,30 +5015,21 @@ impl Gateway {
         }
 
         // Committed to the passthrough path.
+        let headers = Self::curate_passthrough_headers(raw_headers)?;
         let configured = self
             .catalog
             .iter()
             .any(|(target, _)| target.model == decision.chosen.model);
         record.requested_model = canonical_requested_model(&model, configured);
         record.stream = stream;
-        record_route_decision(record, &decision);
 
         // The native body is now just another attempt payload. Everything below
-        // this line — budget, provider admission, fallback, deadline, health,
-        // quota and receipts — is the same machinery every Canonical request
-        // gets, which is the whole point of folding it in here.
-        let headers = Self::curate_passthrough_headers(raw_headers)?;
-        // Same lease discipline as the Canonical path: take an in-flight lease
-        // on the chosen account before dispatch so concurrent requests see the
-        // load and spread, then settle whatever actually served.
-        let lease = quota_now_ms.map(|now_ms| {
-            self.quota
-                .lock()
-                .expect("quota lock")
-                .grant(decision.chosen.upstream.as_str(), now_ms)
-        });
+        // this line — routing record, quota snapshot, lease, budget, provider
+        // admission, fallback, deadline, health and receipts — is the same
+        // machinery every Canonical request gets, which is the whole point of
+        // folding it in here.
         let last_upstream_error = RefCell::new(None);
-        let result = self.dispatch(
+        let result = self.execute_routed_attempt(
             ctx,
             agent,
             &AttemptPayload::AnthropicNative {
@@ -5026,12 +5040,12 @@ impl Gateway {
             },
             &json!({}),
             &decision,
+            &candidates,
+            quota_now_ms,
+            &session,
             emit,
             record,
         );
-        if let Some(now_ms) = quota_now_ms {
-            self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
-        }
 
         // The pool is exhausted and every attempt was a retriable upstream
         // failure. The passthrough contract still holds for the answer the
