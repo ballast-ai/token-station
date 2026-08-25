@@ -3582,6 +3582,44 @@ fn anthropic_native_direct_refuses_tools_before_hitting_an_unsupported_target() 
 }
 
 #[test]
+fn native_passthrough_hashes_an_unlisted_requested_model_in_the_receipt() {
+    // Direct mode routes to a fixed target regardless of the requested model
+    // string, so `decision.chosen.model` is always the configured target and
+    // can never stand in for "did the caller actually name a configured
+    // model". The receipt must still hash whatever the caller sent.
+    let mut turn = native_server_tool_turn();
+    turn["model"] = json!("attacker-supplied-model-name");
+    let upstream_answer = json!({
+        "id": "msg_native_unlisted_model",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("native-unlisted-model", "sk-upstream-secret\n");
+    let proxy = start_native_anthropic_proxy_with(&mock, &key, true, "verified");
+
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 1, "the passthrough still reached the upstream");
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    let requested_model = row["requested_model"].clone();
+    assert!(
+        requested_model.starts_with("Text(\"unlisted:"),
+        "an unlisted caller-supplied model must be hashed, not stored verbatim: {requested_model}"
+    );
+    assert!(
+        !requested_model.contains("attacker-supplied-model-name"),
+        "the raw caller string must never reach the receipt: {requested_model}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_upstreams_receive_document_blocks_verbatim_over_the_translated_path() {
     // A `provider: anthropic` upstream can read a PDF itself. The document block
     // rides through the IR as an unmodelled part and the Anthropic component

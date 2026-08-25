@@ -389,10 +389,12 @@ impl Gateway {
 
         // Committed to the passthrough path.
         let headers = Self::curate_passthrough_headers(raw_headers)?;
-        let configured = self
-            .catalog
-            .iter()
-            .any(|(target, _)| target.model == decision.chosen.model);
+        // The caller's own requested name, not the routed target: `decision`
+        // is only reachable through a successful route, so checking
+        // `decision.chosen.model` against the catalog is a near-tautology —
+        // it is always a configured target and would let an unlisted caller
+        // string through verbatim into the receipt.
+        let configured = self.catalog.iter().any(|(target, _)| target.model == model);
         record.requested_model = canonical_requested_model(&model, configured);
         record.stream = stream;
 
