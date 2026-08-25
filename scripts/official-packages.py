@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 
@@ -31,7 +32,15 @@ def main() -> None:
         if package["kind"] not in KINDS:
             raise SystemExit(f"unsupported official package kind: {package['kind']}")
         if args.kind is None or package["kind"] == args.kind:
-            print(package[args.field])
+            # `sys.stdout.write` with an explicit "\n", not `print`: on Windows
+            # Python's text mode translates "\n" to "\r\n", and the shell
+            # readers that consume this use `IFS= read -r`, which strips the
+            # newline and keeps the carriage return. The package name then ends
+            # in "\r" and the path built from it breaks in the middle —
+            # `plugins/official/agent-openai\r/Cargo.toml`, which reports as a
+            # manifest that does not exist. Six readers across three build
+            # scripts consume this, so the fix belongs at the source.
+            sys.stdout.write(package[args.field] + "\n")
 
 
 if __name__ == "__main__":

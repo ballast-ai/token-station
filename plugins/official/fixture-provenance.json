@@ -1,0 +1,16 @@
+{
+  "comment": "Where each vendored fixture pack came from. Regenerate with scripts/check-provider-fixtures.py record <south-checkout> only after changing South first and re-pinning the revision.",
+  "packages": {
+    "provider-anthropic-v2": {
+      "files": 46,
+      "fixtures": "fixtures-anthropic",
+      "sha256": "86569809a50a4ee12c0c2f7c2c47ae9c929b7e7b9157db863af1e7744efd87e7"
+    },
+    "provider-openai-compatible-v2": {
+      "files": 46,
+      "fixtures": "fixtures",
+      "sha256": "c0a23f2fe0024020012cc47a51a3e5330258a10e00c6c14ccc7526bcdae08164"
+    }
+  },
+  "south_revision": "efbb9b6"
+}

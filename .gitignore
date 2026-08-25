@@ -16,6 +16,14 @@ plugins/official/*/target/
 dist/
 /apps/desktop/coverage/
 
+# npm run from the repository root instead of apps/desktop leaves one here.
+# Without this rule the next person to do it finds a whole dependency tree in
+# On branch develop-v2
+Your branch is up to date with 'origin/develop-v2'.
+
+nothing to commit, working tree clean and has to work out whether it belongs.
+node_modules/
+
 # 私有文档仓的本地软链，不入库
 /all_docs
 

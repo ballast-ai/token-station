@@ -1020,6 +1020,65 @@ fn start_two_native_upstreams_proxy_with(
     spawn_proxy(&config)
 }
 
+/// Two quota accounts under Quota-first, both native. Enough to tell the
+/// account the router picked from the account that actually served.
+fn start_quota_first_native_pair(
+    primary: &MockUpstream,
+    backup: &MockUpstream,
+    key_file: &Path,
+) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-native-quota-pair-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let upstream = |base: String| {
+        json!({
+            "provider": "anthropic",
+            "api_dialect": "anthropic-native",
+            "base_url": base,
+            "auth": { "slot": "provider_api_key", "file": key_file },
+            "models": [
+                {
+                    "model": "deepseek-chat",
+                    "tool": true,
+                    "tool_state": "verified",
+                    "context_window": 128_000
+                }
+            ]
+        })
+    };
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-anthropic"],
+            "providers": {
+                "openai-compatible": "provider-openai-compatible-v2",
+                "anthropic": "provider-anthropic-v2"
+            }
+        },
+        "upstreams": {
+            "account_a": upstream(primary.base_url()),
+            "account_b": upstream(backup.base_url())
+        },
+        "router": {
+            "version": 1,
+            "routing_mode": "quota_first",
+            "quota_accounts": [
+                { "upstream": "account_a", "model": "deepseek-chat" },
+                { "upstream": "account_b", "model": "deepseek-chat" }
+            ]
+        }
+    });
+    let config: ClientConfig =
+        serde_json::from_value(config).expect("paired quota-first native config parses");
+    spawn_proxy(&config)
+}
+
 fn start_quota_first_native_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
@@ -1225,6 +1284,30 @@ fn attempt_engines(data_dir: &Path) -> Vec<(String, Option<String>)> {
         .expect("attempt engine query")
         .collect::<Result<Vec<_>, _>>()
         .expect("attempt engine rows decode")
+}
+
+/// The `decisions` row for the most recent request: kind, chosen upstream, and
+/// the quota snapshot that explains why that account was picked.
+///
+/// The snapshot is the receipt's answer to "why this account". A native turn
+/// that routes through the shared control plane must produce one exactly like
+/// a canonical turn does; a native turn that quietly kept its own routing
+/// would not.
+fn last_decision(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
+    db.query_row(
+        "SELECT * FROM decisions ORDER BY rowid DESC LIMIT 1",
+        [],
+        |row| {
+            let mut out = std::collections::BTreeMap::new();
+            for (index, name) in row.as_ref().column_names().iter().enumerate() {
+                let value: rusqlite::types::Value = row.get(index)?;
+                out.insert((*name).to_owned(), format!("{value:?}"));
+            }
+            Ok(out)
+        },
+    )
+    .expect("a decision row exists")
 }
 
 fn last_row(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
@@ -1933,13 +2016,19 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                // 60s. This was 5s, then 15s, and the coverage job still hit
-                // `Timeout(Global)` under llvm-cov instrumentation on a loaded
-                // 4-core runner. The claim is that the proxy answers rather
-                // than hangs, and a hang is unbounded — a wide margin proves
-                // it exactly as well as a tight one, and stops re-proving the
-                // runner's scheduler instead.
-                .timeout_global(Some(std::time::Duration::from_mins(1)))
+                // `timeout_recv_response`, not `timeout_global`. The global
+                // clock starts inside `send`, so it also covers connecting and
+                // writing the request — and then keeps running while the main
+                // thread waits for arrival and decides to cancel. None of that
+                // is what this test claims. On a loaded 4-core runner sharing
+                // 128 parallel tests, that pre-cancel stretch is what expired,
+                // which is why the budget went 5s -> 15s -> 60s and still
+                // failed: each raise bought margin for the scheduler rather
+                // than for the proxy. This clock starts once the request is
+                // written and the client is waiting on the proxy, which is
+                // exactly the interval the claim is about, so 15s bounds a
+                // hang without re-proving the runner.
+                .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
                 .http_status_as_error(false)
                 .build(),
         );
@@ -1958,8 +2047,8 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
             .as_u16()
     });
 
-    // 10s, not 3s: the same coverage-runner starvation that broke the client's
-    // 15s budget would break a 3s arrival wait first.
+    // 10s, not 3s: a loaded runner can starve this thread before the client's
+    // request lands, and that delay no longer eats the client's budget.
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while (mock.hits() == 0 || proxy.control.in_flight() == 0)
         && std::time::Instant::now() < arrival_deadline
@@ -8353,6 +8442,228 @@ fn a_streamed_native_turn_reports_usage_from_both_halves_of_the_stream() {
         "message_delta carries the output side, and absorbing the two keeps both"
     );
     assert_eq!(row["cache_read_tokens"], "Integer(25)");
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A native turn writes the same quota decision snapshot a canonical turn
+/// writes.
+///
+/// P1-A asks for behavioural evidence that the two entry paths share one
+/// control plane, not a static reading of the call graph. The snapshot is a
+/// good witness because only `execute_routed_attempt` produces it: a native
+/// path that still did its own routing would leave the columns null while the
+/// request itself succeeded, which no other assertion would notice.
+#[test]
+fn a_native_turn_records_the_quota_snapshot_that_explains_its_account() {
+    let upstream_answer = json!({
+        "id": "msg_quota_snapshot",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "served"}],
+        "usage": {"input_tokens": 11, "output_tokens": 5}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("native-snapshot", "sk-native-snapshot");
+    let proxy = start_quota_first_native_proxy(&mock, &key);
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+
+    let _settled = last_row(&proxy.data_dir);
+    let decision = last_decision(&proxy.data_dir);
+    assert_eq!(decision["decision_kind"], "Text(\"quota\")");
+    assert_eq!(decision["upstream"], "Text(\"deepseek_native\")");
+    assert_ne!(
+        decision["quota_headroom_permille"], "Null",
+        "quota mode must record the headroom that justified this account"
+    );
+    assert_ne!(
+        decision["quota_pressured"], "Null",
+        "and whether the account was under rate pressure"
+    );
+    assert_ne!(decision["quota_exhausted"], "Null");
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A Tiered native turn takes no quota lease and records no quota snapshot.
+///
+/// The preamble is what keeps quota bookkeeping out of Tiered entirely: one
+/// wall-clock read and one session key, both skipped. If that judgement moved
+/// back into the entry points, a Tiered turn would start paying for machinery
+/// it does not use, and the snapshot columns are where that first shows.
+#[test]
+fn a_tiered_native_turn_records_no_quota_snapshot() {
+    let upstream_answer = json!({
+        "id": "msg_tiered_native",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "served"}],
+        "usage": {"input_tokens": 3, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("native-tiered", "sk-native-tiered");
+    let proxy = start_native_anthropic_proxy(&mock, &key);
+
+    let (status, body) = post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+
+    let _settled = last_row(&proxy.data_dir);
+    let decision = last_decision(&proxy.data_dir);
+    assert_ne!(
+        decision["decision_kind"], "Text(\"quota\")",
+        "Tiered routing does not decide by quota"
+    );
+    for column in [
+        "quota_reset_ms",
+        "quota_remaining_permille",
+        "quota_headroom_permille",
+        "quota_pressured",
+        "quota_exhausted",
+    ] {
+        assert_eq!(
+            decision[column], "Null",
+            "Tiered must not compute quota bookkeeping: {column}"
+        );
+    }
+
+    std::fs::remove_file(key).ok();
+}
+
+/// After a fallover, the conversation is remembered against the account that
+/// actually served — not the one the router picked first.
+///
+/// This is the assertion P1-A exists for. `settle_quota` charges and remembers
+/// `served` from the attempt's result, and the difference only becomes visible
+/// when those two accounts differ, which needs a fallover to arrange. Settling
+/// against `decision.chosen` instead would still pass every single-account
+/// test, then quietly warm the wrong prompt cache and bill the wrong quota on
+/// every conversation that ever fell over.
+///
+/// Affinity is the readable half: the next turn of the same conversation goes
+/// where the last one was served.
+#[test]
+fn a_conversation_that_fell_over_is_remembered_against_the_account_that_served() {
+    let served = |id: &str| {
+        json!({
+            "id": id,
+            "type": "message",
+            "role": "assistant",
+            "model": "deepseek-chat",
+            "content": [{"type": "text", "text": "served"}],
+            "usage": {"input_tokens": 9, "output_tokens": 4}
+        })
+        .to_string()
+    };
+    let boom = r#"{"error":{"type":"api_error","message":"account_a is down"}}"#;
+    // `account_a` fails the first turn and would answer a second if it were
+    // asked; the point is that it is not asked.
+    let account_a = MockUpstream::start(vec![
+        vec![http_json(503, boom)],
+        vec![http_json(200, &served("msg_a_second"))],
+    ]);
+    let account_b = MockUpstream::start(vec![
+        vec![http_json(200, &served("msg_b_first"))],
+        vec![http_json(200, &served("msg_b_second"))],
+    ]);
+    let key = key_file("native-affinity", "sk-native-affinity");
+    let proxy = start_quota_first_native_pair(&account_a, &account_b, &key);
+
+    // Turn one: the router picks an account, it fails, the other serves.
+    let turn = native_server_tool_turn();
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "the second account serves the turn: {body}");
+    assert_eq!(account_a.hits(), 1, "the first account was tried once");
+    assert_eq!(account_b.hits(), 1, "and the second served");
+    let first = last_row(&proxy.data_dir);
+    assert_eq!(
+        first["upstream"], "Text(\"account_b\")",
+        "the receipt names the account that settled the request"
+    );
+
+    // Turn two: same conversation. Affinity must follow the account that
+    // served, so the failed one is not tried again.
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        account_a.hits(),
+        1,
+        "the account that failed must not be tried again for this conversation"
+    );
+    assert_eq!(
+        account_b.hits(),
+        2,
+        "the conversation stays on the account that warmed its prompt cache"
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A settled turn releases its in-flight lease exactly once, whether it
+/// succeeded or failed.
+///
+/// A leaked lease is invisible for two minutes and then heals itself, which is
+/// the worst shape a bug can have: it degrades routing under load and leaves
+/// nothing behind to find. It is observable in the receipt, though. Each live
+/// lease docks the account's rate headroom, and the decision snapshot records
+/// the headroom that justified the choice — taken before this turn's own lease
+/// is granted. So a released lease means a flat reading turn over turn, and a
+/// leaked one means a staircase down.
+#[test]
+fn every_settled_turn_releases_its_lease_exactly_once() {
+    let ok = json!({
+        "id": "msg_lease",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "served"}],
+        "usage": {"input_tokens": 2, "output_tokens": 1}
+    })
+    .to_string();
+    let boom = r#"{"error":{"type":"invalid_request_error","message":"nope"}}"#;
+    // A 4xx is relayed without a fallover, so this turn begins and ends on the
+    // same account — a failure that still has to give its lease back.
+    let account_a = MockUpstream::start(vec![
+        vec![http_json(200, &ok)],
+        vec![http_json(200, &ok)],
+        vec![http_json(400, boom)],
+        vec![http_json(200, &ok)],
+    ]);
+    let account_b = MockUpstream::start(vec![vec![http_json(200, &ok)]]);
+    let key = key_file("native-lease", "sk-native-lease");
+    let proxy = start_quota_first_native_pair(&account_a, &account_b, &key);
+
+    let turn = native_server_tool_turn();
+    let headroom = |proxy: &Proxy| {
+        let _settled = last_row(&proxy.data_dir);
+        last_decision(&proxy.data_dir)["quota_headroom_permille"].clone()
+    };
+
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+    let first = headroom(&proxy);
+
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        headroom(&proxy),
+        first,
+        "a succeeded turn gave its lease back, so the next turn sees the same headroom"
+    );
+
+    let (status, _) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 400, "the third turn is refused by the upstream");
+
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        headroom(&proxy),
+        first,
+        "a failed turn gave its lease back too"
+    );
 
     std::fs::remove_file(key).ok();
 }
