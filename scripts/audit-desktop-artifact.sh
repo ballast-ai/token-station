@@ -27,9 +27,12 @@ done
 
 strings_file="$(mktemp "${TMPDIR:-/tmp}/token-station-strings.XXXXXX")"
 self_test_report="$(mktemp "${TMPDIR:-/tmp}/token-station-self-test.XXXXXX")"
+expected_ids="$(mktemp "${TMPDIR:-/tmp}/token-station-package-ids.XXXXXX")"
 readonly strings_file
 readonly self_test_report
-trap 'rm -f "$strings_file" "$self_test_report"' EXIT
+readonly expected_ids
+trap 'rm -f "$strings_file" "$self_test_report" "$expected_ids"' EXIT
+"$source_root/scripts/official-packages.py" --field id | LC_ALL=C sort >"$expected_ids"
 
 self_test_output="$self_test_report"
 case "$(uname -s)" in
@@ -40,17 +43,10 @@ esac
   [[ -s "$self_test_report" ]] && sed -n '1,120p' "$self_test_report" >&2
   exit 1
 }
-node - "$self_test_report" <<'NODE'
+node - "$self_test_report" "$expected_ids" <<'NODE'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const expected = [
-  "agent-anthropic",
-  "agent-gemini",
-  "agent-openai",
-  "agent-openai-responses",
-  "provider-anthropic",
-  "provider-openai-compatible",
-];
+const expected = fs.readFileSync(process.argv[3], "utf8").trim().split("\n");
 const actual = Array.isArray(report.plugins)
   ? report.plugins.map((plugin) => plugin.id).sort()
   : [];
@@ -97,18 +93,12 @@ if [[ -n "$builder_home" ]] && grep -Fq "$builder_home/" "$strings_file"; then
   exit 1
 fi
 
-for plugin in \
-  agent-openai \
-  agent-anthropic \
-  agent-openai-responses \
-  agent-gemini \
-  provider-anthropic \
-  provider-openai-compatible; do
+while IFS= read -r plugin; do
   grep -Fq "$plugin" "$strings_file" || {
     echo "desktop executable is missing builtin plugin marker: $plugin" >&2
     exit 1
   }
-done
+done < <("$source_root/scripts/official-packages.py" --field id)
 
 case "$(uname -s)" in
   Darwin)
