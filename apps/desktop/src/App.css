@@ -9925,6 +9925,74 @@ samp {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+/* Usage first-viewport layout */
+.station-content-topnav > .usage-workspace-page {
+  padding-top: 12px;
+}
+
+.usage-workspace-page {
+  gap: 8px;
+}
+
+.usage-page-embedded {
+  gap: 10px;
+}
+
+.usage-page-embedded .usage-trend-panel > header {
+  min-height: 50px;
+  padding-block: 7px;
+}
+
+.usage-page-embedded .usage-chart-legend {
+  min-height: 24px;
+  padding-top: 3px;
+}
+
+.usage-page-embedded .usage-trend-chart {
+  padding-bottom: 10px;
+}
+
+.usage-page-embedded .usage-chart-stage {
+  min-height: 250px;
+}
+
+.usage-page-embedded .usage-trend-svg {
+  height: 250px;
+}
+
+.usage-workspace-heading.page-heading-with-action {
+  min-height: 34px;
+  align-items: center;
+  flex-direction: row;
+  gap: 16px;
+}
+
+.usage-workspace-heading > div {
+  min-width: 0;
+}
+
+.usage-workspace-heading h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.usage-workspace-heading p {
+  display: none;
+}
+
+.usage-workspace-heading .usage-management-link[data-slot="button"] {
+  min-height: 32px;
+  height: 32px;
+  padding-inline: 10px;
+}
+
+@media (max-width: 560px) {
+  .usage-workspace-heading.page-heading-with-action {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 /* ---- Startup discovery workspace ------------------------------------- */
 .startup-home {
   width: 100%;

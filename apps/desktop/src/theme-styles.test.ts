@@ -378,6 +378,38 @@ describe("retained page theme styles", () => {
     expect(detailRule).not.toMatch(/border:/);
   });
 
+  it("keeps the Usage trend and metric strip in the first desktop viewport", () => {
+    const firstViewportRules = appCss.slice(
+      appCss.indexOf("/* Usage first-viewport layout */"),
+    );
+    const workspaceRule = firstViewportRules.match(
+      /\.station-content-topnav\s*>\s*\.usage-workspace-page\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const pageRule = firstViewportRules.match(
+      /(?:^|\n)\.usage-workspace-page\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const headingRule = firstViewportRules.match(
+      /\.usage-workspace-heading\.page-heading-with-action\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const descriptionRule = firstViewportRules.match(
+      /\.usage-workspace-heading p\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const chartStageRule = firstViewportRules.match(
+      /\.usage-page-embedded \.usage-chart-stage\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const chartSvgRule = firstViewportRules.match(
+      /\.usage-page-embedded \.usage-trend-svg\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(workspaceRule).toMatch(/padding-top:\s*12px/);
+    expect(pageRule).toMatch(/gap:\s*8px/);
+    expect(headingRule).toMatch(/flex-direction:\s*row/);
+    expect(headingRule).toMatch(/align-items:\s*center/);
+    expect(descriptionRule).toMatch(/display:\s*none/);
+    expect(chartStageRule).toMatch(/min-height:\s*250px/);
+    expect(chartSvgRule).toMatch(/height:\s*250px/);
+  });
+
   it("reserves intrinsic space for Overview routing badges", () => {
     const routeRowRule = appCss.match(
       /\.overview-route-list\s*>\s*div\s*\{([^}]*)\}/s,
