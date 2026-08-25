@@ -49,9 +49,16 @@ function formatCost(
   return receipt.cost_kind === "actual" ? `${actual} ${amount}` : `${estimated} ${amount}`;
 }
 
-function formatTokens(receipt: ReceiptView, unknown: string): string {
+function formatTokens(
+  receipt: ReceiptView,
+  unknown: string,
+  reported: (total: number) => string,
+): string {
   if (!receipt.usage) return unknown;
-  return `${receipt.usage.input_tokens + receipt.usage.output_tokens} tokens`;
+  const total = receipt.usage.input_tokens + receipt.usage.output_tokens;
+  return receipt.usage_semantics === "provider_reported_v1"
+    ? reported(total)
+    : `${total} tokens`;
 }
 
 function formatDecisionReason(
@@ -161,6 +168,16 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
     );
   return (
     <div className="receipt-timeline receipt-timeline-compact" data-testid="receipt-trace">
+      {receipt.usage && receipt.usage_semantics === "provider_reported_v1" && (
+        <p className="receipt-section-empty">
+          {copy(
+            "Historical provider-reported input may exclude cache tokens; this total is not canonical.",
+            "历史上游输入可能不含缓存 Token；此总量并非规范总量。",
+            "歷史上游輸入可能不含快取 Token；此總量並非規範總量。",
+            "過去のプロバイダー報告入力にはキャッシュトークンが含まれない場合があり、この合計は正規化済みではありません。",
+          )}
+        </p>
+      )}
       {diagnosis && (
         <section className="receipt-diagnosis" aria-label={copy("Error diagnosis", "错误诊断", "錯誤診斷", "エラー診断")}>
           <h4>{copy("Diagnosis", "诊断", "診斷", "診断")}</h4>
@@ -480,7 +497,16 @@ export default function RecentReceipts() {
                     HTTP {receipt.status}{receipt.error_code ? ` · ${receipt.error_code}` : ""}
                   </span>
                   <span>{receipt.latency_ms} ms</span>
-                  <span>{formatTokens(receipt, copy("Tokens unknown", "token 未知", "token 未知", "token は未知"))}</span>
+                  <span>{formatTokens(
+                    receipt,
+                    copy("Tokens unknown", "token 未知", "token 未知", "token は未知"),
+                    (total) => copy(
+                      `${total} reported tokens`,
+                      `${total} 上游上报 Token`,
+                      `${total} 上游上報 Token`,
+                      `${total} 報告トークン`,
+                    ),
+                  )}</span>
                   <span className={`receipt-cost ${receipt.cost_kind}`}>
                     {formatCost(
                       receipt,

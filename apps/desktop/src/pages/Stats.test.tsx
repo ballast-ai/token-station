@@ -51,6 +51,7 @@ const aggregate = {
   p50_latency_ms: 120,
   p95_latency_ms: 480,
   input_tokens: 1_000,
+  legacy_input_requests: 0,
   output_tokens: 500,
   cache_read_tokens: 400,
   cache_write_tokens: 100,
@@ -186,6 +187,19 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(screen.getByRole("img", { name: /用量趋势/ })).toBeInTheDocument();
   });
 
+  it("labels mixed history as provider-reported instead of claiming canonical totals", async () => {
+    const legacyAggregate = { ...aggregate, legacy_input_requests: 2 };
+    vi.mocked(getStats).mockImplementation(async (_since, by) => statsView(by, legacyAggregate));
+
+    render(<Stats />);
+
+    expect(await screen.findByText("上报 Token")).toBeInTheDocument();
+    const composition = screen.getByRole("group", { name: "Token 构成" });
+    expect(within(composition).getByText("上游输入")).toBeInTheDocument();
+    expect(within(composition).getByText("2 个历史请求使用上游原始输入")).toBeInTheDocument();
+    expect(within(composition).getByText(/历史输入可能不包含缓存子项/)).toBeInTheDocument();
+  });
+
   it("orders trend, overview metrics, Token composition, and contribution details", async () => {
     render(<Stats />);
 
@@ -217,7 +231,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(await screen.findByLabelText("暂无 Token 数据")).toBeInTheDocument();
   });
 
-  it("shows cache write as unavailable when no write tokens were reported", async () => {
+  it("does not invent missing-data semantics for a zero cache-write aggregate", async () => {
     vi.mocked(getStats).mockImplementation(async (_since, by) => {
       const withoutCacheWrites = { ...aggregate, cache_write_tokens: 0 };
       return statsView(by, withoutCacheWrites);
@@ -227,8 +241,8 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
     const composition = await screen.findByRole("group", { name: "Token 构成" });
     const cacheWrite = within(composition).getByText("缓存写").closest("div");
-    expect(cacheWrite).toHaveTextContent("未上报");
-    expect(cacheWrite).toHaveAttribute("title", "上游未报告缓存写入 Token");
+    expect(cacheWrite).toHaveTextContent("0");
+    expect(cacheWrite).not.toHaveAttribute("title");
   });
 
   it("exposes refresh in the collapsed landing row and keeps current data while refreshing", async () => {

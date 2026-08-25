@@ -73,6 +73,8 @@ pub struct Aggregate {
     pub p50_latency_ms: u64,
     pub p95_latency_ms: u64,
     pub input_tokens: u64,
+    /// Usage-bearing rows whose input value predates canonical versioning.
+    pub legacy_input_requests: u64,
     pub output_tokens: u64,
     /// Provider-side cache reads and writes partition `input_tokens`; they are
     /// exposed for efficiency analysis and must not be added to total tokens.
@@ -249,7 +251,8 @@ fn select_rows(
                       ORDER BY ordinal DESC LIMIT 1),
                     (SELECT south_fallback_reason FROM attempts
                       WHERE attempts.request_id = requests.request_id
-                      ORDER BY ordinal DESC LIMIT 1)
+                      ORDER BY ordinal DESC LIMIT 1),
+                    usage_semantics
              FROM requests
              WHERE started_at_ms >= ?1
                AND (?2 IS NULL OR started_at_ms < ?2)
@@ -291,6 +294,7 @@ fn select_rows(
                     day_bucket_ms: narrow(row.get::<_, i64>(14)?),
                     engine: row.get::<_, Option<String>>(15)?,
                     fallback_reason: row.get::<_, Option<String>>(16)?,
+                    legacy_input: row.get::<_, String>(17)? == "provider_reported_v1",
                 })
             },
         )
@@ -380,6 +384,13 @@ pub fn render(report: &Report, group_by: Option<GroupBy>) -> String {
     if report.total.cost_micros.is_none() {
         out.push_str("cost: no priced rows yet — the pricing table arrives with account binding\n");
     }
+    if report.total.legacy_input_requests > 0 {
+        let _ = writeln!(
+            out,
+            "input: {} historical request(s) use provider-reported semantics; their input totals may exclude cache tokens",
+            report.total.legacy_input_requests
+        );
+    }
     out
 }
 
@@ -402,6 +413,7 @@ struct Row {
     /// From the last attempt; `None` when no upstream was ever tried.
     engine: Option<String>,
     fallback_reason: Option<String>,
+    legacy_input: bool,
 }
 
 impl Row {
@@ -442,6 +454,7 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         p50_latency_ms: 0,
         p95_latency_ms: 0,
         input_tokens: 0,
+        legacy_input_requests: 0,
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
@@ -457,6 +470,9 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         bucket.input_tokens = bucket
             .input_tokens
             .saturating_add(row.input_tokens.unwrap_or(0));
+        if row.input_tokens.is_some() && row.legacy_input {
+            bucket.legacy_input_requests = bucket.legacy_input_requests.saturating_add(1);
+        }
         bucket.output_tokens = bucket
             .output_tokens
             .saturating_add(row.output_tokens.unwrap_or(0));
@@ -619,6 +635,41 @@ mod tests {
         assert_eq!(report.total.cache_read_tokens, 400);
         assert_eq!(report.total.cache_write_tokens, 120);
         assert_eq!(report.total.reasoning_tokens, 80);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn mixed_history_reports_how_many_input_values_are_legacy() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-mixed-usage-semantics.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut canonical = record(10, 1, 200, Some("provider"), Some((150, 5)));
+        canonical.request_id = "canonical".to_owned();
+        store.record(&canonical);
+        let mut legacy = record(11, 1, 200, Some("provider"), Some((30, 5)));
+        legacy.request_id = "legacy".to_owned();
+        store.record(&legacy);
+        drop(store);
+        rusqlite::Connection::open(&path)
+            .expect("opens")
+            .execute(
+                "UPDATE requests SET usage_semantics='provider_reported_v1' WHERE request_id='legacy'",
+                [],
+            )
+            .expect("marks released semantics");
+
+        let report = collect(&path, None, None).expect("collects");
+        assert_eq!(report.total.input_tokens, 180);
+        assert_eq!(report.total.legacy_input_requests, 1);
+        let rendered = super::render(&report, None);
+        assert!(
+            rendered.contains("1 historical request(s) use provider-reported semantics"),
+            "{rendered}"
+        );
+
         std::fs::remove_file(path).ok();
     }
 

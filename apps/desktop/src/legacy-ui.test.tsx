@@ -184,7 +184,7 @@ beforeEach(() => {
   vi.mocked(getStats).mockResolvedValue({
     total: {
       requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
-      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      input_tokens: 0, legacy_input_requests: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
       reasoning_tokens: 0, cost_micros: null,
       priced_requests: 0, unpriced_requests: 0,
     },
@@ -246,6 +246,7 @@ describe("legacy desktop read-only pages", () => {
         p50_latency_ms: 20,
         p95_latency_ms: 80,
         input_tokens: 100,
+        legacy_input_requests: 0,
         output_tokens: 50,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
@@ -260,6 +261,7 @@ describe("legacy desktop read-only pages", () => {
         p50_latency_ms: 20,
         p95_latency_ms: 80,
         input_tokens: 100,
+        legacy_input_requests: 0,
         output_tokens: 50,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
@@ -298,7 +300,7 @@ describe("legacy desktop read-only pages", () => {
   it("groups by transport engine and by fallback reason", async () => {
     const totals = {
       requests: 3, errors: 0, p50_latency_ms: 10, p95_latency_ms: 20,
-      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0,
+      input_tokens: 0, legacy_input_requests: 0, output_tokens: 0, cache_read_tokens: 0,
       cache_write_tokens: 0, reasoning_tokens: 0, cost_micros: 0,
       priced_requests: 0, unpriced_requests: 3,
     };
@@ -323,7 +325,7 @@ describe("legacy desktop read-only pages", () => {
     vi.mocked(getStats).mockResolvedValueOnce({
       total: {
         requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
-        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+        input_tokens: 0, legacy_input_requests: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
         reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 0,
       },
@@ -624,13 +626,13 @@ describe("model selection and provider model management", () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
-        input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
+        input_tokens: 120, legacy_input_requests: 0, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
         reasoning_tokens: 0, cost_micros: 1_250_000,
         priced_requests: 3, unpriced_requests: 0,
       },
       groups: [["openai", {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
-        input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
+        input_tokens: 120, legacy_input_requests: 0, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
         reasoning_tokens: 0, cost_micros: 1_250_000,
         priced_requests: 3, unpriced_requests: 0,
       }]],
@@ -865,13 +867,13 @@ describe("model selection and provider model management", () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
-        input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
+        input_tokens: 2, legacy_input_requests: 0, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
         reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 1,
       },
       groups: [["local", {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
-        input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
+        input_tokens: 2, legacy_input_requests: 0, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
         reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 1,
       }]],

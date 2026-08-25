@@ -1,0 +1,13 @@
+{
+  "method": "POST",
+  "url": "https://api.openai.com/v1/chat/completions",
+  "headers": {"content-type": "application/json"},
+  "body": {
+    "model": "m",
+    "messages": [
+      {"role": "assistant", "content": []},
+      {"role": "user", "content": null}
+    ]
+  },
+  "auth": {"scheme": "bearer", "secret": "provider_api_key"}
+}

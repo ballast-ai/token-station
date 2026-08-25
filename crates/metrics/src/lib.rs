@@ -55,7 +55,8 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v8: adds content-free transport diagnostics and closed conversion
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
-pub const SCHEMA_VERSION: u32 = 12;
+/// - v13: records whether input usage is legacy provider-reported or canonical.
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// The content-free transport path classification recorded for diagnostics.
 /// Raw, caller-controlled URL paths never enter the receipt.
@@ -619,6 +620,17 @@ impl RequestRecord {
 /// The fixed read model returned by both local admin transports. It mirrors a
 /// request summary and its optional normalized children without exposing raw
 /// database rows or a generic JSON extension point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSemantics {
+    /// Historical rows persisted before the host versioned whether provider
+    /// input counts included cache buckets.
+    ProviderReportedV1,
+    /// Input is the canonical inclusive total; cache buckets are subsets.
+    #[default]
+    CanonicalTotalV2,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReceiptView {
     pub request_id: String,
@@ -645,6 +657,8 @@ pub struct ReceiptView {
     pub routing: Option<RoutingRecord>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    #[serde(default)]
+    pub usage_semantics: UsageSemantics,
     #[serde(default)]
     pub cost_kind: CostKind,
     #[serde(default)]

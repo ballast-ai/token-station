@@ -305,6 +305,7 @@ export interface ReceiptView {
   attempts: number;
   routing: ReceiptRouteView | null;
   usage: ReceiptUsageView | null;
+  usage_semantics?: "provider_reported_v1" | "canonical_total_v2";
   cost_micros: number | null;
   price_version: number | null;
   agent_id: string | null;
@@ -682,6 +683,7 @@ export interface AggView {
   p50_latency_ms: number;
   p95_latency_ms: number;
   input_tokens: number;
+  legacy_input_requests: number;
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;

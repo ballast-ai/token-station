@@ -83,6 +83,16 @@ beforeEach(() => {
 });
 
 describe("RecentReceipts", () => {
+  it("历史回执明确标记上游上报总量而不冒充规范总量", async () => {
+    vi.mocked(getRecentReceipts).mockResolvedValue([
+      receipt(1, { usage_semantics: "provider_reported_v1" }),
+    ]);
+    render(<RecentReceipts />);
+
+    expect(await screen.findByText("15 上游上报 Token")).toBeInTheDocument();
+    expect(screen.getByText("历史上游输入可能不含缓存 Token；此总量并非规范总量。")).toBeInTheDocument();
+  });
+
   it("挂载立即读取并把异常超量结果截断为 5 条", async () => {
     vi.mocked(getRecentReceipts).mockResolvedValue(
       Array.from({ length: 7 }, (_, index) => receipt(index + 1)),

@@ -1,0 +1,5 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": "{\"id\": \"chatcmpl-c1\", \"model\": \"gpt-5.5\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"Cached.\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 4, \"prompt_tokens_details\": {\"cached_tokens\": 90}}}"
+}

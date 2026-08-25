@@ -182,6 +182,31 @@ describe("UsageRequestLog", () => {
     }));
   });
 
+  it("请求列表和详情均披露历史上游输入语义", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getRequestReceipts).mockResolvedValue({
+      items: [receipt({ usage_semantics: "provider_reported_v1" })],
+      plaintext_by_request_id: {},
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    render(
+      <UsageRequestLog
+        since="24h"
+        agentId=""
+        upstream=""
+        model=""
+        refreshKey={0}
+      />,
+    );
+
+    expect(await screen.findByText("1,200 上游上报")).toBeInTheDocument();
+    await user.click(screen.getByText("deepseek/deepseek-v4-pro"));
+    expect(screen.getByText("上游输入")).toBeInTheDocument();
+    expect(screen.getByText("历史上游输入可能不含缓存 Token；总量并非规范总量。")).toBeInTheDocument();
+  });
+
   it("shows paginated receipt metadata and explains unknown model pricing", async () => {
     const user = userEvent.setup();
     render(

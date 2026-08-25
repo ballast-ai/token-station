@@ -23,7 +23,7 @@ use token_station_metrics::{
     AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
     ConversionRecord, ConversionStage, CostKind, DecisionRecord, ProviderCallEngine,
     QuotaDecisionSnapshot, ReceiptView, RecordedDecidedBy, Recorder, RequestPathKind,
-    RequestRecord, RoutingRecord, SCHEMA_VERSION,
+    RequestRecord, RoutingRecord, SCHEMA_VERSION, UsageSemantics,
 };
 use token_station_protocol::{ErrorCode, HintKind, StreamOutcome, Usage};
 use token_station_router_core::RequestFeatures;
@@ -427,6 +427,15 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE attempts_v12 RENAME TO attempts;
         ",
     },
+    Migration {
+        // v12 -> v13: input-token meaning changed at the provider boundary.
+        // Existing rows keep their bytes and are marked ambiguous instead of
+        // being guessed into the new canonical inclusive contract.
+        to: 13,
+        sql: "ALTER TABLE requests ADD COLUMN usage_semantics TEXT NOT NULL
+                DEFAULT 'provider_reported_v1'
+                CHECK (usage_semantics IN ('provider_reported_v1', 'canonical_total_v2'));",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -470,6 +479,8 @@ CREATE TABLE IF NOT EXISTS requests (
     cache_read_tokens   INTEGER,
     cache_write_tokens  INTEGER,
     reasoning_tokens    INTEGER,
+    usage_semantics     TEXT NOT NULL DEFAULT 'canonical_total_v2'
+        CHECK (usage_semantics IN ('provider_reported_v1', 'canonical_total_v2')),
     -- micro-units; NULL when the model has no price (unknown, not zero)
     cost_micros         INTEGER,
     -- actual/estimated/unknown; unknown never carries a numeric cost
@@ -779,7 +790,7 @@ impl SqliteStore {
                         requires_json_schema, code_block_count, requested_max_output_tokens,
                         hint_count, input_tokens, output_tokens, cache_read_tokens,
                         cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
-                        attempts, request_method, path_kind
+                        attempts, request_method, path_kind, usage_semantics
                    FROM requests
                   {where_sql}
                   ORDER BY started_at_ms DESC, request_id DESC, id DESC
@@ -856,6 +867,7 @@ impl SqliteStore {
                            FROM requests
                           WHERE id > ?1
                             AND cost_kind = 'unknown'
+                            AND usage_semantics = 'canonical_total_v2'
                             AND model IS NOT NULL
                             AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
                           ORDER BY id
@@ -1019,7 +1031,7 @@ impl SqliteStore {
                 est_input_tokens, message_count, tool_count, has_images,
                 requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, cost_micros, cost_kind, price_version
+                reasoning_tokens, usage_semantics, cost_micros, cost_kind, price_version
             ) VALUES (
                 :request_id, :agent_id, :running_revision, :request_method, :path_kind,
                 :started_at_ms, :latency_ms, :protocol, :requested_model, :stream, :status,
@@ -1029,7 +1041,7 @@ impl SqliteStore {
                 :est_input_tokens, :message_count, :tool_count, :has_images,
                 :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
                 :input_tokens, :output_tokens, :cache_read_tokens, :cache_write_tokens,
-                :reasoning_tokens, :cost_micros, :cost_kind, :price_version
+                :reasoning_tokens, 'canonical_total_v2', :cost_micros, :cost_kind, :price_version
             )",
             named_params! {
                 ":request_id": record.request_id,
@@ -1289,6 +1301,14 @@ fn cost_kind(column: usize, value: &str) -> Result<CostKind, rusqlite::Error> {
     }
 }
 
+fn usage_semantics(column: usize, value: &str) -> Result<UsageSemantics, rusqlite::Error> {
+    match value {
+        "provider_reported_v1" => Ok(UsageSemantics::ProviderReportedV1),
+        "canonical_total_v2" => Ok(UsageSemantics::CanonicalTotalV2),
+        other => Err(invalid_enum(column, "usage semantics", other)),
+    }
+}
+
 fn stream_outcome(column: usize, value: &str) -> Result<StreamOutcome, rusqlite::Error> {
     match value {
         "complete" => Ok(StreamOutcome::Complete),
@@ -1439,7 +1459,7 @@ impl SqliteStore {
                         requires_json_schema, code_block_count, requested_max_output_tokens,
                         hint_count, input_tokens, output_tokens, cache_read_tokens,
                         cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
-                        attempts, request_method, path_kind
+                        attempts, request_method, path_kind, usage_semantics
                    FROM requests
                   ORDER BY started_at_ms DESC, request_id DESC, id DESC
                   LIMIT ?1",
@@ -1555,6 +1575,7 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
             attempts: row.get(37)?,
             routing,
             usage,
+            usage_semantics: usage_semantics(40, &row.get::<_, String>(40)?)?,
             cost_kind,
             cost_micros,
             price_version,
@@ -2290,6 +2311,142 @@ mod tests {
         drop(store);
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(path.with_extension("v9.bak")).ok();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // the released schema fixture is intentionally complete
+    fn v12_history_keeps_provider_reported_semantics_and_is_not_repriced() {
+        use std::collections::BTreeMap;
+
+        use crate::pricing::{ModelPrice, PriceTable};
+
+        let path = scratch("migrate-v12-usage-semantics");
+        std::fs::remove_file(&path).ok();
+        {
+            let connection = rusqlite::Connection::open(&path).expect("opens");
+            connection.execute_batch(V3_SCHEMA).expect("v3 schema");
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=12).contains(&migration.to))
+            {
+                connection
+                    .execute_batch(migration.sql)
+                    .expect("migrates to v12");
+            }
+            connection
+                .execute(
+                    "INSERT INTO requests (
+                        request_id, started_at_ms, latency_ms, protocol, requested_model,
+                        stream, status, attempts, upstream, model,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                        cost_kind
+                     ) VALUES (
+                        'released-row', 1, 1, 'anthropic-messages', 'claude',
+                        0, 200, 1, 'anthropic-account', 'claude',
+                        30, 5, 100, 20, 'unknown'
+                     )",
+                    [],
+                )
+                .expect("released row");
+            connection
+                .pragma_update(None, "user_version", 12)
+                .expect("stamps v12");
+        }
+
+        let store = SqliteStore::open(&path).expect("v12 migrates");
+        let legacy_semantics: String = store
+            .connection
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT usage_semantics FROM requests WHERE request_id='released-row'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy semantics reads");
+        assert_eq!(legacy_semantics, "provider_reported_v1");
+
+        let mut canonical = receipt("canonical-row", 2);
+        canonical.routing.as_mut().expect("routing").model = "claude".to_owned();
+        canonical.usage = Some(Usage {
+            input_tokens: 150,
+            output_tokens: 0,
+            cache_read_tokens: 100,
+            cache_write_tokens: 20,
+            ..Usage::default()
+        });
+        canonical.cost_kind = CostKind::Unknown;
+        canonical.cost_micros = None;
+        canonical.price_version = None;
+        store.record(&canonical);
+        let receipts = store.read_recent(5).expect("receipt semantics read");
+        assert_eq!(
+            receipts
+                .iter()
+                .find(|receipt| receipt.request_id == "released-row")
+                .expect("legacy receipt")
+                .usage_semantics,
+            token_station_metrics::UsageSemantics::ProviderReportedV1
+        );
+        drop(store);
+
+        let pricing = PriceTable {
+            version: 7,
+            models: BTreeMap::from([(
+                "claude".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 3_000_000,
+                    output_per_mtok: 15_000_000,
+                    cache_read_per_mtok: 300_000,
+                    cache_write_per_mtok: 3_750_000,
+                    reasoning_per_mtok: None,
+                },
+            )]),
+        };
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).expect("backfills"),
+            1,
+            "only the canonical row can be repriced"
+        );
+
+        let connection = rusqlite::Connection::open(&path).expect("reopens");
+        let rows = connection
+            .prepare(
+                "SELECT request_id, usage_semantics, cost_kind, cost_micros
+                   FROM requests ORDER BY request_id",
+            )
+            .expect("prepares")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .expect("queries")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decodes");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "canonical-row".to_owned(),
+                    "canonical_total_v2".to_owned(),
+                    "estimated".to_owned(),
+                    Some(195),
+                ),
+                (
+                    "released-row".to_owned(),
+                    "provider_reported_v1".to_owned(),
+                    "unknown".to_owned(),
+                    None,
+                ),
+            ]
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("v12.bak")).ok();
     }
 
     #[test]

@@ -31,6 +31,7 @@ const EMPTY_AGG: AggView = {
   p50_latency_ms: 0,
   p95_latency_ms: 0,
   input_tokens: 0,
+  legacy_input_requests: 0,
   output_tokens: 0,
   cache_read_tokens: 0,
   cache_write_tokens: 0,
@@ -64,6 +65,12 @@ function cacheRate(aggregate: AggView): string {
 function latency(ms: number): string {
   if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
   return `${ms}ms`;
+}
+
+function inputLabel(aggregate: AggView, copy: LocalizedCopy): string {
+  return aggregate.legacy_input_requests > 0
+    ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
+    : copy("Input total", "输入总量", "輸入總量", "入力合計");
 }
 
 function budgetWarning(
@@ -111,7 +118,6 @@ function ToneIcon({ type }: { type: "token" | "request" | "cost" | "success" | "
 
 function TokenRail({ aggregate }: { aggregate: AggView }) {
   const { language, copy } = useLocalizedCopy();
-  const unavailableCacheWrite = copy("Not reported", "未上报", "未回報", "未報告");
   const total = aggregate.input_tokens + aggregate.output_tokens;
   const inputPercent = total ? (aggregate.input_tokens / total) * 100 : 0;
   const outputPercent = total ? 100 - inputPercent : 0;
@@ -127,15 +133,31 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
       <div className="usage-composition-head">
         <div>
           <span>{copy("Token composition", "Token 构成", "Token 組成", "トークンの構成")}</span>
-          <small>{copy("Input and output form the total", "输入与输出组成总量", "輸入與輸出組成總量", "入力と出力が総量を形成します")}</small>
+          <small>{aggregate.legacy_input_requests > 0
+            ? copy(
+                `${aggregate.legacy_input_requests} historical requests use provider-reported input`,
+                `${aggregate.legacy_input_requests} 个历史请求使用上游原始输入`,
+                `${aggregate.legacy_input_requests} 個歷史請求使用上游原始輸入`,
+                `${aggregate.legacy_input_requests} 件の履歴リクエストはプロバイダー報告の入力を使用します`,
+              )
+            : copy("Input and output form the total", "输入与输出组成总量", "輸入與輸出組成總量", "入力と出力が総量を形成します")}</small>
         </div>
-        <p>{copy(
-          "Total Tokens = input + output; cache and reasoning are nested and are not counted twice.",
-          "总 Token = 输入 + 输出；缓存和推理为子项，不重复计数。", "總 Token = 輸入 + 輸出；快取和推理為子項，不重複計數。", "総トークン = 入力 + 出力；キャッシュと推論はサブ項目で、重複してカウントされません。"
-        )}</p>
+        <p>{aggregate.legacy_input_requests > 0
+          ? copy(
+              "Reported Tokens = reported input + output. Historical input may exclude cache subsets.",
+              "上报 Token = 上游输入 + 输出。历史输入可能不包含缓存子项。",
+              "回報 Token = 上游輸入 + 輸出。歷史輸入可能不包含快取子項。",
+              "報告トークン = 報告された入力 + 出力。履歴入力にはキャッシュ項目が含まれない場合があります。",
+            )
+          : copy(
+              "Total Tokens = input + output; cache and reasoning are nested and are not counted twice.",
+              "总 Token = 输入 + 输出；缓存和推理为子项，不重复计数。",
+              "總 Token = 輸入 + 輸出；快取和推理為子項，不重複計數。",
+              "総トークン = 入力 + 出力；キャッシュと推論はサブ項目で、重複してカウントされません。",
+            )}</p>
       </div>
       <div className="usage-rail-labels">
-        <span><i className="tone-input" /><em>{copy("Input total", "输入总量", "輸入總量", "入力合計")}</em><strong>{compact(aggregate.input_tokens, language)}</strong></span>
+        <span><i className="tone-input" /><em>{inputLabel(aggregate, copy)}</em><strong>{compact(aggregate.input_tokens, language)}</strong></span>
         <span><i className="tone-output" /><em>{copy("Output", "输出", "輸出", "出力")}</em><strong>{compact(aggregate.output_tokens, language)}</strong></span>
       </div>
       <div
@@ -157,19 +179,9 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
           <span><i className="tone-cache" />{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")}</span>
           <strong>{compact(aggregate.cache_read_tokens, language)}</strong>
         </div>
-        <div title={aggregate.cache_write_tokens === 0
-          ? copy(
-              "Upstream did not report cache-write tokens",
-              "上游未报告缓存写入 Token",
-              "上游未報告快取寫入 Token",
-              "アップストリームがキャッシュ書き込みトークンを報告していません",
-            )
-          : undefined}
-        >
+        <div>
           <span><i className="tone-cache-write" />{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")}</span>
-          <strong>{aggregate.cache_write_tokens === 0
-            ? unavailableCacheWrite
-            : compact(aggregate.cache_write_tokens, language)}</strong>
+          <strong>{compact(aggregate.cache_write_tokens, language)}</strong>
         </div>
         <div>
           <span><i className="tone-reasoning" />{copy("Reasoning", "推理", "推理", "推論")}</span>
@@ -507,7 +519,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
               <span className="usage-dual-axis-note">{copy("Left: tokens · Right: cost", "左轴 Token · 右轴成本", "左軸 Token · 右軸成本", "左軸 Token · 右軸コスト")}</span>
             </header>
             <div className="usage-chart-legend">
-              <span><i className="tone-input" />{copy("Input total", "输入总量", "輸入總量", "入力合計")}</span>
+              <span><i className="tone-input" />{inputLabel(aggregate, copy)}</span>
               <span><i className="tone-output" />{copy("Output", "输出", "輸出", "出力")}</span>
               <span><i className="tone-cache-write" />{copy("Cache write", "缓存写入", "快取寫入", "キャッシュ書き込み")}</span>
               <span><i className="tone-cache-read" />{copy("Cache hit", "缓存命中", "快取命中", "キャッシュヒット")}</span>
@@ -520,9 +532,13 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
             <div className="usage-primary-metric">
               <ToneIcon type="token" />
               <div>
-                <span>{copy("Total tokens", "总 Token", "總 Token", "合計トークン")}</span>
+                <span>{aggregate.legacy_input_requests > 0
+                  ? copy("Reported tokens", "上报 Token", "回報 Token", "報告トークン")
+                  : copy("Total tokens", "总 Token", "總 Token", "合計トークン")}</span>
                 <strong title={totalTokens.toLocaleString(language)}>{totalTokens.toLocaleString(language)}</strong>
-                <small>≈ {compact(totalTokens, language, 2)} · {copy("input + output", "输入 + 输出", "輸入 + 輸出", "入力 + 出力")}</small>
+                <small>≈ {compact(totalTokens, language, 2)} · {aggregate.legacy_input_requests > 0
+                  ? copy("reported input + output", "上游输入 + 输出", "上游輸入 + 輸出", "報告された入力 + 出力")
+                  : copy("input + output", "输入 + 输出", "輸入 + 輸出", "入力 + 出力")}</small>
               </div>
             </div>
             <div className="usage-kpi-grid">

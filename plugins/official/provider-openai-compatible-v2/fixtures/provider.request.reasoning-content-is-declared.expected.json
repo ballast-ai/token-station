@@ -1,0 +1,14 @@
+{
+  "method": "POST",
+  "url": "https://api.openai.com/v1/chat/completions",
+  "headers": {"content-type": "application/json"},
+  "body": {
+    "model": "reasoner-1",
+    "messages": [{
+      "role": "assistant",
+      "content": [{"type": "text", "text": "here you go"}],
+      "reasoning_content": "weighing it up"
+    }]
+  },
+  "auth": {"scheme": "bearer", "secret": "provider_api_key"}
+}

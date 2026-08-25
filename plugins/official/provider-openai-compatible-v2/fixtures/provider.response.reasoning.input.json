@@ -1,0 +1,5 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": "{\"id\": \"chatcmpl-r1\", \"model\": \"deepseek-reasoner\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"The answer is 4.\", \"reasoning_content\": \"2+2 carries no trick.\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 12, \"completion_tokens\": 30, \"completion_tokens_details\": {\"reasoning_tokens\": 22}}}"
+}

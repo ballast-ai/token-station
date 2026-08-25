@@ -52,9 +52,10 @@ function routeOf(receipt: ReceiptView, noRoute: string): string {
     : noRoute;
 }
 
-function tokenTotal(receipt: ReceiptView): string {
+function tokenTotal(receipt: ReceiptView, reported: (total: string) => string): string {
   if (!receipt.usage) return "—";
-  return (receipt.usage.input_tokens + receipt.usage.output_tokens).toLocaleString();
+  const total = (receipt.usage.input_tokens + receipt.usage.output_tokens).toLocaleString();
+  return receipt.usage_semantics === "provider_reported_v1" ? reported(total) : total;
 }
 
 function costLabel(receipt: ReceiptView, actual: string, estimated: string, unknown: string): string {
@@ -579,11 +580,21 @@ function ReceiptDetail({
       </div>
       {receipt.usage && (
         <div className="usage-log-token-facts">
-          <span>{copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
+          <span>{receipt.usage_semantics === "provider_reported_v1"
+            ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
+            : copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
           <span>{copy("Output", "输出", "輸出", "出力")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
           <span>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
           <span>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
           <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
+          {receipt.usage_semantics === "provider_reported_v1" && (
+            <small>{copy(
+              "Historical provider-reported input may exclude cache tokens; totals are not canonical.",
+              "历史上游输入可能不含缓存 Token；总量并非规范总量。",
+              "歷史上游輸入可能不含快取 Token；總量並非規範總量。",
+              "過去のプロバイダー報告入力にはキャッシュトークンが含まれない場合があり、合計は正規化済みではありません。",
+            )}</small>
+          )}
         </div>
       )}
       <CostState receipt={receipt} />
@@ -750,7 +761,12 @@ export default function UsageRequestLog({
                   <span className={`usage-log-status ${success ? "success" : cancelled ? "" : "error"}`}>
                     {cancelled ? copy("Cancelled", "已取消", "已取消", "キャンセル") : `HTTP ${receipt.status}`}
                   </span>
-                  <span>{tokenTotal(receipt)}</span>
+                  <span>{tokenTotal(receipt, (total) => copy(
+                    `${total} reported`,
+                    `${total} 上游上报`,
+                    `${total} 上游上報`,
+                    `${total} 報告値`,
+                  ))}</span>
                   <span className="usage-log-latency">{receipt.latency_ms.toLocaleString()} ms</span>
                   <CostState receipt={receipt} compact />
                 </button>

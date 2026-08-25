@@ -3582,6 +3582,44 @@ fn anthropic_native_direct_refuses_tools_before_hitting_an_unsupported_target() 
 }
 
 #[test]
+fn native_passthrough_hashes_an_unlisted_requested_model_in_the_receipt() {
+    // Direct mode routes to a fixed target regardless of the requested model
+    // string, so `decision.chosen.model` is always the configured target and
+    // can never stand in for "did the caller actually name a configured
+    // model". The receipt must still hash whatever the caller sent.
+    let mut turn = native_server_tool_turn();
+    turn["model"] = json!("attacker-supplied-model-name");
+    let upstream_answer = json!({
+        "id": "msg_native_unlisted_model",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("native-unlisted-model", "sk-upstream-secret\n");
+    let proxy = start_native_anthropic_proxy_with(&mock, &key, true, "verified");
+
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 1, "the passthrough still reached the upstream");
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    let requested_model = row["requested_model"].clone();
+    assert!(
+        requested_model.starts_with("Text(\"unlisted:"),
+        "an unlisted caller-supplied model must be hashed, not stored verbatim: {requested_model}"
+    );
+    assert!(
+        !requested_model.contains("attacker-supplied-model-name"),
+        "the raw caller string must never reach the receipt: {requested_model}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_upstreams_receive_document_blocks_verbatim_over_the_translated_path() {
     // A `provider: anthropic` upstream can read a PDF itself. The document block
     // rides through the IR as an unmodelled part and the Anthropic component
@@ -8322,6 +8360,56 @@ fn a_streamed_native_turn_reports_usage_from_both_halves_of_the_stream() {
         "message_delta carries the output side, and absorbing the two keeps both"
     );
     assert_eq!(row["cache_read_tokens"], "Integer(25)");
+
+    std::fs::remove_file(key).ok();
+}
+
+/// A TCP EOF is not Anthropic's application-level terminal event. Treating
+/// any clean socket close as success made a cut-off answer indistinguishable
+/// from a completed one in receipts and quota settlement.
+#[test]
+fn a_native_stream_without_message_stop_is_recorded_as_truncated() {
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_cut\",",
+        "\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-chat\",",
+        "\"content\":[],\"usage\":{\"input_tokens\":30}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,",
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+        "\"usage\":{\"output_tokens\":7}}\n\n",
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{sse}"
+    );
+    let mock = MockUpstream::start(vec![vec![response.into_bytes()]]);
+    let key = key_file(
+        "native-missing-message-stop",
+        "sk-native-missing-message-stop",
+    );
+    let proxy = start_quota_first_native_proxy(&mock, &key);
+
+    let mut turn = native_server_tool_turn();
+    turn["stream"] = json!(true);
+    let (status, body) = post_messages(&proxy, &turn, &proxy.virtual_key);
+    assert_eq!(status, 200, "the partial body already committed: {body}");
+    assert!(body.contains("partial"), "{body}");
+    assert_eq!(mock.hits(), 1, "a committed native stream cannot replay");
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(receipts[0]["status"], json!(502));
+    assert_eq!(receipts[0]["error_code"], json!("transport_truncated"));
+    assert_eq!(receipts[0]["usage"]["input_tokens"], json!(30));
+    assert_eq!(receipts[0]["usage"]["output_tokens"], json!(7));
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["stream_outcome"],
+        json!("failed_after_partial")
+    );
 
     std::fs::remove_file(key).ok();
 }

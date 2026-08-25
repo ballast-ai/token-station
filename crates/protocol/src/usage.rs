@@ -57,7 +57,7 @@ impl Usage {
     /// needs the individual fields, not this sum.
     #[must_use]
     pub const fn total(self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens.saturating_add(self.output_tokens)
     }
 
     /// Fold a later usage report into this one, field-wise, with
@@ -101,6 +101,17 @@ mod tests {
         };
 
         assert_eq!(usage.total(), 120);
+    }
+
+    #[test]
+    fn total_saturates_malformed_provider_counts_instead_of_wrapping() {
+        let usage = Usage {
+            input_tokens: u64::MAX,
+            output_tokens: 1,
+            ..Usage::default()
+        };
+
+        assert_eq!(usage.total(), u64::MAX);
     }
 
     #[test]

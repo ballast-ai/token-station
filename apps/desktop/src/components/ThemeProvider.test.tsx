@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setDockThemeIcon } from "../api";
@@ -94,13 +94,27 @@ describe("ThemeProvider", () => {
   });
 
   it("does not require AppKit to return the same NSImage allocation", () => {
-    const backendSource = readFileSync(
-      resolve(process.cwd(), "src-tauri/src/lib.rs"),
-      "utf8",
-    );
+    // Located by content, not by path. This used to read `lib.rs` directly and
+    // broke the moment the AppKit bridge moved to `dock_icon.rs` — a test that
+    // fails on a pure move is testing the layout, not the behaviour.
+    //
+    // It is deliberately not a repository-wide search for the string either:
+    // that would pass while the bridge did the wrong thing. It finds the one
+    // file that calls into AppKit, insists there is exactly one, and asserts
+    // the property against that file.
+    const sourceDir = resolve(process.cwd(), "src-tauri/src");
+    const bridges = readdirSync(sourceDir)
+      .filter((name) => name.endsWith(".rs"))
+      .map((name) => ({
+        name,
+        source: readFileSync(resolve(sourceDir, name), "utf8"),
+      }))
+      .filter((file) => file.source.includes("applicationIconImage()"));
 
-    expect(backendSource).toContain("applicationIconImage()");
-    expect(backendSource).not.toContain("std::ptr::eq(&*image, &*applied_image)");
+    expect(bridges.map((file) => file.name)).toHaveLength(1);
+    expect(bridges[0].source).not.toContain(
+      "std::ptr::eq(&*image, &*applied_image)",
+    );
   });
 
   it("defaults to the system preference and keeps the root class in sync", () => {

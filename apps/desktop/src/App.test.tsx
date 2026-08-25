@@ -111,6 +111,7 @@ const statsFixture = {
     p50_latency_ms: 48,
     p95_latency_ms: 320,
     input_tokens: 2400,
+    legacy_input_requests: 0,
     output_tokens: 800,
     cache_read_tokens: 0,
     cache_write_tokens: 0,

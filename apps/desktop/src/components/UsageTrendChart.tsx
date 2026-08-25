@@ -40,6 +40,7 @@ const EMPTY_AGGREGATE: AggView = {
   p50_latency_ms: 0,
   p95_latency_ms: 0,
   input_tokens: 0,
+  legacy_input_requests: 0,
   output_tokens: 0,
   cache_read_tokens: 0,
   cache_write_tokens: 0,
@@ -215,12 +216,12 @@ export default function UsageTrendChart({
   nowMs = Date.now(),
 }: UsageTrendChartProps) {
   const { language, copy } = useLocalizedCopy();
-  const unavailableCacheWrite = copy("Not reported", "未上报", "未回報", "未報告");
   const { buckets, unit } = useMemo(
     () => normalizeBuckets(groups, range, nowMs),
     [groups, range, nowMs],
   );
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const hasLegacyInput = buckets.some(({ aggregate }) => aggregate.legacy_input_requests > 0);
   const plotWidth = WIDTH - PLOT.left - PLOT.right;
   const plotHeight = HEIGHT - PLOT.top - PLOT.bottom;
   const xForIndex = (index: number) => (
@@ -232,7 +233,9 @@ export default function UsageTrendChart({
   const tokenSeries = TOKEN_SERIES.map((series) => ({
     ...series,
     label: {
-      input_tokens: copy("Input total", "输入总量", "輸入總量", "入力合計"),
+      input_tokens: hasLegacyInput
+        ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
+        : copy("Input total", "输入总量", "輸入總量", "入力合計"),
       output_tokens: copy("Output", "输出", "輸出", "出力"),
       cache_write_tokens: copy("Cache write", "缓存写入", "快取寫入", "キャッシュ書き込み"),
       cache_read_tokens: copy("Cache hit", "缓存命中", "快取命中", "キャッシュヒット"),
@@ -403,14 +406,17 @@ export default function UsageTrendChart({
             const hitLeft = index === 0 ? PLOT.left : (previousX + x) / 2;
             const hitRight = index === buckets.length - 1 ? WIDTH - PLOT.right : (x + nextX) / 2;
             const currentCost = costValues[index];
-            const cacheWriteValue = aggregate.cache_write_tokens > 0
-              ? aggregate.cache_write_tokens.toLocaleString(language)
-              : unavailableCacheWrite;
+            const cacheWriteValue = aggregate.requests === 0
+              ? "—"
+              : aggregate.cache_write_tokens.toLocaleString(language);
+            const bucketInputLabel = aggregate.legacy_input_requests > 0
+              ? copy("input reported", "上游输入", "上游輸入", "報告された入力")
+              : copy("input total", "输入总量", "輸入總量", "入力合計");
             const label = copy(
-              `${detailedLabel(bucket.timestamp, unit, language)}: input total ${aggregate.input_tokens.toLocaleString(language)}, output ${aggregate.output_tokens.toLocaleString(language)}, cache write ${cacheWriteValue}, cache hit ${aggregate.cache_read_tokens.toLocaleString(language)}, cost ${currentCost == null ? "unknown" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：输入总量 ${aggregate.input_tokens.toLocaleString(language)}，输出 ${aggregate.output_tokens.toLocaleString(language)}，缓存写入 ${cacheWriteValue}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：輸入總量 ${aggregate.input_tokens.toLocaleString(language)}，輸出 ${aggregate.output_tokens.toLocaleString(language)}，快取寫入 ${cacheWriteValue}，快取命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：入力合計 ${aggregate.input_tokens.toLocaleString(language)}、出力 ${aggregate.output_tokens.toLocaleString(language)}、キャッシュ書き込み ${cacheWriteValue}、キャッシュヒット ${aggregate.cache_read_tokens.toLocaleString(language)}、コスト ${currentCost == null ? "不明" : costLabel(currentCost)}`
+              `${detailedLabel(bucket.timestamp, unit, language)}: ${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}, output ${aggregate.output_tokens.toLocaleString(language)}, cache write ${cacheWriteValue}, cache hit ${aggregate.cache_read_tokens.toLocaleString(language)}, cost ${currentCost == null ? "unknown" : costLabel(currentCost)}`,
+              `${detailedLabel(bucket.timestamp, unit, language)}：${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}，输出 ${aggregate.output_tokens.toLocaleString(language)}，缓存写入 ${cacheWriteValue}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
+              `${detailedLabel(bucket.timestamp, unit, language)}：${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}，輸出 ${aggregate.output_tokens.toLocaleString(language)}，快取寫入 ${cacheWriteValue}，快取命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
+              `${detailedLabel(bucket.timestamp, unit, language)}：${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}、出力 ${aggregate.output_tokens.toLocaleString(language)}、キャッシュ書き込み ${cacheWriteValue}、キャッシュヒット ${aggregate.cache_read_tokens.toLocaleString(language)}、コスト ${currentCost == null ? "不明" : costLabel(currentCost)}`
             );
             return (
               <g
@@ -419,7 +425,7 @@ export default function UsageTrendChart({
                 data-bucket-key={bucket.key}
                 tabIndex={isActive(aggregate) ? 0 : undefined}
                 aria-label={isActive(aggregate) ? label : undefined}
-                onMouseEnter={() => setActiveKey(bucket.key)}
+                onMouseEnter={() => isActive(aggregate) && setActiveKey(bucket.key)}
                 onFocus={() => isActive(aggregate) && setActiveKey(bucket.key)}
                 onBlur={() => setActiveKey(null)}
               >
@@ -468,10 +474,7 @@ export default function UsageTrendChart({
             <strong>{detailedLabel(active.timestamp, unit, language)}</strong>
             {tokenSeries.map((series) => (
               <span className={series.className} key={series.key}>
-                <i />{series.label}<em>{series.key === "cache_write_tokens"
-                  && active.aggregate.cache_write_tokens === 0
-                  ? unavailableCacheWrite
-                  : active.aggregate[series.key].toLocaleString(language)}</em>
+                <i />{series.label}<em>{active.aggregate[series.key].toLocaleString(language)}</em>
               </span>
             ))}
             <span className="cost">

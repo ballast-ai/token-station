@@ -222,6 +222,7 @@ fn agg_view(aggregate: &stats::Aggregate) -> Value {
         "cost_micros": aggregate.cost_micros,
         "priced_requests": aggregate.priced_requests,
         "unpriced_requests": aggregate.unpriced_requests,
+        "legacy_input_requests": aggregate.legacy_input_requests,
     })
 }
 
@@ -239,5 +240,22 @@ fn agg_zero() -> Value {
         "cost_micros": null,
         "priced_requests": 0,
         "unpriced_requests": 0,
+        "legacy_input_requests": 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{agg_view, agg_zero};
+
+    #[test]
+    fn both_stats_transports_expose_legacy_usage_semantics() {
+        let aggregate = crate::stats::Aggregate {
+            legacy_input_requests: 3,
+            ..crate::stats::Aggregate::default()
+        };
+
+        assert_eq!(agg_view(&aggregate)["legacy_input_requests"], 3);
+        assert_eq!(agg_zero()["legacy_input_requests"], 0);
+    }
 }

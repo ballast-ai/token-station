@@ -458,7 +458,28 @@ fn cache_candidate_preserves_semantics(
     current_entries.is_subset(&candidate_entries)
 }
 
-fn semantic_model_entries(body: &str) -> Option<BTreeSet<(String, String)>> {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SemanticFacet {
+    Entry,
+    ExplicitCacheWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SemanticCatalogEntry {
+    provider_id: String,
+    model_id: String,
+    facet: SemanticFacet,
+}
+
+fn semantic_entry(provider_id: &str, model_id: &str, facet: SemanticFacet) -> SemanticCatalogEntry {
+    SemanticCatalogEntry {
+        provider_id: provider_id.to_owned(),
+        model_id: model_id.to_owned(),
+        facet,
+    }
+}
+
+fn semantic_model_entries(body: &str) -> Option<BTreeSet<SemanticCatalogEntry>> {
     let providers: BTreeMap<String, CatalogProvider> = serde_json::from_str(body).ok()?;
     validate_unique_provider_namespaces(&providers).ok()?;
     let mut entries = BTreeSet::new();
@@ -486,14 +507,14 @@ fn semantic_model_entries(body: &str) -> Option<BTreeSet<(String, String)>> {
                     .chars()
                     .all(|character| character.is_ascii_graphic())
             {
-                entries.insert((provider_id.clone(), model_id.to_owned()));
+                entries.insert(semantic_entry(&provider_id, model_id, SemanticFacet::Entry));
             }
         }
     }
     Some(entries)
 }
 
-fn semantic_price_entries(body: &str) -> Option<BTreeSet<(String, String)>> {
+fn semantic_price_entries(body: &str) -> Option<BTreeSet<SemanticCatalogEntry>> {
     let providers: BTreeMap<String, CatalogProvider> = serde_json::from_str(body).ok()?;
     validate_unique_provider_namespaces(&providers).ok()?;
     let mut entries = BTreeSet::new();
@@ -522,7 +543,14 @@ fn semantic_price_entries(body: &str) -> Option<BTreeSet<(String, String)>> {
                 model.id.trim()
             };
             if !model_id.is_empty() {
-                entries.insert((provider_id.clone(), model_id.to_owned()));
+                entries.insert(semantic_entry(&provider_id, model_id, SemanticFacet::Entry));
+                if cost.cache_write.is_some() {
+                    entries.insert(semantic_entry(
+                        &provider_id,
+                        model_id,
+                        SemanticFacet::ExplicitCacheWrite,
+                    ));
+                }
             }
         }
     }
@@ -936,6 +964,21 @@ fn commit_cache_if_preserves(
     };
     let current = read_cache(data_dir, kind);
     let current_entries = current.as_ref().and_then(|value| entries(&value.body));
+    // An omitted cache-write price is ambiguous: the public response may be
+    // partial, while accepting it would silently replace a known provider
+    // rate with our lower input-price fallback. Model retirement can be
+    // confirmed by repetition; loss of an explicit monetary fact cannot.
+    if matches!(kind, CatalogCacheKind::Prices)
+        && current_entries.as_ref().is_some_and(|current| {
+            current.iter().any(|entry| {
+                entry.facet == SemanticFacet::ExplicitCacheWrite
+                    && !candidate_entries.contains(entry)
+            })
+        })
+    {
+        remove_pending_cache(data_dir, kind);
+        return Ok(false);
+    }
     if current_entries
         .as_ref()
         .is_none_or(|current| current.is_subset(&candidate_entries))
@@ -1321,6 +1364,8 @@ mod tests {
         }"#;
         let incomplete_price =
             CATALOG.replace("\"cache_read\": 0.3", "\"cache_read_omitted\": 0.3");
+        let downgraded_cache_write =
+            CATALOG.replace("\"cache_write\": 3.75", "\"cache_write_omitted\": 3.75");
 
         assert!(!cache_candidate_preserves_semantics(
             partial,
@@ -1339,6 +1384,11 @@ mod tests {
         ));
         assert!(!cache_candidate_preserves_semantics(
             &incomplete_price,
+            Some(CATALOG),
+            CatalogCacheKind::Prices,
+        ));
+        assert!(!cache_candidate_preserves_semantics(
+            &downgraded_cache_write,
             Some(CATALOG),
             CatalogCacheKind::Prices,
         ));
@@ -1403,6 +1453,35 @@ mod tests {
             retired
         );
         assert!(!pending_cache_path(&data_dir, CatalogCacheKind::Models).exists());
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_omission_never_erases_an_explicit_cache_write_price() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "token-station-pricing-explicit-cache-write-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let omitted = CATALOG.replace("\"cache_write\": 3.75", "\"cache_write_omitted\": 3.75");
+        write_cache(&data_dir, CatalogCacheKind::Prices, CATALOG.as_bytes()).unwrap();
+
+        for observation in ["observation-1", "observation-2", "observation-3"] {
+            assert!(!commit_cache_if_preserves(
+                &data_dir,
+                CatalogCacheKind::Prices,
+                &omitted,
+                observation,
+            )
+            .unwrap());
+        }
+        assert_eq!(
+            read_cache(&data_dir, CatalogCacheKind::Prices)
+                .unwrap()
+                .body,
+            CATALOG
+        );
+        assert!(!pending_cache_path(&data_dir, CatalogCacheKind::Prices).exists());
         std::fs::remove_dir_all(data_dir).unwrap();
     }
 
