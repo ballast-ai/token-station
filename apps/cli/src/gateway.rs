@@ -104,6 +104,39 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// points are the network's, which is exactly what conformance drilled the
 /// parser on.
 const STREAM_READ: usize = 8 * 1024;
+const ANTHROPIC_PROVIDER: &str = "anthropic";
+
+/// Provider adapters return their wire usage vocabulary. Normalize that data
+/// exactly once as it enters the host's canonical seam: unlike OpenAI-style
+/// APIs, Anthropic reports fresh input separately from cache reads and writes.
+fn canonical_provider_usage(provider: &str, mut usage: Usage) -> Usage {
+    if provider == ANTHROPIC_PROVIDER {
+        usage.input_tokens = usage
+            .input_tokens
+            .saturating_add(usage.cache_read_tokens)
+            .saturating_add(usage.cache_write_tokens);
+    }
+    usage
+}
+
+fn canonical_provider_events(provider: &str, events: Vec<StreamEvent>) -> Vec<StreamEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            StreamEvent::Usage { usage } => StreamEvent::Usage {
+                usage: canonical_provider_usage(provider, usage),
+            },
+            event => event,
+        })
+        .collect()
+}
+
+fn absorb_record_usage(record: &mut RequestRecord, usage: Usage) {
+    record
+        .usage
+        .get_or_insert_with(Usage::default)
+        .absorb(usage);
+}
 
 /// Reads Anthropic's wire `usage` object into the canonical [`Usage`].
 ///
@@ -122,18 +155,60 @@ fn anthropic_wire_usage(usage: &serde_json::Value) -> Option<Usage> {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
     };
-    let parsed = Usage {
-        input_tokens: field("input_tokens").unwrap_or(0),
-        output_tokens: field("output_tokens").unwrap_or(0),
-        cache_read_tokens: field("cache_read_input_tokens").unwrap_or(0),
-        cache_write_tokens: field("cache_creation_input_tokens").unwrap_or(0),
-        cache_write_5m_tokens: tier("ephemeral_5m_input_tokens"),
-        cache_write_1h_tokens: tier("ephemeral_1h_input_tokens"),
-        reasoning_tokens: 0,
-    };
+    let parsed = canonical_provider_usage(
+        ANTHROPIC_PROVIDER,
+        Usage {
+            input_tokens: field("input_tokens").unwrap_or(0),
+            output_tokens: field("output_tokens").unwrap_or(0),
+            cache_read_tokens: field("cache_read_input_tokens").unwrap_or(0),
+            cache_write_tokens: field("cache_creation_input_tokens").unwrap_or(0),
+            cache_write_5m_tokens: tier("ephemeral_5m_input_tokens"),
+            cache_write_1h_tokens: tier("ephemeral_1h_input_tokens"),
+            reasoning_tokens: 0,
+        },
+    );
     // An object with none of the fields we understand is not a usage report;
     // recording zeros would claim a free turn rather than an unknown one.
     (parsed != Usage::default()).then_some(parsed)
+}
+
+#[cfg(test)]
+mod anthropic_usage_tests {
+    use super::{AnthropicSseUsageTap, anthropic_wire_usage};
+
+    #[test]
+    fn wire_input_is_normalized_to_the_canonical_inclusive_total() {
+        let usage = anthropic_wire_usage(&serde_json::json!({
+            "input_tokens": 30,
+            "output_tokens": 12,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 20
+        }))
+        .expect("usage");
+
+        assert_eq!(usage.input_tokens, 150);
+        assert_eq!(usage.cache_read_tokens, 100);
+        assert_eq!(usage.cache_write_tokens, 20);
+        assert_eq!(usage.total(), 162);
+    }
+
+    #[test]
+    fn streaming_usage_keeps_input_buckets_when_output_arrives_later() {
+        let mut tap = AnthropicSseUsageTap::default();
+        tap.observe(concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"usage\":{\"input_tokens\":30,",
+            "\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":20}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"usage\":{\"output_tokens\":12}}\n\n"
+        ));
+
+        let usage = tap.into_usage().expect("usage");
+        assert_eq!(usage.input_tokens, 150);
+        assert_eq!(usage.output_tokens, 12);
+        assert_eq!(usage.cache_read_tokens, 100);
+        assert_eq!(usage.cache_write_tokens, 20);
+    }
 }
 
 /// Pulls usage out of a relayed Anthropic SSE stream without altering a byte
@@ -4683,7 +4758,7 @@ impl Gateway {
             Err(AttemptTerminal::Outcome(outcome)) => return Ok(outcome),
             Err(AttemptTerminal::Error(error)) => return Err(error),
         };
-        let chat_response = upstream
+        let mut chat_response = upstream
             .plugin
             .parse_response(&parts)
             .inspect_err(|error| {
@@ -4696,6 +4771,8 @@ impl Gateway {
                     Some(error.code),
                 );
             })?;
+        chat_response.usage =
+            canonical_provider_usage(upstream.config.provider.as_str(), chat_response.usage);
         record_conversion(
             record,
             ConversionStage::ProviderResponse,
@@ -5848,6 +5925,8 @@ impl Gateway {
                             );
                         }
                     };
+                    let events =
+                        canonical_provider_events(upstream.config.provider.as_str(), events);
                     if let Some(error) = events.iter().find_map(|event| match event {
                         StreamEvent::Error { error } => Some(error.clone()),
                         _ => None,
@@ -5903,7 +5982,7 @@ impl Gateway {
                         // No `delivered` update: this is the last batch the
                         // stream can produce, and the guard above already ran.
                         match event {
-                            StreamEvent::Usage { usage } => record.usage = Some(usage),
+                            StreamEvent::Usage { usage } => absorb_record_usage(record, usage),
                             StreamEvent::Done { .. } => terminal = true,
                             _ => {}
                         }
@@ -6001,6 +6080,7 @@ impl Gateway {
                         );
                     }
                 };
+                let events = canonical_provider_events(upstream.config.provider.as_str(), events);
                 if let Some(error) = events.iter().find_map(|event| match event {
                     StreamEvent::Error { error } => Some(error.clone()),
                     _ => None,
@@ -6067,7 +6147,7 @@ impl Gateway {
                     match event {
                         StreamEvent::Done { .. } => terminal = true,
                         StreamEvent::Usage { usage } => {
-                            record.usage = Some(usage);
+                            absorb_record_usage(record, usage);
                             delivered = true;
                         }
                         _ => delivered = true,

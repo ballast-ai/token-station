@@ -231,7 +231,7 @@ export default function UsageTrendChart({
   const tokenSeries = TOKEN_SERIES.map((series) => ({
     ...series,
     label: {
-      input_tokens: copy("Input", "输入", "輸入", "入力"),
+      input_tokens: copy("Input total", "输入总量", "輸入總量", "入力合計"),
       output_tokens: copy("Output", "输出", "輸出", "出力"),
       cache_write_tokens: copy("Cache write", "缓存写入", "快取寫入", "キャッシュ書き込み"),
       cache_read_tokens: copy("Cache hit", "缓存命中", "快取命中", "キャッシュヒット"),
@@ -402,11 +402,14 @@ export default function UsageTrendChart({
             const hitLeft = index === 0 ? PLOT.left : (previousX + x) / 2;
             const hitRight = index === buckets.length - 1 ? WIDTH - PLOT.right : (x + nextX) / 2;
             const currentCost = costValues[index];
+            const cacheWriteValue = aggregate.cache_write_tokens > 0
+              ? aggregate.cache_write_tokens.toLocaleString(language)
+              : "N/A";
             const label = copy(
-              `${detailedLabel(bucket.timestamp, unit, language)}: input ${aggregate.input_tokens.toLocaleString(language)}, output ${aggregate.output_tokens.toLocaleString(language)}, cache write ${aggregate.cache_write_tokens.toLocaleString(language)}, cache hit ${aggregate.cache_read_tokens.toLocaleString(language)}, cost ${currentCost == null ? "unknown" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：输入 ${aggregate.input_tokens.toLocaleString(language)}，输出 ${aggregate.output_tokens.toLocaleString(language)}，缓存写入 ${aggregate.cache_write_tokens.toLocaleString(language)}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：輸入 ${aggregate.input_tokens.toLocaleString(language)}，輸出 ${aggregate.output_tokens.toLocaleString(language)}，快取寫入 ${aggregate.cache_write_tokens.toLocaleString(language)}，快取命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：入力 ${aggregate.input_tokens.toLocaleString(language)}、出力 ${aggregate.output_tokens.toLocaleString(language)}、キャッシュ書き込み ${aggregate.cache_write_tokens.toLocaleString(language)}、キャッシュヒット ${aggregate.cache_read_tokens.toLocaleString(language)}、コスト ${currentCost == null ? "不明" : costLabel(currentCost)}`
+              `${detailedLabel(bucket.timestamp, unit, language)}: input total ${aggregate.input_tokens.toLocaleString(language)}, output ${aggregate.output_tokens.toLocaleString(language)}, cache write ${cacheWriteValue}, cache hit ${aggregate.cache_read_tokens.toLocaleString(language)}, cost ${currentCost == null ? "unknown" : costLabel(currentCost)}`,
+              `${detailedLabel(bucket.timestamp, unit, language)}：输入总量 ${aggregate.input_tokens.toLocaleString(language)}，输出 ${aggregate.output_tokens.toLocaleString(language)}，缓存写入 ${cacheWriteValue}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
+              `${detailedLabel(bucket.timestamp, unit, language)}：輸入總量 ${aggregate.input_tokens.toLocaleString(language)}，輸出 ${aggregate.output_tokens.toLocaleString(language)}，快取寫入 ${cacheWriteValue}，快取命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
+              `${detailedLabel(bucket.timestamp, unit, language)}：入力合計 ${aggregate.input_tokens.toLocaleString(language)}、出力 ${aggregate.output_tokens.toLocaleString(language)}、キャッシュ書き込み ${cacheWriteValue}、キャッシュヒット ${aggregate.cache_read_tokens.toLocaleString(language)}、コスト ${currentCost == null ? "不明" : costLabel(currentCost)}`
             );
             return (
               <g
@@ -464,7 +467,10 @@ export default function UsageTrendChart({
             <strong>{detailedLabel(active.timestamp, unit, language)}</strong>
             {tokenSeries.map((series) => (
               <span className={series.className} key={series.key}>
-                <i />{series.label}<em>{active.aggregate[series.key].toLocaleString()}</em>
+                <i />{series.label}<em>{series.key === "cache_write_tokens"
+                  && active.aggregate.cache_write_tokens === 0
+                  ? "N/A"
+                  : active.aggregate[series.key].toLocaleString(language)}</em>
               </span>
             ))}
             <span className="cost">
@@ -474,8 +480,8 @@ export default function UsageTrendChart({
                 : costLabel(costValues[activeIndex] ?? 0)}</em>
             </span>
             <small>{copy(
-              `${active.aggregate.requests.toLocaleString(language)} requests · Cache metrics are a subset of input`,
-              `${active.aggregate.requests.toLocaleString(language)} 次请求 · 缓存指标属于输入子集`, `${active.aggregate.requests.toLocaleString(language)} 次請求 · 快取指標屬於輸入子集`, `${active.aggregate.requests.toLocaleString(language)} 回のリクエスト · キャッシュメトリクスは入力のサブセット`
+              `${active.aggregate.requests.toLocaleString(language)} requests · ${active.aggregate.errors.toLocaleString(language)} errors · Cache metrics are a subset of input`,
+              `${active.aggregate.requests.toLocaleString(language)} 次请求 · ${active.aggregate.errors.toLocaleString(language)} 个错误 · 缓存指标属于输入子集`, `${active.aggregate.requests.toLocaleString(language)} 次請求 · ${active.aggregate.errors.toLocaleString(language)} 個錯誤 · 快取指標屬於輸入子集`, `${active.aggregate.requests.toLocaleString(language)} 回のリクエスト · ${active.aggregate.errors.toLocaleString(language)} 件のエラー · キャッシュメトリクスは入力のサブセット`
             )}</small>
           </div>
         )}

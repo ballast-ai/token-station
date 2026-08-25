@@ -172,7 +172,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
     expect(await screen.findByText("1,500")).toBeInTheDocument();
     const composition = screen.getByRole("group", { name: "Token 构成" });
-    expect(within(composition).getByText("输入")).toBeInTheDocument();
+    expect(within(composition).getByText("输入总量")).toBeInTheDocument();
     expect(within(composition).getByText("输出")).toBeInTheDocument();
     expect(within(composition).getByText("缓存读")).toBeInTheDocument();
     expect(within(composition).getByText("缓存写")).toBeInTheDocument();
@@ -199,6 +199,20 @@ describe("usage dashboard and display-only Agent budgets", () => {
     render(<Stats />);
 
     expect(await screen.findByLabelText("暂无 Token 数据")).toBeInTheDocument();
+  });
+
+  it("shows cache write as unavailable when no write tokens were reported", async () => {
+    vi.mocked(getStats).mockImplementation(async (_since, by) => {
+      const withoutCacheWrites = { ...aggregate, cache_write_tokens: 0 };
+      return statsView(by, withoutCacheWrites);
+    });
+
+    render(<Stats />);
+
+    const composition = await screen.findByRole("group", { name: "Token 构成" });
+    const cacheWrite = within(composition).getByText("缓存写").closest("div");
+    expect(cacheWrite).toHaveTextContent("N/A");
+    expect(cacheWrite).toHaveAttribute("title", "上游未报告缓存写入 Token");
   });
 
   it("does not overlap automatic dashboard refreshes", async () => {

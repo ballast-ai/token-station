@@ -3815,7 +3815,11 @@ fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
         .filter(|event| event["type"] == "message_delta")
         .find_map(|event| event.get("usage").cloned())
         .expect("a message_delta carries cumulative usage");
-    assert_eq!(usage["input_tokens"], json!(7));
+    assert_eq!(
+        usage["input_tokens"],
+        json!(2),
+        "Anthropic wire input excludes its separately reported cache buckets"
+    );
     assert_eq!(usage["output_tokens"], json!(2));
     assert_eq!(usage["cache_read_input_tokens"], json!(3));
     assert_eq!(usage["cache_creation_input_tokens"], json!(2));
@@ -8258,7 +8262,10 @@ fn a_native_turn_reports_the_usage_the_upstream_billed() {
     );
 
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["input_tokens"], "Integer(4321)");
+    assert_eq!(
+        row["input_tokens"], "Integer(4451)",
+        "the canonical receipt stores fresh input plus both cache buckets"
+    );
     assert_eq!(row["output_tokens"], "Integer(765)");
     assert_eq!(row["cache_read_tokens"], "Integer(100)");
     assert_eq!(row["cache_write_tokens"], "Integer(30)");
@@ -8307,8 +8314,8 @@ fn a_streamed_native_turn_reports_usage_from_both_halves_of_the_stream() {
 
     let row = last_row(&proxy.data_dir);
     assert_eq!(
-        row["input_tokens"], "Integer(1500)",
-        "message_start carries the input side"
+        row["input_tokens"], "Integer(1525)",
+        "message_start carries fresh input and the cache bucket; the canonical receipt stores their total"
     );
     assert_eq!(
         row["output_tokens"], "Integer(88)",

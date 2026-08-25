@@ -4410,11 +4410,16 @@ fn catalog_cost_to_model_price(cost: &model_catalog::CatalogCostView) -> Option<
             .then(|| scaled.round() as u64)
     }
 
+    let input_per_mtok = micros(cost.input?)?;
+    let cache_write_per_mtok = match cost.cache_write {
+        Some(value) => micros(value)?,
+        None => input_per_mtok,
+    };
     Some(ModelPrice {
-        input_per_mtok: micros(cost.input?)?,
+        input_per_mtok,
         output_per_mtok: micros(cost.output?)?,
         cache_read_per_mtok: micros(cost.cache_read?)?,
-        cache_write_per_mtok: micros(cost.cache_write?)?,
+        cache_write_per_mtok,
         reasoning_per_mtok: None,
     })
 }
@@ -10314,13 +10319,27 @@ mod tests {
     }
 
     #[test]
-    fn catalog_cost_requires_every_billed_token_class() {
+    fn catalog_cost_uses_standard_input_price_when_cache_write_is_not_distinct() {
         let partial = model_catalog::CatalogCostView {
             input: Some(0.2),
             output: Some(0.6),
             cache_read: Some(0.02),
             cache_write: None,
         };
+        let price = catalog_cost_to_model_price(&partial).expect("usable catalog price");
+        assert_eq!(price.input_per_mtok, 200_000);
+        assert_eq!(price.cache_write_per_mtok, 200_000);
+    }
+
+    #[test]
+    fn catalog_cost_stays_unknown_without_a_cache_read_price() {
+        let partial = model_catalog::CatalogCostView {
+            input: Some(0.2),
+            output: Some(0.6),
+            cache_read: None,
+            cache_write: None,
+        };
+
         assert!(catalog_cost_to_model_price(&partial).is_none());
     }
 

@@ -15,7 +15,7 @@
   "stop_reason": "tool_use",
   "stop_sequence": null,
   "usage": {
-    "input_tokens": 33,
+    "input_tokens": 26,
     "output_tokens": 20,
     "cache_read_input_tokens": 5,
     "cache_creation_input_tokens": 2

@@ -507,10 +507,13 @@ fn semantic_price_entries(body: &str) -> Option<BTreeSet<(String, String)>> {
             let Some(cost) = model.cost.as_ref() else {
                 continue;
             };
-            let complete = [cost.input, cost.output, cost.cache_read, cost.cache_write]
+            let required_prices = [cost.input, cost.output, cost.cache_read]
                 .into_iter()
                 .all(|value| value.is_some_and(|value| usd_per_mtok_to_micros(value).is_ok()));
-            if !complete {
+            let cache_write_is_valid = cost
+                .cache_write
+                .is_none_or(|value| usd_per_mtok_to_micros(value).is_ok());
+            if !required_prices || !cache_write_is_valid {
                 continue;
             }
             let model_id = if model.id.trim().is_empty() {
@@ -675,9 +678,10 @@ fn find_in_provider(
         let Some(cache_read) = cost.cache_read else {
             return Ok(None);
         };
-        let Some(cache_write) = cost.cache_write else {
-            return Ok(None);
-        };
+        // A catalog without a distinct cache-write class still charges those
+        // prompt tokens at the standard input rate. Preserve explicit rates,
+        // and never convert an omitted rate into a free zero.
+        let cache_write = cost.cache_write.unwrap_or(input);
         return Ok(Some(ModelPriceSuggestionView {
             model_id: if model.id.is_empty() {
                 model_key.clone()
@@ -1118,8 +1122,30 @@ mod tests {
     }
 
     #[test]
-    fn does_not_convert_a_missing_token_class_price_into_free_usage() {
-        assert!(suggest_from_json(CATALOG, Some("openai"), "gpt-5", 42)
+    fn missing_cache_write_price_falls_back_to_standard_input_price() {
+        let suggestion = suggest_from_json(CATALOG, Some("openai"), "gpt-5", 42)
+            .unwrap()
+            .expect("price suggestion");
+
+        assert_eq!(suggestion.input_per_mtok, 1_250_000);
+        assert_eq!(suggestion.cache_write_per_mtok, 1_250_000);
+    }
+
+    #[test]
+    fn missing_cache_read_price_remains_unpriced() {
+        let incomplete = r#"{
+          "openai": {
+            "id": "openai",
+            "models": {
+              "gpt-5": {
+                "id": "gpt-5",
+                "cost": {"input": 1.25, "output": 10}
+              }
+            }
+          }
+        }"#;
+
+        assert!(suggest_from_json(incomplete, Some("openai"), "gpt-5", 42)
             .unwrap()
             .is_none());
     }
@@ -1294,7 +1320,7 @@ mod tests {
           }
         }"#;
         let incomplete_price =
-            CATALOG.replace("\"cache_write\": 3.75", "\"cache_write_omitted\": 3.75");
+            CATALOG.replace("\"cache_read\": 0.3", "\"cache_read_omitted\": 0.3");
 
         assert!(!cache_candidate_preserves_semantics(
             partial,

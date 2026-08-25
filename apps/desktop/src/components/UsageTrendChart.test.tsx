@@ -40,11 +40,30 @@ describe("UsageTrendChart", () => {
     expect(container.querySelector(".usage-chart-cost-line")).toBeInTheDocument();
 
     await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
+    expect(screen.getByText("输入总量")).toBeInTheDocument();
     expect(screen.getByText("80,000")).toBeInTheDocument();
     expect(screen.getByText("3,000")).toBeInTheDocument();
     expect(screen.getByText("1,200")).toBeInTheDocument();
     expect(screen.getByText("64,000")).toBeInTheDocument();
     expect(screen.getAllByText("$0.420")).toHaveLength(2);
+    expect(screen.getByText("3 次请求 · 0 个错误 · 缓存指标属于输入子集")).toBeInTheDocument();
+  });
+
+  it("shows an unavailable cache-write metric instead of inventing zero", async () => {
+    const user = userEvent.setup();
+    const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
+    const bucketMs = new Date(2026, 6, 23, 12).getTime();
+    const { container } = render(
+      <UsageTrendChart
+        groups={[[String(bucketMs), { ...aggregate, cache_write_tokens: 0 }]]}
+        range="24h"
+        nowMs={nowMs}
+      />,
+    );
+
+    await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
+    expect(screen.getByText("N/A")).toBeInTheDocument();
+    expect(container.querySelector('[aria-label*="缓存写入 N/A"]')).toBeInTheDocument();
   });
 
   it("marks an unpriced request bucket as unknown instead of zero cost", async () => {

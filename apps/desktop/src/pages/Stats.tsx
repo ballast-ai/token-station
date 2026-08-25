@@ -134,7 +134,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
         )}</p>
       </div>
       <div className="usage-rail-labels">
-        <span><i className="tone-input" /><em>{copy("Input", "输入", "輸入", "入力")}</em><strong>{compact(aggregate.input_tokens, language)}</strong></span>
+        <span><i className="tone-input" /><em>{copy("Input total", "输入总量", "輸入總量", "入力合計")}</em><strong>{compact(aggregate.input_tokens, language)}</strong></span>
         <span><i className="tone-output" /><em>{copy("Output", "输出", "輸出", "出力")}</em><strong>{compact(aggregate.output_tokens, language)}</strong></span>
       </div>
       <div
@@ -156,9 +156,19 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
           <span><i className="tone-cache" />{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")}</span>
           <strong>{compact(aggregate.cache_read_tokens, language)}</strong>
         </div>
-        <div>
+        <div title={aggregate.cache_write_tokens === 0
+          ? copy(
+              "Upstream did not report cache-write tokens",
+              "上游未报告缓存写入 Token",
+              "上游未報告快取寫入 Token",
+              "アップストリームがキャッシュ書き込みトークンを報告していません",
+            )
+          : undefined}
+        >
           <span><i className="tone-cache-write" />{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")}</span>
-          <strong>{compact(aggregate.cache_write_tokens, language)}</strong>
+          <strong>{aggregate.cache_write_tokens === 0
+            ? "N/A"
+            : compact(aggregate.cache_write_tokens, language)}</strong>
         </div>
         <div>
           <span><i className="tone-reasoning" />{copy("Reasoning", "推理", "推理", "推論")}</span>
@@ -516,7 +526,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
               <span className="usage-dual-axis-note">{copy("Left: tokens · Right: cost", "左轴 Token · 右轴成本", "左軸 Token · 右軸成本", "左軸 Token · 右軸コスト")}</span>
             </header>
             <div className="usage-chart-legend">
-              <span><i className="tone-input" />{copy("Input", "输入", "輸入", "入力")}</span>
+              <span><i className="tone-input" />{copy("Input total", "输入总量", "輸入總量", "入力合計")}</span>
               <span><i className="tone-output" />{copy("Output", "输出", "輸出", "出力")}</span>
               <span><i className="tone-cache-write" />{copy("Cache write", "缓存写入", "快取寫入", "キャッシュ書き込み")}</span>
               <span><i className="tone-cache-read" />{copy("Cache hit", "缓存命中", "快取命中", "キャッシュヒット")}</span>

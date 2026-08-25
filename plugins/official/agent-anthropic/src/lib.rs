@@ -689,7 +689,7 @@ impl StreamState {
                     "model": self.model,
                     "stop_reason": null,
                     "stop_sequence": null,
-                    "usage": {"input_tokens": self.usage.input_tokens, "output_tokens": 0}
+                    "usage": {"input_tokens": fresh_input_tokens(self.usage), "output_tokens": 0}
                 }
             }),
         )?);
@@ -698,9 +698,16 @@ impl StreamState {
     }
 }
 
+const fn fresh_input_tokens(usage: Usage) -> u64 {
+    usage
+        .input_tokens
+        .saturating_sub(usage.cache_read_tokens)
+        .saturating_sub(usage.cache_write_tokens)
+}
+
 fn stream_usage(usage: Usage) -> Value {
     json!({
-        "input_tokens": usage.input_tokens,
+        "input_tokens": fresh_input_tokens(usage),
         "output_tokens": usage.output_tokens,
         "cache_read_input_tokens": usage.cache_read_tokens,
         "cache_creation_input_tokens": usage.cache_write_tokens,
@@ -883,7 +890,7 @@ impl Guest for AnthropicClient {
         let mut usage = Map::new();
         usage.insert(
             "input_tokens".to_owned(),
-            json!(response.usage.input_tokens),
+            json!(fresh_input_tokens(response.usage)),
         );
         usage.insert(
             "output_tokens".to_owned(),
@@ -1097,8 +1104,8 @@ impl Guest for AnthropicClient {
                 StreamEvent::Usage { usage } => {
                     let state = states.get_mut(stream_id).expect("state inserted above");
                     let mut rendered = String::new();
+                    state.usage.absorb(usage);
                     state.ensure_started(&mut rendered)?;
-                    state.usage = usage;
                     rendered.push_str(&sse(
                         "message_delta",
                         json!({
@@ -1171,3 +1178,62 @@ impl Guest for AnthropicClient {
 }
 
 export!(AnthropicClient);
+
+#[cfg(test)]
+mod tests {
+    use super::{fresh_input_tokens, AnthropicClient, Guest};
+    use serde_json::{json, Value};
+    use token_station_protocol::Usage;
+
+    #[test]
+    fn canonical_input_is_denormalized_for_anthropic_wire_usage() {
+        let usage = Usage {
+            input_tokens: 150,
+            cache_read_tokens: 100,
+            cache_write_tokens: 20,
+            ..Usage::default()
+        };
+
+        assert_eq!(fresh_input_tokens(usage), 30);
+    }
+
+    #[test]
+    fn inconsistent_buckets_cannot_underflow_wire_input() {
+        let usage = Usage {
+            input_tokens: 10,
+            cache_read_tokens: 20,
+            cache_write_tokens: 5,
+            ..Usage::default()
+        };
+
+        assert_eq!(fresh_input_tokens(usage), 0);
+    }
+
+    #[test]
+    fn rendered_response_exposes_fresh_input_and_separate_cache_buckets() {
+        let response = json!({
+            "id": "msg_test",
+            "model": "claude-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "input_tokens": 150,
+                "output_tokens": 12,
+                "cache_read_tokens": 100,
+                "cache_write_tokens": 20
+            }
+        });
+
+        let rendered =
+            <AnthropicClient as Guest>::render_response(response.to_string(), "{}".to_owned())
+                .expect("rendered response");
+        let rendered: Value = serde_json::from_str(&rendered).expect("JSON response");
+
+        assert_eq!(rendered["usage"]["input_tokens"], json!(30));
+        assert_eq!(rendered["usage"]["cache_read_input_tokens"], json!(100));
+        assert_eq!(rendered["usage"]["cache_creation_input_tokens"], json!(20));
+    }
+}
