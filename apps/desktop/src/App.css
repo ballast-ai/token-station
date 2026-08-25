@@ -9169,15 +9169,6 @@ samp {
   box-shadow: 0 5px 16px rgba(31, 42, 70, 0.05);
 }
 
-.settings-subnav [data-slot="button"].settings-subnav-item[aria-current="page"]::before {
-  position: absolute;
-  inset: 10px auto 10px -1px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--signal);
-  content: "";
-}
-
 .settings-subnav-icon {
   width: 17px;
   height: 17px;
@@ -9749,9 +9740,6 @@ samp {
     box-shadow: none;
   }
 
-  .settings-subnav [data-slot="button"].settings-subnav-item[aria-current="page"]::before {
-    display: none;
-  }
 }
 
 /* Final cascade guard: every navigable workspace starts on the same baseline. */

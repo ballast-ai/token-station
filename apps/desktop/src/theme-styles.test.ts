@@ -132,6 +132,9 @@ describe("retained page theme styles", () => {
     expect(appCss).not.toMatch(
       /(?:^|\n)\.settings-subnav \[data-slot="button"\]\.settings-subnav-item:hover\s*\{/,
     );
+    expect(appCss).not.toMatch(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]::before/,
+    );
   });
 
   it("returns Settings scrolling to the outer workspace on narrow windows", () => {
