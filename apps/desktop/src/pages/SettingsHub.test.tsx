@@ -45,6 +45,7 @@ const serve: ServeView = {
   listen: settings.listen,
   virtual_key: "vk-test-secret",
   error: null,
+  model_test_uses_running_gateway: true,
 };
 
 const registry: AgentUiMetadataView[] = [];

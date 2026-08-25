@@ -3426,7 +3426,7 @@ mod tests {
             .unwrap()
             .bind()
             .unwrap()
-            .publish(7)
+            .publish(7, std::collections::BTreeMap::new())
             .unwrap();
         let mut inner = crate::AppInner::new(root.join("token-station.json"), draft, None);
         inner.server = crate::ServerLifecycle::Running {

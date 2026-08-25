@@ -15,6 +15,7 @@ interface ModelTestConsoleProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   routingMode: StateView["routing_mode"];
+  routeState: "running" | "draft";
 }
 
 export type TranscriptItem = ModelTestMessage & {
@@ -117,6 +118,7 @@ export default function ModelTestConsole({
   open,
   onOpenChange,
   routingMode,
+  routeState,
 }: ModelTestConsoleProps) {
   const { copy } = useLocalizedCopy();
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -135,6 +137,9 @@ export default function ModelTestConsole({
     : routingMode === "quota_first"
       ? copy("Quota-first", "额度优先", "額度優先", "クォータ優先")
       : copy("Smart routing", "智能路由", "智慧路由", "スマートルーティング");
+  const routeStateLabel = routeState === "running"
+    ? copy("Running global route", "运行中的全局路由", "執行中的全域路由", "実行中のグローバルルート")
+    : copy("Draft global route", "草稿全局路由", "草稿全域路由", "下書きのグローバルルート");
 
   const takePendingDelta = (request: ActiveRequest) => {
     if (request.flushTimer != null) window.clearTimeout(request.flushTimer);
@@ -378,25 +383,25 @@ export default function ModelTestConsole({
             <div>
               <DialogTitle>{copy("Test model", "测试模型", "測試模型", "モデルをテスト")}</DialogTitle>
               <DialogDescription>{copy(
-                "Verify the same global route used by your project before connecting an Agent.",
-                "接入 Agent 前，先验证项目使用的同一条全局路由。",
-                "接入 Agent 前，先驗證專案使用的同一條全域路由。",
-                "Agent を接続する前に、プロジェクトと同じグローバルルートを確認します。",
+                "Verify the current global routing configuration before connecting an Agent.",
+                "接入 Agent 前，先验证当前全局路由配置。",
+                "接入 Agent 前，先驗證目前的全域路由配置。",
+                "Agent を接続する前に、現在のグローバルルーティング設定を確認します。",
               )}</DialogDescription>
             </div>
           </div>
           <div
             className="model-test-route-status"
             aria-label={copy(
-              `Global route: ${routeModeLabel}`,
-              `全局路由：${routeModeLabel}`,
-              `全域路由：${routeModeLabel}`,
-              `グローバルルート：${routeModeLabel}`,
+              `${routeStateLabel}: ${routeModeLabel}`,
+              `${routeStateLabel}：${routeModeLabel}`,
+              `${routeStateLabel}：${routeModeLabel}`,
+              `${routeStateLabel}：${routeModeLabel}`,
             )}
           >
             <Route aria-hidden="true" />
             <span>
-              <small>{copy("Global route", "全局路由", "全域路由", "グローバルルート")}</small>
+              <small>{routeStateLabel}</small>
               <strong>{routeModeLabel}</strong>
             </span>
           </div>

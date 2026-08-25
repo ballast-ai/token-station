@@ -21,6 +21,7 @@ vi.mock("../api", async (importOriginal) => {
 function renderConsole(
   onOpenChange = vi.fn(),
   open = true,
+  routeState: "running" | "draft" = "running",
 ) {
   return render(
     <LanguageProvider>
@@ -28,6 +29,7 @@ function renderConsole(
         open={open}
         onOpenChange={onOpenChange}
         routingMode="direct"
+        routeState={routeState}
       />
     </LanguageProvider>,
   );
@@ -45,10 +47,16 @@ describe("ModelTestConsole", () => {
     renderConsole();
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
-    expect(screen.getByLabelText("全局路由：简单路由")).toBeInTheDocument();
+    expect(screen.getByLabelText("运行中的全局路由：简单路由")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /选择模型/ })).toBeNull();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "消息" })).toHaveFocus());
     expect(screen.getByText("每次发送都会产生一次真实的模型请求，可能计入供应商用量。")).toBeInTheDocument();
+  });
+
+  it("identifies an unapplied global route as a draft", () => {
+    renderConsole(vi.fn(), true, "draft");
+
+    expect(screen.getByLabelText("草稿全局路由：简单路由")).toBeInTheDocument();
   });
 
   it("renders real deltas before completion and shows first-text and total latency", async () => {
@@ -255,6 +263,7 @@ describe("ModelTestConsole", () => {
           open={false}
           onOpenChange={onOpenChange}
           routingMode="direct"
+          routeState="running"
         />
       </LanguageProvider>,
     );
@@ -264,6 +273,7 @@ describe("ModelTestConsole", () => {
           open
           onOpenChange={onOpenChange}
           routingMode="direct"
+          routeState="running"
         />
       </LanguageProvider>,
     );

@@ -60,6 +60,7 @@ describe("retained page theme styles", () => {
     expect(actionRule).toMatch(/right:\s*14px/);
     expect(actionRule).toMatch(/display:\s*flex/);
     expect(appCss).not.toMatch(/\.overview-agent-summary[^}]*padding-bottom:\s*58px/s);
+    expect(appCss).not.toMatch(/\.model-test-(?:target|picker|model-name)/);
   });
 
   it("hides the duplicate provider model summary while management is expanded", () => {

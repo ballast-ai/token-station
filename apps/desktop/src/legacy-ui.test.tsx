@@ -142,6 +142,7 @@ const state: StateView = {
     phase: "stopped", app_runtime: "stopped", listener_reachable: false,
     agent_connected: false, running_revision: null, instance_id: null,
     listen: settings.listen, virtual_key: null, error: null,
+    model_test_uses_running_gateway: false,
   },
   draft_revision: 0,
   saved_revision: 0,

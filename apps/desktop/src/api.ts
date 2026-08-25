@@ -355,6 +355,8 @@ export interface ServeView {
   listen: string;
   virtual_key: string | null;
   error: string | null;
+  /** True when Home model tests share this live Gateway's mutable state. */
+  model_test_uses_running_gateway: boolean;
 }
 
 export type TierSlot = "high" | "mid" | "low";

@@ -3554,6 +3554,60 @@ impl Gateway {
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
     ) {
+        self.chat_scoped_inner(
+            ctx,
+            agent_id,
+            running_revision,
+            method,
+            path,
+            headers,
+            body,
+            true,
+            emit,
+        );
+    }
+
+    /// Runs the normal scoped request pipeline without persisting request or response bodies.
+    /// Metrics, quota settlement, health state, and admission remain shared with normal traffic.
+    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
+    pub fn chat_scoped_without_body_log(
+        &self,
+        ctx: &RequestContext,
+        agent_id: Option<&str>,
+        running_revision: Option<u64>,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) {
+        self.chat_scoped_inner(
+            ctx,
+            agent_id,
+            running_revision,
+            method,
+            path,
+            headers,
+            body,
+            false,
+            emit,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
+    #[allow(clippy::too_many_lines)] // admission + scope + dispatch, read top-down
+    fn chat_scoped_inner(
+        &self,
+        ctx: &RequestContext,
+        agent_id: Option<&str>,
+        running_revision: Option<u64>,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        record_body: bool,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) {
         let clock = std::time::Instant::now();
         let started_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3716,7 +3770,8 @@ impl Gateway {
         }
 
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
-        if let Some(body_log) = &self.body_log
+        if record_body
+            && let Some(body_log) = &self.body_log
             && let Err(error) = body_log.record(
                 &record.request_id,
                 started_at_ms,

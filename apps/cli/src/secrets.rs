@@ -68,6 +68,15 @@ pub fn store_get(data_dir: &Path, upstream: &str, slot: &str) -> Result<String, 
         .ok_or_else(|| format!("secret `{upstream}/{slot}` is not in the local store"))
 }
 
+/// Read a stored egress proxy credential without exposing its internal owner key.
+///
+/// # Errors
+///
+/// The slot is absent. The message never carries a value.
+pub fn store_get_egress(data_dir: &Path, slot: &str) -> Result<String, String> {
+    store_get(data_dir, EGRESS_SECRET_OWNER, slot)
+}
+
 /// Remove `(upstream, slot)` from the local secrets store. A no-op if absent.
 ///
 /// # Errors

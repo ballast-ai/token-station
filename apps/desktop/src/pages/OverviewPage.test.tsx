@@ -105,6 +105,7 @@ const state = {
     listen: "127.0.0.1:8787",
     virtual_key: null,
     error: null,
+    model_test_uses_running_gateway: false,
   },
   draft_revision: 1,
   saved_revision: 1,
@@ -272,6 +273,28 @@ describe("OverviewPage summaries", () => {
     await user.click(testButton);
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
+    expect(screen.getByText("草稿全局路由")).toBeInTheDocument();
+  });
+
+  it("uses the backend Home-Gateway identity for the model test route label", async () => {
+    const user = userEvent.setup();
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={{
+            ...state,
+            serve: { ...state.serve, model_test_uses_running_gateway: true },
+          }}
+          registry={registry}
+          agents={agents}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "验证模型连接" }));
+
+    expect(screen.getByText("运行中的全局路由")).toBeInTheDocument();
   });
 
   it("keeps the model test action visible but disabled without configured models", () => {

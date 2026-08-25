@@ -148,6 +148,7 @@ function serveFixture(overrides: Partial<ServeView> = {}): ServeView {
     listen: "127.0.0.1:8787",
     virtual_key: null,
     error: null,
+    model_test_uses_running_gateway: false,
     ...overrides,
   };
 }
@@ -354,6 +355,55 @@ it("每次启动完成后都进入主页", async () => {
     .toHaveAttribute("aria-current", "page");
   expect(navigation().getByRole("button", { name: "Agent" }))
     .not.toHaveAttribute("aria-current");
+});
+
+it("serve lifecycle events keep the model-test route label in the same generation", async () => {
+  const user = userEvent.setup();
+  let emitServe: ((serve: ServeView) => void) | undefined;
+  listenMock.mockImplementation(async (_eventName, handler) => {
+    emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+    return () => undefined;
+  });
+  const initial = stateFixture({
+    providers: [{
+      name: "openai",
+      provider: "openai-compatible",
+      base_url: "https://api.openai.com/v1",
+      models: ["gpt-5.1"],
+      has_auth: true,
+    }],
+    routing_mode: "direct",
+    direct_target: { upstream: "openai", model: "gpt-5.1" },
+  });
+  mockInvokeImplementation(async (command) => {
+    if (command === "get_state") return initial;
+    if (command === "get_runtime_state") return initial.serve;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return detectedAgentsFixture;
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+  await screen.findByRole("heading", { name: "概览" });
+  await waitFor(() => expect(emitServe).toBeTypeOf("function"));
+  act(() => emitServe?.(serveFixture({
+    phase: "running",
+    app_runtime: "running",
+    listener_reachable: true,
+    running_revision: 1,
+    instance_id: "live-instance",
+    model_test_uses_running_gateway: true,
+  })));
+
+  await user.click(screen.getByRole("button", { name: "验证模型连接" }));
+  expect(screen.getByText("运行中的全局路由")).toBeInTheDocument();
+
+  act(() => emitServe?.(serveFixture({
+    phase: "error",
+    error: "serve_task_exited",
+    model_test_uses_running_gateway: false,
+  })));
+  expect(screen.getByText("草稿全局路由")).toBeInTheDocument();
 });
 
 it("新用户首次打开先询问是否需要教程，暂不需要后不再自动询问", async () => {

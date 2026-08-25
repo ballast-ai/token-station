@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_updater::UpdaterExt;
 use zeroize::Zeroizing;
@@ -43,6 +44,7 @@ use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, Reply, Stag
 use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
 use token_station_cli::request_context::RequestContext;
+use token_station_cli::server::GatewayRequestLease;
 use token_station_cli::{
     secrets, stats,
     store::{ReceiptQuery, SqliteStore},
@@ -76,7 +78,10 @@ use recovery::{
     DiagnosticPreview, FrontendDiagnosticInput, FrontendDiagnosticRecord, RecoveryMode,
     RecoveryState,
 };
-use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
+use serve_lifecycle::{
+    home_gateway_identities_match, home_referenced_upstreams, prepare_server, PreparedServer,
+    RunningServer, StartFailure,
+};
 
 /// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
 const TIER_HIGH: &str = "tier_high";
@@ -1252,8 +1257,165 @@ impl ModelTestStreamRegistry {
     }
 }
 
+struct CachedModelTestGateway {
+    config: Box<ClientConfig>,
+    upstream_epochs: BTreeMap<String, u64>,
+    secret_store_fingerprint: [u8; 32],
+    gateway: Arc<Gateway>,
+}
+
+enum ModelTestGatewaySource {
+    Running {
+        gateway: Arc<Gateway>,
+        running_revision: u64,
+        request: GatewayRequestLease,
+    },
+    Draft {
+        config: Box<ClientConfig>,
+        upstream_epochs: BTreeMap<String, u64>,
+        secret_store_fingerprint: [u8; 32],
+        request: RequestContext,
+    },
+}
+
+impl ModelTestGatewaySource {
+    fn request_context(&self) -> &RequestContext {
+        match self {
+            Self::Running { request, .. } => request.context(),
+            Self::Draft { request, .. } => request,
+        }
+    }
+}
+
+fn hash_model_test_secret(
+    hash: &mut Sha256,
+    owner: &str,
+    slot: &str,
+    value: Result<String, String>,
+) {
+    for field in [owner.as_bytes(), slot.as_bytes()] {
+        hash.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hash.update(field);
+    }
+    match value {
+        Ok(value) => {
+            let value = Zeroizing::new(value);
+            hash.update([1]);
+            hash.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        Err(_) => hash.update([0]),
+    }
+}
+
+fn model_test_secret_store_fingerprint(config: &ClientConfig) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    if let Some(upstreams) = home_referenced_upstreams(config) {
+        for name in upstreams {
+            let Some(auth) = config
+                .upstreams
+                .get(&name)
+                .and_then(|upstream| upstream.auth.as_ref())
+                .filter(|auth| auth.store)
+            else {
+                continue;
+            };
+            hash_model_test_secret(
+                &mut hash,
+                &name,
+                &auth.slot,
+                secrets::store_get(&config.data.dir, &name, &auth.slot),
+            );
+        }
+    }
+    if let Some(auth) = config
+        .egress
+        .auth
+        .as_ref()
+        .map(|auth| &auth.credential)
+        .filter(|auth| auth.store)
+    {
+        hash_model_test_secret(
+            &mut hash,
+            "egress-proxy",
+            &auth.slot,
+            secrets::store_get_egress(&config.data.dir, &auth.slot),
+        );
+    }
+    hash.finalize().into()
+}
+
+enum ModelTestRequestOwner {
+    Running(GatewayRequestLease),
+    Draft(RequestContext),
+}
+
+impl ModelTestRequestOwner {
+    fn context(&self) -> &RequestContext {
+        match self {
+            Self::Running(request) => request.context(),
+            Self::Draft(request) => request,
+        }
+    }
+}
+
+fn reusable_model_test_server<'a>(
+    inner: &'a AppInner,
+    config: &ClientConfig,
+) -> Option<&'a RunningServer> {
+    let server = match &inner.server {
+        ServerLifecycle::Running { server, .. } => server,
+        ServerLifecycle::Applying { old, .. } => old,
+        ServerLifecycle::Stopped { .. }
+        | ServerLifecycle::Starting { .. }
+        | ServerLifecycle::Stopping { .. }
+        | ServerLifecycle::Failed { .. } => return None,
+    };
+    (server.is_task_alive() && server.matches_home_gateway(config, &inner.upstream_epochs))
+        .then_some(server)
+}
+
+fn model_test_gateway_source(inner: &AppInner) -> Result<ModelTestGatewaySource, String> {
+    let config = Box::new(inner.materialize()?);
+    let home_router = config.home_router_config()?;
+    let route_uses_pending_credential = home_router
+        .pools
+        .values()
+        .flatten()
+        .chain(home_router.quota_accounts.iter())
+        .any(|target| {
+            inner
+                .pending_provider_keys
+                .contains_key(target.upstream.as_str())
+        });
+    if route_uses_pending_credential {
+        return Err(
+            "Save the verified Provider credential before testing this Home route".to_owned(),
+        );
+    }
+    if let Some(server) = reusable_model_test_server(inner, &config) {
+        return Ok(ModelTestGatewaySource::Running {
+            gateway: server.gateway(),
+            running_revision: server.running_revision(),
+            request: server
+                .begin_gateway_request(Duration::from_mins(2), Duration::from_mins(2))
+                .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64),
+        });
+    }
+    Ok(ModelTestGatewaySource::Draft {
+        secret_store_fingerprint: model_test_secret_store_fingerprint(&config),
+        config,
+        upstream_epochs: inner.upstream_epochs.clone(),
+        request: RequestContext::detached(Duration::from_mins(2), Duration::from_mins(2))
+            .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64),
+    })
+}
+
 #[derive(Clone, Default)]
-struct ModelTestStreamState(Arc<Mutex<ModelTestStreamRegistry>>);
+struct ModelTestStreamState(
+    Arc<Mutex<ModelTestStreamRegistry>>,
+    Arc<Mutex<Option<CachedModelTestGateway>>>,
+);
 
 struct ModelTestStreamRegistration {
     registry: Arc<Mutex<ModelTestStreamRegistry>>,
@@ -1336,6 +1498,8 @@ struct ServeView {
     listen: String,
     virtual_key: Option<String>,
     error: Option<String>,
+    /// Whether Home model tests share this live Gateway's mutable state.
+    model_test_uses_running_gateway: bool,
 }
 
 #[derive(Serialize)]
@@ -1724,12 +1888,23 @@ impl AppInner {
             // save or startup instead of reporting a rollback that did not occur.
             eprintln!("configuration saved but historical cost backfill failed: {error}");
         }
-        for upstream in self.pending_provider_keys.keys() {
+        let committed_key_upstreams = self
+            .pending_provider_keys
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for upstream in &committed_key_upstreams {
             if let Err(error) = provider_tombstones::discard(&self.data_dir(), upstream) {
                 eprintln!(
                     "configuration saved but free Provider tombstone cleanup failed: {error}"
                 );
             }
+        }
+        for upstream in committed_key_upstreams {
+            // The credential value is absent from ClientConfig, so publishing
+            // it must advance the same identity used by running/draft Gateway
+            // reuse even when the Provider definition itself did not change.
+            self.bump_upstream_epoch(&upstream);
         }
         self.pending_provider_keys.clear();
         Ok(revision)
@@ -2206,6 +2381,10 @@ impl AppInner {
     }
 
     fn serve_view(&self) -> ServeView {
+        let model_test_uses_running_gateway = self
+            .materialize()
+            .ok()
+            .is_some_and(|config| reusable_model_test_server(self, &config).is_some());
         match &self.server {
             ServerLifecycle::Stopped { .. } => ServeView {
                 phase: ServePhase::Stopped,
@@ -2220,6 +2399,7 @@ impl AppInner {
                     .to_string(),
                 virtual_key: None,
                 error: None,
+                model_test_uses_running_gateway,
             },
             ServerLifecycle::Starting { listen, .. } => ServeView {
                 phase: ServePhase::Starting,
@@ -2231,6 +2411,7 @@ impl AppInner {
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
+                model_test_uses_running_gateway,
             },
             ServerLifecycle::Applying { old, .. } => {
                 let alive = old.is_task_alive();
@@ -2249,6 +2430,7 @@ impl AppInner {
                     listen: old.listen().to_owned(),
                     virtual_key: old.virtual_key().map(str::to_string),
                     error: None,
+                    model_test_uses_running_gateway,
                 }
             }
             ServerLifecycle::Stopping { listen, .. } => ServeView {
@@ -2261,6 +2443,7 @@ impl AppInner {
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
+                model_test_uses_running_gateway,
             },
             ServerLifecycle::Running {
                 server,
@@ -2291,6 +2474,7 @@ impl AppInner {
                     } else {
                         Some("serve_task_exited: 代理任务已退出".to_owned())
                     },
+                    model_test_uses_running_gateway,
                 }
             }
             ServerLifecycle::Failed { listen, error, .. } => ServeView {
@@ -2303,6 +2487,7 @@ impl AppInner {
                 listen: listen.clone(),
                 virtual_key: None,
                 error: Some(error.clone()),
+                model_test_uses_running_gateway,
             },
         }
     }
@@ -4746,29 +4931,67 @@ async fn run_model_test_chat<R: Runtime>(
 ) -> Result<ModelTestReply, String> {
     validate_model_test_messages(&messages)?;
     validate_model_test_request_id(&request_id)?;
-    let config = {
-        let inner = state.0.lock().unwrap();
-        inner.materialize()?
-    };
+    let gateway_source = model_test_gateway_source(&state.0.lock().unwrap())?;
 
-    let request_context =
-        RequestContext::detached(Duration::from_secs(120), Duration::from_secs(120))
-            .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64);
     let registry = Arc::clone(&stream_state.0);
     {
         let mut streams = registry.lock().unwrap();
-        streams.register(&request_id, request_context.token())?;
+        streams.register(&request_id, gateway_source.request_context().token())?;
     }
     let registration = ModelTestStreamRegistration {
         registry,
         request_id: request_id.clone(),
     };
+    let gateway_cache = Arc::clone(&stream_state.1);
 
     let provider_runtime = tokio::runtime::Handle::current();
     tauri::async_runtime::spawn_blocking(move || {
         let _registration = registration;
-        let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
-        let gateway = Gateway::new_with_provider_runtime(&config, recorder, provider_runtime)?;
+        let (gateway, running_revision, request_owner) = match gateway_source {
+            ModelTestGatewaySource::Running {
+                gateway,
+                running_revision,
+                request,
+            } => (
+                gateway,
+                Some(running_revision),
+                ModelTestRequestOwner::Running(request),
+            ),
+            ModelTestGatewaySource::Draft {
+                config,
+                upstream_epochs,
+                secret_store_fingerprint,
+                request,
+            } => {
+                let mut cached = gateway_cache.lock().unwrap();
+                let gateway = if let Some(cached) = cached.as_ref().filter(|cached| {
+                    home_gateway_identities_match(
+                        &cached.config,
+                        &cached.upstream_epochs,
+                        &config,
+                        &upstream_epochs,
+                    ) && cached.secret_store_fingerprint == secret_store_fingerprint
+                }) {
+                    Arc::clone(&cached.gateway)
+                } else {
+                    let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
+                    let gateway = Arc::new(Gateway::new_with_provider_runtime(
+                        &config,
+                        recorder,
+                        provider_runtime,
+                    )?);
+                    *cached = Some(CachedModelTestGateway {
+                        config,
+                        upstream_epochs,
+                        secret_store_fingerprint,
+                        gateway: Arc::clone(&gateway),
+                    });
+                    gateway
+                };
+                (gateway, None, ModelTestRequestOwner::Draft(request))
+            }
+        };
+        let request_context = request_owner.context();
         let body = serde_json::to_vec(&json!({
             "model": "auto",
             "messages": messages,
@@ -4783,10 +5006,10 @@ async fn run_model_test_chat<R: Runtime>(
         let mut first_token_ms = None;
         let mut output_budget = ModelTestOutputBudget::default();
         let mut stream_error = None;
-        gateway.chat_scoped(
-            &request_context,
+        gateway.chat_scoped_without_body_log(
+            request_context,
             None,
-            None,
+            running_revision,
             "POST",
             "/v1/chat/completions",
             &[("content-type".to_owned(), "application/json".to_owned())],
@@ -5800,6 +6023,7 @@ fn complete_serve_start<R: Runtime>(
     result: Result<PreparedServer, StartFailure>,
     applied_pricing: PriceTable,
     metrics_db: PathBuf,
+    upstream_epochs: BTreeMap<String, u64>,
 ) {
     // Same-port handoff must first release the old accept socket. This state
     // mutation is instant; the candidate bind/retry itself happens below,
@@ -5849,7 +6073,8 @@ fn complete_serve_start<R: Runtime>(
                     revision,
                 },
                 Ok(prepared),
-            ) if current == generation => match prepared.publish(revision) {
+            ) if current == generation => match prepared.publish(revision, upstream_epochs.clone())
+            {
                 Ok(server) => {
                     published = true;
                     ServerLifecycle::Running {
@@ -5874,7 +6099,7 @@ fn complete_serve_start<R: Runtime>(
                 Ok(prepared),
             ) if current == generation => {
                 let same_listener = old.listen() == prepared.listen();
-                match prepared.publish(revision) {
+                match prepared.publish(revision, upstream_epochs.clone()) {
                     Ok(server) => {
                         published = true;
                         old.stop_accepting();
@@ -6041,7 +6266,7 @@ where
     R: Runtime,
     F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
 {
-    let (config, generation, snapshot, serve_view, metrics_db) = {
+    let (config, generation, snapshot, serve_view, metrics_db, upstream_epochs) = {
         let mut inner = state.0.lock().unwrap();
         if let Some(expected) = expected_stopped_generation {
             if !menu_action_expectation_matches(
@@ -6091,7 +6316,14 @@ where
         };
         let snapshot = inner.snapshot();
         let serve_view = snapshot.serve.clone();
-        (config, generation, snapshot, serve_view, metrics_db)
+        (
+            config,
+            generation,
+            snapshot,
+            serve_view,
+            metrics_db,
+            inner.upstream_epochs.clone(),
+        )
     };
 
     emit_serve_state(&app, &serve_view);
@@ -6109,6 +6341,7 @@ where
             result,
             applied_pricing,
             metrics_db,
+            upstream_epochs,
         );
     });
     Ok(Some(snapshot))
@@ -8582,7 +8815,7 @@ mod tests {
             .unwrap()
             .bind()
             .unwrap()
-            .publish(7)
+            .publish(7, BTreeMap::new())
             .unwrap();
         (draft, running)
     }
@@ -10774,7 +11007,7 @@ mod tests {
             .unwrap()
             .bind()
             .unwrap()
-            .publish(7)
+            .publish(7, BTreeMap::new())
             .unwrap();
         let mut inner = AppInner::new(config_path.clone(), draft, None);
         inner.server = ServerLifecycle::Applying {
@@ -14128,19 +14361,27 @@ mod tests {
     }
 
     #[test]
-    fn model_test_command_uses_the_home_route_and_cleans_registration() {
+    fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
         let root = scratch_home("model-test-command");
-        let (upstream, fixture) = serve_chat_completion("model-test-ok", 1);
+        let (upstream, fixture) = serve_chat_completion("model-test-ok", 4);
         let mut draft = gateway_template_for_test(&root);
         draft["upstreams"]["fixture"] = json!({
             "provider": "openai-compatible",
             "base_url": upstream,
+            "auth": {"slot": "provider_api_key", "store": true},
             "models": [{"model": "small"}]
         });
         draft["routing"] = json!({
             "mode": "direct",
             "direct_target": {"upstream": "fixture", "model": "small"}
         });
+        secrets::store_set(
+            &root.join("token-station-data"),
+            "fixture",
+            "provider_api_key",
+            "initial-key",
+        )
+        .unwrap();
         let app = tauri::test::mock_app();
         assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
             root.join("token-station.json"),
@@ -14149,19 +14390,93 @@ mod tests {
         )))));
         assert!(app.manage(ModelTestStreamState::default()));
 
-        let reply = tauri::async_runtime::block_on(run_model_test_chat(
-            app.handle().clone(),
-            app.state::<AppStateManaged>().inner(),
-            app.state::<ModelTestStreamState>().inner(),
-            vec![ModelTestMessage {
-                role: "user".to_owned(),
-                content: "ping".to_owned(),
-            }],
-            "model-test-command".to_owned(),
-        ))
-        .unwrap();
+        let send = |request_id: &str| {
+            tauri::async_runtime::block_on(run_model_test_chat(
+                app.handle().clone(),
+                app.state::<AppStateManaged>().inner(),
+                app.state::<ModelTestStreamState>().inner(),
+                vec![ModelTestMessage {
+                    role: "user".to_owned(),
+                    content: "ping".to_owned(),
+                }],
+                request_id.to_owned(),
+            ))
+            .unwrap()
+        };
 
-        assert_eq!(reply.content, "model-test-ok");
+        assert_eq!(send("model-test-command-1").content, "model-test-ok");
+        let first_gateway = Arc::clone(
+            &app.state::<ModelTestStreamState>()
+                .1
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .gateway,
+        );
+        assert_eq!(send("model-test-command-2").content, "model-test-ok");
+        let second_gateway = Arc::clone(
+            &app.state::<ModelTestStreamState>()
+                .1
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .gateway,
+        );
+        assert!(Arc::ptr_eq(&first_gateway, &second_gateway));
+        secrets::store_set(
+            &root.join("token-station-data"),
+            "fixture",
+            "provider_api_key",
+            "external-key",
+        )
+        .unwrap();
+        assert_eq!(send("model-test-command-3").content, "model-test-ok");
+        let external_gateway = Arc::clone(
+            &app.state::<ModelTestStreamState>()
+                .1
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .gateway,
+        );
+        assert!(!Arc::ptr_eq(&second_gateway, &external_gateway));
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            let before_epoch = inner
+                .upstream_epochs
+                .get("fixture")
+                .copied()
+                .unwrap_or_default();
+            inner.pending_provider_keys.insert(
+                "fixture".to_owned(),
+                Zeroizing::new("replacement-key".to_owned()),
+            );
+            let pending_error = match model_test_gateway_source(&inner) {
+                Err(error) => error,
+                Ok(_) => panic!("pending Home credentials must not enter a cached Gateway"),
+            };
+            assert_eq!(
+                pending_error,
+                "Save the verified Provider credential before testing this Home route"
+            );
+            inner.save_draft().unwrap();
+            assert!(inner.upstream_epochs["fixture"] > before_epoch);
+        }
+        assert_eq!(send("model-test-command-4").content, "model-test-ok");
+        let rotated_gateway = Arc::clone(
+            &app.state::<ModelTestStreamState>()
+                .1
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .gateway,
+        );
+        assert!(!Arc::ptr_eq(&external_gateway, &rotated_gateway));
         assert!(app
             .state::<ModelTestStreamState>()
             .0
@@ -14170,6 +14485,170 @@ mod tests {
             .active
             .is_empty());
         fixture.join().unwrap();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_test_command_reuses_the_running_gateway_without_body_logging() {
+        let root = scratch_home("model-test-running-gateway");
+        let (upstream, fixture) = serve_chat_completion("model-test-live", 1);
+        let mut draft = gateway_template_for_test(&root);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["server"]["auth"] = json!(false);
+        draft["data"]["metrics"] = json!(false);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": upstream,
+            "models": [{"model": "small"}]
+        });
+        draft["upstreams"]["unused"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:9/v1",
+            "models": [{"model": "unused"}]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "fixture", "model": "small"}
+        });
+        let config: ClientConfig = serde_json::from_value(draft.clone()).unwrap();
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let revision = inner.config_state.draft_revision();
+        let running = prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(revision, inner.upstream_epochs.clone())
+            .unwrap();
+        let published_gateway = running.gateway();
+        inner.server = ServerLifecycle::Running {
+            generation: 1,
+            server: running,
+            apply_error: None,
+        };
+        match model_test_gateway_source(&inner).unwrap() {
+            ModelTestGatewaySource::Running { gateway, .. } => {
+                assert!(Arc::ptr_eq(&gateway, &published_gateway));
+            }
+            ModelTestGatewaySource::Draft { .. } => panic!("the published Gateway must be reused"),
+        }
+
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        assert!(app.manage(ModelTestStreamState::default()));
+        let reply = tauri::async_runtime::block_on(run_model_test_chat(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            app.state::<ModelTestStreamState>().inner(),
+            vec![ModelTestMessage {
+                role: "user".to_owned(),
+                content: "ping".to_owned(),
+            }],
+            "model-test-live".to_owned(),
+        ))
+        .unwrap();
+
+        assert_eq!(reply.content, "model-test-live");
+        assert_eq!(
+            std::fs::read_dir(root.join("token-station-data/request-bodies"))
+                .unwrap()
+                .count(),
+            0
+        );
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            inner.draft["agent_routes"]["codex"] = json!({ "mode": "inherit" });
+            inner.observe_draft().unwrap();
+            match model_test_gateway_source(&inner).unwrap() {
+                ModelTestGatewaySource::Running { gateway, .. } => {
+                    assert!(Arc::ptr_eq(&gateway, &published_gateway));
+                }
+                ModelTestGatewaySource::Draft { .. } => {
+                    panic!("Agent-only edits must preserve the live Home Gateway")
+                }
+            }
+            inner.draft["upstreams"]["unused"]["base_url"] = json!("http://127.0.0.1:10/v1");
+            inner.observe_draft().unwrap();
+            match model_test_gateway_source(&inner).unwrap() {
+                ModelTestGatewaySource::Running { gateway, .. } => {
+                    assert!(Arc::ptr_eq(&gateway, &published_gateway));
+                }
+                ModelTestGatewaySource::Draft { .. } => {
+                    panic!("Unused Provider edits must preserve the live Home Gateway")
+                }
+            }
+            inner.draft["router"]["pools"]["dormant"] = json!([{
+                "upstream": "unused",
+                "model": "unused"
+            }]);
+            inner.observe_draft().unwrap();
+            match model_test_gateway_source(&inner).unwrap() {
+                ModelTestGatewaySource::Running { gateway, .. } => {
+                    assert!(Arc::ptr_eq(&gateway, &published_gateway));
+                }
+                ModelTestGatewaySource::Draft { .. } => {
+                    panic!("Dormant tier edits must preserve a live Direct Home Gateway")
+                }
+            }
+            inner.bump_upstream_epoch("fixture");
+            assert!(matches!(
+                model_test_gateway_source(&inner).unwrap(),
+                ModelTestGatewaySource::Draft { .. }
+            ));
+            inner.upstream_epochs.clear();
+            inner.draft["routing"]["mode"] = json!("tiered");
+            inner.observe_draft().unwrap();
+            assert!(matches!(
+                model_test_gateway_source(&inner).unwrap(),
+                ModelTestGatewaySource::Draft { .. }
+            ));
+        }
+        fixture.join().unwrap();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_test_source_rejects_a_dead_running_gateway() {
+        let root = scratch_home("model-test-dead-gateway");
+        let mut draft = gateway_template_for_test(&root);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["server"]["auth"] = json!(false);
+        draft["data"]["metrics"] = json!(false);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:9/v1",
+            "models": [{"model": "small"}]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "fixture", "model": "small"}
+        });
+        let config: ClientConfig = serde_json::from_value(draft.clone()).unwrap();
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let revision = inner.config_state.draft_revision();
+        let running = prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(revision, inner.upstream_epochs.clone())
+            .unwrap();
+        running.abort_task();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while running.is_task_alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!running.is_task_alive());
+        inner.server = ServerLifecycle::Running {
+            generation: 1,
+            server: running,
+            apply_error: None,
+        };
+
+        assert!(matches!(
+            model_test_gateway_source(&inner).unwrap(),
+            ModelTestGatewaySource::Draft { .. }
+        ));
+        assert!(!inner.snapshot().serve.model_test_uses_running_gateway);
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -16,6 +16,7 @@ const serve: ServeView = {
   error: null,
   running_revision: null,
   instance_id: null,
+  model_test_uses_running_gateway: false,
 };
 
 function renderShell(

@@ -1,6 +1,6 @@
 //! Heavy proxy preparation and supervised listener ownership.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, TcpListener as StdTcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +18,74 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const LISTENER_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 const BIND_HANDOFF_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Exact configuration boundary for an unscoped Home Gateway request. Agent
+/// routes, profiles, budgets, listener/auth settings, and inbound Agent
+/// packages are deliberately outside this projection.
+pub(crate) fn home_referenced_upstreams(config: &ClientConfig) -> Option<BTreeSet<String>> {
+    let router = config.home_router_config().ok()?;
+    Some(
+        router
+            .pools
+            .values()
+            .flatten()
+            .chain(router.quota_accounts.iter())
+            .map(|target| target.upstream.to_string())
+            .collect(),
+    )
+}
+
+pub(crate) fn home_gateway_configs_match(
+    published: &ClientConfig,
+    candidate: &ClientConfig,
+) -> bool {
+    let Ok(published_router) = published.home_router_config() else {
+        return false;
+    };
+    let Ok(candidate_router) = candidate.home_router_config() else {
+        return false;
+    };
+    let Some(published_upstreams) = home_referenced_upstreams(published) else {
+        return false;
+    };
+    let Some(candidate_upstreams) = home_referenced_upstreams(candidate) else {
+        return false;
+    };
+    published_upstreams == candidate_upstreams
+        && published_upstreams
+            .iter()
+            .all(|name| published.upstreams.get(name) == candidate.upstreams.get(name))
+        && published_upstreams.iter().all(|name| {
+            let Some(upstream) = published.upstreams.get(name) else {
+                return false;
+            };
+            published.plugins.providers.get(&upstream.provider)
+                == candidate.plugins.providers.get(&upstream.provider)
+        })
+        && published.plugins.dir == candidate.plugins.dir
+        && published.plugins.allow_unsigned == candidate.plugins.allow_unsigned
+        && published_router == candidate_router
+        && published.data.dir == candidate.data.dir
+        && published.health == candidate.health
+        && published.concurrency == candidate.concurrency
+        && published.pricing == candidate.pricing
+        && published.egress == candidate.egress
+}
+
+pub(crate) fn home_gateway_identities_match(
+    published: &ClientConfig,
+    published_epochs: &BTreeMap<String, u64>,
+    candidate: &ClientConfig,
+    candidate_epochs: &BTreeMap<String, u64>,
+) -> bool {
+    home_gateway_configs_match(published, candidate)
+        && home_referenced_upstreams(published).is_some_and(|upstreams| {
+            upstreams.iter().all(|name| {
+                published_epochs.get(name).copied().unwrap_or_default()
+                    == candidate_epochs.get(name).copied().unwrap_or_default()
+            })
+        })
+}
 
 fn timed_stage<T, E>(
     stage: &'static str,
@@ -64,6 +132,9 @@ pub(crate) struct RunningServer {
     running_revision: u64,
     instance_id: String,
     serving_config: ClientConfig,
+    /// Provider identities at publication time, including credential-only
+    /// changes that are intentionally absent from `ClientConfig`.
+    upstream_epochs: BTreeMap<String, u64>,
     /// Exact per-Agent router documents hot-swapped after this server started.
     /// `None` means that Agent was explicitly returned to the serving Home
     /// router. Keeping this separately avoids pretending unrelated draft
@@ -105,6 +176,37 @@ impl RunningServer {
 
     pub(crate) fn serving_config(&self) -> &ClientConfig {
         &self.serving_config
+    }
+
+    pub(crate) fn gateway(&self) -> Arc<Gateway> {
+        Arc::clone(&self.app_state.gateway)
+    }
+
+    /// Whether an unscoped Home request can use this exact Gateway without
+    /// crossing a configuration or credential-generation boundary. Agent
+    /// routes, profiles, budgets, listener/auth settings, and inbound Agent
+    /// packages do not affect an unscoped Home request.
+    pub(crate) fn matches_home_gateway(
+        &self,
+        candidate: &ClientConfig,
+        upstream_epochs: &BTreeMap<String, u64>,
+    ) -> bool {
+        home_gateway_identities_match(
+            &self.serving_config,
+            &self.upstream_epochs,
+            candidate,
+            upstream_epochs,
+        )
+    }
+
+    pub(crate) fn begin_gateway_request(
+        &self,
+        total: Duration,
+        per_attempt: Duration,
+    ) -> server::GatewayRequestLease {
+        self.app_state
+            .control
+            .begin_gateway_request(total, per_attempt)
     }
 
     pub(crate) fn agent_router_override(
@@ -290,7 +392,11 @@ impl BoundPreparedServer {
 
     /// Publishes an immutable revision from an already reserved socket. No
     /// caller may update `running_revision` before this succeeds.
-    pub(crate) fn publish(self, revision: u64) -> Result<RunningServer, StartFailure> {
+    pub(crate) fn publish(
+        self,
+        revision: u64,
+        upstream_epochs: BTreeMap<String, u64>,
+    ) -> Result<RunningServer, StartFailure> {
         let Self {
             runtime,
             app_state,
@@ -316,6 +422,7 @@ impl BoundPreparedServer {
             running_revision: revision,
             instance_id,
             serving_config,
+            upstream_epochs,
             agent_router_overrides: BTreeMap::new(),
             serve_task,
             retired_controls: Vec::new(),
@@ -488,7 +595,7 @@ mod tests {
             .unwrap()
             .bind()
             .unwrap()
-            .publish(1)
+            .publish(1, BTreeMap::new())
             .unwrap();
         let mut latest = serving.clone();
         latest.pricing.version = 9;
@@ -534,7 +641,7 @@ mod tests {
             .unwrap()
             .bind()
             .unwrap()
-            .publish(1)
+            .publish(1, BTreeMap::new())
             .unwrap();
         let cases = [
             (

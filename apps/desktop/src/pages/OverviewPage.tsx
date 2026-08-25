@@ -295,6 +295,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         open={modelTestOpen}
         onOpenChange={setModelTestOpen}
         routingMode={state.routing_mode}
+        routeState={state.serve.model_test_uses_running_gateway ? "running" : "draft"}
       />
     </div>
   );
