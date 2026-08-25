@@ -1,5 +1,3 @@
-use crate::*;
-
 // ---- Tauri commands --------------------------------------------------------
 
 pub(crate) fn dock_icon_bytes(theme: &str) -> Result<&'static [u8], String> {
@@ -19,6 +17,13 @@ pub(crate) async fn set_dock_theme_icon(
 
     #[cfg(target_os = "macos")]
     {
+        // Imported here rather than at file scope: everything else in this
+        // module is fully qualified, so with no file-level import there is
+        // nothing that can go unused under `cfg(not(target_os = "macos"))`.
+        // A `use crate::*` used to supply this, and on Linux it supplied
+        // nothing at all — which `-D warnings` correctly refused.
+        use std::time::Duration;
+
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         app.run_on_main_thread(move || {
             let _ = result_tx.send(apply_macos_dock_icon(icon_bytes));

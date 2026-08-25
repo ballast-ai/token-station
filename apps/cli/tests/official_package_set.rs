@@ -108,7 +108,10 @@ fn every_consumer_reads_the_package_set() {
         ("apps/cli/build.rs", "plugins/official/packages.json"),
         ("apps/cli/src/plugins.rs", "builtin_official_packages.rs"),
         ("scripts/audit-desktop-artifact.sh", "official-packages.py"),
-        ("apps/desktop/src-tauri/src/self_test.rs", "OFFICIAL_PACKAGE_IDS"),
+        (
+            "apps/desktop/src-tauri/src/self_test.rs",
+            "OFFICIAL_PACKAGE_IDS",
+        ),
     ];
 
     for (path, marker) in consumers {
@@ -120,7 +123,8 @@ fn every_consumer_reads_the_package_set() {
         );
     }
 
-    for entry in std::fs::read_dir(root.join("apps/desktop/src-tauri/src")).expect("desktop src reads")
+    for entry in
+        std::fs::read_dir(root.join("apps/desktop/src-tauri/src")).expect("desktop src reads")
     {
         let path = entry.expect("desktop src entry reads").path();
         if path.extension().is_none_or(|ext| ext != "rs") {

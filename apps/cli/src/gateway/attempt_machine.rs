@@ -277,7 +277,10 @@ impl Gateway {
     /// derivation differs per payload shape (IR vs. Anthropic wire), so the
     /// caller passes it; it runs lazily, and `(None, "")` outside quota-first
     /// mode costs the caller nothing.
-    pub(super) fn quota_preamble(router: &Router, session_key: impl FnOnce() -> String) -> (Option<u64>, String) {
+    pub(super) fn quota_preamble(
+        router: &Router,
+        session_key: impl FnOnce() -> String,
+    ) -> (Option<u64>, String) {
         if router.routing_mode() != RoutingMode::QuotaFirst {
             return (None, String::new());
         }

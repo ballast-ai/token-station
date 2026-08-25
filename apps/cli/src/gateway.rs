@@ -3384,8 +3384,13 @@ impl Gateway {
         let (quota_now_ms, session) = Self::quota_preamble(router, || quota_session_key(&request));
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let mut decision = match self.route_with_mode(router, &request, &hints, &candidates, &session)
-        {
+        let mut decision = match self.route_with_mode(
+            router,
+            &request,
+            &hints,
+            &candidates,
+            &session,
+        ) {
             Ok(decision) => decision,
             Err(no_route) if is_vision_no_route(&no_route) => {
                 let replaced = replace_canonical_images(&mut request);
