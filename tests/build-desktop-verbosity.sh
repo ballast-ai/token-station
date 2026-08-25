@@ -17,23 +17,19 @@ make_fixture() {
   fake_bin="$fixture/bin"
   state="$fixture/state"
 
-  mkdir -p "$repo/scripts" "$repo/apps/desktop/src-tauri" "$fake_bin" "$state" "$fixture/rust-sysroot"
+  mkdir -p "$repo/scripts" "$repo/apps/desktop/src-tauri" "$repo/plugins/official" "$fake_bin" "$state" "$fixture/rust-sysroot"
   cp "$project_root/scripts/build-desktop.sh" "$repo/scripts/build-desktop.sh"
-  chmod +x "$repo/scripts/build-desktop.sh"
+  cp "$project_root/scripts/official-packages.py" "$repo/scripts/official-packages.py"
+  cp "$project_root/plugins/official/packages.json" "$repo/plugins/official/packages.json"
+  chmod +x "$repo/scripts/build-desktop.sh" "$repo/scripts/official-packages.py"
   printf '{\n  "version": "1.1.3"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
 
   local plugin
-  for plugin in \
-    agent-openai \
-    agent-anthropic \
-    agent-openai-responses \
-    agent-gemini \
-    provider-openai-compatible-v2 \
-    provider-anthropic-v2; do
+  while IFS= read -r plugin; do
     mkdir -p "$repo/plugins/official/$plugin/target/wasm32-wasip2/release"
     printf '{}\n' >"$repo/plugins/official/$plugin/manifest.json"
     : >"$repo/plugins/official/$plugin/target/wasm32-wasip2/release/${plugin//-/_}.wasm"
-  done
+  done < <("$repo/scripts/official-packages.py" --field dir)
 
   cat >"$repo/scripts/audit-desktop-artifact.sh" <<'SCRIPT'
 #!/usr/bin/env bash

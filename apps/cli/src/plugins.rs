@@ -80,46 +80,11 @@ mod builtin {
         pub wasm: &'static [u8],
     }
 
-    /// Northbound agent packages (`agent-adapter-v1`).
-    #[cfg(feature = "builtin-plugins")]
-    pub(super) const AGENTS: &[Package] = &[
-        Package {
-            manifest_source: include_str!(env!("TS_BUILTIN_AGENT_OPENAI_MANIFEST")),
-            wasm: include_bytes!(env!("TS_BUILTIN_AGENT_OPENAI_WASM")),
-        },
-        Package {
-            manifest_source: include_str!(env!("TS_BUILTIN_AGENT_ANTHROPIC_MANIFEST")),
-            wasm: include_bytes!(env!("TS_BUILTIN_AGENT_ANTHROPIC_WASM")),
-        },
-        Package {
-            manifest_source: include_str!(env!("TS_BUILTIN_AGENT_OPENAI_RESPONSES_MANIFEST")),
-            wasm: include_bytes!(env!("TS_BUILTIN_AGENT_OPENAI_RESPONSES_WASM")),
-        },
-        Package {
-            manifest_source: include_str!(env!("TS_BUILTIN_AGENT_GEMINI_MANIFEST")),
-            wasm: include_bytes!(env!("TS_BUILTIN_AGENT_GEMINI_WASM")),
-        },
-    ];
-
-    #[cfg(not(feature = "builtin-plugins"))]
-    pub(super) const AGENTS: &[Package] = &[];
-
-    /// Southbound South provider components (`provider-adapter-v2`).
-    #[cfg(feature = "builtin-plugins")]
-    pub(super) const PROVIDERS: &[Package] = &[
-        Package {
-            manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_MANIFEST")),
-            wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_WASM")),
-        },
-        Package {
-            manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_ANTHROPIC_V2_MANIFEST")),
-            wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_ANTHROPIC_V2_WASM")),
-        },
-    ];
-
-    #[cfg(not(feature = "builtin-plugins"))]
-    pub(super) const PROVIDERS: &[Package] = &[];
+    include!(concat!(env!("OUT_DIR"), "/builtin_official_packages.rs"));
 }
+
+/// Package ids compiled from `plugins/official/packages.json`.
+pub const OFFICIAL_PACKAGE_IDS: &[&str] = builtin::IDS;
 
 /// Where a package's bytes come from. The loader runs the same gates on both.
 #[derive(Debug, Clone)]

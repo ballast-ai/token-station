@@ -343,15 +343,6 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
     })
 }
 
-const BUNDLED_PLUGIN_IDS: [&str; 6] = [
-    "agent-openai",
-    "agent-anthropic",
-    "agent-openai-responses",
-    "agent-gemini",
-    "provider-openai-compatible",
-    "provider-anthropic",
-];
-
 #[derive(Serialize)]
 struct InstalledPluginSelfTest {
     id: String,
@@ -422,8 +413,9 @@ fn collect_installed_self_test() -> Result<Value, String> {
 
         let registry = PluginRegistry::for_config(&config)
             .map_err(|error| format!("builtin plugin registry: {error}"))?;
-        let mut plugins = Vec::with_capacity(BUNDLED_PLUGIN_IDS.len());
-        for id in BUNDLED_PLUGIN_IDS {
+        let mut plugins =
+            Vec::with_capacity(token_station_cli::plugins::OFFICIAL_PACKAGE_IDS.len());
+        for &id in token_station_cli::plugins::OFFICIAL_PACKAGE_IDS {
             let package = registry
                 .package(id)
                 .ok_or_else(|| format!("builtin plugin `{id}` is missing"))?;
@@ -9444,7 +9436,7 @@ mod tests {
             .iter()
             .map(|plugin| plugin["id"].as_str().expect("a plugin id is a string"))
             .collect();
-        assert_eq!(reported, BUNDLED_PLUGIN_IDS.to_vec());
+        assert_eq!(reported, token_station_cli::plugins::OFFICIAL_PACKAGE_IDS);
         assert_eq!(report["storage"]["credential_read"], json!(false));
         assert_eq!(report["gateway"]["loadable"], json!(true));
         assert!(report["gateway"]["provider_dialects"]
