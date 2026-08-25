@@ -222,17 +222,32 @@ describe("retained page theme styles", () => {
     expect(appCss).toMatch(/\.error-toast\.is-error\s*\{[^}]*--toast-soft:\s*var\(--danger-soft\)/s);
   });
 
-  it("keeps the global route row neutral until it is selected", () => {
+  it("keeps routing rows compact and free of decorative left rails", () => {
     const permanentGlobalRouteRule = appCss.match(
       /\.agent-master-home\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const routeItemRule = appCss.match(
+      /\.agent-master-item\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const routeIconRule = appCss.match(
+      /\.agent-master-icon\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const selectedAgentRule = appCss.match(
       /\.agent-master-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const disclosureRule = appCss.match(
+      /\.routing-scope-global-group \.agent-route-disclosure\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(permanentGlobalRouteRule).not.toMatch(/background:/);
     expect(permanentGlobalRouteRule).not.toMatch(/border:/);
-    expect(selectedAgentRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(routeItemRule).toMatch(/height:\s*46px/);
+    expect(routeIconRule).not.toMatch(/border:/);
+    expect(routeIconRule).not.toMatch(/background:/);
+    expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(selectedAgentRule).not.toMatch(/box-shadow:/);
+    expect(disclosureRule).not.toMatch(/border-left:/);
+    expect(appCss).not.toMatch(/\.routing-scope-global-group \.agent-route-disclosure::before/);
   });
 
   it("uses one focus indicator for enterprise connection inputs", () => {

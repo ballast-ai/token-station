@@ -6841,7 +6841,7 @@ pre.block {
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-columns: 270px minmax(0, 1fr);
+  grid-template-columns: 258px minmax(0, 1fr);
   align-items: stretch;
   gap: 14px;
   overflow: hidden;
@@ -6855,7 +6855,7 @@ pre.block {
   gap: 0;
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--surface);
   box-shadow: none;
 }
@@ -6863,12 +6863,13 @@ pre.block {
 .agent-master-list-card > [data-slot="card-header"] {
   grid-template-columns: 1fr auto;
   align-items: center;
-  padding: 14px;
+  min-height: 48px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--line);
 }
 
 .agent-master-list-card [data-slot="card-title"] h2 {
-  margin: 3px 0 0;
+  margin: 0;
   color: var(--ink);
   font-size: 13px;
 }
@@ -6882,7 +6883,7 @@ pre.block {
 .agent-master-list-card > [data-slot="card-content"] {
   min-height: 0;
   flex: 1;
-  padding: 5px;
+  padding: 6px;
 }
 
 .agent-master-scroll {
@@ -6893,16 +6894,16 @@ pre.block {
 .agent-master-nav {
   display: grid;
   gap: 2px;
-  padding-right: 2px;
+  padding-right: 1px;
 }
 
 .agent-master-item[data-slot="button"] {
   width: 100%;
-  height: 58px;
+  height: 46px;
   justify-content: flex-start;
-  gap: 11px;
-  padding: 8px 10px;
-  border-radius: 7px;
+  gap: 9px;
+  padding: 6px 9px;
+  border-radius: 8px;
   color: var(--muted);
 }
 
@@ -6929,17 +6930,14 @@ pre.block {
 }
 
 .agent-master-icon {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 42px !important;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px !important;
   display: grid !important;
   place-items: center;
   position: relative;
   overflow: visible !important;
-  border: 1px solid var(--line);
-  border-radius: 10px;
   color: var(--ink);
-  background: var(--surface-2);
 }
 
 .agent-brand-glyph {
@@ -6953,28 +6951,27 @@ pre.block {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 34px !important;
-  height: 34px !important;
+  width: 28px !important;
+  height: 28px !important;
   transform: translate(-50%, -50%);
 }
 
 .agent-master-item .agent-brand-glyph > svg {
   display: block;
-  width: 32px !important;
-  height: 32px !important;
+  width: 26px !important;
+  height: 26px !important;
 }
 
 .agent-master-item .agent-brand-glyph > img,
 .agent-master-item .agent-brand-glyph > .brand-fallback {
   display: block;
-  width: 34px !important;
-  height: 34px !important;
+  width: 28px !important;
+  height: 28px !important;
 }
 
 .agent-master-item[data-slot="button"][aria-current="page"] {
   color: var(--ink);
-  background: var(--signal-soft);
-  box-shadow: inset 2px 0 0 var(--signal);
+  background: var(--surface-2);
 }
 
 .agent-master-copy {
@@ -6994,7 +6991,12 @@ pre.block {
 
 .agent-master-item strong {
   color: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.agent-master-item[aria-current="page"] strong {
+  font-weight: 650;
 }
 
 .agent-master-item small {
@@ -7003,8 +7005,9 @@ pre.block {
 }
 
 .agent-master-item [data-slot="badge"] {
-  padding-inline: 5px;
-  font-size: 8px;
+  height: 18px;
+  padding-inline: 6px;
+  font-size: 9px;
 }
 
 .agent-master-content,
@@ -7065,22 +7068,26 @@ pre.block {
 }
 
 .agent-route-disclosure {
-  margin-top: 6px;
+  margin-top: 2px;
   display: grid;
   gap: 4px;
 }
 
 .agent-route-disclosure-trigger[data-slot="button"] {
   width: 100%;
-  min-height: 40px;
+  min-height: 34px;
   justify-content: space-between;
-  padding-inline: 12px;
+  padding-inline: 9px;
+  border-radius: 8px;
+  color: var(--muted);
 }
 
 .agent-route-disclosure-label {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  font-size: 11px;
+  font-weight: 550;
 }
 
 .agent-route-disclosure-label [data-slot="badge"] {
@@ -7099,6 +7106,7 @@ pre.block {
 .agent-route-list {
   display: grid;
   gap: 2px;
+  padding: 2px 0 0 10px;
 }
 
 .agent-connection-detail {
@@ -10117,32 +10125,18 @@ samp {
 .routing-mode-section .routing-mode-tabs [data-slot="tabs-list"] { width: 100%; }
 
 .agent-master-enterprise .enterprise-route-mark {
-  color: var(--signal);
-  background: color-mix(in srgb, var(--signal) 8%, var(--surface));
+  color: var(--muted);
 }
-.agent-master-enterprise .enterprise-route-mark svg { width: 23px; height: 23px; }
 .routing-scope-global-group {
   display: grid;
-  gap: 3px;
-  padding-bottom: 9px;
+  gap: 2px;
+  padding-bottom: 7px;
   border-bottom: 1px solid var(--line);
 }
 .routing-scope-global-group .agent-route-disclosure {
-  position: relative;
-  margin: 0 0 0 26px;
-  padding: 5px 0 0 15px;
-  border-top: 0;
-  border-left: 1px solid var(--line-strong);
+  margin: 0;
 }
-.routing-scope-global-group .agent-route-disclosure::before {
-  position: absolute;
-  top: 24px;
-  left: 0;
-  width: 10px;
-  border-top: 1px solid var(--line-strong);
-  content: "";
-}
-.agent-master-enterprise { margin-top: 6px; }
+.agent-master-enterprise { margin-top: 4px; }
 
 .agent-route-heading-identity {
   min-width: 0;

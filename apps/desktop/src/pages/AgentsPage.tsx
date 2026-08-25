@@ -82,6 +82,7 @@ export default function AgentsPage({
       <div className="agent-master-detail">
         <Card
           className="agent-master-list-card"
+          size="sm"
           role="region"
           aria-label={connections ? copy("Agent selector", "Agent 选择列表", "Agent 選擇清單", "Agent 選択リスト") : copy("Routing scopes", "路由范围", "路由範圍", "ルーティングスコープ")}
           data-onboarding-target="agent-list"
@@ -136,17 +137,17 @@ export default function AgentsPage({
                       onClick={onOpenHome}
                     >
                       <span className="agent-master-icon global-route-mark" aria-hidden="true">
-                        <TokenStationMark size={36} />
+                        <TokenStationMark size={28} />
                       </span>
                       <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong></span>
-                      <Badge variant={homeSelected ? "default" : "outline"}>{homeSelected
+                      <Badge variant={homeSelected ? "secondary" : "ghost"}>{homeSelected
                         ? copy("Current", "当前", "當前", "表示中")
                         : copy("Switch", "切换", "切換", "切替")}</Badge>
                     </Button>
                     <div className="agent-route-disclosure">
                       <Button
                         className="agent-route-disclosure-trigger"
-                        variant="outline"
+                        variant="ghost"
                         type="button"
                         aria-label={copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}
                         aria-expanded={routeListOpen}
@@ -157,7 +158,7 @@ export default function AgentsPage({
                           <span>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</span>
                           <Badge variant="outline">{registry.length}</Badge>
                         </span>
-                        <ChevronDown aria-hidden="true" />
+                        <ChevronDown data-icon="inline-end" aria-hidden="true" />
                       </Button>
                       {routeListOpen && (
                         <div id="agent-route-list" className="agent-route-list">
@@ -176,10 +177,10 @@ export default function AgentsPage({
                                 onClick={() => onOpenAgent(metadata.agent_id)}
                               >
                                 <span className="agent-master-icon" aria-hidden="true">
-                                  <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />
+                                  <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={28} />
                                 </span>
                                 <span className="agent-master-copy"><strong>{metadata.display_name}</strong></span>
-                                <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
+                                <Badge variant={agent?.status === "CONNECTED" ? "secondary" : "ghost"}>{navStatusCopy(agent?.status, copy)}</Badge>
                               </Button>
                             );
                           })}
@@ -211,10 +212,10 @@ export default function AgentsPage({
                       onClick={() => onOpenAgent(metadata.agent_id)}
                     >
                       <span className="agent-master-icon" aria-hidden="true">
-                        <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />
+                        <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={28} />
                       </span>
                       <span className="agent-master-copy"><strong>{metadata.display_name}</strong></span>
-                      <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
+                      <Badge variant={agent?.status === "CONNECTED" ? "secondary" : "ghost"}>{navStatusCopy(agent?.status, copy)}</Badge>
                     </Button>
                   );
                 })}
@@ -237,7 +238,7 @@ export default function AgentsPage({
                       <Building2 />
                     </span>
                     <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</strong></span>
-                    <Badge variant={enterpriseSelected ? "default" : "outline"}>{enterpriseSelected
+                    <Badge variant={enterpriseSelected ? "secondary" : "ghost"}>{enterpriseSelected
                       ? copy("Current", "当前", "當前", "表示中")
                       : copy("Switch", "切换", "切換", "切替")}</Badge>
                   </Button>
