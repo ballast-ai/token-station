@@ -97,6 +97,8 @@ sys.stdout.write((manifest.get("conformance") or {}).get("fixtures") or "")
 
 host_os="$(uname -s)"
 readonly host_os
+private_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+readonly private_cargo_home
 
 is_windows_target=false
 if [[ "$target" == *-pc-windows-* ]]; then
@@ -163,12 +165,31 @@ readonly rust_sysroot
   exit 1
 }
 
+# On Windows, rustc can retain a native Cargo registry path even when
+# --remap-path-prefix is present (for example C:\Users\runneradmin\.cargo).
+# Compile from an isolated Cargo Home under the ephemeral build stage so a
+# toolchain edge case cannot put the builder's username in the executable.
+# Keep remapping and auditing the original Cargo Home below as defense in
+# depth, including against stale target artifacts.
+build_cargo_home="$private_cargo_home"
+if [[ "$host_os" == MINGW* || "$host_os" == MSYS* || "$host_os" == CYGWIN* ]]; then
+  build_cargo_home_posix="$stage/cargo-home"
+  mkdir -p "$build_cargo_home_posix"
+  build_cargo_home="$(cygpath -w "$build_cargo_home_posix")"
+  export CARGO_HOME="$build_cargo_home"
+fi
+readonly build_cargo_home
+
 # Set the path remaps BEFORE building the plugins. Otherwise the plugin wasm is
 # compiled with the real paths baked into its panic/location strings, and
 # `include_bytes!` (the bundled-plugins layer) then embeds them into the desktop
 # binary. Remap the source checkout, Cargo Home, and Rust sysroot so dependency
 # and standard-library panic locations cannot expose a builder username.
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$root=/build --remap-path-prefix=$rust_sysroot=/rustc"
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$build_cargo_home=/cargo"
+if [[ "$private_cargo_home" != "$build_cargo_home" ]]; then
+  export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$private_cargo_home=/cargo"
+fi
+export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$root=/build --remap-path-prefix=$rust_sysroot=/rustc"
 
 mkdir -p "$stage/plugins-dist"
 for plugin in "${plugins[@]}"; do
@@ -322,7 +343,8 @@ fi
   --binary "$binary_path" \
   --bundle-root "$bundle_root" \
   --source-root "$root" \
-  --rust-sysroot "$rust_sysroot"
+  --rust-sysroot "$rust_sysroot" \
+  --private-cargo-home "$private_cargo_home"
 
 if [[ "$host_os" == "Darwin" && "$mode" != "local" ]]; then
   app_path="$bundle_root/macos/token-station.app"

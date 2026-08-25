@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|preview|production> --binary <path> --bundle-root <path> --source-root <path> --rust-sysroot <path>" >&2
+  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|preview|production> --binary <path> --bundle-root <path> --source-root <path> --rust-sysroot <path> --private-cargo-home <path>" >&2
   exit 2
 }
 
@@ -11,6 +11,7 @@ binary=""
 bundle_root=""
 source_root=""
 rust_sysroot=""
+private_cargo_home=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode=${2:-}; shift 2 ;;
@@ -18,11 +19,12 @@ while [[ $# -gt 0 ]]; do
     --bundle-root) bundle_root=${2:-}; shift 2 ;;
     --source-root) source_root=${2:-}; shift 2 ;;
     --rust-sysroot) rust_sysroot=${2:-}; shift 2 ;;
+    --private-cargo-home) private_cargo_home=${2:-}; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ "$mode" == "local" || "$mode" == "preview" || "$mode" == "production" ]] || usage
-[[ -n "$binary" && -n "$bundle_root" && -n "$source_root" && -n "$rust_sysroot" ]] || usage
+[[ -n "$binary" && -n "$bundle_root" && -n "$source_root" && -n "$rust_sysroot" && -n "$private_cargo_home" ]] || usage
 [[ -f "$binary" ]] || { echo "desktop executable missing: $binary" >&2; exit 1; }
 
 strings_file="$(mktemp "${TMPDIR:-/tmp}/token-station-strings.XXXXXX")"
@@ -75,10 +77,11 @@ fi
 
 # Dependency panic/location strings otherwise embed the builder's cargo home
 # (e.g. /Users/<name>/.cargo/...), which carries the username — a personal-info
-# leak. The build must remap CARGO_HOME (see scripts/build-desktop.sh).
-cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-if [[ -n "$cargo_home" ]] && grep -Fq "$cargo_home" "$strings_file"; then
-  echo "desktop executable leaks the cargo home path: $cargo_home" >&2
+# leak. Windows release builds use an isolated CARGO_HOME, but this audit still
+# checks the original private directory so stale target artifacts cannot hide
+# the leak (see scripts/build-desktop.sh).
+if grep -Fq "$private_cargo_home" "$strings_file"; then
+  echo "desktop executable leaks the cargo home path: $private_cargo_home" >&2
   exit 1
 fi
 

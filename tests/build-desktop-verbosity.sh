@@ -34,6 +34,7 @@ make_fixture() {
   cat >"$repo/scripts/audit-desktop-artifact.sh" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$@" >"$TEST_STATE/audit-args"
 SCRIPT
 
   cat >"$repo/scripts/package-macos-dmg.sh" <<'SCRIPT'
@@ -56,6 +57,14 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "${RUSTFLAGS:-<unset>}" >>"$TEST_STATE/cargo-rustflags"
+printf '%s\n' "${CARGO_HOME:-<unset>}" >>"$TEST_STATE/cargo-homes"
+SCRIPT
+
+  cat >"$fake_bin/cygpath" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "-w" && $# -eq 2 ]]
+printf '%s\n' "$2"
 SCRIPT
 
   cat >"$fake_bin/rustc" <<'SCRIPT'
@@ -175,6 +184,21 @@ test_all_rust_builds_remap_private_host_paths() {
     || fail "plugin and Desktop Rust builds did not share the Rust sysroot path remap"
 }
 
+test_windows_builds_isolate_cargo_home_but_audit_the_private_path() {
+  make_fixture isolated-windows-cargo-home
+  run_build --local --target x86_64-pc-windows-msvc >/dev/null
+
+  if grep -Fxq -- "$fixture/cargo-home" "$state/cargo-homes"; then
+    fail "Windows Rust compilation used the private Cargo Home"
+  fi
+  [[ "$(grep -c '/token-station-desktop\..*/cargo-home$' "$state/cargo-homes" || true)" == "7" ]] \
+    || fail "Windows Rust builds did not share the isolated Cargo Home"
+  grep -Fxq -- '--private-cargo-home' "$state/audit-args" \
+    || fail "desktop audit was not told to check the private Cargo Home"
+  grep -Fxq -- "$fixture/cargo-home" "$state/audit-args" \
+    || fail "desktop audit received the wrong private Cargo Home"
+}
+
 test_production_build_requires_the_official_updater_public_key() {
   make_fixture missing-updater-public-key Darwin
   if env \
@@ -279,6 +303,7 @@ test_production_build_rejects_private_material_in_the_public_key_variable() {
 test_normal_build_does_not_enable_verbose_tauri_logs
 test_test_version_build_enables_two_verbose_levels
 test_all_rust_builds_remap_private_host_paths
+test_windows_builds_isolate_cargo_home_but_audit_the_private_path
 test_production_build_requires_the_official_updater_public_key
 test_production_build_creates_updater_payloads_without_publishing_the_temporary_signature
 test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg
