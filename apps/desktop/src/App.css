@@ -11300,3 +11300,236 @@ samp {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* Overview usage snapshot */
+.station-content.station-content-overview {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.station-content-overview > .overview-page {
+  height: auto;
+  min-height: 100%;
+  grid-template-rows: none;
+  align-content: start;
+  gap: 16px;
+  overflow: visible;
+}
+
+.overview-usage-trend {
+  --usage-output: #25a86f;
+  --usage-cache: #8b5cf6;
+  --usage-cache-write: #ef8a2f;
+  --usage-cost: #ef476f;
+  flex: 0 0 auto;
+}
+
+.overview-usage-trend-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.overview-usage-open {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.overview-usage-open:hover,
+.overview-usage-open:focus-visible {
+  color: var(--signal);
+  border-color: color-mix(in srgb, var(--signal) 38%, var(--line));
+  background: var(--signal-soft);
+}
+
+.overview-usage-open svg {
+  width: 14px;
+  height: 14px;
+}
+
+.overview-usage-trend .usage-chart-stage,
+.overview-usage-trend .usage-trend-svg {
+  min-height: 260px;
+  height: 260px;
+}
+
+.overview-usage-error,
+.overview-usage-loading {
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.overview-usage-error {
+  color: var(--danger);
+}
+
+.overview-usage-metrics {
+  --usage-cache: #8b5cf6;
+  display: grid;
+  grid-template-columns: minmax(190px, 1.35fr) repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 12px 34px rgba(31, 42, 70, .045);
+}
+
+.overview-usage-metric {
+  min-width: 0;
+  min-height: 94px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-areas:
+    "icon label"
+    "icon value";
+  align-items: center;
+  align-content: center;
+  column-gap: 8px;
+  padding: 13px 14px;
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+
+.overview-usage-metric > svg {
+  grid-area: icon;
+  width: 19px;
+  height: 19px;
+}
+
+.overview-usage-metric > span {
+  grid-area: label;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.overview-usage-metric > strong {
+  grid-area: value;
+  overflow: hidden;
+  color: var(--ink);
+  font: 700 14px/1.2 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-usage-metric.request > svg { color: var(--signal); }
+.overview-usage-metric.cost > svg { color: var(--success); }
+.overview-usage-metric.success > svg { color: var(--usage-cache); }
+.overview-usage-metric.latency > svg { color: var(--warning); }
+
+.overview-usage-metric.primary {
+  display: flex;
+  gap: 13px;
+  padding-inline: 16px;
+}
+
+.overview-usage-metric-icon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.overview-usage-metric-icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.overview-usage-metric.primary > div {
+  min-width: 0;
+  display: grid;
+}
+
+.overview-usage-metric.primary > div > span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.overview-usage-metric.primary > div > strong {
+  overflow: hidden;
+  color: var(--ink);
+  font: 700 clamp(24px, 2.7vw, 34px)/1 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  letter-spacing: -.045em;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-usage-metric.primary > div > small {
+  margin-top: 4px;
+  color: var(--muted);
+  font: 9px/1.2 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+
+.station-content-overview .overview-runtime-metrics {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 96px;
+}
+
+.station-content-overview .overview-runtime-metrics > [data-slot="card"] {
+  min-height: 96px;
+}
+
+.station-content-overview .overview-summary-grid {
+  min-height: 320px;
+}
+
+.station-content-overview .overview-summary-card[data-slot="card"] {
+  min-height: 320px;
+}
+
+@media (max-width: 900px) {
+  .overview-usage-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .overview-usage-metric.primary {
+    grid-column: 1 / -1;
+  }
+
+  .overview-usage-trend .usage-chart-stage,
+  .overview-usage-trend .usage-trend-svg {
+    min-height: 230px;
+    height: 230px;
+  }
+}
+
+@media (max-width: 560px) {
+  .overview-usage-trend > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .overview-usage-trend-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .overview-usage-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .overview-usage-metric.primary {
+    grid-column: auto;
+  }
+}
