@@ -231,6 +231,41 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(cacheWrite).toHaveAttribute("title", "上游未报告缓存写入 Token");
   });
 
+  it("exposes refresh in the collapsed landing row and keeps current data while refreshing", async () => {
+    const user = userEvent.setup();
+    render(<Stats />);
+
+    await screen.findByText("1,500");
+    expect(screen.getByRole("button", { name: "筛选" })).toHaveAttribute("aria-expanded", "false");
+    const refresh = screen.getByRole("button", { name: "刷新用量" });
+    expect(refresh).toHaveTextContent("刷新");
+
+    const pending: Array<{
+      by: string | null;
+      request: ReturnType<typeof deferred<ReturnType<typeof statsView>>>;
+    }> = [];
+    vi.mocked(getStats).mockImplementation((_since, by) => {
+      const request = deferred<ReturnType<typeof statsView>>();
+      pending.push({ by, request });
+      return request.promise;
+    });
+
+    await user.click(refresh);
+    expect(refresh).toBeDisabled();
+    expect(refresh).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByText("1,500")).toBeInTheDocument();
+
+    const refreshedTotal = { ...aggregate, input_tokens: 2_000, output_tokens: 333 };
+    await act(async () => {
+      for (const { by, request } of pending) request.resolve(statsView(by, refreshedTotal));
+      await Promise.all(pending.map(({ request }) => request.promise));
+    });
+
+    await waitFor(() => expect(refresh).not.toBeDisabled());
+    expect(refresh).toHaveAttribute("aria-busy", "false");
+    expect(screen.getAllByTitle("2,333").length).toBeGreaterThan(0);
+  });
+
   it("does not overlap automatic dashboard refreshes", async () => {
     render(<Stats />);
     fireEvent.click(await screen.findByRole("button", { name: "筛选" }));

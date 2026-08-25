@@ -3658,13 +3658,17 @@ pre.block {
 .usage-refresh-control {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-template-columns: minmax(0, 1fr);
   align-items: end;
   gap: 6px;
 }
 .usage-refresh-button {
   width: 34px;
   height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
@@ -3673,8 +3677,9 @@ pre.block {
   cursor: pointer;
 }
 .usage-refresh-button:hover { color: var(--signal); border-color: color-mix(in srgb, var(--signal) 40%, var(--line)); }
+.usage-refresh-button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 .usage-refresh-button:disabled { cursor: wait; opacity: .65; }
-.usage-refresh-button.busy span { display: inline-block; animation: usage-spin .8s linear infinite; }
+.usage-refresh-button.busy svg { animation: usage-spin .8s linear infinite; }
 @keyframes usage-spin { to { transform: rotate(360deg); } }
 .usage-error { margin: 0; }
 
@@ -4736,7 +4741,7 @@ pre.block {
   .usage-kpi-grid { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .usage-refresh-button.busy span,
+  .usage-refresh-button.busy svg,
   .usage-loading div { animation: none; }
   .usage-rail-input,
   .usage-rail-output { transition: none; }
@@ -10667,6 +10672,29 @@ samp {
 .usage-filter-disclosure .usage-clear-filters {
   position: static;
   margin: 0;
+}
+
+.usage-filter-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.usage-filter-actions .usage-refresh-button-visible {
+  width: auto;
+  min-width: 68px;
+  padding-inline: 10px;
+  color: var(--ink);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.usage-filter-actions .usage-refresh-button-visible svg {
+  width: 14px;
+  height: 14px;
+  color: var(--signal);
 }
 
 .usage-toolbar {

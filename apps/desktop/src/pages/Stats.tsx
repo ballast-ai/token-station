@@ -14,7 +14,7 @@ import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendC
 import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "../components/ErrorToast";
-import { SlidersHorizontal } from "lucide-react";
+import { RefreshCw, SlidersHorizontal } from "lucide-react";
 
 export function formatBudgetAmount(micros: number): string {
   if (micros === 0) return "0.00";
@@ -384,11 +384,27 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
           <span aria-hidden="true">{sinceOptions.find((range) => range.value === since)?.label}</span>
           {hasFilters && <em aria-hidden="true">{[agentFilter, upstreamFilter, modelFilter].filter(Boolean).length}</em>}
         </button>
-        {hasFilters && (
-          <button className="usage-clear-filters" type="button" onClick={() => { setAgentFilter(""); setUpstreamFilter(""); setModelFilter(""); }}>
-            {copy("Clear filters", "清除筛选", "清除篩選", "フィルタをクリア")}
+        <div className="usage-filter-actions">
+          {hasFilters && (
+            <button className="usage-clear-filters" type="button" onClick={() => { setAgentFilter(""); setUpstreamFilter(""); setModelFilter(""); }}>
+              {copy("Clear filters", "清除筛选", "清除篩選", "フィルタをクリア")}
+            </button>
+          )}
+          <button
+            className={`usage-refresh-button usage-refresh-button-visible ${refreshing ? "busy" : ""}`}
+            type="button"
+            aria-label={copy("Refresh usage", "刷新用量", "重新整理用量", "使用状況を更新")}
+            aria-busy={refreshing}
+            title={copy("Refresh current usage data", "刷新当前用量数据", "重新整理目前用量資料", "現在の使用状況データを更新")}
+            disabled={loading || refreshing}
+            onClick={() => void loadDashboard(true)}
+          >
+            <RefreshCw aria-hidden="true" />
+            <span>{refreshing
+              ? copy("Refreshing", "刷新中", "重新整理中", "更新中")
+              : copy("Refresh", "刷新", "重新整理", "更新")}</span>
           </button>
-        )}
+        </div>
       </div>
 
       {filtersOpen && <div id="usage-filter-panel" className="usage-toolbar" aria-label={copy("Usage filters", "用量筛选", "用量篩選", "使用状況フィルター")}>
@@ -449,16 +465,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
               onChange={(value) => setRefreshInterval(Number(value))}
             />
           </div>
-          <button
-            className={`usage-refresh-button ${refreshing ? "busy" : ""}`}
-            type="button"
-            aria-label={copy("Refresh usage", "刷新用量", "重新整理用量", "使用状況を更新")}
-            title={copy("Refresh usage", "刷新用量", "重新整理用量", "使用状況を更新")}
-            disabled={refreshing}
-            onClick={() => void loadDashboard(true)}
-          >
-            <span aria-hidden="true">↻</span>
-          </button>
         </div>
         <div className="usage-filter-field usage-range-select">
           <span>{copy("Time range", "时间范围", "時間範圍", "時間範囲")}</span>
