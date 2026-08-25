@@ -3,8 +3,10 @@ import {
   Bot,
   Globe,
   Info,
+  KeyRound,
   Palette,
   ScrollText,
+  ServerCog,
   Settings2,
   type LucideIcon,
 } from "lucide-react";
@@ -32,6 +34,8 @@ import RequestLogsPage from "./RequestLogsPage";
 
 type SettingsSection =
   | "general"
+  | "api-key"
+  | "runtime"
   | "agent-visibility"
   | "appearance"
   | "language"
@@ -57,6 +61,18 @@ const SECTIONS: Array<{
     label: "settings.general",
     description: "settings.generalHint",
     icon: Settings2,
+  },
+  {
+    id: "api-key",
+    label: "settings.apiKey",
+    description: "settings.apiKeyHint",
+    icon: KeyRound,
+  },
+  {
+    id: "runtime",
+    label: "settings.runtime",
+    description: "settings.runtimeHint",
+    icon: ServerCog,
   },
   {
     id: "agent-visibility",
@@ -157,6 +173,32 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
         <Button variant="outline" size="sm" type="button" disabled={!key} onClick={() => void copy()}>
           {copied ? t("key.copied") : t("key.copy")}
         </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RuntimeInformationCard({ settings }: { settings: SettingsView }) {
+  const { t } = useLanguage();
+  return (
+    <Card className="settings-card runtime-information-card">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{t("runtime.title")}</h2></CardTitle>
+        <p className="sub">{t("runtime.description")}</p>
+      </CardHeader>
+      <CardContent>
+        <div className="kv-grid">
+          <div className="kv-k">{t("general.listen")}</div>
+          <div className="kv-v mono">{settings.listen}</div>
+          <div className="kv-k">{t("general.dataDir")}</div>
+          <div className="kv-v mono">{settings.data_dir || "—"}</div>
+          <div className="kv-k">{t("general.pluginsDir")}</div>
+          <div className="kv-v mono">{settings.plugins_dir || "—"}</div>
+          <div className="kv-k">{t("general.adapter")}</div>
+          <div className="kv-v mono">{settings.agent || "—"}</div>
+          <div className="kv-k">{t("general.coreVersion")}</div>
+          <div className="kv-v mono">{settings.version}</div>
+        </div>
       </CardContent>
     </Card>
   );
@@ -363,6 +405,13 @@ function SettingsHubContent({
     resetScroll();
     setSection(SECTIONS[nextIndex].id);
   };
+  const activeSection = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0];
+  const activeSectionDescription = activeSection.englishDescription ? copy(
+    activeSection.englishDescription,
+    activeSection.chineseDescription ?? activeSection.englishDescription,
+    activeSection.traditionalDescription ?? activeSection.englishDescription,
+    activeSection.japaneseDescription ?? activeSection.englishDescription,
+  ) : t(activeSection.description);
 
   return (
     <div className="page-stack settings-page">
@@ -370,7 +419,7 @@ function SettingsHubContent({
         <header className="overview-heading settings-heading">
           <div>
             <h1>{t("settings.title")}</h1>
-            <p>{t("settings.generalHint")}</p>
+            <p>{activeSectionDescription}</p>
           </div>
         </header>
         <nav
@@ -435,11 +484,15 @@ function SettingsHubContent({
       </aside>
       <main ref={contentRef} className="settings-content">
         {section === "general" && (
+          <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="general" />
+        )}
+        {section === "api-key" && (
           <>
             <VirtualKeyCard serve={serve} />
-            <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} />
+            <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="api-key" />
           </>
         )}
+        {section === "runtime" && <RuntimeInformationCard settings={settings} />}
         {section === "agent-visibility" && (
           <AgentVisibilityPanel
             registry={registry}

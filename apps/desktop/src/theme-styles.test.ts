@@ -5,6 +5,16 @@ import { describe, expect, it } from "vitest";
 const appCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
 
 describe("retained page theme styles", () => {
+  it("prevents accidental static-text selection but keeps editable controls selectable", () => {
+    const bodyRule = appCss.match(/(?:^|\n)body\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const editableRule = appCss.match(
+      /body :is\(input, textarea, \[contenteditable="true"\]\)\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(bodyRule).toMatch(/user-select:\s*none/);
+    expect(editableRule).toMatch(/user-select:\s*text/);
+  });
+
   it("contains fixed overview runtime cards inside their grid track", () => {
     const overviewGridRule = appCss.match(
       /\.station-content-overview > \.overview-page\s*\{([^}]*)\}/s,
@@ -63,12 +73,33 @@ describe("retained page theme styles", () => {
     expect(appCss).not.toMatch(/\.model-test-(?:target|picker|model-name)/);
   });
 
-  it("hides the duplicate provider model summary while management is expanded", () => {
-    const expandedProviderModelsRule = appCss.match(
-      /\.provider-card\.expanded > \.provider-primary-models\[data-layout="compact-three-column"\]\s*\{([^}]*)\}/s,
+  it("constrains provider management to a large internally scrolling dialog", () => {
+    const dialogRule = appCss.match(
+      /\.provider-management-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const bodyRule = appCss.match(/\.provider-management-dialog-body\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(dialogRule).toMatch(/max-width:\s*920px/);
+    expect(dialogRule).toMatch(/max-height:/);
+    expect(bodyRule).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("keeps long provider-removal impact lists inside the viewport", () => {
+    const dialogRule = appCss.match(
+      /\.provider-removal-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const previewRule = appCss.match(
+      /\.provider-removal-dialog \.provider-removal-preview\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
 
-    expect(expandedProviderModelsRule).toMatch(/display:\s*none/);
+    expect(dialogRule).toMatch(/max-height:/);
+    expect(dialogRule).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\) auto/);
+    expect(previewRule).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("hides the responsive request latency column by semantic class", () => {
+    expect(appCss).toMatch(/\.usage-log-row > \.usage-log-latency\s*\{\s*display:\s*none/);
+    expect(appCss).not.toMatch(/\.usage-log-row > :nth-child\(6\)/);
   });
 
   it("keeps Settings category changes in a stable inner scroller", () => {
@@ -93,6 +124,9 @@ describe("retained page theme styles", () => {
     expect(contentRule).toMatch(/overflow-y:\s*auto/);
     expect(contentRule).toMatch(/scrollbar-gutter:\s*stable/);
     expect(sidebarRule).toMatch(/align-content:\s*start/);
+    expect(sidebarRule).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\)/);
+    const subnavRule = appCss.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(subnavRule).toMatch(/overflow-y:\s*auto/);
     expect(pressedNavigationRule).toMatch(/transform:\s*none/);
     expect(pointerHoverRule).toMatch(/background:\s*var\(--surface\)/);
     expect(appCss).not.toMatch(
@@ -141,6 +175,13 @@ describe("retained page theme styles", () => {
     expect(draggingWrapperRule).toMatch(/z-index:/);
     expect(reducedMotion).toMatch(/\.direct-provider-sortable[^}]*transition:\s*none/);
     expect(reducedMotion).toMatch(/\.direct-provider-row[^}]*transition:\s*none/);
+  });
+
+  it("visually hides the duplicate Direct radio mark", () => {
+    const radioRule = appCss.match(/\.direct-provider-radio\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(radioRule).toMatch(/position:\s*absolute/);
+    expect(radioRule).toMatch(/clip:\s*rect\(0, 0, 0, 0\)/);
   });
 
   it("uses stable WebView-safe colors for selected routing states", () => {

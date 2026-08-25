@@ -195,8 +195,8 @@ describe("UsageRequestLog", () => {
     );
 
     expect((await screen.findAllByText("deepseek/deepseek-v4-pro")).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("估算 $0.435000")).toHaveLength(2);
-    expect(screen.getByText("缺少模型价格：unknown-model")).toBeInTheDocument();
+    expect(screen.getAllByText("估算 $0.435000")).toHaveLength(1);
+    expect(screen.getByText("未知")).toHaveAttribute("title", "缺少模型价格：unknown-model");
     expect(screen.getByText("1–20 / 21")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "下一页" }));
@@ -245,7 +245,11 @@ describe("UsageRequestLog", () => {
       />,
     );
 
-    await user.click((await screen.findAllByText("deepseek/deepseek-v4-pro"))[0]);
+    const openDetails = await screen.findByRole("button", { name: /打开请求详情.*req-1/ });
+    await user.click(openDetails);
+
+    expect(document.querySelector("details.usage-log-row")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "请求详情" })).toBeInTheDocument();
 
     const input = screen.getByRole("region", { name: "明文输入" });
     const output = screen.getByRole("region", { name: "明文输出" });
@@ -265,6 +269,11 @@ describe("UsageRequestLog", () => {
     expect(within(output).getByText("工具调用 · read_file")).toBeInTheDocument();
     expect(within(output).getByText(/\/tmp\/a\.ts/)).toBeInTheDocument();
     expect(screen.getByText("默认保留 7 天")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "请求详情" })).toBeNull();
+    expect(openDetails).toHaveFocus();
   });
 
   it("formats complete JSON in source view and preserves non-JSON source exactly", async () => {
@@ -319,7 +328,7 @@ describe("UsageRequestLog", () => {
 
     const route = (await screen.findAllByText("deepseek/deepseek-v4-pro"))[0];
     await user.click(route);
-    const row = route.closest("details")!;
+    const row = screen.getByRole("dialog", { name: "请求详情" });
 
     const trace = within(row).getByTestId("receipt-trace");
     expect(trace).toHaveClass("receipt-timeline-compact");

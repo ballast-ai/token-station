@@ -10,7 +10,7 @@ interface ProvidersPageProps {
   recoveryError: string | null;
   serveRunning: boolean;
   busy: boolean;
-  onRemove: (name: string) => void;
+  onRemove: (name: string) => Promise<boolean>;
   onRestore: (name: string) => void;
   onStateChange: (state: StateView) => void;
   onAddProvider: () => void;

@@ -1157,7 +1157,7 @@ function StationApp() {
           recoveryError={state.provider_recovery_error ?? null}
           serveRunning={runtimeHealthy}
           busy={busy}
-          onRemove={(name) => void run(
+          onRemove={(name) => run(
             () => removeProvider(name),
             copy("Provider deleted", "供应商已删除", "供應商已刪除", "プロバイダーが削除されました"),
           )}

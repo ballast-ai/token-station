@@ -2699,6 +2699,7 @@ describe("desktop station navigation", () => {
     expect(document.querySelector(".global-banner")).toBeNull();
     expect(screen.queryByText("vk-test-secret")).toBeNull();
     await user.click(screen.getByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("button", { name: /^API Key/ }));
     expect(screen.getByLabelText("虚拟 API Key")).toHaveTextContent("••••");
     await user.click(screen.getByRole("button", { name: "复制" }));
     expect(writeText).toHaveBeenCalledWith("vk-test-secret");

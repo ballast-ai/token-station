@@ -42,6 +42,9 @@ import TokenStationMark from "../components/TokenStationMark";
 
 const PROJECT_URL = "https://github.com/ballast-ai/token-station";
 const RELEASES_URL = `${PROJECT_URL}/releases`;
+const BUILD_COMMIT_HASH = typeof __APP_COMMIT_HASH__ === "string"
+  ? __APP_COMMIT_HASH__
+  : "unknown";
 
 function requiresFreshUpdateCheck(message: string): boolean {
   return message.includes("update_version_changed:")
@@ -66,10 +69,12 @@ function invalidateUpdateCandidate(
 function AboutContent({
   desktopVersion,
   coreVersion,
+  commitHash = BUILD_COMMIT_HASH,
   onOpenFirstRunGuide,
 }: {
   desktopVersion: string;
   coreVersion: string;
+  commitHash?: string;
   onOpenFirstRunGuide?: () => void;
 }) {
   const { copy, language, t } = useLanguage();
@@ -210,6 +215,10 @@ function AboutContent({
                 <Badge variant="outline" aria-label={`Core ${coreVersion}`}>
                   <span>Core</span>
                   <strong className="mono">{coreVersion}</strong>
+                </Badge>
+                <Badge variant="outline" aria-label={`Commit ${commitHash}`}>
+                  <span>Commit</span>
+                  <strong className="mono">{commitHash}</strong>
                 </Badge>
               </div>
             </div>

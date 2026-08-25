@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderView, SettingsView, StateView } from "./api";
@@ -1143,7 +1143,8 @@ describe("model selection and provider model management", () => {
 });
 
 describe("provider deletion lifecycle", () => {
-  it("供应商管理列表复用稳定品牌图标", () => {
+  it("供应商管理列表复用稳定品牌图标并在弹窗中管理", async () => {
+    const user = userEvent.setup();
     render(
       <ProviderList
         providers={[{
@@ -1172,11 +1173,23 @@ describe("provider deletion lifecycle", () => {
     expect(within(providerGroup).getByText("1 个模型")).toBeInTheDocument();
     expect(within(providerGroup).getByText("凭据已配置")).toBeInTheDocument();
     expect(within(providerGroup).queryByText(/store/)).not.toBeInTheDocument();
-    expect(within(providerGroup).getByRole("button", { name: "管理" })).toBeInTheDocument();
+    const manageButton = within(providerGroup).getByRole("button", { name: "管理" });
+    expect(manageButton).toBeInTheDocument();
     const modelList = screen.getByRole("list", { name: "team-openai 模型" });
     expect(modelList).toHaveAttribute("data-layout", "compact-three-column");
     expect(within(modelList).getByRole("listitem"))
       .toHaveTextContent("gpt-5.6供应商 · team-openai");
+
+    await user.click(manageButton);
+    const managerDialog = screen.getByRole("dialog", { name: "管理 team-openai" });
+    expect(managerDialog.querySelector(".provider-model-manager")).toBeInTheDocument();
+    expect(within(managerDialog).getByRole("button", { name: "关闭" })).toBeInTheDocument();
+    expect(providerGroup).not.toHaveClass("expanded");
+    expect(within(providerGroup).queryByText("管理 team-openai")).toBeNull();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "管理 team-openai" })).toBeNull();
+    expect(manageButton).toHaveFocus();
   });
 
   it("供应商管理不根据自定义 deepseek 名称伪造官方品牌", () => {
@@ -1206,6 +1219,40 @@ describe("provider deletion lifecycle", () => {
     expect(within(providerCard as HTMLElement).getByText("D", { selector: ".brand-fallback" }))
       .toBeInTheDocument();
     expect(providerCard.querySelector('[data-provider-artwork="fallback"]')).toBeInTheDocument();
+  });
+
+  it("删除预览延迟返回时不会覆盖已打开的管理弹窗", async () => {
+    const provider: ProviderView = {
+      name: "deferred", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["model-a"], has_auth: true,
+    };
+    let resolvePreview!: (preview: Awaited<ReturnType<typeof previewProviderRemoval>>) => void;
+    vi.mocked(previewProviderRemoval).mockImplementation(() => new Promise((resolve) => {
+      resolvePreview = resolve;
+    }));
+    const user = userEvent.setup();
+    render(
+      <ProviderList
+        providers={[provider]}
+        deletedProviders={[]}
+        recoveryError={null}
+        serveRunning={false}
+        busy={false}
+        onRemove={vi.fn()}
+        onRestore={vi.fn()}
+        onStateChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "管理" }));
+    await act(async () => {
+      resolvePreview({ name: "deferred", references: [], can_remove: true });
+    });
+
+    await waitFor(() => expect(screen.getAllByRole("dialog")).toHaveLength(1));
+    expect(screen.getByRole("dialog", { name: "管理 deferred" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "删除影响预览" })).toBeNull();
   });
 
   it("does not expose a raw provider recovery error in English mode", () => {
@@ -1253,8 +1300,47 @@ describe("provider deletion lifecycle", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "删除" }));
+    const deletionDialog = await screen.findByRole("dialog", { name: "删除影响预览" });
     expect(await screen.findByText("主页/上档#1")).toBeInTheDocument();
     expect(screen.getByText("Agent/codex/high")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认移入回收站" })).toBeDisabled();
+    expect(within(deletionDialog).getByRole("button", { name: "确认移入回收站" })).toBeDisabled();
+    expect(document.querySelector('[aria-label="referenced 供应商"]'))
+      .not.toContainElement(deletionDialog);
+  });
+
+  it("删除失败时保留影响弹窗以便重试", async () => {
+    const provider: ProviderView = {
+      name: "retryable", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["model-a"], has_auth: true,
+    };
+    vi.mocked(previewProviderRemoval).mockResolvedValue({
+      name: "retryable",
+      references: [],
+      can_remove: true,
+    });
+    const onRemove = vi.fn().mockResolvedValue(false);
+    const user = userEvent.setup();
+    render(
+      <ProviderList
+        providers={[provider]}
+        deletedProviders={[]}
+        recoveryError={null}
+        serveRunning={false}
+        busy={false}
+        onRemove={onRemove}
+        onRestore={vi.fn()}
+        onStateChange={vi.fn()}
+      />,
+    );
+
+    const deleteButton = screen.getByRole("button", { name: "删除" });
+    await user.click(deleteButton);
+    const deletionDialog = await screen.findByRole("dialog", { name: "删除影响预览" });
+    await user.click(within(deletionDialog).getByRole("button", { name: "确认移入回收站" }));
+
+    expect(onRemove).toHaveBeenCalledWith("retryable");
+    expect(deletionDialog).toBeInTheDocument();
+    await user.click(within(deletionDialog).getByRole("button", { name: "取消" }));
+    expect(deleteButton).toHaveFocus();
   });
 });

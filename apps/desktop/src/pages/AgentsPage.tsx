@@ -120,7 +120,11 @@ export default function AgentsPage({
                 aria-label={connections ? copy("Detected Agent list", "发现 Agent 列表", "偵測到的 Agent 清單", "検出された Agent リスト") : copy("Routing scope list", "路由范围列表", "路由範圍清單", "ルーティングスコープリスト")}
               >
                 {!connections && (
-                  <>
+                  <div
+                    className="routing-scope-global-group"
+                    role="group"
+                    aria-label={copy("Global routing and Agent routes", "全局路由与 Agent 路由", "全域路由與 Agent 路由", "グローバルルーティングと Agent ルーティング")}
+                  >
                     <Button
                       className="agent-master-item agent-master-home"
                       variant="ghost"
@@ -139,9 +143,52 @@ export default function AgentsPage({
                         ? copy("Current", "当前", "當前", "表示中")
                         : copy("Switch", "切换", "切換", "切替")}</Badge>
                     </Button>
-                  </>
+                    <div className="agent-route-disclosure">
+                      <Button
+                        className="agent-route-disclosure-trigger"
+                        variant="outline"
+                        type="button"
+                        aria-label={copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}
+                        aria-expanded={routeListOpen}
+                        aria-controls="agent-route-list"
+                        onClick={() => setRouteListOpen((open) => !open)}
+                      >
+                        <span className="agent-route-disclosure-label">
+                          <span>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</span>
+                          <Badge variant="outline">{registry.length}</Badge>
+                        </span>
+                        <ChevronDown aria-hidden="true" />
+                      </Button>
+                      {routeListOpen && (
+                        <div id="agent-route-list" className="agent-route-list">
+                          {registry.map((metadata) => {
+                            const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
+                            const selected = metadata.agent_id === selectedAgentId;
+                            return (
+                              <Button
+                                key={metadata.agent_id}
+                                className="agent-master-item"
+                                variant="ghost"
+                                type="button"
+                                aria-label={metadata.display_name}
+                                title={`${metadata.display_name} · ${statusCopy(agent?.status, copy)}`}
+                                aria-current={selected ? "page" : undefined}
+                                onClick={() => onOpenAgent(metadata.agent_id)}
+                              >
+                                <span className="agent-master-icon" aria-hidden="true">
+                                  <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />
+                                </span>
+                                <span className="agent-master-copy"><strong>{metadata.display_name}</strong></span>
+                                <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
+                              </Button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
-                {connections ? registry.map((metadata) => {
+                {connections && registry.map((metadata) => {
                   const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
                   const selected = metadata.agent_id === selectedAgentId;
                   const revealIndex = revealOrder.get(metadata.agent_id);
@@ -170,51 +217,7 @@ export default function AgentsPage({
                       <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
                     </Button>
                   );
-                }) : (
-                  <div className="agent-route-disclosure">
-                    <Button
-                      className="agent-route-disclosure-trigger"
-                      variant="outline"
-                      type="button"
-                      aria-label={copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}
-                      aria-expanded={routeListOpen}
-                      aria-controls="agent-route-list"
-                      onClick={() => setRouteListOpen((open) => !open)}
-                    >
-                      <span className="agent-route-disclosure-label">
-                        <span>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</span>
-                        <Badge variant="outline">{registry.length}</Badge>
-                      </span>
-                      <ChevronDown aria-hidden="true" />
-                    </Button>
-                    {routeListOpen && (
-                      <div id="agent-route-list" className="agent-route-list">
-                        {registry.map((metadata) => {
-                          const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
-                          const selected = metadata.agent_id === selectedAgentId;
-                          return (
-                            <Button
-                              key={metadata.agent_id}
-                              className="agent-master-item"
-                              variant="ghost"
-                              type="button"
-                              aria-label={metadata.display_name}
-                              title={`${metadata.display_name} · ${statusCopy(agent?.status, copy)}`}
-                              aria-current={selected ? "page" : undefined}
-                              onClick={() => onOpenAgent(metadata.agent_id)}
-                            >
-                              <span className="agent-master-icon" aria-hidden="true">
-                                <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />
-                              </span>
-                              <span className="agent-master-copy"><strong>{metadata.display_name}</strong></span>
-                              <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
-                            </Button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
+                })}
                 {!connections && (
                   <Button
                     className="agent-master-item agent-master-enterprise"

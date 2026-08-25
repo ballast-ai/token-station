@@ -77,11 +77,13 @@ describe("DirectRoutePanel", () => {
     expect(emptyRow.querySelector('[data-provider-artwork="fallback"]')).toBeInTheDocument();
 
     const openAiRadio = screen.getByRole("radio", { name: /openai-account/ });
+    expect(openAiRadio).toHaveClass("direct-provider-radio");
     const openAiRow = openAiRadio.closest(".direct-provider-row");
     if (!openAiRow) throw new Error("openai direct row missing");
     await user.click(within(openAiRow as HTMLElement).getByText("openai-account"));
     expect(openAiRadio).toBeChecked();
     expect(openAiRow).toHaveClass("selected");
+    expect(openAiRow?.querySelectorAll(".direct-selected-mark")).toHaveLength(1);
     expect(within(openAiRow as HTMLElement).getByRole("button", { name: /调整 openai-account 顺序/ }))
       .toHaveAttribute("aria-roledescription", "可排序项");
 

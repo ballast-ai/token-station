@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import ProviderModelManager from "./ProviderModelManager";
@@ -6,6 +6,15 @@ import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { ProviderIcon } from "../brandIcons";
 import { useErrorToast } from "./ErrorToast";
+import { Button } from "./ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
 
 interface ProviderListProps {
   providers: ProviderView[];
@@ -13,7 +22,7 @@ interface ProviderListProps {
   recoveryError: string | null;
   serveRunning: boolean;
   busy: boolean;
-  onRemove: (name: string) => void;
+  onRemove: (name: string) => Promise<boolean>;
   onRestore: (name: string) => void;
   onStateChange: (state: StateView) => void;
 }
@@ -32,18 +41,35 @@ export default function ProviderList({
   const { showError } = useErrorToast();
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const providerListRef = useRef<HTMLElement>(null);
+  const manageTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const removalTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const removalRequestRef = useRef(0);
   const modelCount = providers.reduce((total, provider) => total + provider.models.length, 0);
+  const activeProvider = providers.find((provider) => provider.name === managedProvider);
 
   const inspectRemoval = async (name: string) => {
+    const request = ++removalRequestRef.current;
+    setManagedProvider(null);
     try {
-      setRemoval(await previewProviderRemoval(name));
+      setRemoval(null);
+      const preview = await previewProviderRemoval(name);
+      if (request === removalRequestRef.current) setRemoval(preview);
     } catch (caught) {
-      showError(humanizeAppError(caught, language), `provider-removal-preview:${name}`);
+      if (request === removalRequestRef.current) {
+        showError(humanizeAppError(caught, language), `provider-removal-preview:${name}`);
+      }
     }
   };
 
+  const restoreFocus = (trigger: HTMLButtonElement | null) => {
+    if (trigger?.isConnected) trigger.focus();
+    else providerListRef.current?.focus();
+  };
+
   return (
-    <section className="panel provider-panel">
+    <section ref={providerListRef} className="panel provider-panel" tabIndex={-1}>
       <div className="panel-head split-heading">
         <div>
           <h2>{copy("Managed models", "已接入模型", "已接入模型", "接続済みモデル")}</h2>
@@ -78,7 +104,7 @@ export default function ProviderList({
         )}
         {providers.map((provider) => (
           <article
-            className={`provider-card ${managedProvider === provider.name ? "expanded" : ""}`}
+            className="provider-card"
             key={provider.name}
             role="group"
             aria-label={copy(`${provider.name} provider`, `${provider.name} 供应商`, `${provider.name} 供應商`, `${provider.name} プロバイダー`)}
@@ -113,13 +139,24 @@ export default function ProviderList({
                   className="btn tiny"
                   type="button"
                   disabled={busy}
-                  onClick={() => setManagedProvider((current) => current === provider.name ? null : provider.name)}
+                  onClick={(event) => {
+                    removalRequestRef.current += 1;
+                    setRemoval(null);
+                    manageTriggerRef.current = event.currentTarget;
+                    setManagedProvider(provider.name);
+                  }}
                 >
-                  {managedProvider === provider.name
-                    ? copy("Close", "收起", "關閉", "閉じる")
-                    : copy("Manage", "管理", "管理", "管理")}
+                  {copy("Manage", "管理", "管理", "管理")}
                 </button>
-                <button className="btn tiny danger" type="button" disabled={busy} onClick={() => void inspectRemoval(provider.name)}>
+                <button
+                  className="btn tiny danger"
+                  type="button"
+                  disabled={busy}
+                  onClick={(event) => {
+                    removalTriggerRef.current = event.currentTarget;
+                    void inspectRemoval(provider.name);
+                  }}
+                >
                   {copy("Delete", "删除", "刪除", "削除")}
                 </button>
               </div>
@@ -142,8 +179,31 @@ export default function ProviderList({
                 </div>
               )}
             </div>
-            {managedProvider === provider.name && (
-              provider.access_tier === "free" ? (
+          </article>
+        ))}
+      </div>
+
+      <Dialog open={Boolean(activeProvider)} onOpenChange={(open) => !open && setManagedProvider(null)}>
+        {activeProvider && (
+          <DialogContent
+            className="provider-management-dialog"
+            closeLabel={copy("Close", "关闭", "關閉", "閉じる")}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              restoreFocus(manageTriggerRef.current);
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>{copy(`Manage ${activeProvider.name}`, `管理 ${activeProvider.name}`, `管理 ${activeProvider.name}`, `${activeProvider.name} を管理`)}</DialogTitle>
+              <DialogDescription>{copy(
+                "Manage models, credentials, and connection diagnostics without changing the model list behind the dialog.",
+                "在弹窗中管理模型、凭据与连接诊断，不改变后方模型列表的位置。",
+                "在彈窗中管理模型、憑證與連線診斷，不改變後方模型清單的位置。",
+                "ダイアログ内でモデル、認証情報、接続診断を管理します。",
+              )}</DialogDescription>
+            </DialogHeader>
+            <div className="provider-management-dialog-body">
+              {activeProvider.access_tier === "free" ? (
                 <div className="free-provider-managed-note">
                   {copy(
                     "Free provider endpoints and model sets are protected by the catalog. To change the key or models, delete this provider and add it again through the free catalog.",
@@ -152,52 +212,76 @@ export default function ProviderList({
                 </div>
               ) : (
                 <ProviderModelManager
-                  provider={provider}
+                  provider={activeProvider}
                   serveRunning={serveRunning}
                   disabled={busy}
                   onSaved={onStateChange}
                 />
-              )
-            )}
-            {removal?.name === provider.name && (
-              <div
-                className="provider-removal-preview"
-                role="dialog"
-                aria-label={copy("Deletion impact preview", "删除影响预览", "刪除影響預覽", "削除影響プレビュー")}
-              >
-                <strong>{copy("Deletion impact", "删除影响", "刪除影響", "削除影響")}</strong>
-                {removal.references.length > 0 ? (
-                  <>
-                    <p>{copy(
-                      "The following routes still reference this provider and must be updated first:",
-                      "以下路由仍在引用，必须先调整：", "以下路由仍在引用，必須先調整：", "以下のルートがまだ参照しています。まず調整してください："
-                    )}</p>
-                    <ul>{removal.references.map((reference) => <li key={reference}>{reference}</li>)}</ul>
-                  </>
-                ) : (
+              )}
+            </div>
+          </DialogContent>
+        )}
+      </Dialog>
+
+      <Dialog open={Boolean(removal)} onOpenChange={(open) => !open && setRemoval(null)}>
+        {removal && (
+          <DialogContent
+            className="provider-removal-dialog"
+            closeLabel={copy("Close", "关闭", "關閉", "閉じる")}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              restoreFocus(removalTriggerRef.current);
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>{copy("Deletion impact preview", "删除影响预览", "刪除影響預覽", "削除影響プレビュー")}</DialogTitle>
+              <DialogDescription>{copy(
+                `Review every route that references ${removal.name} before removal.`,
+                `删除 ${removal.name} 前，请检查所有引用它的路由。`,
+                `刪除 ${removal.name} 前，請檢查所有引用它的路由。`,
+                `${removal.name} を削除する前に、参照するすべてのルートを確認してください。`,
+              )}</DialogDescription>
+            </DialogHeader>
+            <div className="provider-removal-preview">
+              {removal.references.length > 0 ? (
+                <>
                   <p>{copy(
-                    "No routes reference this provider. Deleted providers move to the local recycle bin and can be restored.",
-                    "没有路由引用。删除后会进入本地回收站，可恢复。", "沒有路由引用。刪除後會進入本地回收站，可恢復。", "ルートが参照していません。削除後はローカルのゴミ箱に移動し、復元可能です。"
+                    "The following routes still reference this provider and must be updated first:",
+                    "以下路由仍在引用，必须先调整：", "以下路由仍在引用，必須先調整：", "以下のルートがまだ参照しています。まず調整してください："
                   )}</p>
-                )}
-                <div>
-                  <button className="btn tiny" type="button" onClick={() => setRemoval(null)}>
-                    {copy("Cancel", "取消", "取消", "キャンセル")}
-                  </button>
-                  <button
-                    className="btn tiny danger"
-                    type="button"
-                    disabled={busy || !removal.can_remove}
-                    onClick={() => onRemove(provider.name)}
-                  >
-                    {copy("Move to recycle bin", "确认移入回收站", "確認移入回收站", "ゴミ箱に移動")}
-                  </button>
-                </div>
-              </div>
-            )}
-          </article>
-        ))}
-      </div>
+                  <ul>{removal.references.map((reference) => <li key={reference}>{reference}</li>)}</ul>
+                </>
+              ) : (
+                <p>{copy(
+                  "No routes reference this provider. Deleted providers move to the local recycle bin and can be restored.",
+                  "没有路由引用。删除后会进入本地回收站，可恢复。", "沒有路由引用。刪除後會進入本地回收站，可恢復。", "ルートが参照していません。削除後はローカルのゴミ箱に移動し、復元可能です。"
+                )}</p>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" type="button" onClick={() => setRemoval(null)}>
+                {copy("Cancel", "取消", "取消", "キャンセル")}
+              </Button>
+              <Button
+                variant="destructive"
+                type="button"
+                disabled={busy || removing || !removal.can_remove}
+                onClick={async () => {
+                  const name = removal.name;
+                  setRemoving(true);
+                  try {
+                    if (await onRemove(name)) setRemoval(null);
+                  } finally {
+                    setRemoving(false);
+                  }
+                }}
+              >
+                {copy("Move to recycle bin", "确认移入回收站", "確認移入回收站", "ゴミ箱に移動")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        )}
+      </Dialog>
     </section>
   );
 }

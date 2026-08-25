@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Maximize2 } from "lucide-react";
 import {
   getRequestReceipts,
   type ReceiptCostKind,
@@ -16,6 +17,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
 
 const PAGE_SIZE = 20;
 
@@ -547,6 +555,44 @@ function CostState({
   );
 }
 
+function ReceiptDetail({
+  receipt,
+  plaintext,
+  plaintextError,
+}: {
+  receipt: ReceiptView;
+  plaintext?: RequestPlaintextView;
+  plaintextError?: string;
+}) {
+  const { language, copy } = useLocalizedCopy();
+  return (
+    <div className="usage-log-expanded">
+      <div className="usage-log-facts">
+        <span><small>{copy("Request ID", "请求 ID", "請求 ID", "リクエスト ID")}</small><code>{receipt.request_id}</code></span>
+        <span><small>{copy("Requested model", "请求模型", "請求模型", "リクエストモデル")}</small><strong>{receipt.requested_model}</strong></span>
+        <span><small>{copy("Protocol", "协议", "協議", "プロトコル")}</small><strong>{receipt.protocol}</strong></span>
+        <span><small>{copy("Endpoint", "端点", "端點", "エンドポイント")}</small><strong>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</strong></span>
+        <span><small>{copy("Transport", "传输", "傳輸", "トランスポート")}</small><strong>{receipt.stream ? copy("Streaming", "流式", "流式", "ストリーム") : copy("Non-streaming", "非流式", "非流式", "非ストリーム")}</strong></span>
+        {receipt.price_version != null && (
+          <span><small>{copy("Price version", "价格版本", "價格版本", "価格バージョン")}</small><strong>v{receipt.price_version}</strong></span>
+        )}
+      </div>
+      {receipt.usage && (
+        <div className="usage-log-token-facts">
+          <span>{copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
+          <span>{copy("Output", "输出", "輸出", "出力")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
+          <span>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
+          <span>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
+          <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
+        </div>
+      )}
+      <CostState receipt={receipt} />
+      <ReceiptDetails receipt={receipt} />
+      <RequestPlaintext plaintext={plaintext} error={plaintextError} />
+    </div>
+  );
+}
+
 export default function UsageRequestLog({
   since,
   agentId,
@@ -560,6 +606,9 @@ export default function UsageRequestLog({
   const [data, setData] = useState<ReceiptPageView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
+  const requestLogRef = useRef<HTMLElement>(null);
+  const receiptTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     setPage(1);
@@ -594,6 +643,14 @@ export default function UsageRequestLog({
 
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const selectedReceipt = data?.items.find((receipt) => receipt.request_id === selectedReceiptId);
+
+  useEffect(() => {
+    if (selectedReceiptId && data && !selectedReceipt) {
+      setSelectedReceiptId(null);
+    }
+  }, [data, selectedReceipt, selectedReceiptId]);
+
   const range = useMemo(() => {
     if (!total) return copy("0 items", "0 条", "0 項", "0 項");
     const start = (page - 1) * PAGE_SIZE + 1;
@@ -601,7 +658,7 @@ export default function UsageRequestLog({
   }, [copy, page, total]);
 
   return (
-    <section className="usage-request-log">
+    <section ref={requestLogRef} className="usage-request-log" tabIndex={-1}>
       <header>
         <div>
           <h2>{copy("Request log", "请求日志", "請求紀錄", "リクエストログ")}</h2>
@@ -667,56 +724,36 @@ export default function UsageRequestLog({
                 && receipt.status < 400
                 && receipt.error_code == null;
               return (
-                <details className="usage-log-row" key={receipt.request_id}>
-                  <summary>
-                    <time dateTime={new Date(receipt.started_at_ms).toISOString()}>
-                      {formatTime(receipt.started_at_ms, language)}
-                    </time>
-                    <span className="usage-log-route">
-                      <small>{receipt.agent_id ?? copy("Unknown Agent", "未知 Agent", "未知 Agent", "不明な Agent")}</small>
-                      <strong>{routeOf(receipt, copy("No route", "未产生路由", "未產生路由", "ルーティングが生成されませんでした"))}</strong>
-                    </span>
-                    <span className={`usage-log-status ${success ? "success" : cancelled ? "" : "error"}`}>
-                      {cancelled ? copy("Cancelled", "已取消", "已取消", "キャンセル") : `HTTP ${receipt.status}`}
-                    </span>
-                    <span>{tokenTotal(receipt)}</span>
-                    <span>{receipt.latency_ms.toLocaleString()} ms</span>
-                    <CostState receipt={receipt} compact />
-                  </summary>
-                  <div className="usage-log-expanded">
-                    <div className="usage-log-facts">
-                      <span><small>{copy("Request ID", "请求 ID", "請求 ID", "リクエスト ID")}</small><code>{receipt.request_id}</code></span>
-                      <span><small>{copy("Requested model", "请求模型", "請求模型", "リクエストモデル")}</small><strong>{receipt.requested_model}</strong></span>
-                      <span><small>{copy("Protocol", "协议", "協議", "プロトコル")}</small><strong>{receipt.protocol}</strong></span>
-                      <span>
-                        <small>{copy("Endpoint", "端点", "端點", "エンドポイント")}</small>
-                        <strong>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</strong>
-                      </span>
-                      <span>
-                        <small>{copy("Transport", "传输", "傳輸", "トランスポート")}</small>
-                        <strong>{receipt.stream ? copy("Streaming", "流式", "流式", "ストリーム") : copy("Non-streaming", "非流式", "非流式", "非ストリーム")}</strong>
-                      </span>
-                      {receipt.price_version != null && (
-                        <span><small>{copy("Price version", "价格版本", "價格版本", "価格バージョン")}</small><strong>v{receipt.price_version}</strong></span>
-                      )}
-                    </div>
-                    {receipt.usage && (
-                      <div className="usage-log-token-facts">
-                        <span>{copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Output", "输出", "輸出", "出力")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
-                      </div>
-                    )}
-                    <CostState receipt={receipt} />
-                    <ReceiptDetails receipt={receipt} />
-                    <RequestPlaintext
-                      plaintext={data.plaintext_by_request_id?.[receipt.request_id]}
-                      error={data.plaintext_errors_by_request_id?.[receipt.request_id]}
-                    />
-                  </div>
-                </details>
+                <button
+                  className="usage-log-row"
+                  key={receipt.request_id}
+                  type="button"
+                  onClick={(event) => {
+                    receiptTriggerRef.current = event.currentTarget;
+                    setSelectedReceiptId(receipt.request_id);
+                  }}
+                >
+                  <span className="sr-only">{copy(
+                    `Open request details ${receipt.request_id}. `,
+                    `打开请求详情 ${receipt.request_id}。`,
+                    `開啟請求詳情 ${receipt.request_id}。`,
+                    `リクエスト詳細を開く ${receipt.request_id}。`,
+                  )}</span>
+                  <span className="usage-log-open-mark" aria-hidden="true"><Maximize2 /></span>
+                  <time dateTime={new Date(receipt.started_at_ms).toISOString()}>
+                    {formatTime(receipt.started_at_ms, language)}
+                  </time>
+                  <span className="usage-log-route">
+                    <small>{receipt.agent_id ?? copy("Unknown Agent", "未知 Agent", "未知 Agent", "不明な Agent")}</small>
+                    <strong>{routeOf(receipt, copy("No route", "未产生路由", "未產生路由", "ルーティングが生成されませんでした"))}</strong>
+                  </span>
+                  <span className={`usage-log-status ${success ? "success" : cancelled ? "" : "error"}`}>
+                    {cancelled ? copy("Cancelled", "已取消", "已取消", "キャンセル") : `HTTP ${receipt.status}`}
+                  </span>
+                  <span>{tokenTotal(receipt)}</span>
+                  <span className="usage-log-latency">{receipt.latency_ms.toLocaleString()} ms</span>
+                  <CostState receipt={receipt} compact />
+                </button>
               );
             })}
           </div>
@@ -738,6 +775,36 @@ export default function UsageRequestLog({
               {copy("Next", "下一页", "下一頁", "次ページ")}
             </button>
           </footer>
+          <Dialog
+            open={Boolean(selectedReceipt)}
+            onOpenChange={(open) => !open && setSelectedReceiptId(null)}
+          >
+            {selectedReceipt && (
+              <DialogContent
+                className="request-detail-dialog"
+                closeLabel={copy("Close", "关闭", "關閉", "閉じる")}
+                onCloseAutoFocus={(event) => {
+                  event.preventDefault();
+                  if (receiptTriggerRef.current?.isConnected) receiptTriggerRef.current.focus();
+                  else requestLogRef.current?.focus();
+                }}
+              >
+                <DialogHeader>
+                  <DialogTitle>{copy("Request details", "请求详情", "請求詳情", "リクエスト詳細")}</DialogTitle>
+                  <DialogDescription>
+                    {formatTime(selectedReceipt.started_at_ms, language)} · {routeOf(selectedReceipt, copy("No route", "未产生路由", "未產生路由", "ルーティングが生成されませんでした"))}
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="request-detail-dialog-body">
+                  <ReceiptDetail
+                    receipt={selectedReceipt}
+                    plaintext={data.plaintext_by_request_id?.[selectedReceipt.request_id]}
+                    plaintextError={data.plaintext_errors_by_request_id?.[selectedReceipt.request_id]}
+                  />
+                </div>
+              </DialogContent>
+            )}
+          </Dialog>
         </>
       )}
     </section>
