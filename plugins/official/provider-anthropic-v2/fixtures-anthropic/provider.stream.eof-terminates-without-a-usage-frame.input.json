@@ -1,0 +1,6 @@
+{
+  "chunks": [
+    "event: content_block_delta\ndata: {\"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"hi\"}}\n\n",
+    "event: message_delta\ndata: {\"delta\": {\"stop_reason\": \"max_tokens\"}}\n\n"
+  ]
+}

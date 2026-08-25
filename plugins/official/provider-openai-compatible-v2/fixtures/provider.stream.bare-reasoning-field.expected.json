@@ -1,0 +1,6 @@
+[
+  {"type": "thinking_delta", "index": 0, "thinking_delta": "thinking aloud"},
+  {"type": "delta", "index": 0, "content": "answer"},
+  {"type": "finish", "finish_reason": "stop"},
+  {"type": "done"}
+]

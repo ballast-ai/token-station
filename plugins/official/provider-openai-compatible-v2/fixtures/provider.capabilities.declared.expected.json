@@ -1,0 +1,14 @@
+[
+  {
+    "model": "gpt-5.5",
+    "tool": true,
+    "vision": true,
+    "json_schema": true,
+    "context_window": 400000,
+    "supported_parameters": [
+      "stop",
+      "temperature",
+      "top_p"
+    ]
+  }
+]

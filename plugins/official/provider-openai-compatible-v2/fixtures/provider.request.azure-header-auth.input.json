@@ -1,0 +1,26 @@
+{
+  "provider_config": {
+    "provider": "azure-openai-v1",
+    "base_url": "https://fixture.openai.azure.com/openai/v1",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "deployment-fixture",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 128000
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "deployment-fixture",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Synthetic canary"
+      }
+    ],
+    "stream": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "provider_config": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "auth": "provider_api_key",
+    "models": [{"model": "reasoner-1", "supported_parameters": ["reasoning_content"]}]
+  },
+  "chat_request": {
+    "model": "reasoner-1",
+    "messages": [{"role": "assistant", "content": [
+      {"type": "thinking", "thinking": "weighing it up"},
+      {"type": "text", "text": "here you go"}
+    ]}]
+  }
+}

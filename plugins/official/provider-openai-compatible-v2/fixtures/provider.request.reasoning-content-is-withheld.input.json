@@ -1,0 +1,15 @@
+{
+  "provider_config": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "auth": "provider_api_key",
+    "models": [{"model": "deepseek-legacy", "supported_parameters": ["temperature"]}]
+  },
+  "chat_request": {
+    "model": "deepseek-legacy",
+    "messages": [{"role": "assistant", "content": [
+      {"type": "thinking", "thinking": "weighing it up"},
+      {"type": "text", "text": "here you go"}
+    ]}]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "chunks": [
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0}}\n\n",
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+    "data: [DONE]\n\n"
+  ]
+}

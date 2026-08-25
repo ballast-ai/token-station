@@ -164,22 +164,17 @@ fn package_reader_reports_the_declared_packages() {
     }
 }
 
-/// A package's declared fixture directory is either present or knowingly
-/// absent — never quietly assumed to be called `fixtures`.
+/// Every package ships the fixture directory its manifest declares — present,
+/// non-empty, and made of complete `.input.json` / `.expected.json` pairs.
 ///
-/// The build scripts used to hardcode that name, so the Anthropic component's
-/// `fixtures-anthropic/` would have shipped nothing even once the directory
-/// existed, and nothing would have said so. They stage the declared path now.
-///
-/// The two South components declare a directory neither this repo nor South
-/// ships today: the fixtures live in `south-component-conformance`, and the
-/// package is distributed as a shell around it. That is South's to publish —
-/// the loader only validates the path's shape and never resolves it, so
-/// nothing breaks at runtime — but the declaration is a promise to anyone
-/// inspecting the package, and this test names exactly who is still owed it.
+/// The build scripts used to hardcode the name `fixtures`, so the Anthropic
+/// component's `fixtures-anthropic/` would have shipped nothing even once the
+/// directory existed, and nothing would have said so. They stage the declared
+/// path now. The South components' packs are vendored from the pinned
+/// token-station-south revision, which owns their content; changing them here
+/// without a matching South change is drift, not an update.
 #[test]
-fn a_declared_fixture_directory_is_present_or_owed_by_south() {
-    let mut owed = Vec::new();
+fn every_declared_fixture_directory_is_present_and_paired() {
     for package in packages() {
         let dir = repo_root()
             .join("plugins/official")
@@ -194,28 +189,39 @@ fn a_declared_fixture_directory_is_present_or_owed_by_south() {
             .trim_end_matches('/')
             .to_owned();
 
-        if dir.join(&declared).is_dir() {
-            continue;
-        }
-        assert_eq!(
-            field(&package, "kind"),
-            "south-component",
-            "{} declares `{declared}` and does not ship it; an agent package owns its own fixtures",
+        let fixtures = dir.join(&declared);
+        assert!(
+            fixtures.is_dir(),
+            "{} declares `{declared}` and does not ship it",
             dir.display()
         );
-        owed.push(format!("{}: {declared}", field(&package, "id")));
-    }
-    owed.sort();
 
-    // Pinned rather than tolerated: if South starts shipping them, this list
-    // shrinks and the assertion says so, which is the prompt to delete the
-    // carve-out instead of leaving it standing.
-    assert_eq!(
-        owed,
-        vec![
-            "provider-anthropic: fixtures-anthropic".to_owned(),
-            "provider-openai-compatible: fixtures".to_owned(),
-        ],
-        "the set of packages still owed fixtures by South has changed"
-    );
+        let mut inputs = Vec::new();
+        let mut expected = Vec::new();
+        for entry in std::fs::read_dir(&fixtures).expect("fixture directory reads") {
+            let name = entry
+                .expect("fixture entry reads")
+                .file_name()
+                .into_string()
+                .expect("fixture names are UTF-8");
+            if let Some(case) = name.strip_suffix(".input.json") {
+                inputs.push(case.to_owned());
+            } else if let Some(case) = name.strip_suffix(".expected.json") {
+                expected.push(case.to_owned());
+            }
+        }
+        inputs.sort();
+        expected.sort();
+        assert!(
+            !inputs.is_empty(),
+            "{} ships an empty fixture pack",
+            fixtures.display()
+        );
+        assert_eq!(
+            inputs,
+            expected,
+            "{} has unpaired fixture files",
+            fixtures.display()
+        );
+    }
 }
