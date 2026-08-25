@@ -227,7 +227,7 @@ describe("retained page theme styles", () => {
     expect(appCss).toMatch(/\.error-toast\.is-error\s*\{[^}]*--toast-soft:\s*var\(--danger-soft\)/s);
   });
 
-  it("keeps routing rows compact and free of decorative left rails", () => {
+  it("keeps routing rows comfortably sized and free of decorative left rails", () => {
     const permanentGlobalRouteRule = appCss.match(
       /\.agent-master-home\[data-slot="button"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -246,6 +246,12 @@ describe("retained page theme styles", () => {
     const agentImageRule = appCss.match(
       /\.agent-master-item \.agent-brand-glyph > img,[^{]*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const routeLabelRule = appCss.match(
+      /\.agent-master-item strong\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const disclosureTriggerRule = appCss.match(
+      /\.agent-route-disclosure-trigger\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
     const selectedAgentRule = appCss.match(
       /\.agent-master-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -255,17 +261,19 @@ describe("retained page theme styles", () => {
 
     expect(permanentGlobalRouteRule).not.toMatch(/background:/);
     expect(permanentGlobalRouteRule).not.toMatch(/border:/);
-    expect(routeItemRule).toMatch(/height:\s*46px/);
-    expect(routeIconRule).toMatch(/width:\s*34px/);
-    expect(routeIconRule).toMatch(/height:\s*34px/);
+    expect(routeItemRule).toMatch(/height:\s*52px/);
+    expect(routeIconRule).toMatch(/width:\s*38px/);
+    expect(routeIconRule).toMatch(/height:\s*38px/);
     expect(routeIconRule).not.toMatch(/border:/);
     expect(routeIconRule).not.toMatch(/background:/);
-    expect(routeMarkRule).toMatch(/width:\s*30px/);
-    expect(routeMarkRule).toMatch(/height:\s*30px/);
-    expect(agentVectorRule).toMatch(/width:\s*30px/);
-    expect(agentVectorRule).toMatch(/height:\s*30px/);
-    expect(agentImageRule).toMatch(/width:\s*32px/);
-    expect(agentImageRule).toMatch(/height:\s*32px/);
+    expect(routeMarkRule).toMatch(/width:\s*34px/);
+    expect(routeMarkRule).toMatch(/height:\s*34px/);
+    expect(agentVectorRule).toMatch(/width:\s*34px/);
+    expect(agentVectorRule).toMatch(/height:\s*34px/);
+    expect(agentImageRule).toMatch(/width:\s*36px/);
+    expect(agentImageRule).toMatch(/height:\s*36px/);
+    expect(routeLabelRule).toMatch(/font-size:\s*13px/);
+    expect(disclosureTriggerRule).toMatch(/min-height:\s*40px/);
     expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(selectedAgentRule).not.toMatch(/box-shadow:/);
     expect(disclosureRule).not.toMatch(/border-left:/);

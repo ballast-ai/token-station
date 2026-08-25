@@ -6899,10 +6899,10 @@ pre.block {
 
 .agent-master-item[data-slot="button"] {
   width: 100%;
-  height: 46px;
+  height: 52px;
   justify-content: flex-start;
-  gap: 9px;
-  padding: 6px 9px;
+  gap: 11px;
+  padding: 7px 10px;
   border-radius: 8px;
   color: var(--muted);
 }
@@ -6930,9 +6930,9 @@ pre.block {
 }
 
 .agent-master-icon {
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px !important;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px !important;
   display: grid !important;
   place-items: center;
   position: relative;
@@ -6951,27 +6951,27 @@ pre.block {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 32px !important;
-  height: 32px !important;
+  width: 36px !important;
+  height: 36px !important;
   transform: translate(-50%, -50%);
 }
 
 .agent-master-item .agent-master-icon > svg {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
 }
 
 .agent-master-item .agent-brand-glyph > svg {
   display: block;
-  width: 30px !important;
-  height: 30px !important;
+  width: 34px !important;
+  height: 34px !important;
 }
 
 .agent-master-item .agent-brand-glyph > img,
 .agent-master-item .agent-brand-glyph > .brand-fallback {
   display: block;
-  width: 32px !important;
-  height: 32px !important;
+  width: 36px !important;
+  height: 36px !important;
 }
 
 .agent-master-item[data-slot="button"][aria-current="page"] {
@@ -6996,7 +6996,7 @@ pre.block {
 
 .agent-master-item strong {
   color: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 550;
 }
 
@@ -7010,9 +7010,9 @@ pre.block {
 }
 
 .agent-master-item [data-slot="badge"] {
-  height: 18px;
-  padding-inline: 6px;
-  font-size: 9px;
+  height: 20px;
+  padding-inline: 7px;
+  font-size: 9.5px;
 }
 
 .agent-master-content,
@@ -7207,7 +7207,7 @@ pre.block {
 
 .agent-route-disclosure-trigger[data-slot="button"] {
   width: 100%;
-  min-height: 34px;
+  min-height: 40px;
   justify-content: space-between;
   padding-inline: 9px;
   border-radius: 8px;
@@ -7218,7 +7218,7 @@ pre.block {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 550;
 }
 
