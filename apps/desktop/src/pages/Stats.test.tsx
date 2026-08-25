@@ -211,7 +211,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
     const composition = await screen.findByRole("group", { name: "Token 构成" });
     const cacheWrite = within(composition).getByText("缓存写").closest("div");
-    expect(cacheWrite).toHaveTextContent("N/A");
+    expect(cacheWrite).toHaveTextContent("未上报");
     expect(cacheWrite).toHaveAttribute("title", "上游未报告缓存写入 Token");
   });
 

@@ -215,6 +215,7 @@ export default function UsageTrendChart({
   nowMs = Date.now(),
 }: UsageTrendChartProps) {
   const { language, copy } = useLocalizedCopy();
+  const unavailableCacheWrite = copy("Not reported", "未上报", "未回報", "未報告");
   const { buckets, unit } = useMemo(
     () => normalizeBuckets(groups, range, nowMs),
     [groups, range, nowMs],
@@ -404,7 +405,7 @@ export default function UsageTrendChart({
             const currentCost = costValues[index];
             const cacheWriteValue = aggregate.cache_write_tokens > 0
               ? aggregate.cache_write_tokens.toLocaleString(language)
-              : "N/A";
+              : unavailableCacheWrite;
             const label = copy(
               `${detailedLabel(bucket.timestamp, unit, language)}: input total ${aggregate.input_tokens.toLocaleString(language)}, output ${aggregate.output_tokens.toLocaleString(language)}, cache write ${cacheWriteValue}, cache hit ${aggregate.cache_read_tokens.toLocaleString(language)}, cost ${currentCost == null ? "unknown" : costLabel(currentCost)}`,
               `${detailedLabel(bucket.timestamp, unit, language)}：输入总量 ${aggregate.input_tokens.toLocaleString(language)}，输出 ${aggregate.output_tokens.toLocaleString(language)}，缓存写入 ${cacheWriteValue}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
@@ -469,7 +470,7 @@ export default function UsageTrendChart({
               <span className={series.className} key={series.key}>
                 <i />{series.label}<em>{series.key === "cache_write_tokens"
                   && active.aggregate.cache_write_tokens === 0
-                  ? "N/A"
+                  ? unavailableCacheWrite
                   : active.aggregate[series.key].toLocaleString(language)}</em>
               </span>
             ))}

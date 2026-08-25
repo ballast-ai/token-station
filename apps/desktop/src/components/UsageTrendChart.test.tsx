@@ -62,8 +62,8 @@ describe("UsageTrendChart", () => {
     );
 
     await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
-    expect(screen.getByText("N/A")).toBeInTheDocument();
-    expect(container.querySelector('[aria-label*="缓存写入 N/A"]')).toBeInTheDocument();
+    expect(screen.getByText("未上报")).toBeInTheDocument();
+    expect(container.querySelector('[aria-label*="缓存写入 未上报"]')).toBeInTheDocument();
   });
 
   it("marks an unpriced request bucket as unknown instead of zero cost", async () => {

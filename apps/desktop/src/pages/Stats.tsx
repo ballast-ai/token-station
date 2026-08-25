@@ -111,6 +111,7 @@ function ToneIcon({ type }: { type: "token" | "request" | "cost" | "success" | "
 
 function TokenRail({ aggregate }: { aggregate: AggView }) {
   const { language, copy } = useLocalizedCopy();
+  const unavailableCacheWrite = copy("Not reported", "未上报", "未回報", "未報告");
   const total = aggregate.input_tokens + aggregate.output_tokens;
   const inputPercent = total ? (aggregate.input_tokens / total) * 100 : 0;
   const outputPercent = total ? 100 - inputPercent : 0;
@@ -167,7 +168,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
         >
           <span><i className="tone-cache-write" />{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")}</span>
           <strong>{aggregate.cache_write_tokens === 0
-            ? "N/A"
+            ? unavailableCacheWrite
             : compact(aggregate.cache_write_tokens, language)}</strong>
         </div>
         <div>
