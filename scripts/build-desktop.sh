@@ -167,13 +167,24 @@ readonly rust_sysroot
 
 # On Windows, rustc can retain a native Cargo registry path even when
 # --remap-path-prefix is present (for example C:\Users\runneradmin\.cargo).
-# Compile from an isolated Cargo Home under the ephemeral build stage so a
-# toolchain edge case cannot put the builder's username in the executable.
+# Compile from an isolated, username-free Cargo Home so a toolchain edge case
+# cannot put the builder's username in the executable. CI uses its short
+# runner-temp path; other Windows hosts fall back to the ephemeral build stage.
 # Keep remapping and auditing the original Cargo Home below as defense in
 # depth, including against stale target artifacts.
 build_cargo_home="$private_cargo_home"
 if [[ "$host_os" == MINGW* || "$host_os" == MSYS* || "$host_os" == CYGWIN* ]]; then
-  build_cargo_home_posix="$stage/cargo-home"
+  if [[ -n "${RUNNER_TEMP:-}" ]]; then
+    # GitHub's D:\a\_temp is both username-free and much shorter than the
+    # default C:\Users\...\AppData\Local\Temp path. The short path is required
+    # for South's deeply nested git dependency fixtures on Windows, and sharing
+    # it across the two MSI lifecycle builds avoids downloading every crate
+    # twice. The hosted runner removes RUNNER_TEMP after the job.
+    runner_temp_posix="$(cygpath -u "$RUNNER_TEMP")"
+    build_cargo_home_posix="$runner_temp_posix/token-station-cargo-home"
+  else
+    build_cargo_home_posix="$stage/cargo-home"
+  fi
   mkdir -p "$build_cargo_home_posix"
   build_cargo_home="$(cygpath -w "$build_cargo_home_posix")"
   export CARGO_HOME="$build_cargo_home"

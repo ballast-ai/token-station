@@ -63,7 +63,7 @@ SCRIPT
   cat >"$fake_bin/cygpath" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${1:-}" == "-w" && $# -eq 2 ]]
+[[ ( "${1:-}" == "-w" || "${1:-}" == "-u" ) && $# -eq 2 ]]
 printf '%s\n' "$2"
 SCRIPT
 
@@ -106,6 +106,7 @@ run_build() {
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
     RUSTFLAGS= \
+    RUNNER_TEMP="$fixture/runner-temp" \
     TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
     "$repo/scripts/build-desktop.sh" "$@"
@@ -116,6 +117,7 @@ run_windows_production_build() {
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
     RUSTFLAGS= \
+    RUNNER_TEMP="$fixture/runner-temp" \
     TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
     WINDOWS_CERTIFICATE_THUMBPRINT="0123456789abcdef0123456789abcdef01234567" \
@@ -191,7 +193,7 @@ test_windows_builds_isolate_cargo_home_but_audit_the_private_path() {
   if grep -Fxq -- "$fixture/cargo-home" "$state/cargo-homes"; then
     fail "Windows Rust compilation used the private Cargo Home"
   fi
-  [[ "$(grep -c '/token-station-desktop\..*/cargo-home$' "$state/cargo-homes" || true)" == "7" ]] \
+  [[ "$(grep -c '/runner-temp/token-station-cargo-home$' "$state/cargo-homes" || true)" == "7" ]] \
     || fail "Windows Rust builds did not share the isolated Cargo Home"
   grep -Fxq -- '--private-cargo-home' "$state/audit-args" \
     || fail "desktop audit was not told to check the private Cargo Home"
