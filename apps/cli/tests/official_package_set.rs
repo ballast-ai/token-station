@@ -108,7 +108,7 @@ fn every_consumer_reads_the_package_set() {
         ("apps/cli/build.rs", "plugins/official/packages.json"),
         ("apps/cli/src/plugins.rs", "builtin_official_packages.rs"),
         ("scripts/audit-desktop-artifact.sh", "official-packages.py"),
-        ("apps/desktop/src-tauri/src/lib.rs", "OFFICIAL_PACKAGE_IDS"),
+        ("apps/desktop/src-tauri/src/self_test.rs", "OFFICIAL_PACKAGE_IDS"),
     ];
 
     for (path, marker) in consumers {
@@ -120,12 +120,19 @@ fn every_consumer_reads_the_package_set() {
         );
     }
 
-    let desktop = std::fs::read_to_string(root.join("apps/desktop/src-tauri/src/lib.rs"))
-        .expect("desktop library reads");
-    assert!(
-        !desktop.contains("BUNDLED_PLUGIN_IDS"),
-        "the desktop must not keep a second official package id list"
-    );
+    for entry in std::fs::read_dir(root.join("apps/desktop/src-tauri/src")).expect("desktop src reads")
+    {
+        let path = entry.expect("desktop src entry reads").path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("desktop source reads");
+        assert!(
+            !source.contains("BUNDLED_PLUGIN_IDS"),
+            "the desktop must not keep a second official package id list ({})",
+            path.display()
+        );
+    }
 }
 
 /// The shell-facing reader preserves package order and exposes every field
