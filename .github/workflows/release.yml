@@ -21,14 +21,39 @@ env:
   TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
 
 jobs:
-  full-ci:
-    uses: ./.github/workflows/full-ci.yml
+  # A tag is releasable only once full-ci.yml has already passed for this exact
+  # commit on main. Re-running it here would cost a second full Linux gate for a
+  # revision that main has verified, so assert the recorded run instead.
+  #
+  # Both conditions matter. head_sha pins the assertion to this commit, so a tag
+  # cut from an older commit or a main that was force-pushed past this revision
+  # finds no run. event=push excludes runs this workflow itself started through
+  # workflow_call, which would otherwise let a release vouch for itself.
+  verify-main-full-ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a successful full-ci run for this commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          conclusion=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/full-ci.yml/runs" \
+            -f "head_sha=$COMMIT" -f branch=main -f event=push -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          if [[ "$conclusion" == "0" ]]; then
+            echo "::error::提交 $COMMIT 在 main 上没有成功的 full-ci 记录，无法发布。" >&2
+            echo "请确认：标签指向的提交已合并进 main 且 full-ci 已跑通；" >&2
+            echo "若 main 曾被强制推送，请重新触发 full-ci（workflow_dispatch）后再发布。" >&2
+            exit 1
+          fi
+          echo "已确认提交 $COMMIT 在 main 上通过 full-ci。"
 
   platform-gates:
     uses: ./.github/workflows/platform.yml
 
   linux-desktop:
-    needs: [full-ci, platform-gates]
+    needs: [verify-main-full-ci, platform-gates]
     uses: ./.github/workflows/linux-desktop.yml
 
   release-mode:
@@ -49,7 +74,7 @@ jobs:
           fi
 
   build:
-    needs: [release-mode, full-ci, platform-gates]
+    needs: [release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     strategy:
       fail-fast: false
@@ -84,7 +109,7 @@ jobs:
 
   # Rebuild the same recipe from clean trees and require byte identity.
   reproducibility:
-    needs: [release-mode, full-ci, platform-gates]
+    needs: [release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     steps:
@@ -99,7 +124,7 @@ jobs:
           sha256sum -c first.sum
 
   desktop-macos:
-    needs: [release-mode, full-ci, platform-gates]
+    needs: [release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     name: Desktop macOS (${{ matrix.target }})
     runs-on: macos-14
@@ -186,7 +211,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [release-mode, full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos]
+    needs: [release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos]
     if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     permissions:

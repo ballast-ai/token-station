@@ -1,15 +1,10 @@
 name: CI
 
-# Required development checks only. Full coverage, compatibility, security,
-# release-policy, and platform validation run before a release build.
+# Fast feedback for day-to-day work: format, lint, and tests only. Coverage
+# thresholds, supply-chain audits, release-policy gates, and the MSRV check run
+# on main via full-ci.yml; platform validation runs before a release build.
 on:
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-  push:
-    branches:
-      - main
     paths-ignore:
       - '**.md'
       - 'LICENSE'

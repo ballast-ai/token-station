@@ -7,8 +7,29 @@ permissions:
   contents: read
 
 jobs:
-  full-ci:
-    uses: ./.github/workflows/full-ci.yml
+  # Same bargain as release.yml: assert the full-ci run main already recorded for
+  # this commit rather than paying for the gate a second time. Dispatching this
+  # workflow from a branch other than main finds no run and fails here, which is
+  # the intended outcome — only main-validated commits produce signed desktop builds.
+  verify-main-full-ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a successful full-ci run for this commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          successes=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/full-ci.yml/runs" \
+            -f "head_sha=$COMMIT" -f branch=main -f event=push -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          if [[ "$successes" == "0" ]]; then
+            echo "::error::提交 $COMMIT 在 main 上没有成功的 full-ci 记录，无法构建正式桌面包。" >&2
+            echo "请确认：该提交已合并进 main 且 full-ci 已跑通；" >&2
+            echo "若 main 曾被强制推送，请重新触发 full-ci（workflow_dispatch）后再试。" >&2
+            exit 1
+          fi
+          echo "已确认提交 $COMMIT 在 main 上通过 full-ci。"
 
   platform-gates:
     uses: ./.github/workflows/platform.yml
@@ -31,7 +52,7 @@ jobs:
           fi
 
   macos:
-    needs: [release-mode, full-ci, platform-gates]
+    needs: [release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     name: macOS (${{ matrix.target }})
     runs-on: macos-latest
@@ -115,7 +136,7 @@ jobs:
 
   windows:
     name: Windows (x86_64-pc-windows-msvc)
-    needs: [release-mode, full-ci, platform-gates]
+    needs: [release-mode, verify-main-full-ci, platform-gates]
     if: ${{ false }} # First public desktop release is macOS-only.
     runs-on: windows-latest
     env:
