@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const workflows = new Map(
-  ["ci", "platform"].map((name) => [
+  ["ci", "full-ci", "platform"].map((name) => [
     name,
     fs.readFileSync(path.join(root, `.github/workflows/${name}.yml`), "utf8"),
   ]),
@@ -36,7 +36,8 @@ const prefetch = [
 // they are not part of basic CI.
 for (const [workflowName, jobName, testCommand] of [
   ["ci", "rust", "cargo test --workspace"],
-  ["ci", "rust-coverage", "cargo llvm-cov --workspace"],
+  ["full-ci", "rust", "cargo test --workspace"],
+  ["full-ci", "rust-coverage", "cargo llvm-cov --workspace"],
   ["platform", "windows-rust", "cargo test --workspace"],
 ]) {
   const body = jobBody(workflowName, jobName).replace(/\s+/g, " ");

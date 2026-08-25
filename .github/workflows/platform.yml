@@ -1,27 +1,11 @@
 name: Platform Gates
 
-# Windows and macOS gates. These are deliberately NOT part of basic CI.
-#
-# ci.yml runs the full clippy / test / fmt / doc / audit / MSRV / frontend set
-# on Linux at 1x billing and catches the large majority of problems. Windows is
-# 2x and macOS is 10x, and what they run here overlaps heavily with that Linux
-# layer, so running them on non-main integration branches buys almost no extra
-# coverage while multiplying both the bill and the wait. Ordinary branch
-# validation therefore runs only after a change reaches main. Published releases
-# and manual release validation keep their explicit entry points below.
+# Complete Windows and macOS release gates. Routine pushes and pull requests do
+# not call this workflow. The release workflow calls it before artifact builds.
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-  release:
-    types:
-      - published
+  workflow_call:
   workflow_dispatch:
 
-# These gates run on already-merged commits, so every result is worth keeping.
 concurrency:
   group: platform-${{ github.ref }}
   cancel-in-progress: false
@@ -133,13 +117,10 @@ jobs:
     name: Windows x64 MSI real lifecycle
     needs: [changes, windows-rust]
     # This release-grade gate builds two installers and exercises the complete
-    # lifecycle. Run it for published releases and manual release validation,
-    # not for routine pushes or pull requests. Regular CI still covers behavior.
+    # lifecycle. Every invocation is explicit release validation.
     if: >-
       !cancelled() &&
-      needs.changes.outputs.installer == 'true' &&
-      (github.event_name == 'release' ||
-       github.event_name == 'workflow_dispatch')
+      needs.changes.outputs.installer == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

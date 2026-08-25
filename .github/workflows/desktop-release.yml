@@ -7,6 +7,12 @@ permissions:
   contents: read
 
 jobs:
+  full-ci:
+    uses: ./.github/workflows/full-ci.yml
+
+  platform-gates:
+    uses: ./.github/workflows/platform.yml
+
   release-mode:
     runs-on: ubuntu-24.04
     outputs:
@@ -25,7 +31,7 @@ jobs:
           fi
 
   macos:
-    needs: release-mode
+    needs: [release-mode, full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     name: macOS (${{ matrix.target }})
     runs-on: macos-latest
@@ -109,7 +115,7 @@ jobs:
 
   windows:
     name: Windows (x86_64-pc-windows-msvc)
-    needs: release-mode
+    needs: [release-mode, full-ci, platform-gates]
     if: ${{ false }} # First public desktop release is macOS-only.
     runs-on: windows-latest
     env:

@@ -1,14 +1,7 @@
 name: CI
 
-# Basic CI. Everything here runs on ubuntu-latest (1x billing): Rust core and
-# desktop backend fmt / clippy / test / doc, dependency supply-chain audits,
-# MSRV, release-behavior gates, and the frontend suite. This is the layer every
-# pull request runs, and where the large majority of problems surface.
-#
-# Windows and macOS gates are deliberately NOT part of basic CI — see
-# platform.yml. They largely repeat the checks below at 2x / 10x runner cost,
-# so ordinary branch validation runs only after a change reaches main rather
-# than on pull requests or non-main integration branches.
+# Required development checks only. Full coverage, compatibility, security,
+# release-policy, and platform validation run before a release build.
 on:
   pull_request:
     paths-ignore:
@@ -17,19 +10,14 @@ on:
   push:
     branches:
       - main
-      - develop
-      - develop-v2
     paths-ignore:
       - '**.md'
       - 'LICENSE'
   workflow_dispatch:
 
-# A new push to the same PR makes every result from the older commit obsolete.
-# Cancel it immediately instead of letting several full Rust builds compete for
-# hosted-runner time and cache bandwidth.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -39,8 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # test-provider is a standalone crate excluded from the workspace and
-      # built by a test subprocess with its own target directory.
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
@@ -48,7 +36,6 @@ jobs:
             .
             plugins/official/provider-openai-compatible-v2
             plugins/official/provider-anthropic-v2
-      - run: node tests/south-dependency-policy.mjs
       - name: Fetch the locked official component dependency sets
         shell: bash
         run: |
@@ -68,46 +55,6 @@ jobs:
           --lib --test proxy
         env:
           TOKEN_STATION_PLUGINS_DIST: ${{ github.workspace }}/plugins-dist
-      # Keep the existing local rustdoc -D warnings gate enforceable in CI.
-      - run: cargo doc --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
-
-  # Coverage stays in its own job rather than folding into `rust`. An
-  # instrumented build writes a second full target tree (target/llvm-cov-target)
-  # next to the ordinary one, and a hosted runner does not have the disk for
-  # both: merging them fails at link time with "No space left on device".
-  rust-coverage:
-    # The PR already runs the complete Rust test suite in `rust`. Coverage
-    # instruments and repeats that suite, so keep it as a post-merge/manual
-    # quality gate instead of doubling every PR's slowest workload.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          components: llvm-tools-preview
-          workspaces: |
-            .
-            plugins/official/provider-openai-compatible-v2
-            plugins/official/provider-anthropic-v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.8.7
-      - name: Fetch the locked official component dependency sets
-        shell: bash
-        run: |
-          for manifest in \
-            plugins/official/provider-openai-compatible-v2/Cargo.toml \
-            plugins/official/provider-anthropic-v2/Cargo.toml; do
-            cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
-          done
-      - run: >-
-          cargo llvm-cov --workspace --coverage-host-only --summary-only
-          --fail-under-lines 80
 
   desktop-rust:
     runs-on: ubuntu-latest
@@ -125,141 +72,6 @@ jobs:
       - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
-
-  # Kept separate from desktop-rust for the same disk reason as rust-coverage:
-  # the instrumented target tree does not fit alongside the ordinary one.
-  desktop-coverage:
-    # Keep the full Desktop Rust and Agent Integration coverage gates pre-merge.
-    # Branch pushes repeat the same check against the exact committed revision.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          components: llvm-tools-preview
-          workspaces: apps/desktop/src-tauri
-          system-deps: tauri
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.1
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.8.7
-      - name: Prepare official plugins for desktop gateway tests
-        run: scripts/prepare-desktop-test-plugins.sh
-      - run: >-
-          cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
-          --lcov --output-path apps/desktop/src-tauri/target/desktop-agent.lcov
-      - name: Enforce desktop Rust line coverage
-        # The cross-platform command layer contains cfg-gated macOS/Windows paths
-        # that a Linux-only coverage job cannot execute. Ratchet the complete tree
-        # at its verified baseline while keeping the security-sensitive Agent
-        # integration module on the stricter 90% gate below.
-        run: >-
-          node scripts/check-coverage-thresholds.mjs
-          apps/desktop/src-tauri/target/desktop-agent.lcov
-          apps/desktop/src-tauri/src 86.3
-      - run: >-
-          node scripts/check-coverage-thresholds.mjs
-          apps/desktop/src-tauri/target/desktop-agent.lcov
-          apps/desktop/src-tauri/src/agent_integration 90
-
-  # License allowlists, RustSec advisories, and dependency sources for both the
-  # root workspace and the desktop app, from their respective deny.toml files.
-  #
-  # This was three jobs (deny / audit / part of desktop-security), each booting
-  # a runner and installing the same tools. Installing once and running five
-  # checks is cheaper; `!cancelled()` on each step preserves the property that
-  # motivated splitting them — one failure never hides the others.
-  #
-  # audit is kept alongside deny despite the advisory overlap: it reads only
-  # Cargo.lock, so it still guards the tree when deny cannot build its graph.
-  supply-chain:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.1
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
-      - name: Root licenses, sources, and advisories
-        run: cargo deny check
-      - name: Root advisories from the lockfile alone
-        if: ${{ !cancelled() }}
-        run: cargo audit
-      - name: Desktop RustSec exception ledger
-        if: ${{ !cancelled() }}
-        run: node scripts/check-rustsec-exceptions.mjs
-      - name: Desktop advisories
-        if: ${{ !cancelled() }}
-        run: >-
-          cargo audit -D unsound
-          --file apps/desktop/src-tauri/Cargo.lock
-          --ignore RUSTSEC-2024-0429
-      - name: Desktop licenses and sources
-        if: ${{ !cancelled() }}
-        run: >-
-          cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml
-          --config apps/desktop/src-tauri/deny.toml check
-
-  # Release-behavior gates that need no Rust toolchain: workflow-shape policies,
-  # packaging checks, and the release-readiness assertions.
-  release-gates:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.1
-      - run: npm --prefix apps/desktop ci
-      - run: node scripts/check-ci-msi-trigger-policy.mjs
-      - run: node scripts/check-integration-branch-policy.mjs
-      - run: node scripts/check-ci-scaffold-prefetch.mjs
-      - run: node scripts/check-macos-dmg-packaging.mjs
-      - run: node tests/localized-macos-installation.mjs
-      - run: node tests/release-assets.mjs
-      - run: node tests/release-script-variable-order.mjs
-      - run: node tests/formal-release-finalization.mjs
-      # Prime the locked Rust dependencies before the test enters its offline signing phase.
-      - run: cargo test -p token-station-release --no-run --locked
-      - run: tests/formal-release-signing.sh
-      - run: node tests/release-readiness.mjs
-      - run: node tests/desktop-release-dependencies.mjs
-      - name: Check release version consistency
-        run: |
-          version=$(node -p "require('./apps/desktop/package.json').version")
-          node scripts/check-release-readiness.mjs --version "$version"
-      - run: tests/build-desktop-verbosity.sh
-      - run: tests/desktop-updater-release.sh
-
-  msrv:
-    name: Rust 1.96 minimum-version check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.96.0
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop-v2' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          key: msrv-1.96
-      - run: cargo check --workspace --all-targets
 
   frontend:
     runs-on: ubuntu-latest
@@ -273,5 +85,5 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - run: npm --prefix apps/desktop ci
-      - run: npm --prefix apps/desktop run test:coverage
+      - run: npm --prefix apps/desktop test -- --run
       - run: npm --prefix apps/desktop run build

@@ -11,13 +11,13 @@ const root = resolve(scriptDir, "..");
 // the installer lifecycle may run, not about which file declares it.
 const platformPath = resolve(root, ".github/workflows/platform.yml");
 const platform = await readFile(platformPath, "utf8");
-const ciPath = resolve(root, ".github/workflows/ci.yml");
-const ci = await readFile(ciPath, "utf8");
+const fullCiPath = resolve(root, ".github/workflows/full-ci.yml");
+const fullCi = await readFile(fullCiPath, "utf8");
 
 assert.match(
   platform,
-  /\n  release:\n    types:\n      - published\n/,
-  "the platform workflow must listen for published Release events",
+  /\n  workflow_call:\n/,
+  "the platform workflow must be reusable before release publication",
 );
 assert.match(
   platform,
@@ -36,8 +36,8 @@ const compactCondition = windowsMsi
   .trim();
 assert.equal(
   compactCondition,
-  "!cancelled() && needs.changes.outputs.installer == 'true' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')",
-  "Windows MSI must run only for an eligible published Release or manual validation",
+  "!cancelled() && needs.changes.outputs.installer == 'true'",
+  "Windows MSI must run for every eligible platform validation",
 );
 assert.equal(
   windowsMsi.includes("github.event_name == 'pull_request'"),
@@ -52,12 +52,11 @@ assert.match(
   "the platform workflow must define the changes job the MSI condition reads",
 );
 
-// Basic CI has to keep executing this policy check, or the assertions above
-// never run on a pull request.
+// Full CI must keep executing this policy check before a release build.
 assert.match(
-  ci,
+  fullCi,
   /- run: node scripts\/check-ci-msi-trigger-policy\.mjs/,
-  "basic CI must execute this policy check",
+  "full CI must execute this policy check",
 );
 
 console.log("Windows MSI trigger policy: PASS");
