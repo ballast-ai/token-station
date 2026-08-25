@@ -55,6 +55,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use south_provider_api::{ComponentManifestV1, PROVIDER_WORLD};
 use token_station_plugin_api::{AdapterKind, AdapterManifest, validate_plugin_name};
 use token_station_release::{plugin_package_digest, sha256_file};
@@ -137,6 +138,28 @@ impl PackageSource {
         match self {
             Self::Dir(dir) => dir.display().to_string(),
             Self::Builtin { .. } => "builtin".to_owned(),
+        }
+    }
+
+    /// Return one digest for every byte that defines this package at runtime.
+    ///
+    /// # Errors
+    ///
+    /// A directory package is missing, unreadable, or outside package bounds.
+    pub fn content_digest(&self) -> Result<String, String> {
+        match self {
+            Self::Dir(dir) => plugin_package_digest(dir),
+            Self::Builtin {
+                manifest_source,
+                wasm,
+            } => {
+                let mut hash = Sha256::new();
+                for bytes in [manifest_source.as_bytes(), *wasm] {
+                    hash.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+                    hash.update(bytes);
+                }
+                Ok(format!("{:x}", hash.finalize()))
+            }
         }
     }
 }

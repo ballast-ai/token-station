@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_updater::UpdaterExt;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use token_station_cli::bodylog::{valid_request_id, BodyLog, PlaintextExchange};
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
@@ -1261,8 +1261,11 @@ struct CachedModelTestGateway {
     config: Box<ClientConfig>,
     upstream_epochs: BTreeMap<String, u64>,
     secret_store_fingerprint: [u8; 32],
+    plugin_identity_fingerprint: [u8; 32],
     gateway: Arc<Gateway>,
 }
+
+const MODEL_TEST_SECRET_STORE_MAX_BYTES: u64 = 1_048_576;
 
 enum ModelTestGatewaySource {
     Running {
@@ -1273,7 +1276,6 @@ enum ModelTestGatewaySource {
     Draft {
         config: Box<ClientConfig>,
         upstream_epochs: BTreeMap<String, u64>,
-        secret_store_fingerprint: [u8; 32],
         request: RequestContext,
     },
 }
@@ -1294,8 +1296,7 @@ fn hash_model_test_secret(
     value: Result<String, String>,
 ) {
     for field in [owner.as_bytes(), slot.as_bytes()] {
-        hash.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
-        hash.update(field);
+        hash_length_prefixed_field(hash, field);
     }
     match value {
         Ok(value) => {
@@ -1308,8 +1309,104 @@ fn hash_model_test_secret(
     }
 }
 
-fn model_test_secret_store_fingerprint(config: &ClientConfig) -> [u8; 32] {
+fn hash_length_prefixed_field(hash: &mut Sha256, field: &[u8]) {
+    hash.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hash.update(field);
+}
+
+struct ModelTestSecretStore {
+    values: BTreeMap<String, String>,
+}
+
+impl Drop for ModelTestSecretStore {
+    fn drop(&mut self) {
+        for value in self.values.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+fn read_model_test_secret_store_inner(
+    data_dir: &Path,
+    before_open: impl FnOnce(),
+) -> Result<ModelTestSecretStore, String> {
+    use std::io::Read as _;
+
+    let path = data_dir.join(secrets::SECRETS_FILE);
+    let link_metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ModelTestSecretStore {
+                values: BTreeMap::new(),
+            });
+        }
+        Err(_) => return Err("The local secrets store is unreadable".to_owned()),
+    };
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+        return Err("The local secrets store must be a regular file".to_owned());
+    }
+    if link_metadata.len() > MODEL_TEST_SECRET_STORE_MAX_BYTES {
+        return Err("The local secrets store exceeds the model test size limit".to_owned());
+    }
+    before_open();
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(&path).map_err(|error| {
+        #[cfg(unix)]
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            return "The local secrets store must be a regular file".to_owned();
+        }
+        "The local secrets store is unreadable".to_owned()
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "The local secrets store is unreadable".to_owned())?;
+    if !metadata.is_file() {
+        return Err("The local secrets store must be a regular file".to_owned());
+    }
+    let mut raw = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(metadata.len().min(MODEL_TEST_SECRET_STORE_MAX_BYTES)).unwrap_or_default(),
+    ));
+    file.take(MODEL_TEST_SECRET_STORE_MAX_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| "The local secrets store is unreadable".to_owned())?;
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MODEL_TEST_SECRET_STORE_MAX_BYTES {
+        return Err("The local secrets store exceeds the model test size limit".to_owned());
+    }
+    let values = serde_json::from_slice(&raw)
+        .map_err(|_| "The local secrets store is invalid JSON".to_owned())?;
+    Ok(ModelTestSecretStore { values })
+}
+
+fn read_model_test_secret_store(data_dir: &Path) -> Result<ModelTestSecretStore, String> {
+    read_model_test_secret_store_inner(data_dir, || {})
+}
+
+#[cfg(test)]
+fn read_model_test_secret_store_with_before_open(
+    data_dir: &Path,
+    before_open: impl FnOnce(),
+) -> Result<ModelTestSecretStore, String> {
+    read_model_test_secret_store_inner(data_dir, before_open)
+}
+
+fn model_test_secret_store_fingerprint_with_reader(
+    config: &ClientConfig,
+    read_store: impl FnOnce(&Path) -> Result<ModelTestSecretStore, String>,
+) -> Result<[u8; 32], String> {
     let mut hash = Sha256::new();
+    let mut slots = Vec::new();
     if let Some(upstreams) = home_referenced_upstreams(config) {
         for name in upstreams {
             let Some(auth) = config
@@ -1320,12 +1417,7 @@ fn model_test_secret_store_fingerprint(config: &ClientConfig) -> [u8; 32] {
             else {
                 continue;
             };
-            hash_model_test_secret(
-                &mut hash,
-                &name,
-                &auth.slot,
-                secrets::store_get(&config.data.dir, &name, &auth.slot),
-            );
+            slots.push((name, auth.slot.clone()));
         }
     }
     if let Some(auth) = config
@@ -1335,14 +1427,95 @@ fn model_test_secret_store_fingerprint(config: &ClientConfig) -> [u8; 32] {
         .map(|auth| &auth.credential)
         .filter(|auth| auth.store)
     {
+        slots.push(("egress-proxy".to_owned(), auth.slot.clone()));
+    }
+    if slots.is_empty() {
+        return Ok(hash.finalize().into());
+    }
+    let store = read_store(&config.data.dir)?;
+    for (owner, slot) in slots {
         hash_model_test_secret(
             &mut hash,
-            "egress-proxy",
-            &auth.slot,
-            secrets::store_get_egress(&config.data.dir, &auth.slot),
+            &owner,
+            &slot,
+            store
+                .values
+                .get(&format!("{owner}/{slot}"))
+                .cloned()
+                .ok_or_else(|| "secret is not in the local store".to_owned()),
         );
     }
-    hash.finalize().into()
+    Ok(hash.finalize().into())
+}
+
+fn model_test_secret_store_fingerprint(config: &ClientConfig) -> Result<[u8; 32], String> {
+    model_test_secret_store_fingerprint_with_reader(config, read_model_test_secret_store)
+}
+
+fn model_test_plugin_identity_fingerprint(config: &ClientConfig) -> Result<[u8; 32], String> {
+    let registry = PluginRegistry::for_config(config).map_err(|error| {
+        eprintln!("model test plugin discovery failed: {error}");
+        "The Home route plugin identity is unavailable".to_owned()
+    })?;
+    let upstreams = home_referenced_upstreams(config)
+        .ok_or_else(|| "The Home route plugin identity is unavailable".to_owned())?;
+    let dialects = upstreams
+        .iter()
+        .filter_map(|name| config.upstreams.get(name))
+        .map(|upstream| upstream.provider.clone())
+        .collect::<BTreeSet<_>>();
+    let mut hash = Sha256::new();
+    for dialect in dialects {
+        let binding = registry
+            .provider_binding(&dialect)
+            .ok_or_else(|| "The Home route references an unavailable Provider plugin".to_owned())?;
+        let digest = binding.source.content_digest().map_err(|error| {
+            eprintln!("model test plugin digest failed: {error}");
+            "The Home route plugin identity is unavailable".to_owned()
+        })?;
+        let discovered_package = registry.package(&binding.package);
+        for field in [
+            dialect.as_bytes(),
+            binding.package.as_bytes(),
+            digest.as_bytes(),
+        ] {
+            hash_length_prefixed_field(&mut hash, field);
+        }
+        hash.update([
+            u8::from(discovered_package.is_some_and(|package| package.conformance_passed)),
+            u8::from(
+                discovered_package.is_some_and(|package| package.publisher_signature_verified),
+            ),
+        ]);
+    }
+    for agent_package_name in &config.plugins.agents {
+        let source = registry.agent_source(agent_package_name);
+        let digest = source.content_digest().map_err(|error| {
+            eprintln!("model test agent plugin digest failed: {error}");
+            "The Home route plugin identity is unavailable".to_owned()
+        })?;
+        for field in [
+            b"agent".as_slice(),
+            agent_package_name.as_bytes(),
+            digest.as_bytes(),
+        ] {
+            hash_length_prefixed_field(&mut hash, field);
+        }
+    }
+    Ok(hash.finalize().into())
+}
+
+fn ensure_model_test_plugin_identity_unchanged(
+    config: &ClientConfig,
+    expected: [u8; 32],
+) -> Result<(), String> {
+    if model_test_plugin_identity_fingerprint(config)? != expected {
+        return Err(
+            "The Home route plugin identity changed while preparing the model test Gateway. Retry"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 enum ModelTestRequestOwner {
@@ -1403,7 +1576,6 @@ fn model_test_gateway_source(inner: &AppInner) -> Result<ModelTestGatewaySource,
         });
     }
     Ok(ModelTestGatewaySource::Draft {
-        secret_store_fingerprint: model_test_secret_store_fingerprint(&config),
         config,
         upstream_epochs: inner.upstream_epochs.clone(),
         request: RequestContext::detached(Duration::from_mins(2), Duration::from_mins(2))
@@ -4898,8 +5070,18 @@ fn model_test_error_is_exhausted_balance(body: &Value) -> bool {
         })
 }
 
+fn model_test_error_is_local_concurrency(body: &Value) -> bool {
+    body.get("error")
+        .unwrap_or(body)
+        .get("code")
+        .and_then(Value::as_str)
+        == Some("concurrency_limit")
+}
+
 fn model_test_http_error(status: u16, body: &Value) -> String {
-    let summary = if status == 429 && model_test_error_is_exhausted_balance(body) {
+    let summary = if status == 429 && model_test_error_is_local_concurrency(body) {
+        "The Token Station concurrency limit is active. Try again shortly"
+    } else if status == 429 && model_test_error_is_exhausted_balance(body) {
         "The Provider account has no available balance"
     } else {
         match status {
@@ -5004,9 +5186,10 @@ async fn run_model_test_chat<R: Runtime>(
             ModelTestGatewaySource::Draft {
                 config,
                 upstream_epochs,
-                secret_store_fingerprint,
                 request,
             } => {
+                let secret_store_fingerprint = model_test_secret_store_fingerprint(&config)?;
+                let plugin_identity_fingerprint = model_test_plugin_identity_fingerprint(&config)?;
                 let mut cached = gateway_cache.lock().unwrap();
                 let gateway = if let Some(cached) = cached.as_ref().filter(|cached| {
                     home_gateway_identities_match(
@@ -5015,8 +5198,14 @@ async fn run_model_test_chat<R: Runtime>(
                         &config,
                         &upstream_epochs,
                     ) && cached.secret_store_fingerprint == secret_store_fingerprint
+                        && cached.plugin_identity_fingerprint == plugin_identity_fingerprint
                 }) {
-                    Arc::clone(&cached.gateway)
+                    let gateway = Arc::clone(&cached.gateway);
+                    ensure_model_test_plugin_identity_unchanged(
+                        &config,
+                        plugin_identity_fingerprint,
+                    )?;
+                    gateway
                 } else {
                     let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
                     let gateway = Arc::new(Gateway::new_with_provider_runtime(
@@ -5024,10 +5213,15 @@ async fn run_model_test_chat<R: Runtime>(
                         recorder,
                         provider_runtime,
                     )?);
+                    ensure_model_test_plugin_identity_unchanged(
+                        &config,
+                        plugin_identity_fingerprint,
+                    )?;
                     *cached = Some(CachedModelTestGateway {
                         config,
                         upstream_epochs,
                         secret_store_fingerprint,
+                        plugin_identity_fingerprint,
                         gateway: Arc::clone(&gateway),
                     });
                     gateway
@@ -8838,6 +9032,21 @@ mod tests {
             .expect("config fixture is an object")
             .remove("routing");
         draft
+    }
+
+    fn copy_model_test_plugin_packages(root: &Path, packages: &[(&str, &str)]) -> PathBuf {
+        let source_packages = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("plugins-dist");
+        let plugin_root = root.join("model-test-plugins");
+        for (package, wasm) in packages {
+            let target = plugin_root.join(package);
+            std::fs::create_dir_all(&target).unwrap();
+            for file in ["manifest.json", *wasm] {
+                std::fs::copy(source_packages.join(package).join(file), target.join(file)).unwrap();
+            }
+        }
+        plugin_root
     }
 
     fn published_agent_route_fixture(root: &std::path::Path) -> (Value, RunningServer) {
@@ -14347,6 +14556,19 @@ mod tests {
     }
 
     #[test]
+    fn model_test_reply_identifies_the_local_concurrency_limit() {
+        let error = extract_model_test_reply(
+            429,
+            r#"{"error":{"code":"concurrency_limit","message":"the local proxy is at its configured concurrency limit"}}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Token Station concurrency limit"), "{error}");
+        assert!(!error.contains("Provider rate limit"), "{error}");
+        assert!(!error.contains("local proxy"), "{error}");
+    }
+
+    #[test]
     fn model_test_sse_decoder_handles_split_frames_and_utf8_boundaries() {
         let wire = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n".as_bytes();
         let chinese = "你".as_bytes();
@@ -14449,11 +14671,262 @@ mod tests {
             .contains("wire response limit"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn model_test_source_preparation_does_not_read_the_secret_store() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = scratch_home("model-test-source-no-secret-io");
+        let data_dir = root.join("token-station-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let secret_store = data_dir.join(secrets::SECRETS_FILE);
+        let secret_store_path = CString::new(secret_store.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(secret_store_path.as_ptr(), 0o600) },
+            0
+        );
+
+        let mut draft = gateway_template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.test/v1",
+            "auth": {"slot": "provider_api_key", "store": true},
+            "models": [{"model": "small"}]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "fixture", "model": "small"}
+        });
+        let inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let is_draft = matches!(
+                model_test_gateway_source(&inner).unwrap(),
+                ModelTestGatewaySource::Draft { .. }
+            );
+            completed_tx.send(is_draft).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let completed_without_reader = completed_rx.recv_timeout(Duration::from_millis(500));
+        let completed_before_secret_read = completed_without_reader.is_ok();
+        let completed = match completed_without_reader {
+            Ok(completed) => completed,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&secret_store)
+                    .unwrap()
+                    .write_all(b"{}")
+                    .unwrap();
+                completed_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+            }
+            Err(error) => panic!("model test source worker failed: {error}"),
+        };
+        worker.join().unwrap();
+        std::fs::remove_dir_all(root).ok();
+
+        assert!(completed);
+        assert!(
+            completed_before_secret_read,
+            "model test source preparation performed secret-store filesystem I/O"
+        );
+    }
+
+    #[test]
+    fn model_test_secret_fingerprint_rejects_an_oversized_store() {
+        let root = scratch_home("model-test-secret-store-limit");
+        let data_dir = root.join("token-station-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join(secrets::SECRETS_FILE),
+            vec![b'x'; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        let mut draft = gateway_template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.test/v1",
+            "auth": {"slot": "provider_api_key", "store": true},
+            "models": [{"model": "small"}]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "fixture", "model": "small"}
+        });
+        let config: ClientConfig = serde_json::from_value(draft).unwrap();
+
+        let error = model_test_secret_store_fingerprint(&config).unwrap_err();
+
+        assert!(error.contains("size limit"), "{error}");
+        assert!(!error.contains(&data_dir.display().to_string()), "{error}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_test_secret_store_open_does_not_follow_a_racing_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch_home("model-test-secret-store-nofollow");
+        let data_dir = root.join("token-station-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let secret_store = data_dir.join(secrets::SECRETS_FILE);
+        let target = data_dir.join("attacker-controlled.json");
+        std::fs::write(&secret_store, b"{}").unwrap();
+        std::fs::write(&target, b"{}").unwrap();
+
+        let error = read_model_test_secret_store_with_before_open(&data_dir, || {
+            std::fs::remove_file(&secret_store).unwrap();
+            symlink(&target, &secret_store).unwrap();
+        })
+        .err()
+        .expect("a racing symlink must be refused");
+
+        assert!(error.contains("regular file"), "{error}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_test_secret_fingerprint_reads_one_store_snapshot_for_several_slots() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = scratch_home("model-test-secret-store-single-read");
+        let data_dir = root.join("token-station-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let secret_store = data_dir.join(secrets::SECRETS_FILE);
+        std::fs::write(
+            &secret_store,
+            br#"{"first/provider_api_key":"one","second/provider_api_key":"two"}"#,
+        )
+        .unwrap();
+        let mut draft = gateway_template_for_test(&root);
+        for name in ["first", "second"] {
+            draft["upstreams"][name] = json!({
+                "provider": "openai-compatible",
+                "base_url": format!("https://{name}.example.test/v1"),
+                "auth": {"slot": "provider_api_key", "store": true},
+                "models": [{"model": "small"}]
+            });
+        }
+        draft["router"]["routing_mode"] = json!("tiered");
+        draft["router"]["pools"] = json!({
+            "simple": [{"upstream": "first", "model": "small"}],
+            "complex": [{"upstream": "second", "model": "small"}]
+        });
+        draft["router"]["default_pool"] = json!("simple");
+        let config: ClientConfig = serde_json::from_value(draft).unwrap();
+        let read_count = AtomicUsize::new(0);
+        let fingerprint = model_test_secret_store_fingerprint_with_reader(&config, |data_dir| {
+            read_count.fetch_add(1, Ordering::SeqCst);
+            read_model_test_secret_store(data_dir)
+        })
+        .unwrap();
+        let empty_fingerprint: [u8; 32] = Sha256::digest([]).into();
+
+        assert_ne!(fingerprint, empty_fingerprint);
+        assert_eq!(read_count.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_test_plugin_identity_tracks_the_inbound_agent_package() {
+        let root = scratch_home("model-test-agent-plugin-identity");
+        let plugin_root = copy_model_test_plugin_packages(
+            &root,
+            &[
+                ("agent-openai", "adapter.wasm"),
+                ("provider-openai-compatible-v2", "component.wasm"),
+            ],
+        );
+        let mut draft = gateway_template_for_test(&root);
+        draft["plugins"]["dir"] = json!(plugin_root);
+        draft["plugins"]["agents"] = json!(["agent-openai"]);
+        draft["plugins"]["providers"]["openai-compatible"] = json!("provider-openai-compatible-v2");
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.test/v1",
+            "models": [{"model": "small"}]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "fixture", "model": "small"}
+        });
+        let config: ClientConfig = serde_json::from_value(draft).unwrap();
+        let first = model_test_plugin_identity_fingerprint(&config).unwrap();
+
+        std::fs::write(
+            plugin_root.join("agent-openai/revision-marker"),
+            b"updated agent package identity",
+        )
+        .unwrap();
+        let second = model_test_plugin_identity_fingerprint(&config).unwrap();
+
+        assert_ne!(first, second);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_test_plugin_identity_rejects_a_package_changed_after_preflight() {
+        let root = scratch_home("model-test-plugin-identity-revalidation");
+        let plugin_root = copy_model_test_plugin_packages(
+            &root,
+            &[
+                ("agent-openai", "adapter.wasm"),
+                ("provider-openai-compatible-v2", "component.wasm"),
+            ],
+        );
+        let mut draft = gateway_template_for_test(&root);
+        draft["plugins"]["dir"] = json!(plugin_root);
+        draft["plugins"]["agents"] = json!(["agent-openai"]);
+        draft["plugins"]["providers"]["openai-compatible"] = json!("provider-openai-compatible-v2");
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.test/v1",
+            "models": [{"model": "small"}]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "fixture", "model": "small"}
+        });
+        let config: ClientConfig = serde_json::from_value(draft).unwrap();
+        let expected = model_test_plugin_identity_fingerprint(&config).unwrap();
+        std::fs::write(
+            config
+                .plugins
+                .dir
+                .join("provider-openai-compatible-v2/revision-marker"),
+            b"changed while the Gateway was loading",
+        )
+        .unwrap();
+
+        let error = ensure_model_test_plugin_identity_unchanged(&config, expected).unwrap_err();
+
+        assert!(error.contains("changed while"), "{error}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
         let root = scratch_home("model-test-command");
-        let (upstream, fixture) = serve_chat_completion("model-test-ok", 4);
+        let (upstream, fixture) = serve_chat_completion("model-test-ok", 6);
         let mut draft = gateway_template_for_test(&root);
+        let plugin_root = copy_model_test_plugin_packages(
+            &root,
+            &[
+                ("agent-anthropic", "adapter.wasm"),
+                ("agent-gemini", "adapter.wasm"),
+                ("agent-openai", "adapter.wasm"),
+                ("agent-openai-responses", "adapter.wasm"),
+                ("provider-openai-compatible-v2", "component.wasm"),
+            ],
+        );
+        let package_dir = plugin_root.join("provider-openai-compatible-v2");
+        draft["plugins"]["dir"] = json!(plugin_root);
+        draft["plugins"]["providers"]["openai-compatible"] = json!("provider-openai-compatible-v2");
         draft["upstreams"]["fixture"] = json!({
             "provider": "openai-compatible",
             "base_url": upstream,
@@ -14514,14 +14987,55 @@ mod tests {
                 .gateway,
         );
         assert!(Arc::ptr_eq(&first_gateway, &second_gateway));
-        secrets::store_set(
-            &root.join("token-station-data"),
-            "fixture",
-            "provider_api_key",
-            "external-key",
+        std::fs::write(
+            package_dir.join("revision-marker"),
+            b"updated package identity",
         )
         .unwrap();
         assert_eq!(send("model-test-command-3").content, "model-test-ok");
+        let updated_plugin_gateway = Arc::clone(
+            &app.state::<ModelTestStreamState>()
+                .1
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .gateway,
+        );
+        assert!(!Arc::ptr_eq(&second_gateway, &updated_plugin_gateway));
+        let package_digest = token_station_cli::plugins::PackageSource::Dir(package_dir.clone())
+            .content_digest()
+            .unwrap();
+        let data_dir = root.join("token-station-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("plugin-receipts.json"),
+            serde_json::to_vec(&json!({
+                "provider-openai-compatible-v2": {
+                    "package_digest": package_digest,
+                    "suite": "south.provider-component.v1",
+                    "publisher_signature_verified": false
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(send("model-test-command-4").content, "model-test-ok");
+        let updated_receipt_gateway = Arc::clone(
+            &app.state::<ModelTestStreamState>()
+                .1
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .gateway,
+        );
+        assert!(!Arc::ptr_eq(
+            &updated_plugin_gateway,
+            &updated_receipt_gateway
+        ));
+        secrets::store_set(&data_dir, "fixture", "provider_api_key", "external-key").unwrap();
+        assert_eq!(send("model-test-command-5").content, "model-test-ok");
         let external_gateway = Arc::clone(
             &app.state::<ModelTestStreamState>()
                 .1
@@ -14531,7 +15045,7 @@ mod tests {
                 .unwrap()
                 .gateway,
         );
-        assert!(!Arc::ptr_eq(&second_gateway, &external_gateway));
+        assert!(!Arc::ptr_eq(&updated_receipt_gateway, &external_gateway));
         {
             let state = app.state::<AppStateManaged>();
             let mut inner = state.0.lock().unwrap();
@@ -14555,7 +15069,7 @@ mod tests {
             inner.save_draft().unwrap();
             assert!(inner.upstream_epochs["fixture"] > before_epoch);
         }
-        assert_eq!(send("model-test-command-4").content, "model-test-ok");
+        assert_eq!(send("model-test-command-6").content, "model-test-ok");
         let rotated_gateway = Arc::clone(
             &app.state::<ModelTestStreamState>()
                 .1
