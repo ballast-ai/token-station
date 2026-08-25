@@ -34,6 +34,7 @@ agent_packages="$("$ROOT/scripts/official-packages.py" --kind agent --field dir)
 readonly agent_packages
 plugins=()
 while IFS= read -r package; do
+  package="${package%$'\r'}"  # a CRLF-emitting producer must not corrupt the path
   plugins+=("$package")
 done <<<"$agent_packages"
 readonly -a plugins
@@ -41,6 +42,7 @@ south_package_dirs="$("$ROOT/scripts/official-packages.py" --kind south-componen
 readonly south_package_dirs
 south_components=()
 while IFS= read -r package; do
+  package="${package%$'\r'}"  # a CRLF-emitting producer must not corrupt the path
   south_components+=("$package")
 done <<<"$south_package_dirs"
 readonly -a south_components
