@@ -1,0 +1,7 @@
+{
+  "provider_config": {"provider":"openai-compatible","base_url":"https://api.openai.com/v1","auth":"provider_api_key"},
+  "chat_request": {
+    "model": "m",
+    "messages": [{"role":"user","content":[{"type":"text","text":"only text"}]}]
+  }
+}

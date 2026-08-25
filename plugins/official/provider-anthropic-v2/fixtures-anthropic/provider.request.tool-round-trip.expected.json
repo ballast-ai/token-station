@@ -1,0 +1,63 @@
+{
+  "method": "POST",
+  "url": "https://api.anthropic.com/v1/messages",
+  "headers": {
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json"
+  },
+  "auth": {
+    "scheme": "header",
+    "name": "x-api-key",
+    "secret": "provider_api_key"
+  },
+  "body": {
+    "model": "claude-sonnet-4",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "get_weather",
+            "input": {
+              "city": "Beijing"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "18C"
+          }
+        ]
+      }
+    ],
+    "max_tokens": 64,
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Look up weather",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "tool_choice": {
+      "type": "auto"
+    }
+  }
+}

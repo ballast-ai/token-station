@@ -1,0 +1,10 @@
+{
+  "provider_config": {"provider":"openai-compatible","base_url":"https://api.openai.com/v1","auth":"provider_api_key"},
+  "chat_request": {
+    "model": "m",
+    "messages": [{"role": "assistant", "content": [
+      {"type": "redacted_thinking", "data": "ENCRYPTED"},
+      {"type": "text", "text": "carrying on"}
+    ]}]
+  }
+}

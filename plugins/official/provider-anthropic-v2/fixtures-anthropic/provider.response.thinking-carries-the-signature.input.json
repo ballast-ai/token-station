@@ -1,0 +1,7 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": "{\"id\": \"msg_2\", \"model\": \"claude-sonnet-4\", \"content\": [{\"type\": \"thinking\", \"thinking\": \"Weighed both options.\", \"signature\": \"SIG-1\"}, {\"type\": \"redacted_thinking\", \"data\": \"OPAQUE\"}, {\"type\": \"text\", \"text\": \"Option B.\"}], \"stop_reason\": \"end_turn\", \"usage\": {\"input_tokens\": 5, \"output_tokens\": 7}}"
+}

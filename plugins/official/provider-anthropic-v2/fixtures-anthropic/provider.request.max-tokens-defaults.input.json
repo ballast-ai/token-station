@@ -1,0 +1,30 @@
+{
+  "provider_config": {
+    "provider": "anthropic",
+    "base_url": "https://api.anthropic.com",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "claude-sonnet-4",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 200000,
+        "supported_parameters": [
+          "stop",
+          "temperature",
+          "top_p"
+        ]
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "claude-sonnet-4",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ]
+  }
+}

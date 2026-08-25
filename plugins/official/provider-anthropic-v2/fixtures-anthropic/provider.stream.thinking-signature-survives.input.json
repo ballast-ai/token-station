@@ -1,0 +1,9 @@
+{
+  "chunks": [
+    "event: content_block_start\ndata: {\"index\": 0, \"content_block\": {\"type\": \"thinking\", \"thinking\": \"\"}}\n\n",
+    "event: content_block_delta\ndata: {\"index\": 0, \"delta\": {\"type\": \"thinking_delta\", \"thinking\": \"Weighing.\"}}\n\n",
+    "event: content_block_delta\ndata: {\"index\": 0, \"delta\": {\"type\": \"signature_delta\", \"signature\": \"SIG-1\"}}\n\n",
+    "event: content_block_stop\ndata: {\"index\": 0}\n\n",
+    "event: message_delta\ndata: {\"delta\": {\"stop_reason\": \"end_turn\"}, \"usage\": {\"output_tokens\": 4}}\n\n"
+  ]
+}

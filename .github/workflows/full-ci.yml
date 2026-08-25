@@ -215,6 +215,7 @@ jobs:
           node scripts/check-release-readiness.mjs --version "$version"
       - run: tests/build-desktop-verbosity.sh
       - run: tests/desktop-updater-release.sh
+      - run: tests/report-legacy-usage.sh
 
   msrv:
     name: Rust 1.96 minimum-version check

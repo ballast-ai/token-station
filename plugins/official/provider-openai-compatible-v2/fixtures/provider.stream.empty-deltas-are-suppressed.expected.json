@@ -1,0 +1,5 @@
+[
+  {"type": "delta", "index": 0, "content": "real"},
+  {"type": "finish", "finish_reason": "stop"},
+  {"type": "done"}
+]
