@@ -80,7 +80,9 @@ describe("retained page theme styles", () => {
     const bodyRule = appCss.match(/\.provider-management-dialog-body\s*\{([^}]*)\}/s)?.[1] ?? "";
 
     expect(dialogRule).toMatch(/max-width:\s*920px/);
+    expect(dialogRule).toMatch(/(?:^|;)\s*height:\s*min\(760px,\s*calc\(100vh - 40px\)\)/);
     expect(dialogRule).toMatch(/max-height:/);
+    expect(bodyRule).toMatch(/min-height:\s*0/);
     expect(bodyRule).toMatch(/overflow-y:\s*auto/);
   });
 
@@ -235,6 +237,15 @@ describe("retained page theme styles", () => {
     const routeIconRule = appCss.match(
       /\.agent-master-icon\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const routeMarkRule = appCss.match(
+      /\.agent-master-item \.agent-master-icon > svg\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const agentVectorRule = appCss.match(
+      /\.agent-master-item \.agent-brand-glyph > svg\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const agentImageRule = appCss.match(
+      /\.agent-master-item \.agent-brand-glyph > img,[^{]*\{([^}]*)\}/s,
+    )?.[1] ?? "";
     const selectedAgentRule = appCss.match(
       /\.agent-master-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -245,8 +256,16 @@ describe("retained page theme styles", () => {
     expect(permanentGlobalRouteRule).not.toMatch(/background:/);
     expect(permanentGlobalRouteRule).not.toMatch(/border:/);
     expect(routeItemRule).toMatch(/height:\s*46px/);
+    expect(routeIconRule).toMatch(/width:\s*34px/);
+    expect(routeIconRule).toMatch(/height:\s*34px/);
     expect(routeIconRule).not.toMatch(/border:/);
     expect(routeIconRule).not.toMatch(/background:/);
+    expect(routeMarkRule).toMatch(/width:\s*30px/);
+    expect(routeMarkRule).toMatch(/height:\s*30px/);
+    expect(agentVectorRule).toMatch(/width:\s*30px/);
+    expect(agentVectorRule).toMatch(/height:\s*30px/);
+    expect(agentImageRule).toMatch(/width:\s*32px/);
+    expect(agentImageRule).toMatch(/height:\s*32px/);
     expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(selectedAgentRule).not.toMatch(/box-shadow:/);
     expect(disclosureRule).not.toMatch(/border-left:/);

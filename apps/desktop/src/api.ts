@@ -373,6 +373,8 @@ export type AgentRouteMode = "inherit" | "custom" | "profile";
 
 export interface AgentRouteView {
   mode: AgentRouteMode;
+  /** True when no per-Agent routing axis overrides the global configuration. */
+  inherits_global?: boolean;
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
   profile: string | null;

@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check as CheckIcon, Copy as CopyIcon, Route as RouteIcon } from "lucide-react";
+import {
+  Check as CheckIcon,
+  Copy as CopyIcon,
+  Globe2,
+  Route as RouteIcon,
+  SlidersHorizontal,
+} from "lucide-react";
 import {
   applyAgentPlan,
   configureCursorProvider,
@@ -267,7 +273,13 @@ export default function AgentRoutePage({
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
   const [copiedDiscoveryPath, setCopiedDiscoveryPath] = useState<{ path: string } | null>(null);
+  const followsGlobal = route.inherits_global === true;
+  const [independentEditorOpen, setIndependentEditorOpen] = useState(!followsGlobal);
   const dismissConnectDiff = () => setConnectDiff(null);
+
+  useEffect(() => {
+    setIndependentEditorOpen(!followsGlobal);
+  }, [followsGlobal, metadata.agent_id]);
 
   useEffect(() => {
     if (selectedInstallationPath !== undefined) return;
@@ -349,6 +361,18 @@ export default function AgentRoutePage({
   const routeNeedsAttention = Boolean(route.config_error || !route.direct_target?.model);
   const discoveredPath = installation?.discovery.canonical_path;
   const discoveredPathCopied = copiedDiscoveryPath?.path === discoveredPath;
+  const inheritedStrategyName = route.routing_mode === "direct"
+    ? copy("Simple routing", "简单路由", "簡單路由", "シンプルルーティング")
+    : route.routing_mode === "quota_first"
+      ? copy("Quota first", "额度优先", "額度優先", "クォータ優先")
+      : copy("Smart tiers", "智能分档", "智慧分檔", "スマート階層");
+  const inheritedStrategyDetail = route.routing_mode === "direct"
+    ? route.direct_target?.upstream && route.direct_target.model
+      ? `${route.direct_target.upstream} / ${route.direct_target.model}`
+      : copy("Uses the global target", "使用全局目标", "使用全域目標", "グローバルターゲットを使用")
+    : route.routing_mode === "quota_first"
+      ? copy("Uses the global quota queue", "使用全局额度队列", "使用全域額度佇列", "グローバルクォータキューを使用")
+      : copy("Uses the global high, mid, and low tiers", "使用全局高、中、低三档", "使用全域高、中、低三檔", "グローバルの高・中・低階層を使用");
 
   const copyDiscoveredPath = async () => {
     const pathToCopy = discoveredPath;
@@ -543,6 +567,7 @@ export default function AgentRoutePage({
       await setAgentRouteMode(metadata.agent_id, "inherit");
       const next = await saveAgentRoutes();
       onStateChange(next);
+      setIndependentEditorOpen(false);
       showSuccess(
         serveRunning
           ? copy("Restored home routing · Restart the proxy to apply", "已恢复跟随主页 · 重启代理后生效", "已恢復隨跟首頁 · 重啟代理後生效", "ホームルーティングを復元しました · プロキシを再起動後に有効になります")
@@ -570,7 +595,7 @@ export default function AgentRoutePage({
             </span>
             {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
           </div>
-          <span className="status-chip neutral">{route.mode === "inherit" ? copy("Follows global", "跟随全局", "隨跟全域性", "グローバルに従う") : copy("Independent", "独立路由", "獨立路由", "独立ルーティング")}</span>
+          <span className="status-chip neutral">{followsGlobal ? copy("Follows global", "跟随全局", "隨跟全域性", "グローバルに従う") : copy("Independent", "独立路由", "獨立路由", "独立ルーティング")}</span>
         </header>
       )}
       {pageMode !== "routing" && (
@@ -763,7 +788,64 @@ export default function AgentRoutePage({
         </>
       )}
       {pageMode !== "connection" && (
+        !independentEditorOpen ? (
+          <section
+            className="panel agent-route-inheritance-card"
+            aria-labelledby={`agent-route-inheritance-${metadata.agent_id}`}
+          >
+            <span className="agent-route-inheritance-mark" aria-hidden="true">
+              <Globe2 />
+            </span>
+            <div className="agent-route-inheritance-copy">
+              <span className="agent-route-inheritance-kicker">{copy("Routing source", "路由来源", "路由來源", "ルーティングソース")}</span>
+              <h2 id={`agent-route-inheritance-${metadata.agent_id}`}>{copy("Follows global routing", "跟随全局路由", "跟隨全域路由", "グローバルルーティングに従う")}</h2>
+              <p>{copy(
+                `${metadata.display_name} automatically uses the global configuration. Global changes apply here without duplicate maintenance.`,
+                `${metadata.display_name} 自动使用全局配置；全局路由变化后，无需在这里重复维护。`,
+                `${metadata.display_name} 自動使用全域設定；全域路由變更後，無需在此重複維護。`,
+                `${metadata.display_name} はグローバル設定を自動的に使用します。グローバル変更は重複した設定なしで反映されます。`,
+              )}</p>
+              <div className="agent-route-inheritance-current">
+                <span>{copy("Current strategy", "当前策略", "目前策略", "現在の戦略")}</span>
+                <strong>{inheritedStrategyName}</strong>
+                <code>{inheritedStrategyDetail}</code>
+              </div>
+            </div>
+            <Button
+              className="agent-route-inheritance-action"
+              variant="outline"
+              type="button"
+              onClick={() => setIndependentEditorOpen(true)}
+            >
+              <SlidersHorizontal data-icon="inline-start" aria-hidden="true" />
+              {copy("Set independent routing", "设置独立路由", "設定獨立路由", "独立ルーティングを設定")}
+            </Button>
+          </section>
+        ) : (
         <>
+      <div className="agent-route-editor-bar">
+        <div>
+          <strong>{copy("Independent routing", "独立路由设置", "獨立路由設定", "独立ルーティング設定")}</strong>
+          <small>{copy(
+            `Set an independent route for ${metadata.display_name}; shared provider and quota data remain global.`,
+            `为 ${metadata.display_name} 设置独立路由；供应商与额度数据仍由全局统一管理。`,
+            `為 ${metadata.display_name} 設定獨立路由；供應商與額度資料仍由全域統一管理。`,
+            `${metadata.display_name} に独立ルートを設定します。共有プロバイダーとクォータデータはグローバル管理のままです。`,
+          )}</small>
+        </div>
+        <Button
+          variant="ghost"
+          type="button"
+          disabled={busy}
+          onClick={() => followsGlobal
+            ? setIndependentEditorOpen(false)
+            : void restoreHome()}
+        >
+          {followsGlobal
+            ? copy("Collapse settings", "收起设置", "收起設定", "設定を閉じる")
+            : copy("Restore global routing", "恢复跟随全局", "恢復跟隨全域", "グローバルルーティングに戻す")}
+        </Button>
+      </div>
       <RoutingModeSelector
         value={route.routing_mode}
         disabled={busy}
@@ -891,6 +973,7 @@ export default function AgentRoutePage({
       </section>
       )}
         </>
+        )
       )}
     </div>
   );

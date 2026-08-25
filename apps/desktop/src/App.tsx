@@ -89,6 +89,7 @@ function errorText(error: unknown): string {
 function emptyAgentRoute(state: StateView): AgentRouteView {
   return {
     mode: "inherit",
+    inherits_global: true,
     tiers: state.tiers,
     config_error: null,
     profile: null,

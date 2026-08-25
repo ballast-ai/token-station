@@ -1439,6 +1439,9 @@ struct TierView {
 #[derive(Serialize)]
 struct AgentRouteView {
     mode: String,
+    /// True only when every per-Agent routing axis is absent and the Agent
+    /// therefore follows the complete Home configuration.
+    inherits_global: bool,
     tiers: std::collections::BTreeMap<String, TierView>,
     config_error: Option<String>,
     profile: Option<String>,
@@ -2234,6 +2237,11 @@ impl AppInner {
             .into_iter()
             .map(|agent_id| {
                 let mode = self.agent_route_view_mode(&agent_id).to_string();
+                let stored_route = &self.draft["agent_routes"][&agent_id];
+                let inherits_global = !self.agent_route_drafts.contains_key(&agent_id)
+                    && self.agent_route_mode(&agent_id) == "inherit"
+                    && stored_route["routing_mode"].is_null()
+                    && stored_route["direct_target"].is_null();
                 let routing_mode = self.draft["agent_routes"][&agent_id]["routing_mode"]
                     .as_str()
                     .unwrap_or(home_mode)
@@ -2262,6 +2270,7 @@ impl AppInner {
                     agent_id.clone(),
                     AgentRouteView {
                         mode,
+                        inherits_global,
                         tiers,
                         config_error,
                         profile: self.agent_profile(&agent_id),
@@ -13562,6 +13571,7 @@ mod tests {
                 .all(|r| r.routing_mode == "tiered"),
             "every Agent inherits the tiered home default"
         );
+        assert!(view.agent_routes.values().all(|r| r.inherits_global));
 
         // Flip Home to quota-first: the Home view flips, and Agents that never
         // overrode follow it.
@@ -13586,11 +13596,12 @@ mod tests {
             set_routing_mode(app.state(), "tiered".to_owned(), Some("codex".to_owned())).unwrap();
         assert_eq!(view.routing_mode, "quota_first", "Home is untouched");
         assert_eq!(view.agent_routes["codex"].routing_mode, "tiered");
+        assert!(!view.agent_routes["codex"].inherits_global);
         assert!(
             view.agent_routes
                 .iter()
                 .filter(|(id, _)| id.as_str() != "codex")
-                .all(|(_, r)| r.routing_mode == "quota_first"),
+                .all(|(_, r)| r.routing_mode == "quota_first" && r.inherits_global),
             "sibling Agents are untouched by the per-Agent switch"
         );
         // The Agent's mode is written explicitly (not cleared), so it stays

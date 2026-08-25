@@ -1244,6 +1244,7 @@ describe("compactDiscoveryPath", () => {
 describe("AgentRoutePage split page modes", () => {
   const route = {
     mode: "inherit" as const,
+    inherits_global: true,
     tiers: {
       high: { upstream: null, model: null },
       mid: { upstream: null, model: null },
@@ -1442,12 +1443,35 @@ describe("AgentRoutePage split page modes", () => {
       .toHaveTextContent("无法复制发现路径，请检查系统剪贴板权限后重试。");
   });
 
-  it("shows routing controls without connection or recovery controls", () => {
+  it("hides routing strategies for a globally inherited Agent until requested", async () => {
+    const user = userEvent.setup();
     render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="routing" embedded /></ErrorToastProvider>);
 
-    expect(screen.getByRole("tablist", { name: "Agent 路由策略" })).toBeInTheDocument();
+    expect(screen.getByText("跟随全局路由")).toBeInTheDocument();
+    expect(screen.queryByRole("tablist", { name: "Agent 路由策略" })).toBeNull();
     expect(screen.queryByText("选择请求如何分配")).toBeNull();
     expect(screen.queryByRole("button", { name: "一键接入" })).toBeNull();
     expect(screen.queryByText("发现路径")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "设置独立路由" }));
+    expect(screen.getByRole("tablist", { name: "Agent 路由策略" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "收起设置" })).toBeInTheDocument();
+  });
+
+  it("opens an existing independent route directly with a global restore action", () => {
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          {...props}
+          route={{ ...route, inherits_global: false }}
+          pageMode="routing"
+          embedded
+        />
+      </ErrorToastProvider>,
+    );
+
+    expect(screen.getByRole("tablist", { name: "Agent 路由策略" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "恢复跟随全局" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "设置独立路由" })).toBeNull();
   });
 });

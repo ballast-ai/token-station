@@ -6930,9 +6930,9 @@ pre.block {
 }
 
 .agent-master-icon {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px !important;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px !important;
   display: grid !important;
   place-items: center;
   position: relative;
@@ -6951,22 +6951,27 @@ pre.block {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 28px !important;
-  height: 28px !important;
+  width: 32px !important;
+  height: 32px !important;
   transform: translate(-50%, -50%);
+}
+
+.agent-master-item .agent-master-icon > svg {
+  width: 30px;
+  height: 30px;
 }
 
 .agent-master-item .agent-brand-glyph > svg {
   display: block;
-  width: 26px !important;
-  height: 26px !important;
+  width: 30px !important;
+  height: 30px !important;
 }
 
 .agent-master-item .agent-brand-glyph > img,
 .agent-master-item .agent-brand-glyph > .brand-fallback {
   display: block;
-  width: 28px !important;
-  height: 28px !important;
+  width: 32px !important;
+  height: 32px !important;
 }
 
 .agent-master-item[data-slot="button"][aria-current="page"] {
@@ -7051,6 +7056,133 @@ pre.block {
   margin: 3px 0 0;
   font-size: 22px;
   letter-spacing: -.035em;
+}
+
+.agent-route-inheritance-card {
+  min-height: 164px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 24px 26px;
+}
+
+.agent-route-inheritance-mark {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.agent-route-inheritance-mark > svg {
+  width: 26px;
+  height: 26px;
+  stroke-width: 1.6;
+}
+
+.agent-route-inheritance-copy {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.agent-route-inheritance-kicker {
+  color: var(--muted);
+  font: 500 9.5px/1.3 "IBM Plex Mono", monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.agent-route-inheritance-copy h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  letter-spacing: -.025em;
+}
+
+.agent-route-inheritance-copy > p {
+  max-width: 660px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.agent-route-inheritance-current {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-top: 5px;
+}
+
+.agent-route-inheritance-current > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.agent-route-inheritance-current > strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.agent-route-inheritance-current > code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-route-inheritance-action[data-slot="button"] {
+  min-width: 132px;
+  height: 36px;
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.agent-route-editor-bar {
+  min-height: 44px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 1px 2px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-route-editor-bar > div {
+  display: grid;
+  gap: 3px;
+}
+
+.agent-route-editor-bar strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.agent-route-editor-bar small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.agent-route-editor-bar > [data-slot="button"] {
+  height: 30px;
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+@media (max-width: 860px) {
+  .agent-route-inheritance-card {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .agent-route-inheritance-action[data-slot="button"] {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 
 .agent-route-embedded .agent-route-hero h2 {
@@ -9461,6 +9593,7 @@ samp {
 .provider-management-dialog[data-slot="dialog-content"] {
   width: min(920px, calc(100vw - 40px));
   max-width: 920px;
+  height: min(760px, calc(100vh - 40px));
   max-height: min(760px, calc(100vh - 40px));
   grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
