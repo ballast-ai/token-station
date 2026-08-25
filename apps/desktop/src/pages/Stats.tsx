@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   AgentUiMetadataView,
   AggView,
@@ -213,6 +213,21 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
   const activeDashboardKey = useRef("");
   const dashboardMounted = useRef(true);
   const latestDashboardLoader = useRef<(background?: boolean) => Promise<void>>(async () => undefined);
+
+  const handleGroupKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % groups.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + groups.length) % groups.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = groups.length - 1;
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    setActiveGroup(groups[nextIndex].value);
+    event.currentTarget.parentElement
+      ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+      [nextIndex]?.focus();
+  };
 
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
   const [budgets, setBudgets] = useState<BudgetStatus[]>([]);
@@ -516,14 +531,16 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
                 <div><h2>{copy("Contribution details", "贡献明细", "貢獻明細", "貢献明細")}</h2><p>{groupLabel} · {copy("Current filters", "当前筛选范围", "當前篩選範圍", "現在のフィルタ")}</p></div>
               </div>
               <div className="usage-segmented" role="tablist" aria-label={copy("Aggregation view", "统计视角", "統計視角", "統計ビュー")}>
-                {groups.map((group) => (
+                {groups.map((group, index) => (
                   <button
                     key={group.value}
                     type="button"
                     role="tab"
                     aria-selected={activeGroup === group.value}
+                    tabIndex={activeGroup === group.value ? 0 : -1}
                     className={activeGroup === group.value ? "active" : ""}
                     onClick={() => setActiveGroup(group.value)}
+                    onKeyDown={(event) => handleGroupKeyDown(event, index)}
                   >
                     {group.shortLabel}
                   </button>
