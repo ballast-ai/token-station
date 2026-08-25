@@ -165,9 +165,9 @@ fn read_model_test_secret_store_inner(
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let file = options.open(&path).map_err(|error| {
+    let file = options.open(&path).map_err(|_error| {
         #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::ELOOP) {
+        if _error.raw_os_error() == Some(libc::ELOOP) {
             return "The local secrets store must be a regular file".to_owned();
         }
         "The local secrets store is unreadable".to_owned()
@@ -198,7 +198,7 @@ pub(crate) fn read_model_test_secret_store(
     read_model_test_secret_store_inner(data_dir, || {})
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn read_model_test_secret_store_with_before_open(
     data_dir: &Path,
     before_open: impl FnOnce(),
