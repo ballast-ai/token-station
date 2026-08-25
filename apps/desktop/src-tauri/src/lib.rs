@@ -4867,17 +4867,52 @@ fn validate_model_test_messages(messages: &[ModelTestMessage]) -> Result<(), Str
     Ok(())
 }
 
-fn model_test_http_error(status: u16) -> String {
-    let summary = match status {
-        400 => "The model rejected the request. Check the prompt and model limits",
-        401 | 403 => "Provider authentication failed. Check this Provider credential",
-        402 => "The Provider account has no available balance",
-        404 => "The selected model or endpoint is unavailable",
-        408 | 504 => "The model request timed out",
-        409 => "The Provider rejected the current request state",
-        429 => "The Provider rate limit is active. Try again later",
-        500..=599 => "The Provider is temporarily unavailable",
-        _ => "The model request failed",
+/// Pay-per-token providers report an exhausted wallet as HTTP 429 rather than
+/// 402, where the retry advice of the rate-limit summary is wrong: waiting
+/// never helps an empty account. Classify from the error body's stable fields
+/// without ever echoing its text into the summary the console shows.
+fn model_test_error_is_exhausted_balance(body: &Value) -> bool {
+    let error = body.get("error").unwrap_or(body);
+    if error.get("type").and_then(Value::as_str) == Some("insufficient_quota") {
+        return true;
+    }
+    if ["code", "internal_code"].iter().any(|field| {
+        error
+            .get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|code| {
+                code.eq_ignore_ascii_case("credit_balance_exhausted")
+                    || code.eq_ignore_ascii_case("platform_balance_insufficient")
+            })
+    }) {
+        return true;
+    }
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| {
+            let lowered = message.to_lowercase();
+            lowered.contains("insufficient balance")
+                || lowered.contains("balance is insufficient")
+                || message.contains("余额不足")
+        })
+}
+
+fn model_test_http_error(status: u16, body: &Value) -> String {
+    let summary = if status == 429 && model_test_error_is_exhausted_balance(body) {
+        "The Provider account has no available balance"
+    } else {
+        match status {
+            400 => "The model rejected the request. Check the prompt and model limits",
+            401 | 403 => "Provider authentication failed. Check this Provider credential",
+            402 => "The Provider account has no available balance",
+            404 => "The selected model or endpoint is unavailable",
+            408 | 504 => "The model request timed out",
+            409 => "The Provider rejected the current request state",
+            429 => "The Provider rate limit is active. Try again later",
+            500..=599 => "The Provider is temporarily unavailable",
+            _ => "The model request failed",
+        }
     };
     format!("{summary} (HTTP {status})")
 }
@@ -4903,7 +4938,7 @@ fn extract_model_test_reply(status: u16, body: &str) -> Result<String, String> {
     let value: Value = serde_json::from_str(body)
         .map_err(|_| format!("The model returned invalid JSON (HTTP {status})"))?;
     if !(200..300).contains(&status) {
-        return Err(model_test_http_error(status));
+        return Err(model_test_http_error(status, &value));
     }
     let content = model_test_assistant_content(&value)
         .ok_or_else(|| "The model returned no assistant text".to_owned())?;
@@ -14266,6 +14301,49 @@ mod tests {
         assert!(extract_model_test_reply(200, &oversized_envelope)
             .unwrap_err()
             .contains("wire response limit"));
+    }
+
+    /// Pay-per-token providers report an exhausted wallet as HTTP 429 rather
+    /// than 402 (observed live: wecoding's `credit_balance_exhausted` and
+    /// z.ai's code 1113 "Insufficient balance"). The console must tell the
+    /// user to recharge, not to retry — while still never echoing body text.
+    #[test]
+    fn model_test_reply_reports_a_429_exhausted_wallet_as_no_balance() {
+        let wecoding = extract_model_test_reply(
+            429,
+            r#"{"error":{"code":"credit_balance_exhausted","internal_code":"PLATFORM_BALANCE_INSUFFICIENT","message":"wallet balance is insufficient","type":"insufficient_quota"}}"#,
+        )
+        .unwrap_err();
+        assert!(wecoding.contains("no available balance"), "{wecoding}");
+        assert!(wecoding.contains("HTTP 429"), "{wecoding}");
+        assert!(!wecoding.contains("wallet"), "{wecoding}");
+
+        let zai = extract_model_test_reply(
+            429,
+            r#"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#,
+        )
+        .unwrap_err();
+        assert!(zai.contains("no available balance"), "{zai}");
+        assert!(!zai.contains("recharge"), "{zai}");
+
+        let zai_chinese = extract_model_test_reply(
+            429,
+            r#"{"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            zai_chinese.contains("no available balance"),
+            "{zai_chinese}"
+        );
+        assert!(!zai_chinese.contains("余额"), "{zai_chinese}");
+
+        let real_rate_limit = extract_model_test_reply(
+            429,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached, retry after 20s"}}"#,
+        )
+        .unwrap_err();
+        assert!(real_rate_limit.contains("rate limit"), "{real_rate_limit}");
+        assert!(!real_rate_limit.contains("20s"), "{real_rate_limit}");
     }
 
     #[test]
