@@ -203,6 +203,8 @@ jobs:
       - run: node tests/localized-macos-installation.mjs
       - run: node tests/release-assets.mjs
       - run: node tests/release-mode-policy.mjs
+      - run: python3 scripts/check-provider-fixtures.py verify
+      - run: tests/provider-fixture-staging.sh
       - run: node tests/source-release-mode.mjs
       - run: node tests/release-script-variable-order.mjs
       - run: node tests/formal-release-finalization.mjs

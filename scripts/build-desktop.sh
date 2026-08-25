@@ -80,7 +80,16 @@ sys.stdout.write((manifest.get("conformance") or {}).get("fixtures") or "")
   ' "$source/manifest.json")"
   [[ -n "$declared" ]] || return 0
   declared="${declared%/}"
-  [[ -d "$source/$declared" ]] || return 0
+  # A declared directory that is not there is a broken package, not a package
+  # without fixtures. This used to return quietly, which was right while South
+  # still owed the fixtures and the manifest's promise could not be kept. They
+  # are vendored now, so a missing directory means the package would ship
+  # claiming conformance material it does not carry — and the build that
+  # produced it would have said nothing.
+  if [[ ! -d "$source/$declared" ]]; then
+    echo "$source/manifest.json declares conformance fixtures at '$declared', which does not exist" >&2
+    return 1
+  fi
   cp -R "$source/$declared" "$dest/$declared"
 }
 

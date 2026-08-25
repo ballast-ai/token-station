@@ -2160,6 +2160,7 @@ dependencies = [
  "serde",
  "serde_json",
  "south-provider-api",
+ "south-provider-runtime",
  "thiserror 2.0.18",
  "token-station-protocol 0.3.0 (git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35)",
 ]
