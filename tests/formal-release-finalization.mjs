@@ -10,9 +10,9 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "u
 
 const releaseWorkflow = read(".github/workflows/release.yml");
 assert.match(releaseWorkflow, /desktop-macos:/);
-assert.match(releaseWorkflow, /full-ci:\n    uses: \.\/\.github\/workflows\/full-ci\.yml/);
+assert.match(releaseWorkflow, /verify-main-full-ci:\n    runs-on:/);
 assert.match(releaseWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
-assert.match(releaseWorkflow, /needs: \[release-mode, full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos\]/);
+assert.match(releaseWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos\]/);
 assert.match(releaseWorkflow, /token-station-desktop-\$\{\{ matrix\.target \}\}/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/dmg\/\*\.dmg/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/macos\/\*\.app\.tar\.gz/);
@@ -23,14 +23,14 @@ assert.match(releaseWorkflow, /Awaiting offline CLI and updater signatures/);
 const desktopWorkflow = read(".github/workflows/desktop-release.yml");
 assert.match(desktopWorkflow, /workflow_dispatch:/);
 assert.doesNotMatch(desktopWorkflow, /push:\s*\n\s*tags:/);
-assert.match(desktopWorkflow, /full-ci:\n    uses: \.\/\.github\/workflows\/full-ci\.yml/);
+assert.match(desktopWorkflow, /verify-main-full-ci:\n    runs-on:/);
 assert.match(desktopWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
-assert.match(desktopWorkflow, /needs: \[release-mode, full-ci, platform-gates\]/);
+assert.match(desktopWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates\]/);
 
 const linuxWorkflow = read(".github/workflows/linux-desktop.yml");
 assert.match(linuxWorkflow, /workflow_call:/);
 assert.doesNotMatch(linuxWorkflow, /push:\s*\n\s*tags:/);
-assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);
+assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[verify-main-full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);
 
 for (const script of [
   "scripts/prepare-formal-release.sh",

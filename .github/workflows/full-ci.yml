@@ -1,8 +1,19 @@
 name: Full CI
 
-# Run the complete Linux quality gate before a release build. Routine pushes
-# and pull requests use ci.yml and run only the required development checks.
+# The complete Linux quality gate. Runs automatically on every push to main and
+# is called by the release workflows. Pull requests use ci.yml and run only the
+# fast format, lint, and test checks.
+#
+# A release checks that the tagged commit already has a successful push-event run
+# of this workflow on main rather than repeating it, so the push trigger below is
+# what makes a tag releasable. See verify-main-full-ci in release.yml.
 on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
   workflow_call:
   workflow_dispatch:
 
