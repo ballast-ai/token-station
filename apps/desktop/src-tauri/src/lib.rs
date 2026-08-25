@@ -1488,8 +1488,8 @@ fn model_test_plugin_identity_fingerprint(config: &ClientConfig) -> Result<[u8; 
             ),
         ]);
     }
-    for agent_package_name in &config.plugins.agents {
-        let source = registry.agent_source(agent_package_name);
+    for agent_package_name in config.plugins.effective_agents() {
+        let source = registry.agent_source(&agent_package_name);
         let digest = source.content_digest().map_err(|error| {
             eprintln!("model test agent plugin digest failed: {error}");
             "The Home route plugin identity is unavailable".to_owned()
@@ -14832,9 +14832,11 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    #[test]
-    fn model_test_plugin_identity_tracks_the_inbound_agent_package() {
-        let root = scratch_home("model-test-agent-plugin-identity");
+    fn assert_model_test_agent_package_change_invalidates_identity(
+        label: &str,
+        configure_agents: impl FnOnce(&mut Value),
+    ) {
+        let root = scratch_home(label);
         let plugin_root = copy_model_test_plugin_packages(
             &root,
             &[
@@ -14843,8 +14845,8 @@ mod tests {
             ],
         );
         let mut draft = gateway_template_for_test(&root);
-        draft["plugins"]["dir"] = json!(plugin_root);
-        draft["plugins"]["agents"] = json!(["agent-openai"]);
+        draft["plugins"]["dir"] = json!(&plugin_root);
+        configure_agents(&mut draft);
         draft["plugins"]["providers"]["openai-compatible"] = json!("provider-openai-compatible-v2");
         draft["upstreams"]["fixture"] = json!({
             "provider": "openai-compatible",
@@ -14856,17 +14858,39 @@ mod tests {
             "direct_target": {"upstream": "fixture", "model": "small"}
         });
         let config: ClientConfig = serde_json::from_value(draft).unwrap();
+        assert_eq!(config.plugins.effective_agents(), ["agent-openai"]);
         let first = model_test_plugin_identity_fingerprint(&config).unwrap();
 
         std::fs::write(
             plugin_root.join("agent-openai/revision-marker"),
-            b"updated agent package identity",
+            b"updated effective agent package identity",
         )
         .unwrap();
         let second = model_test_plugin_identity_fingerprint(&config).unwrap();
 
         assert_ne!(first, second);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_test_plugin_identity_tracks_the_inbound_agent_package() {
+        assert_model_test_agent_package_change_invalidates_identity(
+            "model-test-agent-plugin-identity",
+            |draft| {
+                draft["plugins"]["agents"] = json!(["agent-openai"]);
+            },
+        );
+    }
+
+    #[test]
+    fn model_test_plugin_identity_tracks_the_legacy_effective_agent_package() {
+        assert_model_test_agent_package_change_invalidates_identity(
+            "model-test-legacy-agent-plugin-identity",
+            |draft| {
+                draft["plugins"]["agents"] = json!([]);
+                draft["plugins"]["agent"] = json!("agent-openai");
+            },
+        );
     }
 
     #[test]
