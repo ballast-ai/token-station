@@ -52,6 +52,16 @@ describe("retained page theme styles", () => {
     expect(routeSnapshotRule).not.toMatch(/align-content:\s*center/);
   });
 
+  it("keeps the Agent actions compact in the card's top-right corner", () => {
+    const actionRule = appCss.match(/\.overview-agent-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(actionRule).toMatch(/position:\s*absolute/);
+    expect(actionRule).toMatch(/top:\s*14px/);
+    expect(actionRule).toMatch(/right:\s*14px/);
+    expect(actionRule).toMatch(/display:\s*flex/);
+    expect(appCss).not.toMatch(/\.overview-agent-summary[^}]*padding-bottom:\s*58px/s);
+  });
+
   it("hides the duplicate provider model summary while management is expanded", () => {
     const expandedProviderModelsRule = appCss.match(
       /\.provider-card\.expanded > \.provider-primary-models\[data-layout="compact-three-column"\]\s*\{([^}]*)\}/s,

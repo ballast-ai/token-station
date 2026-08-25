@@ -261,7 +261,12 @@ describe("OverviewPage summaries", () => {
     );
 
     const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
-    const testButton = within(agentSummary).getByRole("button", { name: "测试模型" });
+    const agentActions = agentSummary.querySelector<HTMLElement>(".overview-agent-actions");
+    expect(agentActions).not.toBeNull();
+    const testButton = within(agentActions!).getByRole("button", { name: "验证模型连接" });
+    const openAgentsButton = within(agentActions!).getByRole("button", { name: "打开 Agent" });
+    expect(testButton.compareDocumentPosition(openAgentsButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
     expect(document.querySelector(".overview-heading")?.contains(testButton)).toBe(false);
 
     await user.click(testButton);
@@ -281,6 +286,6 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
 
-    expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "验证模型连接" })).toBeDisabled();
   });
 });

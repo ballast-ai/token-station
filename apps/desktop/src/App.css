@@ -10430,24 +10430,37 @@ samp {
 }
 
 .overview-model-test-action[data-slot="button"] {
-  position: absolute;
-  left: 16px;
-  bottom: 12px;
-  min-width: 112px;
-  height: 34px;
+  min-width: 0;
+  height: 28px;
+  gap: 5px;
+  padding-inline: 8px;
   border-color: color-mix(in srgb, var(--signal) 42%, var(--line));
+  border-radius: 8px;
   color: var(--signal);
   background: color-mix(in srgb, var(--signal) 7%, var(--surface));
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--signal) 8%, transparent);
+  box-shadow: none;
+  font-size: 10px;
+}
+
+.overview-model-test-action[data-slot="button"] svg { width: 13px; height: 13px; }
+
+.overview-agent-actions {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.station-content-overview .overview-agent-actions .overview-summary-link {
+  position: static;
 }
 
 .overview-model-test-action[data-slot="button"]:hover {
   border-color: color-mix(in srgb, var(--signal) 64%, var(--line));
   background: color-mix(in srgb, var(--signal) 12%, var(--surface));
-}
-
-.station-content-overview .overview-agent-summary > [data-slot="card-content"] {
-  padding-bottom: 58px;
 }
 
 .model-test-dialog[data-slot="dialog-content"] {

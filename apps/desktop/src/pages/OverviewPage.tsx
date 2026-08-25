@@ -183,19 +183,22 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                 </li>
               ))}
             </ul>
-            <button className="overview-summary-link" type="button" aria-label={copy("Open Agents", "打开 Agent", "開啟 Agent", "Agentを開く")} onClick={() => onNavigate("agents")}>
-              <ArrowUpRight aria-hidden="true" />
-            </button>
-            <Button
-              type="button"
-              variant="outline"
-              className="overview-model-test-action"
-              disabled={modelCount === 0}
-              onClick={() => setModelTestOpen(true)}
-            >
-              <MessageSquareText aria-hidden="true" />
-              {copy("Test model", "测试模型", "測試模型", "モデルをテスト")}
-            </Button>
+            <div className="overview-agent-actions">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="overview-model-test-action"
+                disabled={modelCount === 0}
+                onClick={() => setModelTestOpen(true)}
+              >
+                <MessageSquareText aria-hidden="true" />
+                {copy("Verify model connection", "验证模型连接", "驗證模型連線", "モデル接続を確認")}
+              </Button>
+              <button className="overview-summary-link" type="button" aria-label={copy("Open Agents", "打开 Agent", "開啟 Agent", "Agentを開く")} onClick={() => onNavigate("agents")}>
+                <ArrowUpRight aria-hidden="true" />
+              </button>
+            </div>
           </CardContent>
         </Card>
 
