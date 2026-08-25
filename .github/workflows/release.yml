@@ -12,6 +12,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "formal builds and publishes; source-only deliberately skips artifacts"
+        type: choice
+        required: true
+        options: [source-only, formal]
 
 permissions:
   contents: read
@@ -30,23 +36,41 @@ jobs:
   linux-desktop:
     needs: [full-ci, platform-gates]
     uses: ./.github/workflows/linux-desktop.yml
+    # A called workflow sees its own `inputs`, not the caller's. Without this
+    # a manual source-only release run would reach the callee with no mode and
+    # be refused for not asking explicitly.
+    with:
+      mode: ${{ inputs.mode }}
 
+  # A `v*` tag fails closed: the run stops here and names what is missing,
+  # rather than skipping every real job and reporting green.
   release-mode:
     runs-on: ubuntu-24.04
     outputs:
-      enabled: ${{ steps.mode.outputs.enabled }}
+      enabled: ${{ steps.mode.outputs.formal }}
+      mode: ${{ steps.mode.outputs.mode }}
     steps:
+      - uses: actions/checkout@v5
       - id: mode
         env:
-          FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED }}
-        run: |
-          if [[ "$FORMAL_ARTIFACTS_ENABLED" == "true" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "已启用正式 CLI 二进制构建。"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "本次只发布 GitHub 源码，跳过正式 CLI 二进制构建。"
-          fi
+          TS_EVENT: ${{ github.event_name }}
+          TS_REF: ${{ github.ref }}
+          TS_REQUESTED_MODE: ${{ inputs.mode }}
+          TS_REQUIRED: >-
+            TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED,
+            TOKEN_STATION_RELEASE_PUBKEY_HEX,
+            TOKEN_STATION_UPDATER_PUBKEY,
+            APPLE_CERTIFICATE,
+            APPLE_SIGNING_IDENTITY,
+            APPLE_API_KEY_CONTENT
+          # Presence only. A secret's value never reaches the process.
+          TS_HAS_TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED == 'true' }}
+          TS_HAS_TOKEN_STATION_RELEASE_PUBKEY_HEX: ${{ vars.TOKEN_STATION_RELEASE_PUBKEY_HEX != '' }}
+          TS_HAS_TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY != '' }}
+          TS_HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          TS_HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+          TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
+        run: node scripts/resolve-release-mode.mjs
 
   build:
     needs: [release-mode, full-ci, platform-gates]

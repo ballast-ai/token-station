@@ -202,6 +202,8 @@ jobs:
       - run: node scripts/check-macos-dmg-packaging.mjs
       - run: node tests/localized-macos-installation.mjs
       - run: node tests/release-assets.mjs
+      - run: node tests/release-mode-policy.mjs
+      - run: node tests/source-release-mode.mjs
       - run: node tests/release-script-variable-order.mjs
       - run: node tests/formal-release-finalization.mjs
       # Prime the locked Rust dependencies before the test enters its offline signing phase.

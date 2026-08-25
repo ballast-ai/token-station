@@ -5,28 +5,42 @@ name: Build Linux Desktop
 # workflow artifacts and are not attached to a GitHub Release automatically.
 on:
   workflow_call:
+    inputs:
+      mode:
+        description: "Passed down by the calling release workflow."
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "formal builds and publishes; source-only deliberately skips artifacts"
+        type: choice
+        required: true
+        options: [source-only, formal]
 
 permissions:
   contents: read
 
 jobs:
+  # Fails closed rather than skipping silently: see scripts/resolve-release-mode.mjs.
   release-mode:
     runs-on: ubuntu-24.04
     outputs:
-      enabled: ${{ steps.mode.outputs.enabled }}
+      enabled: ${{ steps.mode.outputs.formal }}
+      mode: ${{ steps.mode.outputs.mode }}
     steps:
+      - uses: actions/checkout@v5
       - id: mode
         env:
-          FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED }}
-        run: |
-          if [[ "$FORMAL_ARTIFACTS_ENABLED" == "true" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "已启用正式 Linux 桌面包构建。"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "本次只发布 GitHub 源码，跳过 Linux 桌面包构建。"
-          fi
+          TS_EVENT: ${{ github.event_name }}
+          TS_REF: ${{ github.ref }}
+          TS_REQUESTED_MODE: ${{ inputs.mode }}
+          TS_REQUIRED: >-
+            TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED
+          # Presence only. A secret's value never reaches the process.
+          TS_HAS_TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED == 'true' }}
+        run: node scripts/resolve-release-mode.mjs
 
   linux:
     needs: release-mode
