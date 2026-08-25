@@ -2016,13 +2016,19 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                // 60s. This was 5s, then 15s, and the coverage job still hit
-                // `Timeout(Global)` under llvm-cov instrumentation on a loaded
-                // 4-core runner. The claim is that the proxy answers rather
-                // than hangs, and a hang is unbounded — a wide margin proves
-                // it exactly as well as a tight one, and stops re-proving the
-                // runner's scheduler instead.
-                .timeout_global(Some(std::time::Duration::from_mins(1)))
+                // `timeout_recv_response`, not `timeout_global`. The global
+                // clock starts inside `send`, so it also covers connecting and
+                // writing the request — and then keeps running while the main
+                // thread waits for arrival and decides to cancel. None of that
+                // is what this test claims. On a loaded 4-core runner sharing
+                // 128 parallel tests, that pre-cancel stretch is what expired,
+                // which is why the budget went 5s -> 15s -> 60s and still
+                // failed: each raise bought margin for the scheduler rather
+                // than for the proxy. This clock starts once the request is
+                // written and the client is waiting on the proxy, which is
+                // exactly the interval the claim is about, so 15s bounds a
+                // hang without re-proving the runner.
+                .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
                 .http_status_as_error(false)
                 .build(),
         );
@@ -2041,8 +2047,8 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
             .as_u16()
     });
 
-    // 10s, not 3s: the same coverage-runner starvation that broke the client's
-    // 15s budget would break a 3s arrival wait first.
+    // 10s, not 3s: a loaded runner can starve this thread before the client's
+    // request lands, and that delay no longer eats the client's budget.
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while (mock.hits() == 0 || proxy.control.in_flight() == 0)
         && std::time::Instant::now() < arrival_deadline
