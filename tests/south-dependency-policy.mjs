@@ -110,11 +110,34 @@ assert.match(
 );
 
 for (const packageName of expectedSouthPackages) {
-  const exactDeclaration = `${packageName} = { version = "=${southVersion}", git = "${southRepository}", rev = "${southRevision}" }`;
+  // The pinned trio, in order, is what this gate exists for: an exact version,
+  // the official repository, and a commit revision. It used to require the
+  // whole line to match verbatim, which also forbade a `features` list — so
+  // enabling a feature looked identical to unpinning the revision. The
+  // requirement is that the pin is there and nothing else on the line
+  // relaxes it, not that the line is one exact string.
+  const pinned = `${packageName} = { version = "=${southVersion}", git = "${southRepository}", rev = "${southRevision}"`;
+  const declaration = rootManifest
+    .split("\n")
+    .find((line) => line.startsWith(`${packageName} = `));
   assert.ok(
-    rootManifest.split("\n").includes(exactDeclaration),
+    declaration !== undefined && declaration.startsWith(pinned),
     `${packageName} must use an exact manifest version and revision`,
   );
+  const tail = declaration.slice(pinned.length);
+  assert.match(
+    tail,
+    /^(, features = \[[^\]]*\])? \}$/,
+    `${packageName} may add only a features list after its pin, found: ${tail}`,
+  );
+  // `path` or `branch` would defeat the pin while keeping the prefix intact.
+  for (const escape of ["path", "branch", "tag", "default-features"]) {
+    assert.doesNotMatch(
+      declaration,
+      new RegExp(`\\b${escape}\\s*=`),
+      `${packageName} must not use \`${escape}\`, which would undo the revision pin`,
+    );
+  }
 }
 
 for (const relativePath of southAccessActionPaths) {

@@ -80,7 +80,11 @@ connection.executescript(SCHEMA)
 now_ms = int(time.time() * 1000)
 
 for index, spec in enumerate(sys.argv[2:]):
-    engine, reason, latency, status, error_code, age_days = spec.split("|")
+    parts = spec.split("|")
+    engine, reason, latency, status, error_code, age_days = parts[:6]
+    # An optional seventh field names the upstream, so a fixture can build more
+    # than one cohort. Without it every row lands in the same one.
+    upstream = parts[6] if len(parts) > 6 else "up"
     request_id = f"req-{index:05}"
     started_at = now_ms - int(age_days) * 86_400_000
     connection.execute(
@@ -92,9 +96,10 @@ for index, spec in enumerate(sys.argv[2:]):
     connection.execute(
         "INSERT INTO attempts (request_id, ordinal, upstream, model, latency_ms,"
         " http_status, error_code, provider_call_engine, south_fallback_reason,"
-        " fallback_allowed) VALUES (?, 0, 'up', 'test-model', ?, ?, ?, ?, ?, 1)",
+        " fallback_allowed) VALUES (?, 0, ?, 'test-model', ?, ?, ?, ?, ?, 1)",
         (
             request_id,
+            upstream,
             int(latency),
             None if status == "null" else int(status),
             None if error_code == "null" else error_code,
@@ -167,16 +172,19 @@ check(
     "configured_legacy reason count",
 )
 
-gate = report["gate"]
-check(gate["zero_explicit_use"]["status"] == "fail", "zero_explicit_use verdict")
+usage = report["usage_gate"]
+check(usage["zero_explicit_use"]["status"] == "fail", "zero_explicit_use verdict")
 check(
-    gate["fallback_below_threshold"]["status"] == "fail",
+    usage["fallback_below_threshold"]["status"] == "fail",
     "fallback_below_threshold verdict",
 )
+performance = report["performance_gate"]
 check(
-    gate["south_not_degraded"]["status"] == "insufficient_data",
-    "south_not_degraded needs 100 legacy attempts",
+    performance["status"] == "insufficient_data",
+    "performance needs a real sample on both sides",
 )
+check(performance["source"] == "live", "performance source")
+check(report["thresholds_approved"] is False, "draft thresholds are marked unapproved")
 check(report["verdict"] == "not_ready", "overall verdict")
 PY
 }
@@ -215,16 +223,184 @@ check(legacy["p50_latency_ms"] == 100, "legacy p50")
 check(legacy["p95_latency_ms"] == 190, "legacy p95")
 check(report["attempts"]["legacy_attempt_ratio"] == 0.2, "legacy ratio")
 
-gate = report["gate"]
-check(gate["zero_explicit_use"]["status"] == "pass", "zero_explicit_use verdict")
+usage = report["usage_gate"]
+check(usage["zero_explicit_use"]["status"] == "pass", "zero_explicit_use verdict")
 check(
-    gate["fallback_below_threshold"]["status"] == "pass",
+    usage["fallback_below_threshold"]["status"] == "pass",
     "fallback_below_threshold under the overridden threshold",
 )
-check(gate["south_not_degraded"]["status"] == "pass", "south_not_degraded verdict")
-check(gate["south_not_degraded"]["south_p95_latency_ms"] == 150, "south p95")
+
+performance = report["performance_gate"]
+check(performance["status"] == "pass", "performance verdict")
+check(performance["source"] == "live", "measured live, not carried from a baseline")
+# Every attempt in this fixture is the same upstream, model and transport, so
+# it forms one cohort with both sides well over the minimum. That is the point:
+# the comparison is within a cohort, never across the whole window.
+compared = performance["cohorts"]["compared"]
+check(len(compared) == 1, f"one cohort compared, got {len(compared)}")
+cohort = compared[0]
+check(cohort["transport"] == "buffered", "transport shape")
+check(cohort["south_count"] == 800 and cohort["legacy_count"] == 200, "cohort sides")
+check(cohort["south_p95_latency_ms"] == 150, "south p95 within the cohort")
+check(cohort["legacy_p95_latency_ms"] == 190, "legacy p95 within the cohort")
+check(cohort["status"] == "pass", "cohort verdict")
 check(report["verdict"] == "ready", "overall verdict")
 PY
+}
+
+test_enforce_turns_a_report_into_a_gate() {
+  local db="$test_root/enforce.sqlite"
+  make_db "$db" "legacy|configured_legacy|10|200|null|0"
+  printf '{ "upstreams": { "a": { "provider_call": "legacy" } } }\n' \
+    >"$test_root/enforce-config.json"
+
+  # Without --enforce the tool reports and exits zero: a zero here means "the
+  # report was produced", not "the gate passed".
+  python3 "$report_script" --db "$db" --config "$test_root/enforce-config.json" \
+    >/dev/null || fail "reporting must not fail just because the verdict is bad"
+
+  if python3 "$report_script" --db "$db" --config "$test_root/enforce-config.json" \
+    --enforce >/dev/null 2>"$test_root/enforce.err"; then
+    fail "--enforce must exit non-zero when the verdict is not ready"
+  fi
+  grep -q "not_ready" "$test_root/enforce.err" \
+    || fail "--enforce must say which verdict it refused"
+}
+
+test_insufficient_data_is_refused_under_enforce_too() {
+  # The dangerous confusion is treating "we could not measure" as "nothing is
+  # wrong". Under --enforce they must be equally fatal.
+  local db="$test_root/thin.sqlite"
+  make_db "$db" "south_v1_streaming|null|150|200|null|0"
+  printf '{ "upstreams": { "c": { "provider": "openai-compatible" } } }\n' \
+    >"$test_root/thin-config.json"
+
+  local verdict
+  verdict="$(python3 "$report_script" --db "$db" --config "$test_root/thin-config.json" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])')"
+  [[ "$verdict" == "insufficient_data" ]] \
+    || fail "a one-attempt window must be insufficient_data, got $verdict"
+
+  if python3 "$report_script" --db "$db" --config "$test_root/thin-config.json" \
+    --enforce >/dev/null 2>&1; then
+    fail "--enforce must refuse insufficient_data, not only fail"
+  fi
+}
+
+test_zero_legacy_uses_the_sealed_baseline_instead_of_stalling() {
+  # Zero legacy traffic is the migration working. If that left the performance
+  # gate permanently unfinishable, success would be indistinguishable from
+  # never having measured — so a sealed pre-cutover report stands in.
+  local db="$test_root/migrated.sqlite"
+  local rows=()
+  local i
+  for ((i = 1; i <= 300; i++)); do
+    rows+=("south_v1_streaming|null|150|200|null|0")
+  done
+  make_db "$db" "${rows[@]}"
+  printf '{ "upstreams": { "c": { "provider": "openai-compatible" } } }\n' \
+    >"$test_root/migrated-config.json"
+
+  # No baseline: honest about not having a Legacy side to compare against.
+  python3 "$report_script" --db "$db" --config "$test_root/migrated-config.json" \
+    >"$test_root/migrated.json" || fail "report failed on the migrated fixture"
+  python3 - "$test_root/migrated.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+gate = report["performance_gate"]
+assert gate["status"] == "insufficient_data", gate
+assert gate["source"] == "live", gate
+assert "--baseline" in gate["reason"], gate
+assert report["usage_gate"]["zero_explicit_use"]["status"] == "pass", report
+PY
+
+  # With a sealed baseline that passed, the verdict carries.
+  cat >"$test_root/sealed.json" <<'JSON'
+{
+  "window": { "until_ms": 1750000000000 },
+  "performance_gate": {
+    "status": "pass",
+    "source": "live",
+    "cohorts": { "compared": [{ "upstream": "up", "status": "pass" }], "skipped": [] }
+  }
+}
+JSON
+  python3 "$report_script" --db "$db" --config "$test_root/migrated-config.json" \
+    --baseline "$test_root/sealed.json" --enforce >"$test_root/carried.json" \
+    || fail "a sealed passing baseline must let the gate complete"
+  python3 - "$test_root/carried.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+gate = report["performance_gate"]
+assert gate["status"] == "pass", gate
+assert gate["source"] == "sealed_baseline", gate
+assert gate["sealed_window_end_ms"] == 1750000000000, gate
+assert report["verdict"] == "ready", report
+PY
+}
+
+test_a_cohort_too_thin_to_compare_is_reported_not_counted() {
+  # The failure this whole gate reshaping exists to prevent: Legacy carries the
+  # traffic South cannot, so a window-wide p95 compares two populations and
+  # reads the difference as a transport regression. Here one upstream has a
+  # real sample on both sides and another has almost none. The thin one must
+  # be reported as unmeasured — not averaged into the verdict, and not
+  # silently dropped, which would make "we did not measure this" look exactly
+  # like "this is fine".
+  local db="$test_root/cohorts.sqlite"
+  local rows=()
+  local i
+  for ((i = 1; i <= 120; i++)); do rows+=("legacy|null|100|200|null|0|busy"); done
+  for ((i = 1; i <= 120; i++)); do rows+=("south_v1_streaming|null|110|200|null|0|busy"); done
+  # `thin` is where Legacy still handles something South barely sees.
+  for ((i = 1; i <= 5; i++)); do rows+=("legacy|null|900|200|null|0|thin"); done
+  for ((i = 1; i <= 2; i++)); do rows+=("south_v1_streaming|null|50|200|null|0|thin"); done
+  make_db "$db" "${rows[@]}"
+  printf '{ "upstreams": { "c": { "provider": "openai-compatible" } } }\n' \
+    >"$test_root/cohorts-config.json"
+
+  python3 "$report_script" --db "$db" --config "$test_root/cohorts-config.json" \
+    --fallback-threshold 0.9 >"$test_root/cohorts.json" \
+    || fail "report failed on the cohort fixture"
+
+  python3 - "$test_root/cohorts.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+cohorts = report["performance_gate"]["cohorts"]
+compared = {entry["upstream"]: entry for entry in cohorts["compared"]}
+skipped = {entry["upstream"]: entry for entry in cohorts["skipped"]}
+assert set(compared) == {"busy"}, compared
+assert set(skipped) == {"thin"}, skipped
+assert skipped["thin"]["status"] == "insufficient_data", skipped
+assert skipped["thin"]["legacy_count"] == 5 and skipped["thin"]["south_count"] == 2, skipped
+# The thin cohort's 900ms legacy attempts must not have been folded into the
+# comparison; the busy cohort's own numbers decide it.
+assert compared["busy"]["legacy_p95_latency_ms"] == 100, compared
+assert compared["busy"]["status"] == "pass", compared
+assert report["performance_gate"]["status"] == "pass", report["performance_gate"]
+PY
+}
+
+test_ci_never_uploads_a_real_report() {
+  # A real report names upstreams and carries usage shape. It is fine on the
+  # maintainer's machine and not fine in a public artifact, and the difference
+  # is one `upload-artifact` step away — so the boundary is a gate, not a
+  # convention.
+  local workflows="$project_root/.github/workflows"
+  local offenders
+  offenders="$(grep -rln "report-legacy-usage" "$workflows" || true)"
+  local file
+  for file in $offenders; do
+    grep -q "upload-artifact" "$file" && {
+      grep -A6 "report-legacy-usage" "$file" | grep -q "upload-artifact" \
+        && fail "$file uploads a legacy usage report"
+    }
+    # CI may only run the synthetic-fixture test, never the reporter against a
+    # real database.
+    grep -qE "report-legacy-usage\.py" "$file" \
+      && fail "$file runs the reporter directly; CI may only run its test"
+  done
+  [[ -n "$offenders" ]] || fail "no workflow runs the legacy usage test at all"
 }
 
 test_pre_south_database_gets_a_clear_error() {
@@ -252,6 +428,11 @@ PY
 }
 
 test_mixed_window_is_counted_per_attempt_and_fails_the_gate
+test_enforce_turns_a_report_into_a_gate
+test_insufficient_data_is_refused_under_enforce_too
+test_zero_legacy_uses_the_sealed_baseline_instead_of_stalling
+test_a_cohort_too_thin_to_compare_is_reported_not_counted
+test_ci_never_uploads_a_real_report
 test_clean_config_and_small_fallback_share_is_ready
 test_pre_south_database_gets_a_clear_error
 

@@ -39,7 +39,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 south-contracts = { version = "=0.16.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8" }
 south-core = { version = "=0.16.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8" }
-south-component-conformance = { version = "=0.16.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8" }
+south-component-conformance = { version = "=0.16.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8", features = ["sandbox"] }
 south-provider-conformance = { version = "=0.16.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8" }
 south-testkit = { version = "=0.16.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8" }
 south-transport-reqwest = { version = "=0.16.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8" }
