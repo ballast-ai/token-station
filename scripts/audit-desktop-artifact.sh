@@ -46,7 +46,7 @@ esac
 node - "$self_test_report" "$expected_ids" <<'NODE'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const expected = fs.readFileSync(process.argv[3], "utf8").trim().split("\n");
+const expected = fs.readFileSync(process.argv[3], "utf8").trim().split(/\r?\n/);
 const actual = Array.isArray(report.plugins)
   ? report.plugins.map((plugin) => plugin.id).sort()
   : [];

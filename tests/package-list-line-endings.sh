@@ -19,10 +19,18 @@ readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # The producer writes "\n", never "\r\n", whatever platform it runs on.
+grep -Fq 'sys.stdout.reconfigure(newline="\n")' \
+  "$root/scripts/official-packages.py" \
+  || fail "official-packages.py does not disable platform newline translation"
 if python3 "$root/scripts/official-packages.py" --kind agent --field dir \
   | grep -q $'\r'; then
   fail "official-packages.py emits carriage returns"
 fi
+
+# The artifact audit also accepts a CRLF producer. It compares identifiers in
+# Node rather than through one of the guarded shell loops above.
+grep -Fq 'split(/\r?\n/)' "$root/scripts/audit-desktop-artifact.sh" \
+  || fail "artifact audit does not normalize CRLF package identifiers"
 
 # Every reader strips one anyway. Check the source rather than simulating
 # Windows: the guard has to be present in each loop, and there are six.
