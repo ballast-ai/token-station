@@ -119,5 +119,18 @@ assert.equal(
   false,
   "UpgradeCode is not a Property-table value",
 );
+assert.ok(
+  lifecycle.includes('plugins\\official\\packages.json'),
+  "the MSI lifecycle must read the canonical official package catalog",
+);
+assert.ok(
+  lifecycle.includes("$packageCatalog.packages"),
+  "the MSI lifecycle must derive its expected builtin set from the catalog",
+);
+assert.equal(
+  lifecycle.includes('"provider-openai-compatible"'),
+  false,
+  "the MSI lifecycle must not hardcode the builtin plugin set",
+);
 
 console.log("Windows release configuration: PASS");

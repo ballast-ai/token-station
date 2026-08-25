@@ -11,6 +11,19 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$packageCatalogPath = Join-Path $projectRoot "plugins\official\packages.json"
+if (-not (Test-Path -LiteralPath $packageCatalogPath -PathType Leaf)) {
+    throw "official package catalog is missing: $packageCatalogPath"
+}
+$packageCatalog = Get-Content -LiteralPath $packageCatalogPath -Raw | ConvertFrom-Json
+$expectedPlugins = @($packageCatalog.packages | ForEach-Object {
+    [string] $_.id
+} | Sort-Object)
+if ($expectedPlugins.Count -eq 0) {
+    throw "official package catalog contains no packages"
+}
+
 function Resolve-ExistingFile([string] $Path, [string] $Label) {
     $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
     if (-not (Test-Path -LiteralPath $resolved.Path -PathType Leaf)) {
@@ -64,20 +77,13 @@ function Invoke-InstalledSelfTest([string] $Label) {
         $report.gateway.loadable -ne $true) {
         throw "$Label installed executable self-test report is incomplete"
     }
-    $expectedPlugins = @(
-        "agent-anthropic",
-        "agent-gemini",
-        "agent-openai",
-        "agent-openai-responses",
-        "provider-openai-compatible"
-    )
     $actualPlugins = @($report.plugins | ForEach-Object {
         if ($_.source -ne "builtin" -or $_.loadable -ne $true) {
             throw "$Label plugin $($_.id) is not a loadable builtin"
         }
         [string] $_.id
     } | Sort-Object)
-    if (($actualPlugins -join ",") -ne (($expectedPlugins | Sort-Object) -join ",")) {
+    if (($actualPlugins -join ",") -ne ($expectedPlugins -join ",")) {
         throw "$Label installed executable has an unexpected builtin plugin set"
     }
 }
