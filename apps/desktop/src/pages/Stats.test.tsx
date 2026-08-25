@@ -186,6 +186,22 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(screen.getByRole("img", { name: /用量趋势/ })).toBeInTheDocument();
   });
 
+  it("orders trend, overview metrics, Token composition, and contribution details", async () => {
+    render(<Stats />);
+
+    const trend = (await screen.findByRole("img", { name: /用量趋势/ })).closest("section");
+    const overview = screen.getByLabelText("用量总览");
+    const composition = screen.getByRole("group", { name: "Token 构成" }).closest("section");
+    const details = screen.getByRole("heading", { name: "贡献明细" }).closest("section");
+
+    expect(trend).not.toBeNull();
+    expect(composition).not.toBeNull();
+    expect(details).not.toBeNull();
+    expect(trend!.compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(overview.compareDocumentPosition(composition!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(composition!.compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("renders an empty token rail without inventing a 50/50 split", async () => {
     vi.mocked(getStats).mockImplementation(async (_since, by) => ({
       total: { ...aggregate, input_tokens: 0, output_tokens: 0 },

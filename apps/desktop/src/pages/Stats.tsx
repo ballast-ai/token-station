@@ -488,32 +488,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         </div>
       ) : (
         <>
-          <section className="usage-hero" aria-label={copy("Usage overview", "用量总览", "用量總覽", "使用状況概要")}>
-            <div className="usage-primary-metric">
-              <ToneIcon type="token" />
-              <div>
-                <span>{copy("Total tokens", "总 Token", "總 Token", "合計トークン")}</span>
-                <strong title={totalTokens.toLocaleString(language)}>{totalTokens.toLocaleString(language)}</strong>
-                <small>≈ {compact(totalTokens, language, 2)} · {copy("input + output", "输入 + 输出", "輸入 + 輸出", "入力 + 出力")}</small>
-              </div>
-            </div>
-            <div className="usage-kpi-grid">
-              <div><ToneIcon type="request" /><span>{copy("Requests", "请求", "請求", "リクエスト")}</span><strong>{aggregate.requests.toLocaleString(language)}</strong></div>
-              <div><ToneIcon type="cost" /><span>{copy("Estimated cost", "估算成本", "估算成本", "推定コスト")}</span><strong>{cost(aggregate.cost_micros)}</strong></div>
-              <div><ToneIcon type="success" /><span>{copy("Success rate", "成功率", "成功率", "成功率")}</span><strong>{successRate(aggregate)}</strong></div>
-              <div><ToneIcon type="latency" /><span>{copy("p95 latency", "p95 延迟", "p95 延遲", "p95 レイテンシー")}</span><strong>{latency(aggregate.p95_latency_ms)}</strong></div>
-            </div>
-            <TokenRail aggregate={aggregate} />
-            {aggregate.unpriced_requests > 0 && (
-              <div className="usage-unpriced-note">
-                {copy(
-                  `Known cost covers ${aggregate.priced_requests} requests; ${aggregate.unpriced_requests} requests are unpriced.`,
-                  `已知成本覆盖 ${aggregate.priced_requests} 个请求；另有 ${aggregate.unpriced_requests} 个请求未定价。`, `已知成本覆蓋 ${aggregate.priced_requests} 個請求；另有 ${aggregate.unpriced_requests} 個請求未定價。`, `既知のコストは ${aggregate.priced_requests} 個のリクエストをカバー；${aggregate.unpriced_requests} 個のリクエストは価格が未設定です。`
-                )}
-              </div>
-            )}
-          </section>
-
           <section className="usage-trend-panel">
             <header>
               <div>
@@ -534,6 +508,35 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
               <span><i className="tone-cost" />{copy("Cost", "成本", "成本", "コスト")}</span>
             </div>
             <UsageTrendChart groups={trend?.groups ?? []} range={since as UsageTrendRange} />
+          </section>
+
+          <section className="usage-hero" aria-label={copy("Usage overview", "用量总览", "用量總覽", "使用状況概要")}>
+            <div className="usage-primary-metric">
+              <ToneIcon type="token" />
+              <div>
+                <span>{copy("Total tokens", "总 Token", "總 Token", "合計トークン")}</span>
+                <strong title={totalTokens.toLocaleString(language)}>{totalTokens.toLocaleString(language)}</strong>
+                <small>≈ {compact(totalTokens, language, 2)} · {copy("input + output", "输入 + 输出", "輸入 + 輸出", "入力 + 出力")}</small>
+              </div>
+            </div>
+            <div className="usage-kpi-grid">
+              <div><ToneIcon type="request" /><span>{copy("Requests", "请求", "請求", "リクエスト")}</span><strong>{aggregate.requests.toLocaleString(language)}</strong></div>
+              <div><ToneIcon type="cost" /><span>{copy("Estimated cost", "估算成本", "估算成本", "推定コスト")}</span><strong>{cost(aggregate.cost_micros)}</strong></div>
+              <div><ToneIcon type="success" /><span>{copy("Success rate", "成功率", "成功率", "成功率")}</span><strong>{successRate(aggregate)}</strong></div>
+              <div><ToneIcon type="latency" /><span>{copy("p95 latency", "p95 延迟", "p95 延遲", "p95 レイテンシー")}</span><strong>{latency(aggregate.p95_latency_ms)}</strong></div>
+            </div>
+          </section>
+
+          <section className="usage-composition-panel">
+            <TokenRail aggregate={aggregate} />
+            {aggregate.unpriced_requests > 0 && (
+              <div className="usage-unpriced-note">
+                {copy(
+                  `Known cost covers ${aggregate.priced_requests} requests; ${aggregate.unpriced_requests} requests are unpriced.`,
+                  `已知成本覆盖 ${aggregate.priced_requests} 个请求；另有 ${aggregate.unpriced_requests} 个请求未定价。`, `已知成本覆蓋 ${aggregate.priced_requests} 個請求；另有 ${aggregate.unpriced_requests} 個請求未定價。`, `既知のコストは ${aggregate.priced_requests} 個のリクエストをカバー；${aggregate.unpriced_requests} 個のリクエストは価格が未設定です。`
+                )}
+              </div>
+            )}
           </section>
 
           <section className="usage-detail-panel">
