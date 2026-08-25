@@ -45,18 +45,20 @@ fi
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly wasm_target="wasm32-wasip2"
-readonly plugins=(
-  agent-openai
-  agent-anthropic
-  agent-openai-responses
-  agent-gemini
-)
-# The South provider components ship beside the agents under the South
-# loader's file name (`component.wasm`).
-readonly south_components=(
-  provider-openai-compatible-v2
-  provider-anthropic-v2
-)
+agent_packages="$("$root/scripts/official-packages.py" --kind agent --field dir)"
+readonly agent_packages
+plugins=()
+while IFS= read -r package; do
+  plugins+=("$package")
+done <<<"$agent_packages"
+readonly -a plugins
+south_package_dirs="$("$root/scripts/official-packages.py" --kind south-component --field dir)"
+readonly south_package_dirs
+south_components=()
+while IFS= read -r package; do
+  south_components+=("$package")
+done <<<"$south_package_dirs"
+readonly -a south_components
 
 
 # Stages the fixture directory a package's own manifest declares, rather than

@@ -9,6 +9,7 @@
 //! red test on any machine.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 
@@ -90,31 +91,69 @@ fn each_package_agrees_with_itself_about_its_version() {
     }
 }
 
-/// Every consumer that repeats the list is checked against it. A new package
-/// added to the set but not to a script fails here rather than on the one
-/// platform whose packaging noticed.
+/// Every consumer reads the package set instead of keeping a checked copy.
+/// A test that only checks repeated names still permits every copy to drift in
+/// its other fields and keeps package addition as a multi-file change.
 #[test]
-fn every_consumer_names_the_whole_set() {
+fn every_consumer_reads_the_package_set() {
     let root = repo_root();
     let consumers = [
-        ("scripts/build-desktop.sh", "dir"),
-        ("scripts/build-release.sh", "dir"),
-        ("scripts/prepare-desktop-test-plugins.sh", "dir"),
-        ("apps/cli/build.rs", "dir"),
-        ("scripts/audit-desktop-artifact.sh", "id"),
-        ("apps/desktop/src-tauri/src/lib.rs", "id"),
+        ("scripts/build-desktop.sh", "official-packages.py"),
+        ("scripts/build-release.sh", "official-packages.py"),
+        (
+            "scripts/prepare-desktop-test-plugins.sh",
+            "official-packages.py",
+        ),
+        ("tests/build-desktop-verbosity.sh", "official-packages.py"),
+        ("apps/cli/build.rs", "plugins/official/packages.json"),
+        ("apps/cli/src/plugins.rs", "builtin_official_packages.rs"),
+        ("scripts/audit-desktop-artifact.sh", "official-packages.py"),
+        ("apps/desktop/src-tauri/src/lib.rs", "OFFICIAL_PACKAGE_IDS"),
     ];
 
-    for (path, key) in consumers {
+    for (path, marker) in consumers {
         let source = std::fs::read_to_string(root.join(path))
             .unwrap_or_else(|error| panic!("{path} reads: {error}"));
-        for package in packages() {
-            let name = field(&package, key);
-            assert!(
-                source.contains(&name),
-                "{path} does not name `{name}`; the official package set lists it"
-            );
-        }
+        assert!(
+            source.contains(marker),
+            "{path} does not consume the official package set through `{marker}`"
+        );
+    }
+
+    let desktop = std::fs::read_to_string(root.join("apps/desktop/src-tauri/src/lib.rs"))
+        .expect("desktop library reads");
+    assert!(
+        !desktop.contains("BUNDLED_PLUGIN_IDS"),
+        "the desktop must not keep a second official package id list"
+    );
+}
+
+/// The shell-facing reader preserves package order and exposes every field
+/// needed by build, staging, and audit scripts.
+#[test]
+fn package_reader_reports_the_declared_packages() {
+    for (kind, key) in [("agent", "dir"), ("south-component", "id")] {
+        let output = Command::new("python3")
+            .arg(repo_root().join("scripts/official-packages.py"))
+            .args(["--kind", kind, "--field", key])
+            .output()
+            .expect("official package reader starts");
+        assert!(
+            output.status.success(),
+            "official package reader failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual: Vec<_> = String::from_utf8(output.stdout)
+            .expect("reader output is UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let expected: Vec<_> = packages()
+            .into_iter()
+            .filter(|package| field(package, "kind") == kind)
+            .map(|package| field(&package, key))
+            .collect();
+        assert_eq!(actual, expected, "reader output for {kind}.{key}");
     }
 }
 

@@ -30,6 +30,21 @@ TARGET=${1:?usage: scripts/build-release.sh <target-triple>}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
+agent_packages="$("$ROOT/scripts/official-packages.py" --kind agent --field dir)"
+readonly agent_packages
+plugins=()
+while IFS= read -r package; do
+  plugins+=("$package")
+done <<<"$agent_packages"
+readonly -a plugins
+south_package_dirs="$("$ROOT/scripts/official-packages.py" --kind south-component --field dir)"
+readonly south_package_dirs
+south_components=()
+while IFS= read -r package; do
+  south_components+=("$package")
+done <<<"$south_package_dirs"
+readonly -a south_components
+
 : "${TOKEN_STATION_RELEASE_PUBKEY_HEX:?正式 CLI 构建缺少 TOKEN_STATION_RELEASE_PUBKEY_HEX 公钥}"
 if [[ ! "$TOKEN_STATION_RELEASE_PUBKEY_HEX" =~ ^[0-9a-f]{64}$ ]]; then
   echo "正式 CLI 构建的发布公钥必须是 64 位小写十六进制字符。" >&2
@@ -72,14 +87,14 @@ sys.stdout.write((manifest.get("conformance") or {}).get("fixtures") or "")
   cp -R "$source/$declared" "$dest/$declared"
 }
 
-for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; do
+for plugin in "${plugins[@]}"; do
   (cd "plugins/official/${plugin}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
 done
 
 # The South provider components: same toolchain, staged beside the agents
 # under the South loader's file name (`component.wasm`).
-for component in provider-openai-compatible-v2 provider-anthropic-v2; do
+for component in "${south_components[@]}"; do
   (cd "plugins/official/${component}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
 done
@@ -89,7 +104,7 @@ STAGE="dist/${NAME}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/plugins-dist"
 
-for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; do
+for plugin in "${plugins[@]}"; do
   mkdir -p "$STAGE/plugins-dist/${plugin}"
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \
@@ -97,7 +112,7 @@ for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini; 
   stage_declared_fixtures "plugins/official/${plugin}" "$STAGE/plugins-dist/${plugin}"
 done
 
-for component in provider-openai-compatible-v2 provider-anthropic-v2; do
+for component in "${south_components[@]}"; do
   mkdir -p "$STAGE/plugins-dist/${component}"
   cp "plugins/official/${component}/manifest.json" \
      "$STAGE/plugins-dist/${component}/"

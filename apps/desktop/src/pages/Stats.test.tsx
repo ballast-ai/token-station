@@ -361,6 +361,37 @@ describe("usage dashboard and display-only Agent budgets", () => {
     ));
   });
 
+  it("switches from engine to fallback with tab arrow-key navigation", async () => {
+    const user = userEvent.setup();
+    render(<Stats />);
+    const engine = await screen.findByRole("tab", { name: "引擎" });
+    const fallback = screen.getByRole("tab", { name: "回退原因" });
+
+    await user.click(engine);
+    await waitFor(() => expect(getStats).toHaveBeenCalledWith(
+      "24h",
+      "engine",
+      null,
+      null,
+      null,
+      null,
+    ));
+
+    engine.focus();
+    await user.keyboard("{ArrowRight}");
+
+    expect(fallback).toHaveFocus();
+    expect(fallback).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(getStats).toHaveBeenCalledWith(
+      "24h",
+      "fallback",
+      null,
+      null,
+      null,
+      null,
+    ));
+  });
+
   it("shows approaching usage as a warning and states that routing is unaffected", async () => {
     const user = userEvent.setup();
     render(<Stats />);
