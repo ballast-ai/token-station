@@ -41,7 +41,7 @@ const runtimeManifest = fs.readFileSync(
   "utf8",
 );
 const ciWorkflow = fs.readFileSync(
-  path.join(root, ".github/workflows/ci.yml"),
+  path.join(root, ".github/workflows/full-ci.yml"),
   "utf8",
 );
 const cargoGitConfigPath = path.join(root, ".cargo/config.toml");

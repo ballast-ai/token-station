@@ -28,16 +28,18 @@ function settingsFailure(caught: unknown): { field: string; message: string } {
   };
 }
 
-/// Settings page for proxy switches, egress policy, and read-only environment details.
+/// Settings page for proxy switches and egress policy.
 /// Switch changes do not affect a running server until the proxy restarts; the panel states this explicitly.
 function SettingsContent({
   settings,
   serveRunning,
   onSaved,
+  mode = "all",
 }: {
   settings: SettingsView;
   serveRunning: boolean;
   onSaved: (s: StateView) => void;
+  mode?: "all" | "general" | "api-key";
 }) {
   const { t } = useLanguage();
   const { showError, showSuccess } = useErrorToast();
@@ -58,13 +60,18 @@ function SettingsContent({
   }, [settings]);
 
   const noProxyEntries = noProxy.split(",").map((value) => value.trim()).filter(Boolean);
-  const dirty = auth !== settings.auth
-    || metrics !== settings.metrics
+  const authDirty = auth !== settings.auth;
+  const generalDirty = metrics !== settings.metrics
     || egressMode !== settings.egress_mode
     || proxyUrl !== settings.egress_proxy_url
     || noProxyEntries.join(",") !== settings.egress_no_proxy.join(",")
     || proxyUsername !== settings.egress_auth_username
     || proxySlot !== settings.egress_auth_slot;
+  const dirty = mode === "api-key"
+    ? authDirty
+    : mode === "general"
+      ? generalDirty
+      : authDirty || generalDirty;
 
   const save = async () => {
     setErr("");
@@ -95,22 +102,22 @@ function SettingsContent({
   };
 
   return (
-    <Card className="settings-card general-settings-card">
+    <Card className={`settings-card general-settings-card ${mode === "api-key" ? "api-key-auth-settings-card" : ""}`}>
       <CardHeader className="panel-head">
-        <CardTitle><h2>{t("general.title")}</h2></CardTitle>
-        <p className="sub">{t("general.description")}</p>
+        <CardTitle><h2>{t(mode === "api-key" ? "key.authTitle" : "general.title")}</h2></CardTitle>
+        <p className="sub">{t(mode === "api-key" ? "key.authSettingsDescription" : "general.description")}</p>
       </CardHeader>
       <CardContent className="settings-card-content">
 
-      <div className="setting-row setting-toggle-row">
+      {mode !== "general" && <div className="setting-row setting-toggle-row">
         <span id="settings-auth-label" className="setting-toggle-copy">
             <b>{t("general.auth")}</b>(server.auth)
             <em>{t("general.authDescription")}</em>
         </span>
         <Switch aria-labelledby="settings-auth-label" checked={auth} onCheckedChange={setAuth} />
-      </div>
+      </div>}
 
-      <div className="setting-row egress-settings">
+      {mode !== "api-key" && <div className="setting-row egress-settings">
         <div>
           <b>{t("general.egress")}</b>
           <em>{t("general.egressDescription")}</em>
@@ -176,15 +183,15 @@ function SettingsContent({
             <div className="egress-route-row"><span>update_check</span><code>{t("general.direct")}</code></div>
           </div>
         )}
-      </div>
+      </div>}
 
-      <div className="setting-row setting-toggle-row">
+      {mode !== "api-key" && <div className="setting-row setting-toggle-row">
         <span id="settings-metrics-label" className="setting-toggle-copy">
             <b>{t("general.metrics")}</b>(data.metrics)
             <em>{t("general.metricsDescription")}</em>
         </span>
         <Switch aria-labelledby="settings-metrics-label" checked={metrics} onCheckedChange={setMetrics} />
-      </div>
+      </div>}
 
       <div className="panel-foot">
         <Button disabled={!dirty} onClick={save}>
@@ -193,18 +200,6 @@ function SettingsContent({
         {serveRunning && dirty && <span className="foot-hint">{t("general.restartHint")}</span>}
       </div>
 
-      <div className="kv-grid">
-        <div className="kv-k">{t("general.listen")}</div>
-        <div className="kv-v mono">{settings.listen}</div>
-        <div className="kv-k">{t("general.dataDir")}</div>
-        <div className="kv-v mono">{settings.data_dir || "—"}</div>
-        <div className="kv-k">{t("general.pluginsDir")}</div>
-        <div className="kv-v mono">{settings.plugins_dir || "—"}</div>
-        <div className="kv-k">{t("general.adapter")}</div>
-        <div className="kv-v mono">{settings.agent || "—"}</div>
-        <div className="kv-k">{t("general.coreVersion")}</div>
-        <div className="kv-v mono">{settings.version}</div>
-      </div>
       </CardContent>
     </Card>
   );

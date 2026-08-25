@@ -161,6 +161,7 @@ function SortableDirectProviderRow({
           <GripVertical aria-hidden="true" />
         </button>
         <input
+          className="direct-provider-radio"
           type="radio"
           name="direct-provider"
           checked={selected}

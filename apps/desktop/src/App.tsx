@@ -89,6 +89,7 @@ function errorText(error: unknown): string {
 function emptyAgentRoute(state: StateView): AgentRouteView {
   return {
     mode: "inherit",
+    inherits_global: true,
     tiers: state.tiers,
     config_error: null,
     profile: null,
@@ -259,6 +260,7 @@ function StationApp() {
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
   const [view, setView] = useState<AppView>("overview");
+  const [modelEntryOpen, setModelEntryOpen] = useState(false);
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [shownUndetectedAgentIds, setShownUndetectedAgentIds] = useState<Set<string>>(
@@ -794,6 +796,13 @@ function StationApp() {
       && visibleAgentIds.has(lastConnectionAgentId)
       ? `agent:${lastConnectionAgentId}` as AppView
       : next;
+    if (
+      target === "providers"
+      && !firstRunGuideOpen
+      && (state?.providers.reduce((total, provider) => total + provider.models.length, 0) ?? 0) === 0
+    ) {
+      setModelEntryOpen(true);
+    }
     if (target === view) return;
     if (
       target === "usage" ||
@@ -872,6 +881,10 @@ function StationApp() {
         agents={[]}
         commandBusy
         discoveryPending
+        modelCount={0}
+        modelEntryOpen={false}
+        suppressModelEntryAutoOpen
+        onModelEntryOpenChange={() => undefined}
         onNavigate={() => undefined}
         onToggleServe={() => undefined}
       >
@@ -966,6 +979,10 @@ function StationApp() {
       registry={visibleRegistry}
       agents={agents}
       commandBusy={serveBusy || busy || freeProviderBusy}
+      modelCount={state.providers.reduce((total, provider) => total + provider.models.length, 0)}
+      modelEntryOpen={modelEntryOpen}
+      suppressModelEntryAutoOpen={firstRunGuideOpen}
+      onModelEntryOpenChange={setModelEntryOpen}
       onNavigate={navigate}
       onToggleServe={() => void toggleServe()}
     >
@@ -1141,7 +1158,7 @@ function StationApp() {
           recoveryError={state.provider_recovery_error ?? null}
           serveRunning={runtimeHealthy}
           busy={busy}
-          onRemove={(name) => void run(
+          onRemove={(name) => run(
             () => removeProvider(name),
             copy("Provider deleted", "供应商已删除", "供應商已刪除", "プロバイダーが削除されました"),
           )}
@@ -1150,7 +1167,10 @@ function StationApp() {
             copy("Provider restored from the recycle bin", "供应商已从回收站恢复", "供應商已從回收站恢復", "プロバイダーがゴミ箱から復元されました"),
           )}
           onStateChange={showState}
-          onAddProvider={() => navigate("add-provider")}
+          onAddProvider={() => {
+            if (firstRunGuideOpen) navigate("add-provider");
+            else setModelEntryOpen(true);
+          }}
         />
       )}
 

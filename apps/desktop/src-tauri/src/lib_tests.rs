@@ -3,6 +3,8 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 use tauri::Manager;
 
 #[test]
@@ -631,6 +633,21 @@ fn gateway_template_for_test(root: &std::path::Path) -> Value {
     draft
 }
 
+fn copy_model_test_plugin_packages(root: &Path, packages: &[(&str, &str)]) -> PathBuf {
+    let source_packages = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("plugins-dist");
+    let plugin_root = root.join("model-test-plugins");
+    for (package, wasm) in packages {
+        let target = plugin_root.join(package);
+        std::fs::create_dir_all(&target).unwrap();
+        for file in ["manifest.json", *wasm] {
+            std::fs::copy(source_packages.join(package).join(file), target.join(file)).unwrap();
+        }
+    }
+    plugin_root
+}
+
 fn published_agent_route_fixture(root: &std::path::Path) -> (Value, RunningServer) {
     let mut draft = gateway_template_for_test(root);
     draft["server"]["listen"] = json!("127.0.0.1:0");
@@ -650,7 +667,7 @@ fn published_agent_route_fixture(root: &std::path::Path) -> (Value, RunningServe
         .unwrap()
         .bind()
         .unwrap()
-        .publish(7)
+        .publish(7, BTreeMap::new())
         .unwrap();
     (draft, running)
 }
@@ -2819,7 +2836,7 @@ fn restarting_one_agent_route_rejects_an_apply_already_in_progress_before_saving
         .unwrap()
         .bind()
         .unwrap()
-        .publish(7)
+        .publish(7, BTreeMap::new())
         .unwrap();
     let mut inner = AppInner::new(config_path.clone(), draft, None);
     inner.server = ServerLifecycle::Applying {
@@ -5368,6 +5385,7 @@ fn routing_mode_switches_per_agent_without_touching_home_or_siblings() {
             .all(|r| r.routing_mode == "tiered"),
         "every Agent inherits the tiered home default"
     );
+    assert!(view.agent_routes.values().all(|r| r.inherits_global));
 
     // Flip Home to quota-first: the Home view flips, and Agents that never
     // overrode follow it.
@@ -5392,11 +5410,12 @@ fn routing_mode_switches_per_agent_without_touching_home_or_siblings() {
         set_routing_mode(app.state(), "tiered".to_owned(), Some("codex".to_owned())).unwrap();
     assert_eq!(view.routing_mode, "quota_first", "Home is untouched");
     assert_eq!(view.agent_routes["codex"].routing_mode, "tiered");
+    assert!(!view.agent_routes["codex"].inherits_global);
     assert!(
         view.agent_routes
             .iter()
             .filter(|(id, _)| id.as_str() != "codex")
-            .all(|(_, r)| r.routing_mode == "quota_first"),
+            .all(|(_, r)| r.routing_mode == "quota_first" && r.inherits_global),
         "sibling Agents are untouched by the per-Agent switch"
     );
     // The Agent's mode is written explicitly (not cleared), so it stays
@@ -6107,6 +6126,19 @@ fn model_test_reply_reports_a_429_exhausted_wallet_as_no_balance() {
 }
 
 #[test]
+fn model_test_reply_identifies_the_local_concurrency_limit() {
+    let error = extract_model_test_reply(
+        429,
+        r#"{"error":{"code":"concurrency_limit","message":"the local proxy is at its configured concurrency limit"}}"#,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("Token Station concurrency limit"), "{error}");
+    assert!(!error.contains("Provider rate limit"), "{error}");
+    assert!(!error.contains("local proxy"), "{error}");
+}
+
+#[test]
 fn model_test_sse_decoder_handles_split_frames_and_utf8_boundaries() {
     let wire = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n".as_bytes();
     let chinese = "你".as_bytes();
@@ -6209,16 +6241,303 @@ fn model_test_output_budget_rejects_many_individually_valid_deltas() {
         .contains("wire response limit"));
 }
 
+#[cfg(unix)]
 #[test]
-fn model_test_command_uses_an_exact_in_memory_route_and_cleans_registration() {
-    let root = scratch_home("model-test-command");
-    let (upstream, fixture) = serve_chat_completion("model-test-ok", 1);
+fn model_test_source_preparation_does_not_read_the_secret_store() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let root = scratch_home("model-test-source-no-secret-io");
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let secret_store = data_dir.join(secrets::SECRETS_FILE);
+    let secret_store_path = CString::new(secret_store.as_os_str().as_bytes()).unwrap();
+    assert_eq!(
+        unsafe { libc::mkfifo(secret_store_path.as_ptr(), 0o600) },
+        0
+    );
+
     let mut draft = gateway_template_for_test(&root);
     draft["upstreams"]["fixture"] = json!({
         "provider": "openai-compatible",
-        "base_url": upstream,
+        "base_url": "https://example.test/v1",
+        "auth": {"slot": "provider_api_key", "store": true},
         "models": [{"model": "small"}]
     });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let inner = AppInner::new(root.join("token-station.json"), draft, None);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let is_draft = matches!(
+            model_test_gateway_source(&inner).unwrap(),
+            ModelTestGatewaySource::Draft { .. }
+        );
+        completed_tx.send(is_draft).unwrap();
+    });
+
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let completed_without_reader = completed_rx.recv_timeout(Duration::from_millis(500));
+    let completed_before_secret_read = completed_without_reader.is_ok();
+    let completed = match completed_without_reader {
+        Ok(completed) => completed,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&secret_store)
+                .unwrap()
+                .write_all(b"{}")
+                .unwrap();
+            completed_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        }
+        Err(error) => panic!("model test source worker failed: {error}"),
+    };
+    worker.join().unwrap();
+    std::fs::remove_dir_all(root).ok();
+
+    assert!(completed);
+    assert!(
+        completed_before_secret_read,
+        "model test source preparation performed secret-store filesystem I/O"
+    );
+}
+
+#[test]
+fn model_test_secret_fingerprint_rejects_an_oversized_store() {
+    let root = scratch_home("model-test-secret-store-limit");
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join(secrets::SECRETS_FILE),
+        vec![b'x'; 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let mut draft = gateway_template_for_test(&root);
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://example.test/v1",
+        "auth": {"slot": "provider_api_key", "store": true},
+        "models": [{"model": "small"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let config: ClientConfig = serde_json::from_value(draft).unwrap();
+
+    let error = model_test_secret_store_fingerprint(&config).unwrap_err();
+
+    assert!(error.contains("size limit"), "{error}");
+    assert!(!error.contains(&data_dir.display().to_string()), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn model_test_secret_store_open_does_not_follow_a_racing_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let root = scratch_home("model-test-secret-store-nofollow");
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let secret_store = data_dir.join(secrets::SECRETS_FILE);
+    let target = data_dir.join("attacker-controlled.json");
+    std::fs::write(&secret_store, b"{}").unwrap();
+    std::fs::write(&target, b"{}").unwrap();
+
+    let error = read_model_test_secret_store_with_before_open(&data_dir, || {
+        std::fs::remove_file(&secret_store).unwrap();
+        symlink(&target, &secret_store).unwrap();
+    })
+    .err()
+    .expect("a racing symlink must be refused");
+
+    assert!(error.contains("regular file"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn model_test_secret_fingerprint_reads_one_store_snapshot_for_several_slots() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = scratch_home("model-test-secret-store-single-read");
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let secret_store = data_dir.join(secrets::SECRETS_FILE);
+    std::fs::write(
+        &secret_store,
+        br#"{"first/provider_api_key":"one","second/provider_api_key":"two"}"#,
+    )
+    .unwrap();
+    let mut draft = gateway_template_for_test(&root);
+    for name in ["first", "second"] {
+        draft["upstreams"][name] = json!({
+            "provider": "openai-compatible",
+            "base_url": format!("https://{name}.example.test/v1"),
+            "auth": {"slot": "provider_api_key", "store": true},
+            "models": [{"model": "small"}]
+        });
+    }
+    draft["router"]["routing_mode"] = json!("tiered");
+    draft["router"]["pools"] = json!({
+        "simple": [{"upstream": "first", "model": "small"}],
+        "complex": [{"upstream": "second", "model": "small"}]
+    });
+    draft["router"]["default_pool"] = json!("simple");
+    let config: ClientConfig = serde_json::from_value(draft).unwrap();
+    let read_count = AtomicUsize::new(0);
+    let fingerprint = model_test_secret_store_fingerprint_with_reader(&config, |data_dir| {
+        read_count.fetch_add(1, Ordering::SeqCst);
+        read_model_test_secret_store(data_dir)
+    })
+    .unwrap();
+    let empty_fingerprint: [u8; 32] = Sha256::digest([]).into();
+
+    assert_ne!(fingerprint, empty_fingerprint);
+    assert_eq!(read_count.load(Ordering::SeqCst), 1);
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn assert_model_test_agent_package_change_invalidates_identity(
+    label: &str,
+    configure_agents: impl FnOnce(&mut Value),
+) {
+    let root = scratch_home(label);
+    let plugin_root = copy_model_test_plugin_packages(
+        &root,
+        &[
+            ("agent-openai", "adapter.wasm"),
+            ("provider-openai-compatible-v2", "component.wasm"),
+        ],
+    );
+    let mut draft = gateway_template_for_test(&root);
+    draft["plugins"]["dir"] = json!(&plugin_root);
+    configure_agents(&mut draft);
+    draft["plugins"]["providers"]["openai-compatible"] = json!("provider-openai-compatible-v2");
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://example.test/v1",
+        "models": [{"model": "small"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let config: ClientConfig = serde_json::from_value(draft).unwrap();
+    assert_eq!(config.plugins.effective_agents(), ["agent-openai"]);
+    let first = model_test_plugin_identity_fingerprint(&config).unwrap();
+
+    std::fs::write(
+        plugin_root.join("agent-openai/revision-marker"),
+        b"updated effective agent package identity",
+    )
+    .unwrap();
+    let second = model_test_plugin_identity_fingerprint(&config).unwrap();
+
+    assert_ne!(first, second);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn model_test_plugin_identity_tracks_the_inbound_agent_package() {
+    assert_model_test_agent_package_change_invalidates_identity(
+        "model-test-agent-plugin-identity",
+        |draft| {
+            draft["plugins"]["agents"] = json!(["agent-openai"]);
+        },
+    );
+}
+
+#[test]
+fn model_test_plugin_identity_tracks_the_legacy_effective_agent_package() {
+    assert_model_test_agent_package_change_invalidates_identity(
+        "model-test-legacy-agent-plugin-identity",
+        |draft| {
+            draft["plugins"]["agents"] = json!([]);
+            draft["plugins"]["agent"] = json!("agent-openai");
+        },
+    );
+}
+
+#[test]
+fn model_test_plugin_identity_rejects_a_package_changed_after_preflight() {
+    let root = scratch_home("model-test-plugin-identity-revalidation");
+    let plugin_root = copy_model_test_plugin_packages(
+        &root,
+        &[
+            ("agent-openai", "adapter.wasm"),
+            ("provider-openai-compatible-v2", "component.wasm"),
+        ],
+    );
+    let mut draft = gateway_template_for_test(&root);
+    draft["plugins"]["dir"] = json!(plugin_root);
+    draft["plugins"]["agents"] = json!(["agent-openai"]);
+    draft["plugins"]["providers"]["openai-compatible"] = json!("provider-openai-compatible-v2");
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://example.test/v1",
+        "models": [{"model": "small"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let config: ClientConfig = serde_json::from_value(draft).unwrap();
+    let expected = model_test_plugin_identity_fingerprint(&config).unwrap();
+    std::fs::write(
+        config
+            .plugins
+            .dir
+            .join("provider-openai-compatible-v2/revision-marker"),
+        b"changed while the Gateway was loading",
+    )
+    .unwrap();
+
+    let error = ensure_model_test_plugin_identity_unchanged(&config, expected).unwrap_err();
+
+    assert!(error.contains("changed while"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
+    let root = scratch_home("model-test-command");
+    let (upstream, fixture) = serve_chat_completion("model-test-ok", 6);
+    let mut draft = gateway_template_for_test(&root);
+    let plugin_root = copy_model_test_plugin_packages(
+        &root,
+        &[
+            ("agent-anthropic", "adapter.wasm"),
+            ("agent-gemini", "adapter.wasm"),
+            ("agent-openai", "adapter.wasm"),
+            ("agent-openai-responses", "adapter.wasm"),
+            ("provider-openai-compatible-v2", "component.wasm"),
+        ],
+    );
+    let package_dir = plugin_root.join("provider-openai-compatible-v2");
+    draft["plugins"]["dir"] = json!(plugin_root);
+    draft["plugins"]["providers"]["openai-compatible"] = json!("provider-openai-compatible-v2");
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible",
+        "base_url": upstream,
+        "auth": {"slot": "provider_api_key", "store": true},
+        "models": [{"model": "small"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    secrets::store_set(
+        &root.join("token-station-data"),
+        "fixture",
+        "provider_api_key",
+        "initial-key",
+    )
+    .unwrap();
     let app = tauri::test::mock_app();
     assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
         root.join("token-station.json"),
@@ -6227,21 +6546,134 @@ fn model_test_command_uses_an_exact_in_memory_route_and_cleans_registration() {
     )))));
     assert!(app.manage(ModelTestStreamState::default()));
 
-    let reply = tauri::async_runtime::block_on(run_model_test_chat(
-        app.handle().clone(),
-        app.state::<AppStateManaged>().inner(),
-        app.state::<ModelTestStreamState>().inner(),
-        "fixture".to_owned(),
-        "small".to_owned(),
-        vec![ModelTestMessage {
-            role: "user".to_owned(),
-            content: "ping".to_owned(),
-        }],
-        "model-test-command".to_owned(),
-    ))
-    .unwrap();
+    let send = |request_id: &str| {
+        tauri::async_runtime::block_on(run_model_test_chat(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            app.state::<ModelTestStreamState>().inner(),
+            vec![ModelTestMessage {
+                role: "user".to_owned(),
+                content: "ping".to_owned(),
+            }],
+            request_id.to_owned(),
+        ))
+        .unwrap()
+    };
 
-    assert_eq!(reply.content, "model-test-ok");
+    assert_eq!(send("model-test-command-1").content, "model-test-ok");
+    let first_gateway = Arc::clone(
+        &app.state::<ModelTestStreamState>()
+            .1
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .gateway,
+    );
+    assert_eq!(send("model-test-command-2").content, "model-test-ok");
+    let second_gateway = Arc::clone(
+        &app.state::<ModelTestStreamState>()
+            .1
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .gateway,
+    );
+    assert!(Arc::ptr_eq(&first_gateway, &second_gateway));
+    std::fs::write(
+        package_dir.join("revision-marker"),
+        b"updated package identity",
+    )
+    .unwrap();
+    assert_eq!(send("model-test-command-3").content, "model-test-ok");
+    let updated_plugin_gateway = Arc::clone(
+        &app.state::<ModelTestStreamState>()
+            .1
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .gateway,
+    );
+    assert!(!Arc::ptr_eq(&second_gateway, &updated_plugin_gateway));
+    let package_digest = token_station_cli::plugins::PackageSource::Dir(package_dir.clone())
+        .content_digest()
+        .unwrap();
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("plugin-receipts.json"),
+        serde_json::to_vec(&json!({
+            "provider-openai-compatible-v2": {
+                "package_digest": package_digest,
+                "suite": "south.provider-component.v1",
+                "publisher_signature_verified": false
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(send("model-test-command-4").content, "model-test-ok");
+    let updated_receipt_gateway = Arc::clone(
+        &app.state::<ModelTestStreamState>()
+            .1
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .gateway,
+    );
+    assert!(!Arc::ptr_eq(
+        &updated_plugin_gateway,
+        &updated_receipt_gateway
+    ));
+    secrets::store_set(&data_dir, "fixture", "provider_api_key", "external-key").unwrap();
+    assert_eq!(send("model-test-command-5").content, "model-test-ok");
+    let external_gateway = Arc::clone(
+        &app.state::<ModelTestStreamState>()
+            .1
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .gateway,
+    );
+    assert!(!Arc::ptr_eq(&updated_receipt_gateway, &external_gateway));
+    {
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let before_epoch = inner
+            .upstream_epochs
+            .get("fixture")
+            .copied()
+            .unwrap_or_default();
+        inner.pending_provider_keys.insert(
+            "fixture".to_owned(),
+            Zeroizing::new("replacement-key".to_owned()),
+        );
+        let pending_error = match model_test_gateway_source(&inner) {
+            Err(error) => error,
+            Ok(_) => panic!("pending Home credentials must not enter a cached Gateway"),
+        };
+        assert_eq!(
+            pending_error,
+            "Save the verified Provider credential before testing this Home route"
+        );
+        inner.save_draft().unwrap();
+        assert!(inner.upstream_epochs["fixture"] > before_epoch);
+    }
+    assert_eq!(send("model-test-command-6").content, "model-test-ok");
+    let rotated_gateway = Arc::clone(
+        &app.state::<ModelTestStreamState>()
+            .1
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .gateway,
+    );
+    assert!(!Arc::ptr_eq(&external_gateway, &rotated_gateway));
     assert!(app
         .state::<ModelTestStreamState>()
         .0
@@ -6250,6 +6682,170 @@ fn model_test_command_uses_an_exact_in_memory_route_and_cleans_registration() {
         .active
         .is_empty());
     fixture.join().unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn model_test_command_reuses_the_running_gateway_without_body_logging() {
+    let root = scratch_home("model-test-running-gateway");
+    let (upstream, fixture) = serve_chat_completion("model-test-live", 1);
+    let mut draft = gateway_template_for_test(&root);
+    draft["server"]["listen"] = json!("127.0.0.1:0");
+    draft["server"]["auth"] = json!(false);
+    draft["data"]["metrics"] = json!(false);
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible",
+        "base_url": upstream,
+        "models": [{"model": "small"}]
+    });
+    draft["upstreams"]["unused"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "http://127.0.0.1:9/v1",
+        "models": [{"model": "unused"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let config: ClientConfig = serde_json::from_value(draft.clone()).unwrap();
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    let revision = inner.config_state.draft_revision();
+    let running = prepare_server(config)
+        .unwrap()
+        .bind()
+        .unwrap()
+        .publish(revision, inner.upstream_epochs.clone())
+        .unwrap();
+    let published_gateway = running.gateway();
+    inner.server = ServerLifecycle::Running {
+        generation: 1,
+        server: running,
+        apply_error: None,
+    };
+    match model_test_gateway_source(&inner).unwrap() {
+        ModelTestGatewaySource::Running { gateway, .. } => {
+            assert!(Arc::ptr_eq(&gateway, &published_gateway));
+        }
+        ModelTestGatewaySource::Draft { .. } => panic!("the published Gateway must be reused"),
+    }
+
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+    assert!(app.manage(ModelTestStreamState::default()));
+    let reply = tauri::async_runtime::block_on(run_model_test_chat(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        app.state::<ModelTestStreamState>().inner(),
+        vec![ModelTestMessage {
+            role: "user".to_owned(),
+            content: "ping".to_owned(),
+        }],
+        "model-test-live".to_owned(),
+    ))
+    .unwrap();
+
+    assert_eq!(reply.content, "model-test-live");
+    assert_eq!(
+        std::fs::read_dir(root.join("token-station-data/request-bodies"))
+            .unwrap()
+            .count(),
+        0
+    );
+    {
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        inner.draft["agent_routes"]["codex"] = json!({ "mode": "inherit" });
+        inner.observe_draft().unwrap();
+        match model_test_gateway_source(&inner).unwrap() {
+            ModelTestGatewaySource::Running { gateway, .. } => {
+                assert!(Arc::ptr_eq(&gateway, &published_gateway));
+            }
+            ModelTestGatewaySource::Draft { .. } => {
+                panic!("Agent-only edits must preserve the live Home Gateway")
+            }
+        }
+        inner.draft["upstreams"]["unused"]["base_url"] = json!("http://127.0.0.1:10/v1");
+        inner.observe_draft().unwrap();
+        match model_test_gateway_source(&inner).unwrap() {
+            ModelTestGatewaySource::Running { gateway, .. } => {
+                assert!(Arc::ptr_eq(&gateway, &published_gateway));
+            }
+            ModelTestGatewaySource::Draft { .. } => {
+                panic!("Unused Provider edits must preserve the live Home Gateway")
+            }
+        }
+        inner.draft["router"]["pools"]["dormant"] = json!([{
+            "upstream": "unused",
+            "model": "unused"
+        }]);
+        inner.observe_draft().unwrap();
+        match model_test_gateway_source(&inner).unwrap() {
+            ModelTestGatewaySource::Running { gateway, .. } => {
+                assert!(Arc::ptr_eq(&gateway, &published_gateway));
+            }
+            ModelTestGatewaySource::Draft { .. } => {
+                panic!("Dormant tier edits must preserve a live Direct Home Gateway")
+            }
+        }
+        inner.bump_upstream_epoch("fixture");
+        assert!(matches!(
+            model_test_gateway_source(&inner).unwrap(),
+            ModelTestGatewaySource::Draft { .. }
+        ));
+        inner.upstream_epochs.clear();
+        inner.draft["routing"]["mode"] = json!("tiered");
+        inner.observe_draft().unwrap();
+        assert!(matches!(
+            model_test_gateway_source(&inner).unwrap(),
+            ModelTestGatewaySource::Draft { .. }
+        ));
+    }
+    fixture.join().unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn model_test_source_rejects_a_dead_running_gateway() {
+    let root = scratch_home("model-test-dead-gateway");
+    let mut draft = gateway_template_for_test(&root);
+    draft["server"]["listen"] = json!("127.0.0.1:0");
+    draft["server"]["auth"] = json!(false);
+    draft["data"]["metrics"] = json!(false);
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "http://127.0.0.1:9/v1",
+        "models": [{"model": "small"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let config: ClientConfig = serde_json::from_value(draft.clone()).unwrap();
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    let revision = inner.config_state.draft_revision();
+    let running = prepare_server(config)
+        .unwrap()
+        .bind()
+        .unwrap()
+        .publish(revision, inner.upstream_epochs.clone())
+        .unwrap();
+    running.abort_task();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while running.is_task_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!running.is_task_alive());
+    inner.server = ServerLifecycle::Running {
+        generation: 1,
+        server: running,
+        apply_error: None,
+    };
+
+    assert!(matches!(
+        model_test_gateway_source(&inner).unwrap(),
+        ModelTestGatewaySource::Draft { .. }
+    ));
+    assert!(!inner.snapshot().serve.model_test_uses_running_gateway);
     std::fs::remove_dir_all(root).ok();
 }
 

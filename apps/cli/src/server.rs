@@ -106,6 +106,21 @@ impl ServerControl {
         }
     }
 
+    /// Register a non-HTTP borrower of the running Gateway under this server's
+    /// drain contract. The returned lease must remain alive for the whole
+    /// request so shutdown waits for it and can cancel its context.
+    #[must_use]
+    pub fn begin_gateway_request(
+        &self,
+        total: Duration,
+        per_attempt: Duration,
+    ) -> GatewayRequestLease {
+        GatewayRequestLease {
+            context: RequestContext::new(&self.inner.drain, total, per_attempt),
+            _in_flight: self.begin_request(),
+        }
+    }
+
     async fn wait_for_stop(&self) {
         let mut receiver = self.inner.stop_accepting.subscribe();
         if *receiver.borrow() {
@@ -126,6 +141,26 @@ struct InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.inner.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A request context plus the in-flight ownership that keeps its server
+/// runtime alive during direct Gateway calls outside the HTTP handler.
+pub struct GatewayRequestLease {
+    context: RequestContext,
+    _in_flight: InFlightGuard,
+}
+
+impl GatewayRequestLease {
+    #[must_use]
+    pub fn with_upstream_response_limit(mut self, bytes: u64) -> Self {
+        self.context = self.context.with_upstream_response_limit(bytes);
+        self
+    }
+
+    #[must_use]
+    pub const fn context(&self) -> &RequestContext {
+        &self.context
     }
 }
 
@@ -675,6 +710,7 @@ async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response
 mod tests {
     use super::{ScopedInboundPath, ServerControl, parse_inbound_path, presented_virtual_keys};
     use axum::http::HeaderMap;
+    use std::time::Duration;
 
     #[test]
     fn presented_virtual_keys_reads_bearer_goog_header_and_query() {
@@ -722,6 +758,20 @@ mod tests {
         assert!(!context.is_cancelled());
         control.cancel_in_flight();
         assert!(context.is_cancelled());
+
+        drop(request);
+        assert_eq!(control.in_flight(), 0);
+    }
+
+    #[test]
+    fn direct_gateway_borrowers_participate_in_server_drain() {
+        let control = ServerControl::new();
+        let request = control.begin_gateway_request(Duration::from_mins(2), Duration::from_mins(2));
+
+        assert_eq!(control.in_flight(), 1);
+        assert!(!request.context().is_cancelled());
+        control.cancel_in_flight();
+        assert!(request.context().is_cancelled());
 
         drop(request);
         assert_eq!(control.in_flight(), 0);

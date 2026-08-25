@@ -612,12 +612,23 @@ impl AppInner {
             // save or startup instead of reporting a rollback that did not occur.
             eprintln!("configuration saved but historical cost backfill failed: {error}");
         }
-        for upstream in self.pending_provider_keys.keys() {
+        let committed_key_upstreams = self
+            .pending_provider_keys
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for upstream in &committed_key_upstreams {
             if let Err(error) = provider_tombstones::discard(&self.data_dir(), upstream) {
                 eprintln!(
                     "configuration saved but free Provider tombstone cleanup failed: {error}"
                 );
             }
+        }
+        for upstream in committed_key_upstreams {
+            // The credential value is absent from ClientConfig, so publishing
+            // it must advance the same identity used by running/draft Gateway
+            // reuse even when the Provider definition itself did not change.
+            self.bump_upstream_epoch(&upstream);
         }
         self.pending_provider_keys.clear();
         Ok(revision)
@@ -950,6 +961,11 @@ impl AppInner {
             .into_iter()
             .map(|agent_id| {
                 let mode = self.agent_route_view_mode(&agent_id).to_string();
+                let stored_route = &self.draft["agent_routes"][&agent_id];
+                let inherits_global = !self.agent_route_drafts.contains_key(&agent_id)
+                    && self.agent_route_mode(&agent_id) == "inherit"
+                    && stored_route["routing_mode"].is_null()
+                    && stored_route["direct_target"].is_null();
                 let routing_mode = self.draft["agent_routes"][&agent_id]["routing_mode"]
                     .as_str()
                     .unwrap_or(home_mode)
@@ -978,6 +994,7 @@ impl AppInner {
                     agent_id.clone(),
                     AgentRouteView {
                         mode,
+                        inherits_global,
                         tiers,
                         config_error,
                         profile: self.agent_profile(&agent_id),
@@ -1097,6 +1114,10 @@ impl AppInner {
     }
 
     pub(crate) fn serve_view(&self) -> ServeView {
+        let model_test_uses_running_gateway = self
+            .materialize()
+            .ok()
+            .is_some_and(|config| reusable_model_test_server(self, &config).is_some());
         match &self.server {
             ServerLifecycle::Stopped { .. } => ServeView {
                 phase: ServePhase::Stopped,
@@ -1111,6 +1132,7 @@ impl AppInner {
                     .to_string(),
                 virtual_key: None,
                 error: None,
+                model_test_uses_running_gateway,
             },
             ServerLifecycle::Starting { listen, .. } => ServeView {
                 phase: ServePhase::Starting,
@@ -1122,6 +1144,7 @@ impl AppInner {
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
+                model_test_uses_running_gateway,
             },
             ServerLifecycle::Applying { old, .. } => {
                 let alive = old.is_task_alive();
@@ -1140,6 +1163,7 @@ impl AppInner {
                     listen: old.listen().to_owned(),
                     virtual_key: old.virtual_key().map(str::to_string),
                     error: None,
+                    model_test_uses_running_gateway,
                 }
             }
             ServerLifecycle::Stopping { listen, .. } => ServeView {
@@ -1152,6 +1176,7 @@ impl AppInner {
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
+                model_test_uses_running_gateway,
             },
             ServerLifecycle::Running {
                 server,
@@ -1182,6 +1207,7 @@ impl AppInner {
                     } else {
                         Some("serve_task_exited: 代理任务已退出".to_owned())
                     },
+                    model_test_uses_running_gateway,
                 }
             }
             ServerLifecycle::Failed { listen, error, .. } => ServeView {
@@ -1194,6 +1220,7 @@ impl AppInner {
                 listen: listen.clone(),
                 virtual_key: None,
                 error: Some(error.clone()),
+                model_test_uses_running_gateway,
             },
         }
     }

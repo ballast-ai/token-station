@@ -4,9 +4,8 @@ name: Build Linux Desktop
 # artifact gate is explicitly enabled. Successful packages remain internal
 # workflow artifacts and are not attached to a GitHub Release automatically.
 on:
+  workflow_call:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
 
 permissions:
   contents: read

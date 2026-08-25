@@ -96,6 +96,9 @@ pub(crate) struct TierView {
 #[derive(Serialize)]
 pub(crate) struct AgentRouteView {
     pub(crate) mode: String,
+    /// True only when every per-Agent routing axis is absent and the Agent
+    /// therefore follows the complete Home configuration.
+    pub(crate) inherits_global: bool,
     pub(crate) tiers: std::collections::BTreeMap<String, TierView>,
     pub(crate) config_error: Option<String>,
     pub(crate) profile: Option<String>,
@@ -155,6 +158,8 @@ pub(crate) struct ServeView {
     pub(crate) listen: String,
     pub(crate) virtual_key: Option<String>,
     pub(crate) error: Option<String>,
+    /// Whether Home model tests share this live Gateway's mutable state.
+    pub(crate) model_test_uses_running_gateway: bool,
 }
 
 #[derive(Serialize)]

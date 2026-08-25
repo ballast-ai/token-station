@@ -135,7 +135,7 @@ if (!/package-macos-dmg\.sh/.test(buildScript)) failures.push("build-desktop.sh 
 const appBundleSelections = (buildScript.match(/--bundles app|macos_bundle_kind="app"/g) ?? []).length;
 if (appBundleSelections < 2) failures.push("build-desktop.sh 没有限制 Tauri 只生成 App");
 
-for (const workflowPath of [".github/workflows/ci.yml", ".github/workflows/desktop-release.yml"]) {
+for (const workflowPath of [".github/workflows/full-ci.yml", ".github/workflows/desktop-release.yml"]) {
   const workflow = read(workflowPath);
   if (!workflow.includes("node scripts/check-macos-dmg-packaging.mjs")) {
     failures.push(`${workflowPath} 没有检查 DMG 策略`);

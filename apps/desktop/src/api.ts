@@ -355,6 +355,8 @@ export interface ServeView {
   listen: string;
   virtual_key: string | null;
   error: string | null;
+  /** True when Home model tests share this live Gateway's mutable state. */
+  model_test_uses_running_gateway: boolean;
 }
 
 export type TierSlot = "high" | "mid" | "low";
@@ -371,6 +373,8 @@ export type AgentRouteMode = "inherit" | "custom" | "profile";
 
 export interface AgentRouteView {
   mode: AgentRouteMode;
+  /** True when no per-Agent routing axis overrides the global configuration. */
+  inherits_global?: boolean;
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
   profile: string | null;
@@ -993,8 +997,6 @@ export const testProvider = (name: string) =>
   invoke<ProviderTestResult[]>("test_provider", { name });
 
 export const testModelChatStream = async (
-  upstream: string,
-  model: string,
   messages: ModelTestMessage[],
   requestId: string,
   onDelta: (event: ModelTestStreamEvent) => void,
@@ -1004,8 +1006,6 @@ export const testModelChatStream = async (
   });
   try {
     return await invoke<ModelTestReply>("test_model_chat_stream", {
-      upstream,
-      model,
       messages,
       requestId,
     });

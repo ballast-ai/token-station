@@ -53,7 +53,7 @@ use token_station_cli::bodylog::{valid_request_id, BodyLog, PlaintextExchange};
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
 use token_station_cli::cancel::{CancelReason, CancelToken};
 use token_station_cli::config::{
-    ClientConfig, EgressConfig, HostRoutingConfig, PluginsConfig, RoutingMode as HostRoutingMode,
+    ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
 };
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, Reply, StageStatus};
 use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
@@ -92,7 +92,10 @@ use recovery::{
     DiagnosticPreview, FrontendDiagnosticInput, FrontendDiagnosticRecord, RecoveryMode,
     RecoveryState,
 };
-use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
+use serve_lifecycle::{
+    home_gateway_identities_match, home_referenced_upstreams, prepare_server, PreparedServer,
+    RunningServer, StartFailure,
+};
 
 use config_draft::*;
 use desktop_update_commands::*;

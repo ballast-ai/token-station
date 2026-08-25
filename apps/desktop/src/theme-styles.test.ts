@@ -5,6 +5,16 @@ import { describe, expect, it } from "vitest";
 const appCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
 
 describe("retained page theme styles", () => {
+  it("prevents accidental static-text selection but keeps editable controls selectable", () => {
+    const bodyRule = appCss.match(/(?:^|\n)body\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const editableRule = appCss.match(
+      /body :is\(input, textarea, \[contenteditable="true"\]\)\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(bodyRule).toMatch(/user-select:\s*none/);
+    expect(editableRule).toMatch(/user-select:\s*text/);
+  });
+
   it("contains fixed overview runtime cards inside their grid track", () => {
     const overviewGridRule = appCss.match(
       /\.station-content-overview > \.overview-page\s*\{([^}]*)\}/s,
@@ -52,12 +62,46 @@ describe("retained page theme styles", () => {
     expect(routeSnapshotRule).not.toMatch(/align-content:\s*center/);
   });
 
-  it("hides the duplicate provider model summary while management is expanded", () => {
-    const expandedProviderModelsRule = appCss.match(
-      /\.provider-card\.expanded > \.provider-primary-models\[data-layout="compact-three-column"\]\s*\{([^}]*)\}/s,
+  it("keeps the Agent actions compact in the card's top-right corner", () => {
+    const actionRule = appCss.match(/\.overview-agent-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(actionRule).toMatch(/position:\s*absolute/);
+    expect(actionRule).toMatch(/top:\s*14px/);
+    expect(actionRule).toMatch(/right:\s*14px/);
+    expect(actionRule).toMatch(/display:\s*flex/);
+    expect(appCss).not.toMatch(/\.overview-agent-summary[^}]*padding-bottom:\s*58px/s);
+    expect(appCss).not.toMatch(/\.model-test-(?:target|picker|model-name)/);
+  });
+
+  it("constrains provider management to a large internally scrolling dialog", () => {
+    const dialogRule = appCss.match(
+      /\.provider-management-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const bodyRule = appCss.match(/\.provider-management-dialog-body\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(dialogRule).toMatch(/max-width:\s*920px/);
+    expect(dialogRule).toMatch(/(?:^|;)\s*height:\s*min\(760px,\s*calc\(100vh - 40px\)\)/);
+    expect(dialogRule).toMatch(/max-height:/);
+    expect(bodyRule).toMatch(/min-height:\s*0/);
+    expect(bodyRule).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("keeps long provider-removal impact lists inside the viewport", () => {
+    const dialogRule = appCss.match(
+      /\.provider-removal-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const previewRule = appCss.match(
+      /\.provider-removal-dialog \.provider-removal-preview\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
 
-    expect(expandedProviderModelsRule).toMatch(/display:\s*none/);
+    expect(dialogRule).toMatch(/max-height:/);
+    expect(dialogRule).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\) auto/);
+    expect(previewRule).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("hides the responsive request latency column by semantic class", () => {
+    expect(appCss).toMatch(/\.usage-log-row > \.usage-log-latency\s*\{\s*display:\s*none/);
+    expect(appCss).not.toMatch(/\.usage-log-row > :nth-child\(6\)/);
   });
 
   it("keeps Settings category changes in a stable inner scroller", () => {
@@ -82,10 +126,16 @@ describe("retained page theme styles", () => {
     expect(contentRule).toMatch(/overflow-y:\s*auto/);
     expect(contentRule).toMatch(/scrollbar-gutter:\s*stable/);
     expect(sidebarRule).toMatch(/align-content:\s*start/);
+    expect(sidebarRule).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\)/);
+    const subnavRule = appCss.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(subnavRule).toMatch(/overflow-y:\s*auto/);
     expect(pressedNavigationRule).toMatch(/transform:\s*none/);
     expect(pointerHoverRule).toMatch(/background:\s*var\(--surface\)/);
     expect(appCss).not.toMatch(
       /(?:^|\n)\.settings-subnav \[data-slot="button"\]\.settings-subnav-item:hover\s*\{/,
+    );
+    expect(appCss).not.toMatch(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]::before/,
     );
   });
 
@@ -132,6 +182,13 @@ describe("retained page theme styles", () => {
     expect(reducedMotion).toMatch(/\.direct-provider-row[^}]*transition:\s*none/);
   });
 
+  it("visually hides the duplicate Direct radio mark", () => {
+    const radioRule = appCss.match(/\.direct-provider-radio\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(radioRule).toMatch(/position:\s*absolute/);
+    expect(radioRule).toMatch(/clip:\s*rect\(0, 0, 0, 0\)/);
+  });
+
   it("uses stable WebView-safe colors for selected routing states", () => {
     const routingModeRule = appCss.match(
       /\.routing-mode-tabs \[data-slot="tabs-trigger"\]\[data-state="active"\],[^{]*\{([^}]*)\}/s,
@@ -170,17 +227,57 @@ describe("retained page theme styles", () => {
     expect(appCss).toMatch(/\.error-toast\.is-error\s*\{[^}]*--toast-soft:\s*var\(--danger-soft\)/s);
   });
 
-  it("keeps the global route row neutral until it is selected", () => {
+  it("keeps routing rows comfortably sized and free of decorative left rails", () => {
     const permanentGlobalRouteRule = appCss.match(
       /\.agent-master-home\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const routeItemRule = appCss.match(
+      /\.agent-master-item\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const routeIconRule = appCss.match(
+      /\.agent-master-icon\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const routeMarkRule = appCss.match(
+      /\.agent-master-item \.agent-master-icon > svg\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const agentVectorRule = appCss.match(
+      /\.agent-master-item \.agent-brand-glyph > svg\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const agentImageRule = appCss.match(
+      /\.agent-master-item \.agent-brand-glyph > img,[^{]*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const routeLabelRule = appCss.match(
+      /\.agent-master-item strong\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const disclosureTriggerRule = appCss.match(
+      /\.agent-route-disclosure-trigger\[data-slot="button"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const selectedAgentRule = appCss.match(
       /\.agent-master-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const disclosureRule = appCss.match(
+      /\.routing-scope-global-group \.agent-route-disclosure\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(permanentGlobalRouteRule).not.toMatch(/background:/);
     expect(permanentGlobalRouteRule).not.toMatch(/border:/);
-    expect(selectedAgentRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(routeItemRule).toMatch(/height:\s*52px/);
+    expect(routeIconRule).toMatch(/width:\s*38px/);
+    expect(routeIconRule).toMatch(/height:\s*38px/);
+    expect(routeIconRule).not.toMatch(/border:/);
+    expect(routeIconRule).not.toMatch(/background:/);
+    expect(routeMarkRule).toMatch(/width:\s*34px/);
+    expect(routeMarkRule).toMatch(/height:\s*34px/);
+    expect(agentVectorRule).toMatch(/width:\s*34px/);
+    expect(agentVectorRule).toMatch(/height:\s*34px/);
+    expect(agentImageRule).toMatch(/width:\s*36px/);
+    expect(agentImageRule).toMatch(/height:\s*36px/);
+    expect(routeLabelRule).toMatch(/font-size:\s*13px/);
+    expect(disclosureTriggerRule).toMatch(/min-height:\s*40px/);
+    expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(selectedAgentRule).not.toMatch(/box-shadow:/);
+    expect(disclosureRule).not.toMatch(/border-left:/);
+    expect(appCss).not.toMatch(/\.routing-scope-global-group \.agent-route-disclosure::before/);
   });
 
   it("uses one focus indicator for enterprise connection inputs", () => {

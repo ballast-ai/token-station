@@ -1,5 +1,9 @@
 use crate::*;
 
+use sha2::{Digest, Sha256};
+use token_station_cli::server::GatewayRequestLease;
+use zeroize::Zeroize;
+
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ModelTestMessage {
     pub(crate) role: String,
@@ -56,8 +60,345 @@ impl ModelTestStreamRegistry {
     }
 }
 
+pub(crate) struct CachedModelTestGateway {
+    pub(crate) config: Box<ClientConfig>,
+    pub(crate) upstream_epochs: BTreeMap<String, u64>,
+    pub(crate) secret_store_fingerprint: [u8; 32],
+    pub(crate) plugin_identity_fingerprint: [u8; 32],
+    pub(crate) gateway: Arc<Gateway>,
+}
+
+pub(crate) const MODEL_TEST_SECRET_STORE_MAX_BYTES: u64 = 1_048_576;
+
+pub(crate) enum ModelTestGatewaySource {
+    Running {
+        gateway: Arc<Gateway>,
+        running_revision: u64,
+        request: GatewayRequestLease,
+    },
+    Draft {
+        config: Box<ClientConfig>,
+        upstream_epochs: BTreeMap<String, u64>,
+        request: RequestContext,
+    },
+}
+
+impl ModelTestGatewaySource {
+    pub(crate) fn request_context(&self) -> &RequestContext {
+        match self {
+            Self::Running { request, .. } => request.context(),
+            Self::Draft { request, .. } => request,
+        }
+    }
+}
+
+fn hash_model_test_secret(
+    hash: &mut Sha256,
+    owner: &str,
+    slot: &str,
+    value: Result<String, String>,
+) {
+    for field in [owner.as_bytes(), slot.as_bytes()] {
+        hash_length_prefixed_field(hash, field);
+    }
+    match value {
+        Ok(value) => {
+            let value = Zeroizing::new(value);
+            hash.update([1]);
+            hash.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        Err(_) => hash.update([0]),
+    }
+}
+
+fn hash_length_prefixed_field(hash: &mut Sha256, field: &[u8]) {
+    hash.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hash.update(field);
+}
+
+pub(crate) struct ModelTestSecretStore {
+    pub(crate) values: BTreeMap<String, String>,
+}
+
+impl Drop for ModelTestSecretStore {
+    fn drop(&mut self) {
+        for value in self.values.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+fn read_model_test_secret_store_inner(
+    data_dir: &Path,
+    before_open: impl FnOnce(),
+) -> Result<ModelTestSecretStore, String> {
+    use std::io::Read as _;
+
+    let path = data_dir.join(secrets::SECRETS_FILE);
+    let link_metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ModelTestSecretStore {
+                values: BTreeMap::new(),
+            });
+        }
+        Err(_) => return Err("The local secrets store is unreadable".to_owned()),
+    };
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+        return Err("The local secrets store must be a regular file".to_owned());
+    }
+    if link_metadata.len() > MODEL_TEST_SECRET_STORE_MAX_BYTES {
+        return Err("The local secrets store exceeds the model test size limit".to_owned());
+    }
+    before_open();
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(&path).map_err(|error| {
+        #[cfg(unix)]
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            return "The local secrets store must be a regular file".to_owned();
+        }
+        "The local secrets store is unreadable".to_owned()
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "The local secrets store is unreadable".to_owned())?;
+    if !metadata.is_file() {
+        return Err("The local secrets store must be a regular file".to_owned());
+    }
+    let mut raw = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(metadata.len().min(MODEL_TEST_SECRET_STORE_MAX_BYTES)).unwrap_or_default(),
+    ));
+    file.take(MODEL_TEST_SECRET_STORE_MAX_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| "The local secrets store is unreadable".to_owned())?;
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MODEL_TEST_SECRET_STORE_MAX_BYTES {
+        return Err("The local secrets store exceeds the model test size limit".to_owned());
+    }
+    let values = serde_json::from_slice(&raw)
+        .map_err(|_| "The local secrets store is invalid JSON".to_owned())?;
+    Ok(ModelTestSecretStore { values })
+}
+
+pub(crate) fn read_model_test_secret_store(
+    data_dir: &Path,
+) -> Result<ModelTestSecretStore, String> {
+    read_model_test_secret_store_inner(data_dir, || {})
+}
+
+#[cfg(test)]
+pub(crate) fn read_model_test_secret_store_with_before_open(
+    data_dir: &Path,
+    before_open: impl FnOnce(),
+) -> Result<ModelTestSecretStore, String> {
+    read_model_test_secret_store_inner(data_dir, before_open)
+}
+
+pub(crate) fn model_test_secret_store_fingerprint_with_reader(
+    config: &ClientConfig,
+    read_store: impl FnOnce(&Path) -> Result<ModelTestSecretStore, String>,
+) -> Result<[u8; 32], String> {
+    let mut hash = Sha256::new();
+    let mut slots = Vec::new();
+    if let Some(upstreams) = home_referenced_upstreams(config) {
+        for name in upstreams {
+            let Some(auth) = config
+                .upstreams
+                .get(&name)
+                .and_then(|upstream| upstream.auth.as_ref())
+                .filter(|auth| auth.store)
+            else {
+                continue;
+            };
+            slots.push((name, auth.slot.clone()));
+        }
+    }
+    if let Some(auth) = config
+        .egress
+        .auth
+        .as_ref()
+        .map(|auth| &auth.credential)
+        .filter(|auth| auth.store)
+    {
+        slots.push(("egress-proxy".to_owned(), auth.slot.clone()));
+    }
+    if slots.is_empty() {
+        return Ok(hash.finalize().into());
+    }
+    let store = read_store(&config.data.dir)?;
+    for (owner, slot) in slots {
+        hash_model_test_secret(
+            &mut hash,
+            &owner,
+            &slot,
+            store
+                .values
+                .get(&format!("{owner}/{slot}"))
+                .cloned()
+                .ok_or_else(|| "secret is not in the local store".to_owned()),
+        );
+    }
+    Ok(hash.finalize().into())
+}
+
+pub(crate) fn model_test_secret_store_fingerprint(
+    config: &ClientConfig,
+) -> Result<[u8; 32], String> {
+    model_test_secret_store_fingerprint_with_reader(config, read_model_test_secret_store)
+}
+
+pub(crate) fn model_test_plugin_identity_fingerprint(
+    config: &ClientConfig,
+) -> Result<[u8; 32], String> {
+    let registry = PluginRegistry::for_config(config).map_err(|error| {
+        eprintln!("model test plugin discovery failed: {error}");
+        "The Home route plugin identity is unavailable".to_owned()
+    })?;
+    let upstreams = home_referenced_upstreams(config)
+        .ok_or_else(|| "The Home route plugin identity is unavailable".to_owned())?;
+    let dialects = upstreams
+        .iter()
+        .filter_map(|name| config.upstreams.get(name))
+        .map(|upstream| upstream.provider.clone())
+        .collect::<BTreeSet<_>>();
+    let mut hash = Sha256::new();
+    for dialect in dialects {
+        let binding = registry
+            .provider_binding(&dialect)
+            .ok_or_else(|| "The Home route references an unavailable Provider plugin".to_owned())?;
+        let digest = binding.source.content_digest().map_err(|error| {
+            eprintln!("model test plugin digest failed: {error}");
+            "The Home route plugin identity is unavailable".to_owned()
+        })?;
+        let discovered_package = registry.package(&binding.package);
+        for field in [
+            dialect.as_bytes(),
+            binding.package.as_bytes(),
+            digest.as_bytes(),
+        ] {
+            hash_length_prefixed_field(&mut hash, field);
+        }
+        hash.update([
+            u8::from(discovered_package.is_some_and(|package| package.conformance_passed)),
+            u8::from(
+                discovered_package.is_some_and(|package| package.publisher_signature_verified),
+            ),
+        ]);
+    }
+    for agent_package_name in config.plugins.effective_agents() {
+        let source = registry.agent_source(&agent_package_name);
+        let digest = source.content_digest().map_err(|error| {
+            eprintln!("model test agent plugin digest failed: {error}");
+            "The Home route plugin identity is unavailable".to_owned()
+        })?;
+        for field in [
+            b"agent".as_slice(),
+            agent_package_name.as_bytes(),
+            digest.as_bytes(),
+        ] {
+            hash_length_prefixed_field(&mut hash, field);
+        }
+    }
+    Ok(hash.finalize().into())
+}
+
+pub(crate) fn ensure_model_test_plugin_identity_unchanged(
+    config: &ClientConfig,
+    expected: [u8; 32],
+) -> Result<(), String> {
+    if model_test_plugin_identity_fingerprint(config)? != expected {
+        return Err(
+            "The Home route plugin identity changed while preparing the model test Gateway. Retry"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) enum ModelTestRequestOwner {
+    Running(GatewayRequestLease),
+    Draft(RequestContext),
+}
+
+impl ModelTestRequestOwner {
+    pub(crate) fn context(&self) -> &RequestContext {
+        match self {
+            Self::Running(request) => request.context(),
+            Self::Draft(request) => request,
+        }
+    }
+}
+
+pub(crate) fn reusable_model_test_server<'a>(
+    inner: &'a AppInner,
+    config: &ClientConfig,
+) -> Option<&'a RunningServer> {
+    let server = match &inner.server {
+        ServerLifecycle::Running { server, .. } => server,
+        ServerLifecycle::Applying { old, .. } => old,
+        ServerLifecycle::Stopped { .. }
+        | ServerLifecycle::Starting { .. }
+        | ServerLifecycle::Stopping { .. }
+        | ServerLifecycle::Failed { .. } => return None,
+    };
+    (server.is_task_alive() && server.matches_home_gateway(config, &inner.upstream_epochs))
+        .then_some(server)
+}
+
+pub(crate) fn model_test_gateway_source(
+    inner: &AppInner,
+) -> Result<ModelTestGatewaySource, String> {
+    let config = Box::new(inner.materialize()?);
+    let home_router = config.home_router_config()?;
+    let route_uses_pending_credential = home_router
+        .pools
+        .values()
+        .flatten()
+        .chain(home_router.quota_accounts.iter())
+        .any(|target| {
+            inner
+                .pending_provider_keys
+                .contains_key(target.upstream.as_str())
+        });
+    if route_uses_pending_credential {
+        return Err(
+            "Save the verified Provider credential before testing this Home route".to_owned(),
+        );
+    }
+    if let Some(server) = reusable_model_test_server(inner, &config) {
+        return Ok(ModelTestGatewaySource::Running {
+            gateway: server.gateway(),
+            running_revision: server.running_revision(),
+            request: server
+                .begin_gateway_request(Duration::from_mins(2), Duration::from_mins(2))
+                .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64),
+        });
+    }
+    Ok(ModelTestGatewaySource::Draft {
+        config,
+        upstream_epochs: inner.upstream_epochs.clone(),
+        request: RequestContext::detached(Duration::from_mins(2), Duration::from_mins(2))
+            .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64),
+    })
+}
+
 #[derive(Clone, Default)]
-pub(crate) struct ModelTestStreamState(pub(crate) Arc<Mutex<ModelTestStreamRegistry>>);
+pub(crate) struct ModelTestStreamState(
+    pub(crate) Arc<Mutex<ModelTestStreamRegistry>>,
+    pub(crate) Arc<Mutex<Option<CachedModelTestGateway>>>,
+);
 
 pub(crate) struct ModelTestStreamRegistration {
     pub(crate) registry: Arc<Mutex<ModelTestStreamRegistry>>,
@@ -319,8 +660,18 @@ pub(crate) fn model_test_error_is_exhausted_balance(body: &Value) -> bool {
         })
 }
 
+pub(crate) fn model_test_error_is_local_concurrency(body: &Value) -> bool {
+    body.get("error")
+        .unwrap_or(body)
+        .get("code")
+        .and_then(Value::as_str)
+        == Some("concurrency_limit")
+}
+
 pub(crate) fn model_test_http_error(status: u16, body: &Value) -> String {
-    let summary = if status == 429 && model_test_error_is_exhausted_balance(body) {
+    let summary = if status == 429 && model_test_error_is_local_concurrency(body) {
+        "The Token Station concurrency limit is active. Try again shortly"
+    } else if status == 429 && model_test_error_is_exhausted_balance(body) {
         "The Provider account has no available balance"
     } else {
         match status {
@@ -374,8 +725,6 @@ pub(crate) async fn test_model_chat_stream(
     app: AppHandle,
     state: State<'_, AppStateManaged>,
     stream_state: State<'_, ModelTestStreamState>,
-    upstream: String,
-    model: String,
     messages: Vec<ModelTestMessage>,
     request_id: String,
 ) -> Result<ModelTestReply, String> {
@@ -383,8 +732,6 @@ pub(crate) async fn test_model_chat_stream(
         app,
         state.inner(),
         stream_state.inner(),
-        upstream,
-        model,
         messages,
         request_id,
     )
@@ -395,66 +742,86 @@ pub(crate) async fn run_model_test_chat<R: Runtime>(
     app: AppHandle<R>,
     state: &AppStateManaged,
     stream_state: &ModelTestStreamState,
-    upstream: String,
-    model: String,
     messages: Vec<ModelTestMessage>,
     request_id: String,
 ) -> Result<ModelTestReply, String> {
     validate_model_test_messages(&messages)?;
     validate_model_test_request_id(&request_id)?;
-    let upstream = upstream.trim().to_owned();
-    let model = model.trim().to_owned();
-    let mut config = {
-        let inner = state.0.lock().unwrap();
-        let config = inner.materialize()?;
-        let provider = config
-            .upstreams
-            .get(&upstream)
-            .ok_or_else(|| format!("Provider `{upstream}` is no longer configured"))?;
-        if !provider
-            .models
-            .iter()
-            .any(|candidate| candidate.model == model)
-        {
-            return Err(format!(
-                "Model `{model}` is no longer configured for Provider `{upstream}`"
-            ));
-        }
-        config
-    };
+    let gateway_source = model_test_gateway_source(&state.0.lock().unwrap())?;
 
-    let target = UpstreamModel::new(
-        UpstreamRef::new(upstream.clone())
-            .map_err(|error| format!("Provider name is invalid: {error}"))?,
-        model.clone(),
-    );
-    config.routing = Some(HostRoutingConfig {
-        mode: HostRoutingMode::Direct,
-        direct_target: Some(target),
-    });
-    config.router.local_only = false;
-    config.router.allow_cloud_fallback = false;
-
-    let request_context =
-        RequestContext::detached(Duration::from_secs(120), Duration::from_secs(120))
-            .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64);
     let registry = Arc::clone(&stream_state.0);
     {
         let mut streams = registry.lock().unwrap();
-        streams.register(&request_id, request_context.token())?;
+        streams.register(&request_id, gateway_source.request_context().token())?;
     }
     let registration = ModelTestStreamRegistration {
         registry,
         request_id: request_id.clone(),
     };
+    let gateway_cache = Arc::clone(&stream_state.1);
 
     let provider_runtime = tokio::runtime::Handle::current();
     tauri::async_runtime::spawn_blocking(move || {
         let _registration = registration;
-        let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
-        let gateway = Gateway::new_with_provider_runtime(&config, recorder, provider_runtime)?;
+        let (gateway, running_revision, request_owner) = match gateway_source {
+            ModelTestGatewaySource::Running {
+                gateway,
+                running_revision,
+                request,
+            } => (
+                gateway,
+                Some(running_revision),
+                ModelTestRequestOwner::Running(request),
+            ),
+            ModelTestGatewaySource::Draft {
+                config,
+                upstream_epochs,
+                request,
+            } => {
+                let secret_store_fingerprint = model_test_secret_store_fingerprint(&config)?;
+                let plugin_identity_fingerprint = model_test_plugin_identity_fingerprint(&config)?;
+                let mut cached = gateway_cache.lock().unwrap();
+                let gateway = if let Some(cached) = cached.as_ref().filter(|cached| {
+                    home_gateway_identities_match(
+                        &cached.config,
+                        &cached.upstream_epochs,
+                        &config,
+                        &upstream_epochs,
+                    ) && cached.secret_store_fingerprint == secret_store_fingerprint
+                        && cached.plugin_identity_fingerprint == plugin_identity_fingerprint
+                }) {
+                    let gateway = Arc::clone(&cached.gateway);
+                    ensure_model_test_plugin_identity_unchanged(
+                        &config,
+                        plugin_identity_fingerprint,
+                    )?;
+                    gateway
+                } else {
+                    let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
+                    let gateway = Arc::new(Gateway::new_with_provider_runtime(
+                        &config,
+                        recorder,
+                        provider_runtime,
+                    )?);
+                    ensure_model_test_plugin_identity_unchanged(
+                        &config,
+                        plugin_identity_fingerprint,
+                    )?;
+                    *cached = Some(CachedModelTestGateway {
+                        config,
+                        upstream_epochs,
+                        secret_store_fingerprint,
+                        plugin_identity_fingerprint,
+                        gateway: Arc::clone(&gateway),
+                    });
+                    gateway
+                };
+                (gateway, None, ModelTestRequestOwner::Draft(request))
+            }
+        };
+        let request_context = request_owner.context();
         let body = serde_json::to_vec(&json!({
-            "model": model,
+            "model": "auto",
             "messages": messages,
             "stream": true,
             "max_tokens": 1024
@@ -467,10 +834,10 @@ pub(crate) async fn run_model_test_chat<R: Runtime>(
         let mut first_token_ms = None;
         let mut output_budget = ModelTestOutputBudget::default();
         let mut stream_error = None;
-        gateway.chat_scoped(
-            &request_context,
+        gateway.chat_scoped_without_body_log(
+            request_context,
             None,
-            None,
+            running_revision,
             "POST",
             "/v1/chat/completions",
             &[("content-type".to_owned(), "application/json".to_owned())],

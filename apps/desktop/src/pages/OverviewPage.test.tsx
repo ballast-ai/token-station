@@ -105,6 +105,7 @@ const state = {
     listen: "127.0.0.1:8787",
     virtual_key: null,
     error: null,
+    model_test_uses_running_gateway: false,
   },
   draft_revision: 1,
   saved_revision: 1,
@@ -260,9 +261,40 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "测试模型" }));
+    const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
+    const agentActions = agentSummary.querySelector<HTMLElement>(".overview-agent-actions");
+    expect(agentActions).not.toBeNull();
+    const testButton = within(agentActions!).getByRole("button", { name: "验证模型连接" });
+    const openAgentsButton = within(agentActions!).getByRole("button", { name: "打开 Agent" });
+    expect(testButton.compareDocumentPosition(openAgentsButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(document.querySelector(".overview-heading")?.contains(testButton)).toBe(false);
+
+    await user.click(testButton);
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
+    expect(screen.getByText("草稿全局路由")).toBeInTheDocument();
+  });
+
+  it("uses the backend Home-Gateway identity for the model test route label", async () => {
+    const user = userEvent.setup();
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={{
+            ...state,
+            serve: { ...state.serve, model_test_uses_running_gateway: true },
+          }}
+          registry={registry}
+          agents={agents}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "验证模型连接" }));
+
+    expect(screen.getByText("运行中的全局路由")).toBeInTheDocument();
   });
 
   it("keeps the model test action visible but disabled without configured models", () => {
@@ -277,6 +309,6 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
 
-    expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "验证模型连接" })).toBeDisabled();
   });
 });

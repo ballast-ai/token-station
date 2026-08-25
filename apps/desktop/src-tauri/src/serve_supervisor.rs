@@ -113,6 +113,7 @@ pub(crate) fn complete_serve_start<R: Runtime>(
     result: Result<PreparedServer, StartFailure>,
     applied_pricing: PriceTable,
     metrics_db: PathBuf,
+    upstream_epochs: BTreeMap<String, u64>,
 ) {
     // Same-port handoff must first release the old accept socket. This state
     // mutation is instant; the candidate bind/retry itself happens below,
@@ -162,7 +163,8 @@ pub(crate) fn complete_serve_start<R: Runtime>(
                     revision,
                 },
                 Ok(prepared),
-            ) if current == generation => match prepared.publish(revision) {
+            ) if current == generation => match prepared.publish(revision, upstream_epochs.clone())
+            {
                 Ok(server) => {
                     published = true;
                     ServerLifecycle::Running {
@@ -187,7 +189,7 @@ pub(crate) fn complete_serve_start<R: Runtime>(
                 Ok(prepared),
             ) if current == generation => {
                 let same_listener = old.listen() == prepared.listen();
-                match prepared.publish(revision) {
+                match prepared.publish(revision, upstream_epochs.clone()) {
                     Ok(server) => {
                         published = true;
                         old.stop_accepting();
@@ -354,7 +356,7 @@ where
     R: Runtime,
     F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
 {
-    let (config, generation, snapshot, serve_view, metrics_db) = {
+    let (config, generation, snapshot, serve_view, metrics_db, upstream_epochs) = {
         let mut inner = state.0.lock().unwrap();
         if let Some(expected) = expected_stopped_generation {
             if !menu_action_expectation_matches(
@@ -404,7 +406,14 @@ where
         };
         let snapshot = inner.snapshot();
         let serve_view = snapshot.serve.clone();
-        (config, generation, snapshot, serve_view, metrics_db)
+        (
+            config,
+            generation,
+            snapshot,
+            serve_view,
+            metrics_db,
+            inner.upstream_epochs.clone(),
+        )
     };
 
     emit_serve_state(&app, &serve_view);
@@ -422,6 +431,7 @@ where
             result,
             applied_pricing,
             metrics_db,
+            upstream_epochs,
         );
     });
     Ok(Some(snapshot))

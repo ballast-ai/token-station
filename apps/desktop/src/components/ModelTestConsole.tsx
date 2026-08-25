@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Bot, Check, ChevronLeft, ChevronRight, ChevronsUpDown, LoaderCircle, MessageSquareText, SendHorizontal, Square, Trash2 } from "lucide-react";
-import type { ModelTestMessage, ProviderView, TierView } from "../api";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Bot, LoaderCircle, MessageSquareText, Route, SendHorizontal, Square, Trash2 } from "lucide-react";
+import type { ModelTestMessage, StateView } from "../api";
 import { cancelModelTestChat, testModelChatStream } from "../api";
-import { ProviderIcon } from "../brandIcons";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Button } from "./ui/button";
 import {
@@ -12,20 +11,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "./ui/dropdown-menu";
-
 interface ModelTestConsoleProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  providers: ProviderView[];
-  initialTarget: TierView | null;
+  routingMode: StateView["routing_mode"];
+  routeState: "running" | "draft";
 }
 
 export type TranscriptItem = ModelTestMessage & {
@@ -118,8 +108,6 @@ type ActiveRequest = {
   pendingFirstTokenMs: number | null;
 };
 
-const targetKey = (upstream: string, model: string) => `${upstream}\u0000${model}`;
-
 function errorMessage(error: unknown) {
   if (error instanceof Error && error.message.trim()) return error.message;
   if (typeof error === "string" && error.trim()) return error;
@@ -129,8 +117,8 @@ function errorMessage(error: unknown) {
 export default function ModelTestConsole({
   open,
   onOpenChange,
-  providers,
-  initialTarget,
+  routingMode,
+  routeState,
 }: ModelTestConsoleProps) {
   const { copy } = useLocalizedCopy();
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -138,26 +126,20 @@ export default function ModelTestConsole({
   const nextId = useRef(1);
   const nextRequestId = useRef(1);
   const activeRequestRef = useRef<ActiveRequest | null>(null);
-  const targets = useMemo(() => providers.flatMap((provider) => provider.models.map((model) => ({
-    provider,
-    model,
-    key: targetKey(provider.name, model),
-  }))), [providers]);
-  const preferredKey = initialTarget?.upstream && initialTarget.model
-    ? targetKey(initialTarget.upstream, initialTarget.model)
-    : null;
-  const defaultKey = targets.some((target) => target.key === preferredKey)
-    ? preferredKey!
-    : (targets[0]?.key ?? "");
-  const [selectedKey, setSelectedKey] = useState(defaultKey);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [draft, setDraft] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const [targetMenuOpen, setTargetMenuOpen] = useState(false);
-  const [pickerProviderName, setPickerProviderName] = useState<string | null>(null);
   const focusComposer = (delay = 60) => window.setTimeout(() => composerRef.current?.focus(), delay);
+  const routeModeLabel = routingMode === "direct"
+    ? copy("Direct", "简单路由", "簡單路由", "ダイレクト")
+    : routingMode === "quota_first"
+      ? copy("Quota-first", "额度优先", "額度優先", "クォータ優先")
+      : copy("Smart routing", "智能路由", "智慧路由", "スマートルーティング");
+  const routeStateLabel = routeState === "running"
+    ? copy("Running global route", "运行中的全局路由", "執行中的全域路由", "実行中のグローバルルート")
+    : copy("Draft global route", "草稿全局路由", "草稿全域路由", "下書きのグローバルルート");
 
   const takePendingDelta = (request: ActiveRequest) => {
     if (request.flushTimer != null) window.clearTimeout(request.flushTimer);
@@ -218,10 +200,6 @@ export default function ModelTestConsole({
   };
 
   useEffect(() => {
-    if (!targets.some((target) => target.key === selectedKey)) setSelectedKey(defaultKey);
-  }, [defaultKey, selectedKey, targets]);
-
-  useEffect(() => {
     if (open) return;
     void (async () => {
       if (!(await cancelActiveRequest(false))) return;
@@ -230,11 +208,8 @@ export default function ModelTestConsole({
       setComposerError(null);
       setSending(false);
       setCancelling(false);
-      setSelectedKey(defaultKey);
-      setTargetMenuOpen(false);
-      setPickerProviderName(null);
     })();
-  }, [defaultKey, open]);
+  }, [open]);
 
   useEffect(() => () => {
     const active = activeRequestRef.current;
@@ -250,27 +225,12 @@ export default function ModelTestConsole({
     if (transcript) transcript.scrollTop = transcript.scrollHeight;
   }, [items]);
 
-  const selectedTarget = targets.find((target) => target.key === selectedKey) ?? targets[0];
-  const selectableProviders = providers.filter((provider) => provider.models.length > 0);
-  const pickerProvider = selectableProviders.find((provider) => provider.name === pickerProviderName);
-
   const clearConversation = async () => {
     if (!(await cancelActiveRequest(false))) return;
     setItems([]);
     setDraft("");
     setComposerError(null);
     focusComposer();
-  };
-
-  const changeTarget = async (key: string) => {
-    if (!(await cancelActiveRequest(false))) return;
-    setSelectedKey(key);
-    setItems([]);
-    setDraft("");
-    setComposerError(null);
-    setTargetMenuOpen(false);
-    setPickerProviderName(null);
-    focusComposer(220);
   };
 
   const stop = async () => {
@@ -285,15 +245,12 @@ export default function ModelTestConsole({
     setComposerError(null);
     setSending(false);
     setCancelling(false);
-    setSelectedKey(defaultKey);
-    setTargetMenuOpen(false);
-    setPickerProviderName(null);
     onOpenChange(false);
   };
 
   const send = async () => {
     const prompt = draft.trim();
-    if (!selectedTarget || !prompt || sending) return;
+    if (!prompt || sending) return;
 
     const requestMessages = buildModelTestRequestMessages(items, prompt);
     if (requestMessages.error) {
@@ -338,8 +295,6 @@ export default function ModelTestConsole({
 
     try {
       const reply = await testModelChatStream(
-        selectedTarget.provider.name,
-        selectedTarget.model,
         requestMessages.messages,
         request.requestId,
         (event) => {
@@ -428,89 +383,28 @@ export default function ModelTestConsole({
             <div>
               <DialogTitle>{copy("Test model", "测试模型", "測試模型", "モデルをテスト")}</DialogTitle>
               <DialogDescription>{copy(
-                "Have a short conversation before using this model in an Agent.",
-                "接入 Agent 前，先用真实对话确认模型响应。",
-                "接入 Agent 前，先用真實對話確認模型回應。",
-                "Agent で使う前に、実際の会話でモデルの応答を確認します。",
+                "Verify the current global routing configuration before connecting an Agent.",
+                "接入 Agent 前，先验证当前全局路由配置。",
+                "接入 Agent 前，先驗證目前的全域路由配置。",
+                "Agent を接続する前に、現在のグローバルルーティング設定を確認します。",
               )}</DialogDescription>
             </div>
           </div>
-          {selectedTarget && (
-            <DropdownMenu open={targetMenuOpen} onOpenChange={(nextOpen) => {
-              setTargetMenuOpen(nextOpen);
-              if (nextOpen) setPickerProviderName(null);
-            }}>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="model-test-target-trigger"
-                  aria-label={copy(
-                    `Choose model. Current: ${selectedTarget.model}, Provider: ${selectedTarget.provider.name}`,
-                    `选择模型，当前：${selectedTarget.model}，供应商：${selectedTarget.provider.name}`,
-                    `選擇模型，目前：${selectedTarget.model}，供應商：${selectedTarget.provider.name}`,
-                    `モデルを選択。現在：${selectedTarget.model}、プロバイダー：${selectedTarget.provider.name}`,
-                  )}
-                >
-                  <ProviderIcon id={selectedTarget.provider.brand_id} label={selectedTarget.provider.name} size={20} />
-                  <span className="model-test-target-copy">
-                    <strong>{selectedTarget.model}</strong>
-                    <small>{selectedTarget.provider.name}</small>
-                  </span>
-                  <ChevronsUpDown aria-hidden="true" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" sideOffset={8} className="model-test-target-menu">
-                {pickerProvider ? (
-                  <>
-                    <DropdownMenuItem
-                      className="model-test-picker-back"
-                      aria-label={copy("Back to Providers", "返回供应商", "返回供應商", "プロバイダーに戻る")}
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        setPickerProviderName(null);
-                      }}
-                    >
-                      <ChevronLeft aria-hidden="true" />
-                      <ProviderIcon id={pickerProvider.brand_id} label={pickerProvider.name} size={20} />
-                      <span className="model-test-picker-heading">
-                        <small>{copy("Choose model", "选择模型", "選擇模型", "モデルを選択")}</small>
-                        <strong>{pickerProvider.name}</strong>
-                      </span>
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    {pickerProvider.models.map((model) => {
-                      const key = targetKey(pickerProvider.name, model);
-                      return (
-                        <DropdownMenuItem key={key} onSelect={() => void changeTarget(key)}>
-                          <span className="model-test-model-name">{model}</span>
-                          {selectedKey === key && <Check aria-hidden="true" />}
-                        </DropdownMenuItem>
-                      );
-                    })}
-                  </>
-                ) : (
-                  <>
-                    <DropdownMenuLabel>{copy("Choose Provider", "选择供应商", "選擇供應商", "プロバイダーを選択")}</DropdownMenuLabel>
-                    {selectableProviders.map((provider) => (
-                      <DropdownMenuItem
-                        key={provider.name}
-                        onSelect={(event) => {
-                          event.preventDefault();
-                          setPickerProviderName(provider.name);
-                        }}
-                      >
-                        <ProviderIcon id={provider.brand_id} label={provider.name} size={20} />
-                        <strong>{provider.name}</strong>
-                        {provider.name === selectedTarget.provider.name
-                          ? <Check aria-hidden="true" />
-                          : <ChevronRight aria-hidden="true" />}
-                      </DropdownMenuItem>
-                    ))}
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
+          <div
+            className="model-test-route-status"
+            aria-label={copy(
+              `${routeStateLabel}: ${routeModeLabel}`,
+              `${routeStateLabel}：${routeModeLabel}`,
+              `${routeStateLabel}：${routeModeLabel}`,
+              `${routeStateLabel}：${routeModeLabel}`,
+            )}
+          >
+            <Route aria-hidden="true" />
+            <span>
+              <small>{routeStateLabel}</small>
+              <strong>{routeModeLabel}</strong>
+            </span>
+          </div>
         </DialogHeader>
 
         <div ref={transcriptRef} className="model-test-transcript" aria-live="polite">
@@ -532,7 +426,7 @@ export default function ModelTestConsole({
                   <div className="model-test-message-meta">
                     <span>{item.role === "user"
                       ? copy("You", "你", "你", "あなた")
-                      : selectedTarget?.model}</span>
+                      : copy("Global route", "全局路由", "全域路由", "グローバルルート")}</span>
                     {item.stopped ? (
                       <small>{copy("Stopped", "已停止", "已停止", "停止済み")}</small>
                     ) : item.firstTokenMs != null && item.latencyMs != null ? (
@@ -566,11 +460,10 @@ export default function ModelTestConsole({
             ref={composerRef}
             className="model-test-composer"
             aria-label={copy("Message", "消息", "訊息", "メッセージ")}
-            placeholder={copy("Message the model…", "给模型发消息…", "傳訊息給模型…", "モデルにメッセージを送信…")}
+            placeholder={copy("Message the global route…", "向全局路由发送消息…", "向全域路由傳送訊息…", "グローバルルートにメッセージを送信…")}
             value={draft}
             maxLength={16_000}
             rows={2}
-            disabled={!selectedTarget}
             onChange={(event) => {
               setDraft(event.target.value);
               setComposerError(null);
@@ -601,7 +494,7 @@ export default function ModelTestConsole({
                 : sending
                   ? copy("Stop generating", "停止生成", "停止生成", "生成を停止")
                 : copy("Send message", "发送消息", "傳送訊息", "メッセージを送信")}
-              disabled={cancelling || (!sending && (!draft.trim() || !selectedTarget))}
+              disabled={cancelling || (!sending && !draft.trim())}
               onClick={sending ? () => void stop() : () => void send()}
             >
               {sending ? <Square className="model-test-stop-icon" aria-hidden="true" /> : <SendHorizontal aria-hidden="true" />}

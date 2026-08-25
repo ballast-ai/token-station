@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Activity, Boxes, Search, Settings, X } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
@@ -37,6 +37,10 @@ interface AppShellProps {
   agents: AgentView[];
   commandBusy: boolean;
   discoveryPending?: boolean;
+  modelCount: number;
+  modelEntryOpen: boolean;
+  suppressModelEntryAutoOpen?: boolean;
+  onModelEntryOpenChange: (open: boolean) => void;
   onNavigate: (view: AppView) => void;
   onToggleServe: () => void;
   children: ReactNode;
@@ -67,12 +71,15 @@ export default function AppShell({
   agents,
   commandBusy,
   discoveryPending = false,
+  modelCount,
+  modelEntryOpen,
+  suppressModelEntryAutoOpen = false,
+  onModelEntryOpenChange,
   onNavigate,
   onToggleServe,
   children,
 }: AppShellProps) {
   const { t, copy } = useLanguage();
-  const [modelEntryOpen, setModelEntryOpen] = useState(false);
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const taskRunning = serve.app_runtime === "running";
   const activePrimary = primaryView(view);
@@ -127,10 +134,8 @@ export default function AppShell({
                     : undefined
                 }
                 onClick={() => {
-                  if (item.view === "providers") {
-                    onNavigate("providers");
-                    setModelEntryOpen(true);
-                    return;
+                  if (item.view === "providers" && modelCount === 0 && !suppressModelEntryAutoOpen) {
+                    onModelEntryOpenChange(true);
                   }
                   onNavigate(item.view);
                 }}
@@ -193,7 +198,7 @@ export default function AppShell({
         </span>
       )}
 
-      <Dialog open={modelEntryOpen} onOpenChange={setModelEntryOpen}>
+      <Dialog open={modelEntryOpen} onOpenChange={onModelEntryOpenChange}>
         <DialogContent
           className="model-entry-dialog"
           aria-describedby="model-entry-description"
@@ -223,7 +228,7 @@ export default function AppShell({
               type="button"
               aria-label={copy("Choose provider first", "先选供应商", "先選供應商", "まずプロバイダーを選択")}
               onClick={() => {
-                setModelEntryOpen(false);
+                onModelEntryOpenChange(false);
                 onNavigate("add-provider");
               }}
             >
@@ -237,7 +242,7 @@ export default function AppShell({
               type="button"
               aria-label={copy("Search model first", "先搜模型", "先搜模型", "まずモデルを検索")}
               onClick={() => {
-                setModelEntryOpen(false);
+                onModelEntryOpenChange(false);
                 onNavigate("add-model");
               }}
             >

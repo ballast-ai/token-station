@@ -34,6 +34,7 @@ describe("desktop in-app update", () => {
       <About
         desktopVersion="1.1.2"
         coreVersion="0.2.0"
+        commitHash="8632371"
         onOpenFirstRunGuide={onOpenFirstRunGuide}
       />,
     );
@@ -41,8 +42,9 @@ describe("desktop in-app update", () => {
     expect(screen.getByRole("heading", { name: "Token Station" })).toBeInTheDocument();
     expect(screen.getByLabelText("Desktop 1.1.2")).toBeInTheDocument();
     expect(screen.getByLabelText("Core 0.2.0")).toBeInTheDocument();
+    expect(screen.getByLabelText("Commit 8632371")).toBeInTheDocument();
     expect(container.querySelector('[data-slot="card"]')).toBeInTheDocument();
-    expect(container.querySelectorAll('[data-slot="badge"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-slot="badge"]')).toHaveLength(3);
     expect(container.querySelector('[data-slot="separator"]')).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "GitHub" }));

@@ -97,7 +97,8 @@ function serveFixture(overrides: Partial<ServeView> = {}): ServeView {
   return {
     phase: "stopped", app_runtime: "stopped", listener_reachable: false,
     agent_connected: false, running_revision: null, instance_id: null,
-    listen: "127.0.0.1:9999", virtual_key: null, error: null, ...overrides,
+    listen: "127.0.0.1:9999", virtual_key: null, error: null,
+    model_test_uses_running_gateway: false, ...overrides,
   };
 }
 
@@ -305,8 +306,6 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     });
 
     const reply = await testModelChatStream(
-      "p",
-      "m",
       [{ role: "user", content: "hello" }],
       "model-test-1",
       onDelta,
@@ -314,8 +313,6 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
     expect(listenMock).toHaveBeenCalledWith("model-test-stream", expect.any(Function));
     expect(invokeMock).toHaveBeenCalledWith("test_model_chat_stream", {
-      upstream: "p",
-      model: "m",
       messages: [{ role: "user", content: "hello" }],
       requestId: "model-test-1",
     });

@@ -1,7 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProviderView, TierView } from "../api";
 import { cancelModelTestChat, testModelChatStream } from "../api";
 import { LANGUAGE_STORAGE_KEY, LanguageProvider } from "./LanguageProvider";
 import ModelTestConsole, {
@@ -19,39 +18,18 @@ vi.mock("../api", async (importOriginal) => {
   };
 });
 
-const providers: ProviderView[] = [
-  {
-    name: "openai-main",
-    brand_id: "openai",
-    provider: "openai-compatible",
-    base_url: "https://api.openai.com/v1",
-    models: ["gpt-5.6-sol", "gpt-5.6-terra"],
-    has_auth: true,
-  },
-  {
-    name: "deepseek-main",
-    brand_id: "deepseek",
-    provider: "openai-compatible",
-    base_url: "https://api.deepseek.com/v1",
-    models: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4"],
-    has_auth: true,
-  },
-];
-
-const directTarget: TierView = { upstream: "openai-main", model: "gpt-5.6-terra" };
-
 function renderConsole(
-  target: TierView | null = directTarget,
   onOpenChange = vi.fn(),
   open = true,
+  routeState: "running" | "draft" = "running",
 ) {
   return render(
     <LanguageProvider>
       <ModelTestConsole
         open={open}
         onOpenChange={onOpenChange}
-        providers={providers}
-        initialTarget={target}
+        routingMode="direct"
+        routeState={routeState}
       />
     </LanguageProvider>,
   );
@@ -65,21 +43,26 @@ beforeEach(() => {
 });
 
 describe("ModelTestConsole", () => {
-  it("starts with the saved direct target and a normal chat composer", async () => {
+  it("shows the global route and a normal chat composer", async () => {
     renderConsole();
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
-    const targetButton = screen.getByRole("button", { name: /选择模型/ });
-    expect(targetButton).toHaveTextContent("gpt-5.6-terra");
-    expect(targetButton).toHaveTextContent("openai-main");
+    expect(screen.getByLabelText("运行中的全局路由：简单路由")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /选择模型/ })).toBeNull();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "消息" })).toHaveFocus());
     expect(screen.getByText("每次发送都会产生一次真实的模型请求，可能计入供应商用量。")).toBeInTheDocument();
+  });
+
+  it("identifies an unapplied global route as a draft", () => {
+    renderConsole(vi.fn(), true, "draft");
+
+    expect(screen.getByLabelText("草稿全局路由：简单路由")).toBeInTheDocument();
   });
 
   it("renders real deltas before completion and shows first-text and total latency", async () => {
     const user = userEvent.setup();
     let finishRequest: ((reply: { content: string; first_token_ms: number; latency_ms: number }) => void) | undefined;
-    vi.mocked(testModelChatStream).mockImplementation((_upstream, _model, _messages, requestId, onDelta) => {
+    vi.mocked(testModelChatStream).mockImplementation((_messages, requestId, onDelta) => {
       onDelta({ request_id: requestId, delta: "连接", first_token_ms: 126 });
       return new Promise((resolve) => {
         finishRequest = resolve;
@@ -92,8 +75,6 @@ describe("ModelTestConsole", () => {
     await user.keyboard("{Enter}");
 
     expect(testModelChatStream).toHaveBeenCalledWith(
-      "openai-main",
-      "gpt-5.6-terra",
       [{ role: "user", content: "只回复：连接正常" }],
       expect.any(String),
       expect.any(Function),
@@ -105,49 +86,6 @@ describe("ModelTestConsole", () => {
     expect(await screen.findByText("连接正常。")).toBeInTheDocument();
     expect(screen.getByText("首字 126 ms · 总计 842 ms")).toBeInTheDocument();
     expect(composer).toHaveValue("");
-  });
-
-  it("uses one button to select a Provider first and then one of its models", async () => {
-    const user = userEvent.setup();
-    renderConsole();
-
-    const targetButton = screen.getByRole("button", { name: /选择模型/ });
-    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
-    await user.click(targetButton);
-
-    expect(screen.getByText("选择供应商")).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "openai-main" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "deepseek-main" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /gpt-5.6/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /deepseek-v4/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("menuitem", { name: "deepseek-main" }));
-
-    expect(screen.getByText("选择模型")).toBeInTheDocument();
-    expect(screen.getByText("deepseek-main")).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "deepseek-chat" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "deepseek-reasoner" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "deepseek-v4" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /gpt-5.6/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("menuitem", { name: "deepseek-reasoner" }));
-
-    expect(targetButton).toHaveTextContent("deepseek-reasoner");
-    expect(targetButton).toHaveTextContent("deepseek-main");
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("textbox", { name: "消息" })).toHaveFocus());
-  });
-
-  it("shows the official Provider avatar once and keeps model options text-only", async () => {
-    const user = userEvent.setup();
-    renderConsole();
-
-    expect(document.querySelectorAll('[data-provider-brand="openai"]')).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: /选择模型/ }));
-    await user.click(screen.getByRole("menuitem", { name: "deepseek-main" }));
-    expect(screen.getAllByRole("menuitem")).toHaveLength(4);
-    expect(document.querySelector('[data-slot="dropdown-menu-content"] [data-provider-brand="openai"]')).toBeNull();
-    document.querySelectorAll(".model-test-model-name").forEach((modelName) => {
-      expect(modelName.closest('[data-slot="dropdown-menu-item"]')?.querySelector("[data-provider-brand]")).toBeNull();
-    });
   });
 
   it("keeps the failed prompt available, blocks duplicate sends, and retries one prompt", async () => {
@@ -175,7 +113,7 @@ describe("ModelTestConsole", () => {
     });
     await user.keyboard("{Enter}");
     await waitFor(() => expect(testModelChatStream).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(testModelChatStream).mock.calls[1]?.[2]).toEqual([
+    expect(vi.mocked(testModelChatStream).mock.calls[1]?.[0]).toEqual([
       { role: "user", content: "测试鉴权" },
     ]);
   });
@@ -184,7 +122,7 @@ describe("ModelTestConsole", () => {
     const user = userEvent.setup();
     let rejectRequest: ((reason?: unknown) => void) | undefined;
     let pushDelta: ((delta: string) => void) | undefined;
-    vi.mocked(testModelChatStream).mockImplementation((_upstream, _model, _messages, requestId, onDelta) => {
+    vi.mocked(testModelChatStream).mockImplementation((_messages, requestId, onDelta) => {
       pushDelta = (delta) => onDelta({ request_id: requestId, delta, first_token_ms: 90 });
       pushDelta("部分回答");
       return new Promise((_, reject) => {
@@ -215,30 +153,9 @@ describe("ModelTestConsole", () => {
     await user.type(composer, "新问题");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(testModelChatStream).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(testModelChatStream).mock.calls[1]?.[2]).toEqual([
+    expect(vi.mocked(testModelChatStream).mock.calls[1]?.[0]).toEqual([
       { role: "user", content: "新问题" },
     ]);
-  });
-
-  it("cancels the active request and clears partial text when the target changes", async () => {
-    const user = userEvent.setup();
-    vi.mocked(testModelChatStream).mockImplementation((_upstream, _model, _messages, requestId, onDelta) => {
-      onDelta({ request_id: requestId, delta: "旧模型回复", first_token_ms: 75 });
-      return new Promise(() => undefined);
-    });
-    renderConsole();
-
-    await user.type(screen.getByRole("textbox", { name: "消息" }), "开始测试");
-    await user.keyboard("{Enter}");
-    expect(await screen.findByText("旧模型回复")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /选择模型/ }));
-    await user.click(screen.getByRole("menuitem", { name: "deepseek-main" }));
-    await user.click(screen.getByRole("menuitem", { name: "deepseek-chat" }));
-
-    expect(cancelModelTestChat).toHaveBeenCalledWith(expect.any(String));
-    expect(screen.queryByText("旧模型回复")).not.toBeInTheDocument();
-    expect(screen.getByText("每次发送都会产生一次真实的模型请求，可能计入供应商用量。")).toBeInTheDocument();
   });
 
   it("rejects a prompt that exceeds the UTF-8 byte limit", async () => {
@@ -257,7 +174,7 @@ describe("ModelTestConsole", () => {
     const user = userEvent.setup();
     let pushDelta: ((delta: string) => void) | undefined;
     vi.mocked(cancelModelTestChat).mockRejectedValue(new Error("cancel transport failed"));
-    vi.mocked(testModelChatStream).mockImplementation((_upstream, _model, _messages, requestId, onDelta) => {
+    vi.mocked(testModelChatStream).mockImplementation((_messages, requestId, onDelta) => {
       pushDelta = (delta) => onDelta({ request_id: requestId, delta, first_token_ms: 42 });
       pushDelta("第一段");
       return new Promise(() => undefined);
@@ -283,7 +200,7 @@ describe("ModelTestConsole", () => {
       rejectCancellation = reject;
     }));
     vi.mocked(testModelChatStream).mockImplementation(() => new Promise(() => undefined));
-    renderConsole(directTarget, onOpenChange);
+    renderConsole(onOpenChange);
 
     await user.type(screen.getByRole("textbox", { name: "消息" }), "保持打开");
     await user.keyboard("{Enter}");
@@ -305,7 +222,7 @@ describe("ModelTestConsole", () => {
     vi.mocked(cancelModelTestChat).mockImplementation(() => new Promise((resolve) => {
       resolveCancellation = resolve;
     }));
-    vi.mocked(testModelChatStream).mockImplementation((_upstream, _model, _messages, requestId, onDelta) => {
+    vi.mocked(testModelChatStream).mockImplementation((_messages, requestId, onDelta) => {
       onDelta({ request_id: requestId, delta: "保留片段", first_token_ms: 18 });
       return new Promise((_, reject) => {
         rejectRequest = reject;
@@ -330,12 +247,12 @@ describe("ModelTestConsole", () => {
     vi.mocked(cancelModelTestChat).mockImplementation(() => new Promise((resolve) => {
       resolveCancellation = resolve;
     }));
-    vi.mocked(testModelChatStream).mockImplementation((_upstream, _model, _messages, requestId, onDelta) => {
+    vi.mocked(testModelChatStream).mockImplementation((_messages, requestId, onDelta) => {
       onDelta({ request_id: requestId, delta: "旧回复", first_token_ms: 21 });
       return new Promise(() => undefined);
     });
     const onOpenChange = vi.fn();
-    const view = renderConsole(directTarget, onOpenChange);
+    const view = renderConsole(onOpenChange);
 
     await user.type(screen.getByRole("textbox", { name: "消息" }), "旧问题");
     await user.keyboard("{Enter}");
@@ -345,8 +262,8 @@ describe("ModelTestConsole", () => {
         <ModelTestConsole
           open={false}
           onOpenChange={onOpenChange}
-          providers={providers}
-          initialTarget={directTarget}
+          routingMode="direct"
+          routeState="running"
         />
       </LanguageProvider>,
     );
@@ -355,8 +272,8 @@ describe("ModelTestConsole", () => {
         <ModelTestConsole
           open
           onOpenChange={onOpenChange}
-          providers={providers}
-          initialTarget={directTarget}
+          routingMode="direct"
+          routeState="running"
         />
       </LanguageProvider>,
     );

@@ -21,6 +21,16 @@ env:
   TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
 
 jobs:
+  full-ci:
+    uses: ./.github/workflows/full-ci.yml
+
+  platform-gates:
+    uses: ./.github/workflows/platform.yml
+
+  linux-desktop:
+    needs: [full-ci, platform-gates]
+    uses: ./.github/workflows/linux-desktop.yml
+
   release-mode:
     runs-on: ubuntu-24.04
     outputs:
@@ -39,7 +49,7 @@ jobs:
           fi
 
   build:
-    needs: release-mode
+    needs: [release-mode, full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     strategy:
       fail-fast: false
@@ -74,7 +84,7 @@ jobs:
 
   # Rebuild the same recipe from clean trees and require byte identity.
   reproducibility:
-    needs: release-mode
+    needs: [release-mode, full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     steps:
@@ -89,7 +99,7 @@ jobs:
           sha256sum -c first.sum
 
   desktop-macos:
-    needs: release-mode
+    needs: [release-mode, full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     name: Desktop macOS (${{ matrix.target }})
     runs-on: macos-14
@@ -176,7 +186,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [release-mode, build, reproducibility, desktop-macos]
+    needs: [release-mode, full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos]
     if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     permissions:

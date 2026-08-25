@@ -67,6 +67,11 @@ describe("AgentsPage split workspaces", () => {
     expect(within(selector).getByRole("button", { name: "企业路由" })).toBeVisible();
     const globalRoute = within(selector).getByRole("button", { name: "全局路由" });
     const enterpriseRoute = within(selector).getByRole("button", { name: "企业路由" });
+    const globalGroup = selector.querySelector(".routing-scope-global-group");
+    expect(globalGroup).not.toBeNull();
+    expect(screen.getByRole("group", { name: "全局路由与 Agent 路由" })).toBe(globalGroup);
+    expect(globalGroup).toContainElement(globalRoute);
+    expect(globalGroup).not.toContainElement(enterpriseRoute);
     expect(globalRoute).toHaveTextContent("当前");
     expect(globalRoute).toHaveAttribute("aria-current", "page");
     expect(enterpriseRoute).toHaveTextContent("切换");
@@ -74,6 +79,7 @@ describe("AgentsPage split workspaces", () => {
     expect(within(selector).queryByRole("button", { name: "重新扫描" })).toBeNull();
     expect(within(selector).queryByText("所有 Agent 的默认策略")).toBeNull();
     const disclosure = within(selector).getByRole("button", { name: "Agent 路由" });
+    expect(globalGroup).toContainElement(disclosure);
     expect(disclosure).toHaveTextContent("Agent 路由2");
     expect(selector.querySelector('[data-slot="card-header"] [data-slot="badge"]')).toBeNull();
     expect(globalRoute.compareDocumentPosition(disclosure) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
