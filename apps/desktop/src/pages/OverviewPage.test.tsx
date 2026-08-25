@@ -2,7 +2,6 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentUiMetadataView, AgentView, StateView } from "../api";
-import { getStats } from "../api";
 import { LANGUAGE_STORAGE_KEY, LanguageProvider } from "../components/LanguageProvider";
 import OverviewPage from "./OverviewPage";
 
@@ -130,80 +129,9 @@ const state = {
 
 beforeEach(() => {
   window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-CN");
-  vi.mocked(getStats).mockResolvedValue({
-    total: {
-      requests: 0,
-      errors: 0,
-      p50_latency_ms: 0,
-      p95_latency_ms: 0,
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-      reasoning_tokens: 0,
-      cost_micros: null,
-      priced_requests: 0,
-      unpriced_requests: 0,
-    },
-    groups: [],
-    by: null,
-    empty: true,
-  });
 });
 
 describe("OverviewPage summaries", () => {
-  it("shows the rolling usage trend and five metrics before system summaries", async () => {
-    const user = userEvent.setup();
-    const onNavigate = vi.fn();
-    const aggregate = {
-      requests: 10,
-      errors: 1,
-      p50_latency_ms: 120,
-      p95_latency_ms: 480,
-      input_tokens: 1_000,
-      output_tokens: 500,
-      cache_read_tokens: 400,
-      cache_write_tokens: 100,
-      reasoning_tokens: 80,
-      cost_micros: 1_250_000,
-      priced_requests: 10,
-      unpriced_requests: 0,
-    };
-    vi.mocked(getStats).mockImplementation(async (_since, by) => ({
-      total: aggregate,
-      groups: by === "hour" ? [[String(Date.now()), aggregate]] : [],
-      by,
-      empty: false,
-    }));
-
-    render(
-      <LanguageProvider>
-        <OverviewPage state={state} registry={registry} agents={agents} onNavigate={onNavigate} />
-      </LanguageProvider>,
-    );
-
-    const trend = await screen.findByRole("region", { name: "近 24 小时使用趋势" });
-    expect(within(trend).getByRole("img", { name: /用量趋势/ })).toBeInTheDocument();
-    const metrics = screen.getByRole("region", { name: "近 24 小时用量指标" });
-    expect(within(metrics).getByText("总 Token")).toBeInTheDocument();
-    expect(within(metrics).getByText("1,500")).toBeInTheDocument();
-    expect(within(metrics).getByText("请求")).toBeInTheDocument();
-    expect(within(metrics).getByText("10")).toBeInTheDocument();
-    expect(within(metrics).getByText("估算成本")).toBeInTheDocument();
-    expect(within(metrics).getByText("1.2500")).toBeInTheDocument();
-    expect(within(metrics).getByText("成功率")).toBeInTheDocument();
-    expect(within(metrics).getByText("90.0%")).toBeInTheDocument();
-    expect(within(metrics).getByText("p95 延迟")).toBeInTheDocument();
-    expect(within(metrics).getByText("480ms")).toBeInTheDocument();
-    expect(getStats).toHaveBeenCalledWith("24h", null);
-    expect(getStats).toHaveBeenCalledWith("24h", "hour");
-    expect(trend.compareDocumentPosition(metrics) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.queryByText("近 24 小时成本")).toBeNull();
-
-    await user.click(within(trend).getByRole("button", { name: "打开完整用量" }));
-    expect(onNavigate).toHaveBeenCalledWith("usage");
-  });
-
   it("renders the Overview title and content in Japanese", () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "ja");
 

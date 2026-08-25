@@ -1429,11 +1429,8 @@ describe("desktop station navigation", () => {
     }
     expect(within(snapshot).queryByText("简单路由")).toBeNull();
     expect(within(snapshot).queryByText("额度优先")).toBeNull();
-    const usageMetrics = await screen.findByRole("region", { name: "近 24 小时用量指标" });
-    expect(within(usageMetrics).getByText("91.7%")).toBeInTheDocument();
-    expect(within(usageMetrics).getByText("320ms")).toBeInTheDocument();
+    expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
-    expect(getStatsMock).toHaveBeenCalledWith("24h", "hour");
   });
 
   it("returns to the last opened Agent after visiting another primary page", async () => {
@@ -1565,8 +1562,8 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
-  it("shows the usage snapshot before the three fixed workspace summaries", async () => {
-    const usageStats = {
+  it("makes cost primary and exposes the three fixed workspace summaries", async () => {
+    getStatsMock.mockResolvedValueOnce({
       ...statsFixture,
       total: {
         ...statsFixture.total,
@@ -1574,30 +1571,18 @@ describe("desktop station navigation", () => {
         priced_requests: 12,
         unpriced_requests: 0,
       },
-    };
-    getStatsMock.mockImplementation(async (_since, by) => ({
-      ...usageStats,
-      by,
-      groups: by === "hour" ? [[String(Date.now()), usageStats.total]] : [],
-    }));
+    });
 
     render(<App />);
 
     await screen.findByRole("heading", { name: "概览" });
 
-    const trend = await screen.findByRole("region", { name: "近 24 小时使用趋势" });
-    expect(within(trend).getByRole("img", { name: /用量趋势/ })).toBeInTheDocument();
-    const usageMetrics = screen.getByRole("region", { name: "近 24 小时用量指标" });
-    expect(usageMetrics).toHaveTextContent("总 Token3,200");
-    expect(usageMetrics).toHaveTextContent("请求12");
-    expect(usageMetrics).toHaveTextContent("估算成本2.3400");
-    expect(usageMetrics).toHaveTextContent("成功率91.7%");
-    expect(usageMetrics).toHaveTextContent("p95 延迟320ms");
     const systemSummary = await screen.findByRole("region", { name: "系统摘要" });
-    expect(within(systemSummary).getByText("代理状态")).toBeInTheDocument();
-    expect(within(systemSummary).queryByText("近 24 小时成本")).toBeNull();
+    const costLabel = await within(systemSummary).findByText("近 24 小时成本");
+    const costCard = costLabel.closest('[data-slot="card"]');
+    expect(costCard).toHaveTextContent("近 24 小时成本$2.3412 次请求");
+    expect(costCard).toHaveTextContent("成功率 91.7% · P95 320ms");
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
-    expect(getStatsMock).toHaveBeenCalledWith("24h", "hour");
     expect(within(systemSummary).queryByText("今日请求")).toBeNull();
     expect(screen.queryByText("快捷键")).toBeNull();
     expect(screen.getByRole("region", { name: "Agent 概览" })).toBeInTheDocument();

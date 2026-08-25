@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import { Activity, ArrowUpRight, Bot, Boxes, CircleCheckBig, Clock3, DollarSign, MessageSquareText, Route, Zap } from "lucide-react";
+import { Activity, ArrowUpRight, Bot, Boxes, Clock3, MessageSquareText, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
 import { useLocalizedCopy } from "../components/LanguageProvider";
-import UsageTrendChart from "../components/UsageTrendChart";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { AgentIcon, ProviderIcon } from "../brandIcons";
@@ -33,13 +32,18 @@ function formatLatency(ms: number) {
 }
 
 function formatCost(costMicros: number | null) {
-  return costMicros == null ? "—" : (costMicros / 1_000_000).toFixed(4);
+  if (costMicros == null) return null;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: costMicros < 10_000 ? 4 : 2,
+  }).format(costMicros / 1_000_000);
 }
 
 export default function OverviewPage({ state, registry, agents, onNavigate }: OverviewPageProps) {
-  const { copy, language } = useLocalizedCopy();
+  const { copy } = useLocalizedCopy();
   const [stats, setStats] = useState<StatsView | null>(null);
-  const [trend, setTrend] = useState<StatsView | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
   const [modelTestOpen, setModelTestOpen] = useState(false);
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
@@ -101,13 +105,8 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
   useEffect(() => {
     let active = true;
     setStatsUnavailable(false);
-    void Promise.all([
-      getStats("24h", null),
-      getStats("24h", "hour"),
-    ]).then(([nextStats, nextTrend]) => {
-      if (!active) return;
-      setStats(nextStats);
-      setTrend(nextTrend);
+    void getStats("24h", null).then((nextStats) => {
+      if (active) setStats(nextStats);
     }).catch(() => {
       if (active) setStatsUnavailable(true);
     });
@@ -117,7 +116,17 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
   }, []);
 
   const successRate = stats ? formatSuccessRate(stats) : null;
-  const totalTokens = stats ? stats.total.input_tokens + stats.total.output_tokens : null;
+  const requestCost = stats ? formatCost(stats.total.cost_micros) : null;
+  const statsSummary = statsUnavailable
+    ? copy("Statistics are temporarily unavailable", "统计暂不可用", "統計暫不可用", "統計は一時的に利用不可です")
+    : stats == null
+      ? copy("Loading local statistics…", "正在读取本地统计…", "正在讀取本地統計…", "ローカルの統計を読み込んでいます…")
+      : stats.total.requests === 0
+        ? copy("No requests in the last 24 hours", "近 24 小时暂无请求", "近 24 小時暫無請求", "過去24時間のリクエストはまだありません")
+        : copy(
+            `Success ${successRate} · P95 ${formatLatency(stats.total.p95_latency_ms)}`,
+            `成功率 ${successRate} · P95 ${formatLatency(stats.total.p95_latency_ms)}`, `成功率 ${successRate} · P95 ${formatLatency(stats.total.p95_latency_ms)}`, `成功率 ${successRate} · P95 ${formatLatency(stats.total.p95_latency_ms)}`
+          );
 
   return (
     <div
@@ -135,87 +144,20 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         </div>
       </header>
 
-      <section
-        className="usage-trend-panel overview-usage-trend"
-        role="region"
-        aria-label={copy("Usage trend for the last 24 hours", "近 24 小时使用趋势", "近 24 小時使用趨勢", "過去24時間の使用状況の推移")}
-      >
-        <header>
-          <div>
-            <div>
-              <h2>{copy("Usage trend", "使用趋势", "使用趨勢", "使用トレンド")}</h2>
-              <p>{copy("Last 24 hours · Hourly", "近 24 小时 · 按小时", "近 24 小時 · 按小時", "過去24時間 · 1時間ごと")}</p>
-            </div>
-          </div>
-          <div className="overview-usage-trend-actions">
-            <span className="usage-dual-axis-note">{copy("Left: tokens · Right: cost", "左轴 Token · 右轴成本", "左軸 Token · 右軸成本", "左軸 Token · 右軸コスト")}</span>
-            <button
-              className="overview-usage-open"
-              type="button"
-              aria-label={copy("Open full Usage", "打开完整用量", "開啟完整用量", "使用量の詳細を開く")}
-              onClick={() => onNavigate("usage")}
-            >
-              <ArrowUpRight aria-hidden="true" />
-            </button>
-          </div>
-        </header>
-        <div className="usage-chart-legend">
-          <span><i className="tone-input" />{copy("Input total", "输入总量", "輸入總量", "入力合計")}</span>
-          <span><i className="tone-output" />{copy("Output", "输出", "輸出", "出力")}</span>
-          <span><i className="tone-cache-write" />{copy("Cache write", "缓存写入", "快取寫入", "キャッシュ書き込み")}</span>
-          <span><i className="tone-cache-read" />{copy("Cache hit", "缓存命中", "快取命中", "キャッシュヒット")}</span>
-          <span><i className="tone-cost" />{copy("Cost", "成本", "成本", "コスト")}</span>
-        </div>
-        {statsUnavailable ? (
-          <div className="overview-usage-error">{copy("Statistics are temporarily unavailable", "统计暂不可用", "統計暫不可用", "統計は一時的に利用不可です")}</div>
-        ) : trend == null ? (
-          <div className="overview-usage-loading">{copy("Loading local statistics…", "正在读取本地统计…", "正在讀取本地統計…", "ローカルの統計を読み込んでいます…")}</div>
-        ) : (
-          <UsageTrendChart groups={trend?.groups ?? []} range="24h" />
-        )}
-      </section>
-
-      <section
-        className="overview-usage-metrics"
-        role="region"
-        aria-label={copy("Usage metrics for the last 24 hours", "近 24 小时用量指标", "近 24 小時用量指標", "過去24時間の使用量指標")}
-      >
-        <article className="overview-usage-metric primary">
-          <span className="overview-usage-metric-icon"><Zap aria-hidden="true" /></span>
-          <div>
-            <span>{copy("Total tokens", "总 Token", "總 Token", "合計トークン")}</span>
-            <strong>{totalTokens?.toLocaleString(language) ?? "—"}</strong>
-            <small>{copy("input + output", "输入 + 输出", "輸入 + 輸出", "入力 + 出力")}</small>
-          </div>
-        </article>
-        <article className="overview-usage-metric request">
-          <Activity aria-hidden="true" />
-          <span>{copy("Requests", "请求", "請求", "リクエスト")}</span>
-          <strong>{stats?.total.requests.toLocaleString(language) ?? "—"}</strong>
-        </article>
-        <article className="overview-usage-metric cost">
-          <DollarSign aria-hidden="true" />
-          <span>{copy("Estimated cost", "估算成本", "估算成本", "推定コスト")}</span>
-          <strong>{stats ? formatCost(stats.total.cost_micros) : "—"}</strong>
-        </article>
-        <article className="overview-usage-metric success">
-          <CircleCheckBig aria-hidden="true" />
-          <span>{copy("Success rate", "成功率", "成功率", "成功率")}</span>
-          <strong>{successRate ?? "—"}</strong>
-        </article>
-        <article className="overview-usage-metric latency">
-          <Clock3 aria-hidden="true" />
-          <span>{copy("p95 latency", "p95 延迟", "p95 延遲", "p95 レイテンシー")}</span>
-          <strong>{stats ? formatLatency(stats.total.p95_latency_ms) : "—"}</strong>
-        </article>
-      </section>
-
       <section className="overview-metrics overview-runtime-metrics" aria-label={copy("System summary", "系统摘要", "系統摘要", "システムサマリー")}>
         <Card size="sm" className="overview-status-card">
           <CardHeader>
             <span><Activity />{copy("Proxy status", "代理状态", "代理狀態", "プロキシステータス")}</span>
             <CardTitle><Badge variant={runtimeHealthy ? "default" : "secondary"}><i className={runtimeHealthy ? "healthy" : ""} />{runtimeHealthy ? copy("Running", "运行中", "執行中", "実行中") : copy("Stopped", "未运行", "已停止", "停止中")}</Badge></CardTitle>
             <dl><div><dt>{copy("Revision", "版本", "版本", "リビジョン")}</dt><dd>{state.saved_revision}</dd></div><div><dt>{copy("Listen", "监听", "監聽", "リスニング")}</dt><dd>{state.serve.listen}</dd></div></dl>
+          </CardHeader>
+        </Card>
+        <Card size="sm" className="overview-request-card">
+          <CardHeader>
+            <span><WalletCards />{copy("Cost in the last 24 hours", "近 24 小时成本", "近 24 小時成本", "過去 24 時間のコスト")}</span>
+            <CardTitle className="overview-cost-value">{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价", "成本未定價", "コストが未設定") : "—")}</CardTitle>
+            <strong className="overview-request-count"><Clock3 />{stats ? copy(`${stats.total.requests} requests`, `${stats.total.requests} 次请求`, `${stats.total.requests} 次請求`, `${stats.total.requests} 回のリクエスト`) : "—"}</strong>
+            <p>{statsSummary}</p>
           </CardHeader>
         </Card>
       </section>
