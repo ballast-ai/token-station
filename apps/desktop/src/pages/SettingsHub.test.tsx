@@ -72,11 +72,15 @@ describe("SettingsHub clipboard feedback", () => {
     const runtime = screen.getByRole("button", { name: /运行信息/ });
     const agentVisibility = screen.getByRole("button", { name: /Agent 显示/ });
     const about = screen.getByRole("button", { name: /关于/ });
+    const navigation = screen.getByRole("navigation", { name: "设置分类" });
+    const categories = within(navigation).getAllByRole("button");
 
     expect(about).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("heading", { name: "关于 · 更新" })).toBeInTheDocument();
+    expect(categories[0]).toBe(about);
+    expect(categories[categories.length - 1]).toBe(general);
 
-    general.focus();
+    about.focus();
     await user.keyboard("{ArrowDown}");
     expect(apiKey).toHaveFocus();
     expect(apiKey).toHaveAttribute("aria-current", "page");
@@ -96,17 +100,17 @@ describe("SettingsHub clipboard feedback", () => {
     await user.keyboard("{ArrowUp}");
     expect(apiKey).toHaveFocus();
     await user.keyboard("{ArrowUp}");
-    expect(general).toHaveFocus();
-    expect(general).toHaveAttribute("aria-current", "page");
-
-    await user.keyboard("{ArrowUp}");
     expect(about).toHaveFocus();
     expect(about).toHaveAttribute("aria-current", "page");
 
-    await user.keyboard("{Home}");
+    await user.keyboard("{ArrowUp}");
     expect(general).toHaveFocus();
-    await user.keyboard("{End}");
+    expect(general).toHaveAttribute("aria-current", "page");
+
+    await user.keyboard("{Home}");
     expect(about).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(general).toHaveFocus();
   });
 
   it("keeps pointer-selected Settings navigation under keyboard control in WebView", async () => {
@@ -126,15 +130,13 @@ describe("SettingsHub clipboard feedback", () => {
     );
 
     const about = screen.getByRole("button", { name: /关于/ });
-    const general = screen.getByRole("button", { name: /代理/ });
-
     fireEvent.click(about);
     expect(about).toHaveFocus();
     await user.keyboard("{ArrowDown}");
 
-    expect(general).toHaveFocus();
-    expect(general).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("heading", { name: "代理与数据" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /API Key/ })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /API Key/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "虚拟 API Key" })).toBeInTheDocument();
   });
 
   it("splits API key and runtime information out of General", async () => {

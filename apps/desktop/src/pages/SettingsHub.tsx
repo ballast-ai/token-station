@@ -57,10 +57,10 @@ const SECTIONS: Array<{
   icon: LucideIcon;
 }> = [
   {
-    id: "general",
-    label: "settings.general",
-    description: "settings.generalHint",
-    icon: Settings2,
+    id: "about",
+    label: "settings.about",
+    description: "settings.aboutHint",
+    icon: Info,
   },
   {
     id: "api-key",
@@ -107,10 +107,10 @@ const SECTIONS: Array<{
     icon: ScrollText,
   },
   {
-    id: "about",
-    label: "settings.about",
-    description: "settings.aboutHint",
-    icon: Info,
+    id: "general",
+    label: "settings.general",
+    description: "settings.generalHint",
+    icon: Settings2,
   },
 ];
 
