@@ -226,6 +226,8 @@ jobs:
       - run: tests/formal-release-signing.sh
       - run: node tests/release-readiness.mjs
       - run: node tests/desktop-release-dependencies.mjs
+      - run: node tests/preview-platform-artifacts.mjs
+      - run: node tests/preview-release-assets.mjs
       - name: Check release version consistency
         run: |
           version=$(node -p "require('./apps/desktop/package.json').version")

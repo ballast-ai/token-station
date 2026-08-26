@@ -142,6 +142,7 @@ run_macos_production_build() {
 }
 
 run_macos_preview_build() {
+  preview_target="${1:-aarch64-apple-darwin}"
   env \
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
@@ -151,7 +152,7 @@ run_macos_preview_build() {
     TOKEN_STATION_UPDATER_ENDPOINT="https://github.com/ballast-ai/token-station/releases/download/updater-preview/latest.json" \
     TOKEN_STATION_UPDATER_PUBKEY="untrusted comment: minisign public key\nRWTESTPUBLICKEY" \
     TAURI_SIGNING_PRIVATE_KEY="untrusted comment: preview signing key\nRWTESTPRIVATEKEY" \
-    "$repo/scripts/build-desktop.sh" --preview --target aarch64-apple-darwin
+    "$repo/scripts/build-desktop.sh" --preview --target "$preview_target"
 }
 
 test_normal_build_does_not_enable_verbose_tauri_logs() {
@@ -252,6 +253,15 @@ test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg() {
     || fail "preview bundle phase did not receive the updater private key"
 }
 
+test_preview_build_supports_an_intel_updater_payload_and_unsigned_test_dmg() {
+  make_fixture preview-intel-updater-artifacts Darwin
+  run_macos_preview_build x86_64-apple-darwin >/dev/null
+  grep -Fxq -- '--architecture' "$state/dmg-package-args" \
+    || fail "Intel macOS preview build did not pass a DMG architecture"
+  grep -Fxq -- 'x86_64' "$state/dmg-package-args" \
+    || fail "Intel macOS preview build passed the wrong DMG architecture"
+}
+
 test_preview_build_loads_the_private_key_path_for_the_tauri_bundler() {
   make_fixture preview-updater-key-path Darwin
   printf '%s\n' 'encrypted-preview-key' >"$fixture/updater.key"
@@ -309,6 +319,7 @@ test_windows_builds_isolate_cargo_home_but_audit_the_private_path
 test_production_build_requires_the_official_updater_public_key
 test_production_build_creates_updater_payloads_without_publishing_the_temporary_signature
 test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg
+test_preview_build_supports_an_intel_updater_payload_and_unsigned_test_dmg
 test_preview_build_loads_the_private_key_path_for_the_tauri_bundler
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release
 test_production_build_rejects_private_material_in_the_public_key_variable

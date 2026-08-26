@@ -114,8 +114,8 @@ if [[ "$mode" == "preview" ]]; then
     echo "preview desktop updates are supported only on macOS" >&2
     exit 1
   }
-  [[ "$target" == "aarch64-apple-darwin" ]] || {
-    echo "the preview update channel requires target aarch64-apple-darwin" >&2
+  [[ "$target" == "aarch64-apple-darwin" || "$target" == "x86_64-apple-darwin" ]] || {
+    echo "the preview update channel requires an aarch64 or x86_64 macOS target" >&2
     exit 1
   }
   : "${TOKEN_STATION_UPDATER_ENDPOINT:?preview desktop build needs TOKEN_STATION_UPDATER_ENDPOINT}"

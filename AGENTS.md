@@ -114,9 +114,40 @@ each failed step accurately.
 A change to documentation, comments, or test data does not require App installation. Install the App if
 the user explicitly requests it.
 
-## Publish each Apple Silicon preview release
+## Publish an unsigned cross-platform preview release
 
-Use this procedure for every preview release after v1.2.1. This procedure publishes an ad-hoc signed,
+Use this procedure when a preview includes Windows or Linux packages without formal platform signing
+credentials. Publish it as a GitHub pre-release. Do not mark it as a stable or formal release.
+
+1. Prepare one aligned SemVer release commit on `main`. Update every file checked by
+   `scripts/check-release-readiness.mjs`. Add `docs/release/vX.Y.Z.md` with explicit unsigned-package warnings.
+2. Push the release commit. Wait for the exact commit's Full CI run to pass.
+3. Dispatch `.github/workflows/preview-platform-artifacts.yml` on that exact commit. Wait for Full CI
+   verification, Platform Gates, the Windows MSI build, and all Linux package builds to pass.
+4. Build the two macOS preview targets on the authorized offline updater-signing host:
+
+```bash
+scripts/build-desktop.sh --preview --target aarch64-apple-darwin
+scripts/build-desktop.sh --preview --target x86_64-apple-darwin
+```
+
+5. Assemble the two unsigned DMGs and checksum files, two updater payloads and signatures, Windows MSI,
+   Linux AppImage, Debian, and RPM packages, and `latest.json` in one new empty directory.
+6. Create `SHA256SUMS`. Run `scripts/check-preview-release-assets.mjs` against the assembled directory.
+7. Create an annotated `preview-vX.Y.Z` tag on the release commit. Push the tag only after every package
+   audit passes. This tag must not match the formal `v*` release trigger.
+8. Create a GitHub pre-release named `Token Station vX.Y.Z`. Upload the exact verified directory. Do not
+   overwrite an asset in a published versioned preview.
+9. Replace only `updater-preview/latest.json` after every versioned asset URL, updater signature, and checksum
+   passes a fresh download check.
+
+Windows and Linux updates remain manual. A Windows preview MSI can show a SmartScreen warning. macOS preview
+Apps are ad-hoc signed, Apple-unsigned, and unnotarized. The formal release workflow and its signing
+requirements do not change.
+
+## Publish an Apple Silicon updater preview release
+
+Use this procedure only for an Apple Silicon-only preview. This procedure publishes an ad-hoc signed,
 Apple-unsigned, and unnotarized Apple Silicon App. Do not call this a stable or formal release.
 
 Publishing only a versioned GitHub Release does not update an installed App. The versioned release stores

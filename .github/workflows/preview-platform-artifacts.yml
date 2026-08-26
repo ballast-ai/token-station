@@ -1,0 +1,132 @@
+name: Preview Platform Artifacts
+
+# Build the unsigned Windows and Linux packages for a versioned preview.
+# macOS preview packages remain on the offline updater-signing host because the
+# long-term updater private key must not enter GitHub Actions.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: preview-platform-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify-main-full-ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a successful Full CI push run for this commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          conclusion=$(gh api \
+            --method GET \
+            "repos/${{ github.repository }}/actions/workflows/full-ci.yml/runs" \
+            -f "head_sha=$COMMIT" -f branch=main -f event=push -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          if [[ "$conclusion" == "0" ]]; then
+            echo "The selected commit has no successful Full CI push run on main." >&2
+            exit 1
+          fi
+
+  platform-gates:
+    uses: ./.github/workflows/platform.yml
+
+  windows:
+    name: Unsigned Windows preview (x86_64-pc-windows-msvc)
+    needs: [verify-main-full-ci, platform-gates]
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: wasm32-wasip2,x86_64-pc-windows-msvc
+          workspaces: apps/desktop/src-tauri
+      - run: npm --prefix apps/desktop ci
+      - name: Check preview version and Windows package configuration
+        shell: bash
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          node scripts/check-release-readiness.mjs --version "$version"
+          node scripts/check-windows-release-config.mjs
+      - name: Build and audit the unsigned MSI
+        shell: bash
+        run: scripts/build-desktop.sh --local --target x86_64-pc-windows-msvc
+      - name: Stage the normalized MSI
+        shell: bash
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          mkdir desktop-dist
+          cp apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi \
+            "desktop-dist/token-station_${version}_x86_64.msi"
+          test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-station-preview-windows-x86_64
+          path: desktop-dist/*
+          if-no-files-found: error
+
+  linux:
+    name: Unsigned Linux preview (x86_64-unknown-linux-gnu)
+    needs: [verify-main-full-ci, platform-gates]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Tauri Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl wget file \
+            libssl-dev \
+            libxdo-dev \
+            pkg-config
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: wasm32-wasip2,x86_64-unknown-linux-gnu
+          workspaces: apps/desktop/src-tauri
+      - run: npm --prefix apps/desktop ci
+      - name: Check preview version
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          node scripts/check-release-readiness.mjs --version "$version"
+      - name: Build and audit the unsigned Linux packages
+        run: scripts/build-desktop.sh --local
+      - name: Stage normalized Linux packages
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          mkdir desktop-dist
+          cp apps/desktop/src-tauri/target/release/bundle/deb/*.deb \
+            "desktop-dist/token-station_${version}_x86_64.deb"
+          cp apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage \
+            "desktop-dist/token-station_${version}_x86_64.AppImage"
+          cp apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm \
+            "desktop-dist/token-station_${version}_x86_64.rpm"
+          test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-station-preview-linux-x86_64
+          path: desktop-dist/*
+          if-no-files-found: error
