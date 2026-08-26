@@ -13,7 +13,9 @@ const workflow = fs.readFileSync(workflowPath, "utf8");
 assert.match(workflow, /workflow_dispatch:/);
 assert.doesNotMatch(workflow, /push:\s*\n\s*tags:/);
 assert.match(workflow, /permissions:\s*\n\s*contents: read/);
+assert.match(workflow, /permissions:\s*\n\s*contents: read\s*\n\s*pull-requests: read/);
 assert.doesNotMatch(workflow, /contents: write/);
+assert.doesNotMatch(workflow, /pull-requests: write/);
 assert.doesNotMatch(workflow, /secrets\./);
 assert.doesNotMatch(workflow, /gh release/);
 
