@@ -31,6 +31,8 @@ jobs:
             .
             plugins/official/provider-openai-compatible-v2
             plugins/official/provider-anthropic-v2
+      - name: Prepare official plugins for gateway tests
+        run: scripts/prepare-desktop-test-plugins.sh
       - name: Fetch the locked official component dependency sets
         shell: bash
         run: |
@@ -42,8 +44,6 @@ jobs:
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - name: Prepare official plugins for builtin South tests
-        run: scripts/prepare-desktop-test-plugins.sh
       - name: Test builtin official South paths
         run: >-
           cargo test -p token-station-cli --features builtin-plugins
