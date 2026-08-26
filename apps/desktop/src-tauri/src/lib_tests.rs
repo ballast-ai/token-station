@@ -885,6 +885,87 @@ fn wait_for_receipts(path: &std::path::Path, expected: usize) -> Vec<ReceiptView
     }
 }
 
+fn exercise_running_status_menu_lifecycle<R: Runtime>(app: &tauri::App<R>) {
+    {
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let generation = inner.server.generation();
+        assert_eq!(
+            desktop_shell_snapshot(&inner).phase,
+            desktop_shell::ProxyMenuPhase::Running
+        );
+        assert_eq!(
+            lifecycle_proxy_action(&inner.server),
+            desktop_shell::ProxyMenuAction::Stop
+        );
+        let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        let ServerLifecycle::Running { server, .. } = current else {
+            panic!("the proxy must still be running");
+        };
+        inner.server = ServerLifecycle::Applying {
+            generation: generation + 1,
+            revision: 1,
+            old: server,
+        };
+        assert_eq!(
+            desktop_shell_snapshot(&inner).phase,
+            desktop_shell::ProxyMenuPhase::Applying
+        );
+        let applying =
+            std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        let ServerLifecycle::Applying { old, .. } = applying else {
+            panic!("the fixture must still be applying");
+        };
+        inner.server = ServerLifecycle::Running {
+            generation,
+            server: old,
+            apply_error: None,
+        };
+        let ServerLifecycle::Running { server, .. } = &inner.server else {
+            panic!("the fixture must be restored to running");
+        };
+        server.abort_task();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let dead_generation = loop {
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        let ServerLifecycle::Running { server, .. } = &inner.server else {
+            panic!("the fixture must remain running until explicit stop");
+        };
+        if !server.is_task_alive() {
+            assert_eq!(
+                desktop_shell_snapshot(&inner).phase,
+                desktop_shell::ProxyMenuPhase::Failed
+            );
+            assert_eq!(
+                lifecycle_proxy_action(&inner.server),
+                desktop_shell::ProxyMenuAction::Start
+            );
+            break inner.server.generation();
+        }
+        assert!(Instant::now() < deadline, "aborted proxy task must finish");
+        drop(inner);
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(begin_serve_stop_if_generation(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        dead_generation,
+    )
+    .is_none());
+    let error = tauri::async_runtime::block_on(ensure_serve_running_with(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        |_| unreachable!("a dead running server must fail before preparation"),
+        Duration::from_millis(50),
+    ))
+    .err()
+    .expect("a dead running server must fail before preparation");
+    assert!(error.contains("代理任务已退出"));
+}
+
 #[test]
 fn desktop_shell_distinguishes_live_application_from_listener_handoff() {
     assert_eq!(
@@ -931,6 +1012,218 @@ fn status_menu_actions_require_the_same_generation_and_lifecycle_action() {
         desktop_shell::ProxyMenuAction::Start,
         desktop_shell::ProxyMenuAction::Stop,
     ));
+}
+
+#[test]
+fn status_menu_adapters_project_cross_platform_idle_lifecycles() {
+    let root = scratch_home("status-menu-adapters");
+    let app = tauri::test::mock_app();
+    manage_test_agent_state(&app, &root);
+    let mut draft = template_for_test(&root);
+    draft["server"]["listen"] = json!("127.0.0.1:0");
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    assert!(app
+        .state::<AgentCommandState>()
+        .managed_agent_menu_entries()
+        .is_empty());
+
+    let state = app.state::<AppStateManaged>();
+    {
+        let mut inner = state.0.lock().unwrap();
+        assert_eq!(
+            desktop_shell_snapshot(&inner),
+            desktop_shell::ProxyMenuSnapshot::new(
+                0,
+                desktop_shell::ProxyMenuPhase::Stopped,
+                "127.0.0.1:0",
+            )
+        );
+
+        inner.server = ServerLifecycle::Starting {
+            generation: 7,
+            listen: "127.0.0.1:9001".to_owned(),
+            revision: 3,
+        };
+        assert_eq!(
+            desktop_shell_snapshot(&inner).phase,
+            desktop_shell::ProxyMenuPhase::Starting
+        );
+    }
+
+    publish_status_menu_start_error(app.handle(), state.inner(), "ignored".to_owned());
+    assert!(matches!(
+        state.0.lock().unwrap().server,
+        ServerLifecycle::Starting { .. }
+    ));
+    assert!(begin_serve_stop_if_generation(app.handle().clone(), state.inner(), 7).is_none());
+    assert_eq!(
+        begin_serve_stop(app.handle().clone(), state.inner())
+            .serve
+            .phase,
+        ServePhase::Stopping
+    );
+    assert_eq!(
+        begin_serve_stop(app.handle().clone(), state.inner())
+            .serve
+            .phase,
+        ServePhase::Stopping
+    );
+    complete_serve_stop(app.handle(), 8);
+    complete_serve_stop(app.handle(), 7);
+    assert_eq!(
+        begin_serve_stop(app.handle().clone(), state.inner())
+            .serve
+            .phase,
+        ServePhase::Stopped
+    );
+
+    {
+        let mut inner = state.0.lock().unwrap();
+        inner.server = ServerLifecycle::Stopping {
+            generation: 7,
+            listen: "127.0.0.1:9002".to_owned(),
+            draining: false,
+        };
+        assert_eq!(
+            desktop_shell_snapshot(&inner).phase,
+            desktop_shell::ProxyMenuPhase::Stopping
+        );
+    }
+
+    let start_while_stopping =
+        begin_serve_start(app.handle().clone(), state.inner(), prepare_server)
+            .err()
+            .expect("a stopping lifecycle must reject a new start");
+    assert!(start_while_stopping.contains("startup_cleanup_in_progress"));
+    let applied_pricing = {
+        let inner = state.0.lock().unwrap();
+        draft_price_table(&inner).unwrap()
+    };
+    complete_serve_start(
+        app.handle(),
+        7,
+        Err(StartFailure::new("fixture", "candidate failed")),
+        applied_pricing.clone(),
+        root.join("metrics.sqlite"),
+        BTreeMap::new(),
+    );
+    assert!(matches!(
+        state.0.lock().unwrap().server,
+        ServerLifecycle::Stopped { generation: 7 }
+    ));
+
+    {
+        let mut inner = state.0.lock().unwrap();
+        inner.server = ServerLifecycle::Stopping {
+            generation: 8,
+            listen: "127.0.0.1:9002".to_owned(),
+            draining: true,
+        };
+    }
+    complete_serve_start(
+        app.handle(),
+        8,
+        Err(StartFailure::new("fixture", "candidate failed")),
+        applied_pricing,
+        root.join("metrics.sqlite"),
+        BTreeMap::new(),
+    );
+    {
+        let mut inner = state.0.lock().unwrap();
+        assert!(matches!(
+            inner.server,
+            ServerLifecycle::Stopping { draining: true, .. }
+        ));
+        inner.server = ServerLifecycle::Failed {
+            generation: 7,
+            listen: "127.0.0.1:9003".to_owned(),
+            error: "fixture".to_owned(),
+        };
+        assert_eq!(
+            desktop_shell_snapshot(&inner).phase,
+            desktop_shell::ProxyMenuPhase::Failed
+        );
+    }
+
+    assert!(!begin_serve_start_if_generation(
+        app.handle().clone(),
+        state.inner(),
+        8,
+        prepare_server,
+    )
+    .unwrap());
+    assert!(begin_serve_stop_if_generation(app.handle().clone(), state.inner(), 7).is_none());
+    assert_eq!(
+        begin_serve_stop(app.handle().clone(), state.inner())
+            .serve
+            .phase,
+        ServePhase::Stopped
+    );
+
+    publish_status_menu_start_error(app.handle(), state.inner(), "menu start failed".to_owned());
+    let inner = state.0.lock().unwrap();
+    assert_eq!(
+        desktop_shell_snapshot(&inner),
+        desktop_shell::ProxyMenuSnapshot::new(
+            7,
+            desktop_shell::ProxyMenuPhase::Failed,
+            "127.0.0.1:0",
+        )
+    );
+    assert!(matches!(
+        &inner.server,
+        ServerLifecycle::Failed { error, .. } if error == "menu start failed"
+    ));
+    drop(inner);
+
+    let interrupted_app = app.handle().clone();
+    let interrupted = tauri::async_runtime::block_on(ensure_serve_running_with(
+        app.handle().clone(),
+        state.inner(),
+        move |_| {
+            let state = interrupted_app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            let generation = inner.server.generation();
+            inner.server = ServerLifecycle::Stopped { generation };
+            Err(StartFailure::new("fixture", "interrupted"))
+        },
+        Duration::from_secs(1),
+    ))
+    .err()
+    .expect("an explicitly stopped startup must fail");
+    assert!(interrupted.contains("启动被停止"));
+
+    let stopping_app = app.handle().clone();
+    let stopping = tauri::async_runtime::block_on(ensure_serve_running_with(
+        app.handle().clone(),
+        state.inner(),
+        move |_| {
+            let state = stopping_app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            let generation = inner.server.generation();
+            inner.server = ServerLifecycle::Stopping {
+                generation,
+                listen: "127.0.0.1:0".to_owned(),
+                draining: false,
+            };
+            drop(inner);
+            std::thread::sleep(Duration::from_millis(100));
+            Err(StartFailure::new("fixture", "stopping"))
+        },
+        Duration::from_secs(1),
+    ))
+    .err()
+    .expect("a startup entering stop must fail");
+    assert!(stopping.contains("代理正在停止"));
+
+    let truncated = StartFailure::new("fixture", "x".repeat(600)).public_message();
+    assert!(truncated.ends_with('…'));
+    assert!(truncated.len() < 600);
 }
 
 #[test]
@@ -4702,10 +4995,53 @@ fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views()
     assert!(running.serve.listener_reachable);
     assert!(running.serve.virtual_key.is_none());
     assert!(root.join("data").join("requests.log").exists());
+
+    exercise_running_status_menu_lifecycle(&app);
     let stopping = begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
     assert_eq!(stopping.serve.phase, ServePhase::Stopping);
     let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
     assert_eq!(stopped.serve.app_runtime, AppRuntime::Stopped);
+
+    let (candidate_config, applied_pricing, generation) = {
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        (
+            inner.materialize().unwrap(),
+            draft_price_table(&inner).unwrap(),
+            inner.server.generation(),
+        )
+    };
+    for draining in [false, true] {
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            inner.server = ServerLifecycle::Stopping {
+                generation,
+                listen: "127.0.0.1:0".to_owned(),
+                draining,
+            };
+        }
+        complete_serve_start(
+            app.handle(),
+            generation,
+            Ok(prepare_server(candidate_config.clone()).unwrap()),
+            applied_pricing.clone(),
+            root.join("data").join("metrics.sqlite"),
+            BTreeMap::new(),
+        );
+        if draining {
+            assert!(matches!(
+                app.state::<AppStateManaged>().0.lock().unwrap().server,
+                ServerLifecycle::Stopping { draining: true, .. }
+            ));
+            complete_serve_stop(app.handle(), generation);
+        } else {
+            assert!(matches!(
+                app.state::<AppStateManaged>().0.lock().unwrap().server,
+                ServerLifecycle::Stopped { .. }
+            ));
+        }
+    }
 
     let impact = preview_provider_removal(app.state(), "local".to_string()).unwrap();
     assert!(!impact.can_remove);

@@ -4535,6 +4535,9 @@ mod tests {
                 .len(),
             1
         );
+        let menu_entries = state.managed_agent_menu_entries();
+        assert_eq!(menu_entries.len(), 1);
+        assert_eq!(menu_entries[0].0, "claude-code");
 
         // force_forget does not access the keychain; it removes managed fields only according to ownership.
         state.force_forget("claude-code", "/opt/claude").unwrap();

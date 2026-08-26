@@ -857,6 +857,10 @@ mod tests {
 
         for (phase, expected) in cases {
             assert_eq!(
+                expected.tooltip(),
+                format!("Token Station · {}", expected.status)
+            );
+            assert_eq!(
                 proxy_menu_view(phase, "127.0.0.1:8787", ProxyMenuMode::Normal),
                 expected
             );
