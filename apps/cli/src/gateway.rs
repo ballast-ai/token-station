@@ -1526,6 +1526,7 @@ fn retain_free_fallbacks(decision: &mut Decision, free_upstreams: &BTreeSet<Stri
 /// Token Station virtual model: the Agent router still selects the real
 /// upstream and model for each request.
 const CLAUDE_DESKTOP_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[{"id":"claude-sonnet-4-6","object":"model","owned_by":"token-station","display_name":"Token Station Auto","anthropic_family_tier":"sonnet","is_family_default":true}]}"#;
+const EMPTY_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[]}"#;
 
 /// The assembled data plane.
 pub struct Gateway {
@@ -1537,7 +1538,10 @@ pub struct Gateway {
     /// keeps the gateway available, while this list makes the degradation
     /// visible to callers.
     skipped_agents: Vec<(String, String)>,
-    home_router: Arc<Router>,
+    /// `None` is the exact route-free desktop setup state. The loopback
+    /// gateway remains available for Agent setup and rejects model traffic
+    /// until the user applies a personal or enterprise route.
+    home_router: Option<Arc<Router>>,
     /// Only custom routes are materialized. Missing/inherit entries use the
     /// home router, so old configurations allocate no duplicate routers.
     ///
@@ -1950,10 +1954,14 @@ impl Gateway {
         recorder: Arc<dyn Recorder>,
         provider_runtime: Option<tokio::runtime::Handle>,
     ) -> Result<Self, String> {
-        // Compile host routing before plugin or network setup. A Direct config
-        // without a target therefore fails closed even when its ClientConfig
-        // was constructed directly instead of loaded from disk.
-        let home_router_config = config.home_router_config()?;
+        // Compile host routing before plugin or network setup. Only the exact
+        // empty desktop setup state may proceed without a Router. A partially
+        // configured Direct route still fails closed.
+        let home_router_config = if config.home_route_is_unconfigured() {
+            None
+        } else {
+            Some(config.home_router_config()?)
+        };
         let runtime = PluginRuntime::new(token_station_plugin_runtime::RuntimeLimits::default())
             .map_err(|error| format!("wasm engine: {error}"))?;
 
@@ -1987,8 +1995,13 @@ impl Gateway {
 
         let quota_plans = Self::quota_plans_from(config);
 
-        let home_router =
-            Arc::new(Router::new(home_router_config).map_err(|error| error.to_string())?);
+        let home_router = home_router_config
+            .map(|router| {
+                Router::new(router)
+                    .map(Arc::new)
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
         let mut agent_routers = BTreeMap::new();
         for agent_id in config.agent_routes.keys() {
             if let Some(router) = config.custom_router_for_agent(agent_id)? {
@@ -2040,13 +2053,16 @@ impl Gateway {
         if agent_id.is_some_and(|agent_id| !self.supported_agent_ids.contains(agent_id)) {
             return None;
         }
+        if self.home_router.is_none() {
+            return Some(EMPTY_MODELS_DOCUMENT.to_owned());
+        }
         if agent_id == Some("claude-desktop") {
             return Some(CLAUDE_DESKTOP_MODELS_DOCUMENT.to_owned());
         }
         let routers = self.agent_routers.read().ok()?;
         let router = agent_id
             .and_then(|agent_id| routers.get(agent_id).map(Arc::as_ref))
-            .unwrap_or(self.home_router.as_ref());
+            .or(self.home_router.as_deref())?;
         Some(scoped_models_document(&self.catalog, router, &self.pricing))
     }
 
@@ -3046,15 +3062,15 @@ impl Gateway {
                 u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
             });
 
-        let router: Arc<Router> = match agent_id {
-            None => Arc::clone(&self.home_router),
+        let router: Option<Arc<Router>> = match agent_id {
+            None => self.home_router.clone(),
             Some(agent_id) if self.supported_agent_ids.contains(agent_id) => self
                 .agent_routers
                 .read()
                 .expect("agent_routers lock")
                 .get(agent_id)
                 .cloned()
-                .unwrap_or_else(|| Arc::clone(&self.home_router)),
+                .or_else(|| self.home_router.clone()),
             Some(agent_id) => {
                 let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
                 tag_transport(&mut record, method, path, false);
@@ -3080,6 +3096,26 @@ impl Gateway {
                 self.recorder.record(&record);
                 return;
             }
+        };
+        let Some(router) = router else {
+            let mut record = begin_record(started_at_ms, "auto".to_owned(), None, running_revision);
+            tag_transport(&mut record, method, path, false);
+            record.status = 503;
+            record.error_code = Some(ErrorCode::InvalidRequest);
+            emit(Reply::BeginJson(JsonReply {
+                status: 503,
+                body: json!({
+                    "error": {
+                        "message": "Configure a personal or enterprise route in Token Station.",
+                        "type": "route_not_configured",
+                        "code": "route_not_configured"
+                    }
+                })
+                .to_string(),
+            }));
+            record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.recorder.record(&record);
+            return;
         };
 
         // Embeddings stay outside the synchronous generation protocols.
@@ -4378,5 +4414,54 @@ mod upstream_response_tests {
             oversized.into_parts().unwrap_err().code,
             token_station_protocol::ErrorCode::TransportTruncated
         );
+    }
+}
+
+#[cfg(test)]
+mod waiting_route_tests {
+    use super::{Gateway, Reply};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    #[test]
+    fn unconfigured_gateway_returns_route_not_configured() {
+        let mut value: Value = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        value["upstreams"] = json!({});
+        value["routing"] = json!({"mode": "direct"});
+        value["router"]["pools"] = json!({});
+        value["router"]["rules"] = json!([]);
+        value["router"]["hint_routes"] = json!([]);
+        value["router"]["heuristic"] = Value::Null;
+        value["router"]["default_pool"] = json!("");
+        value["plugins"]["dir"] = json!(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("plugins-dist")
+        );
+        let config: crate::config::ClientConfig = serde_json::from_value(value).unwrap();
+        let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))
+            .expect("an unconfigured gateway binds while it waits for a route");
+        assert_eq!(
+            gateway.models_for(None).as_deref(),
+            Some(r#"{"object":"list","data":[]}"#)
+        );
+
+        let mut replies = Vec::new();
+        gateway.chat(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"auto","messages":[{"role":"user","content":"hello"}]}"#,
+            &mut |reply| {
+                replies.push(reply);
+                true
+            },
+        );
+
+        let Reply::BeginJson(reply) = replies.remove(0) else {
+            panic!("the waiting gateway returns one JSON refusal");
+        };
+        assert_eq!(reply.status, 503);
+        assert!(reply.body.contains(r#""code":"route_not_configured""#));
     }
 }

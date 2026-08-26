@@ -3687,6 +3687,106 @@ fn ensure_serve_running_starts_a_stopped_proxy_and_waits_until_reachable() {
 }
 
 #[test]
+fn start_routing_binds_a_waiting_gateway_before_a_route_is_configured() {
+    let root = scratch_home("waiting-route-start");
+    let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("plugins-dist");
+    let mut draft = template(&root.join("token-station-data"), &plugins_dir);
+    draft["server"]["listen"] = json!("127.0.0.1:0");
+    draft["server"]["auth"] = json!(false);
+    draft["data"]["metrics"] = json!(false);
+    let app = tauri::test::mock_app();
+    manage_test_agent_state(&app, &root);
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let starting = begin_serve_start(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        prepare_server,
+    )
+    .expect("Start routing accepts the empty setup state");
+    assert_eq!(starting.serve.phase, ServePhase::Starting);
+
+    let running = wait_for_serve_phase(&app, ServePhase::Running);
+    assert_eq!(running.serve.app_runtime, AppRuntime::Running);
+    assert!(running.serve.listener_reachable);
+    assert_eq!(running.serve.error, None);
+
+    begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+    wait_for_serve_phase(&app, ServePhase::Stopped);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn enterprise_route_apply_replaces_a_waiting_gateway() {
+    let root = scratch_home("waiting-enterprise-apply");
+    let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("plugins-dist");
+    let mut draft = template(&root.join("token-station-data"), &plugins_dir);
+    draft["server"]["listen"] = json!("127.0.0.1:0");
+    draft["server"]["auth"] = json!(false);
+    draft["data"]["metrics"] = json!(false);
+    let app = tauri::test::mock_app();
+    manage_test_agent_state(&app, &root);
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    begin_serve_start(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        prepare_server,
+    )
+    .unwrap();
+    let waiting = wait_for_serve_phase(&app, ServePhase::Running);
+    let waiting_instance = waiting
+        .serve
+        .instance_id
+        .expect("waiting instance has identity");
+
+    let routed = add_provider_impl(
+        app.state(),
+        "enterprise_main".to_owned(),
+        "https://enterprise.example.com/v1".to_owned(),
+        vec!["auto".to_owned()],
+        None,
+        false,
+        "env",
+        Some("ENTERPRISE_API_KEY"),
+        "openai-compatible",
+        true,
+    )
+    .expect("enterprise route becomes the complete Direct target");
+    assert_eq!(routed.direct_target.unwrap().model.as_deref(), Some("auto"));
+
+    begin_serve_start(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        prepare_server,
+    )
+    .unwrap();
+    let applied = wait_for_serve_phase(&app, ServePhase::Running);
+    assert_ne!(
+        applied.serve.instance_id.as_deref(),
+        Some(waiting_instance.as_str())
+    );
+    assert_eq!(applied.serve.running_revision, Some(applied.saved_revision));
+    assert!(applied.serve.listener_reachable);
+
+    begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+    wait_for_serve_phase(&app, ServePhase::Stopped);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn ensure_serve_running_joins_starting_and_rejects_a_failed_apply() {
     let root = scratch_home("ensure-join");
     let mut inner = AppInner::new(
@@ -4358,7 +4458,7 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
     let managed = app.state::<AppStateManaged>();
     let inner = managed.0.lock().unwrap();
     let upstream = &inner.draft["upstreams"]["enterprise_main"];
-    assert_eq!(upstream["managed_route"], json!(true));
+    assert!(upstream.get("managed_route").is_none());
     assert_eq!(
         upstream["models"][0]["supported_parameters"],
         json!(["reasoning_effort"])

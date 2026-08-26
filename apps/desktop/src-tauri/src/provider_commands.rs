@@ -873,9 +873,6 @@ pub(crate) fn add_provider_impl(
     if local {
         up["local"] = json!(true);
     }
-    if managed_route {
-        up["managed_route"] = json!(true);
-    }
     // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
     let api_key = api_key
         .as_deref()

@@ -719,6 +719,24 @@ impl ClientConfig {
             .and_then(|routing| routing.direct_target.as_ref())
     }
 
+    /// Whether this is the exact route-free desktop setup state.
+    ///
+    /// This state may bind a waiting loopback gateway. Any configured route
+    /// identity keeps the normal fail-closed validation contract.
+    #[must_use]
+    pub fn home_route_is_unconfigured(&self) -> bool {
+        self.effective_home_routing_mode() == RoutingMode::Direct
+            && self.effective_home_direct_target().is_none()
+            && self.upstreams.is_empty()
+            && self.agent_routes.is_empty()
+            && self.router.pools.is_empty()
+            && self.router.quota_accounts.is_empty()
+            && self.router.rules.is_empty()
+            && self.router.hint_routes.is_empty()
+            && self.router.heuristic.is_none()
+            && self.router.default_pool.is_empty()
+    }
+
     /// Compiles the host-level Home mode into the protected two-state
     /// router-core contract consumed by the Gateway.
     ///
@@ -889,6 +907,7 @@ impl ClientConfig {
         }
         if self.effective_home_routing_mode() == RoutingMode::Direct
             && self.effective_home_direct_target().is_none()
+            && !self.home_route_is_unconfigured()
         {
             return Err("Home direct routing requires direct_target".to_owned());
         }
@@ -1880,6 +1899,25 @@ mod tests {
             (true, true, true, false)
         );
         fs::remove_file(load_path).ok();
+    }
+
+    #[test]
+    fn empty_desktop_route_is_a_valid_waiting_configuration() {
+        let mut value = example();
+        value["upstreams"] = serde_json::json!({});
+        value["routing"] = serde_json::json!({"mode": "direct"});
+        value["router"]["pools"] = serde_json::json!({});
+        value["router"]["rules"] = serde_json::json!([]);
+        value["router"]["hint_routes"] = serde_json::json!([]);
+        value["router"]["heuristic"] = serde_json::Value::Null;
+        value["router"]["default_pool"] = serde_json::json!("");
+
+        let path = scratch("empty-desktop-route", &value.to_string());
+        let config = ClientConfig::load(&path)
+            .expect("the exact empty desktop route remains valid while it waits for configuration");
+
+        assert!(config.home_route_is_unconfigured());
+        fs::remove_file(path).ok();
     }
 
     #[test]

@@ -44,9 +44,14 @@ impl AdminContext {
     /// Returns the same fail-closed routing error as Gateway construction when
     /// the effective Home mode cannot be compiled.
     pub fn from_config(config: &ClientConfig) -> Result<Self, String> {
+        let router = if config.home_route_is_unconfigured() {
+            config.router.clone()
+        } else {
+            config.home_router_config()?
+        };
         Ok(Self {
             data_dir: config.data.dir.clone(),
-            router: config.home_router_config()?,
+            router,
             plugins: config.plugins.clone(),
         })
     }
