@@ -383,25 +383,20 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
       </header>}
 
       <div className="usage-filter-disclosure">
-        <button
-          className="usage-filter-toggle"
-          type="button"
-          aria-label={copy("Filters", "筛选", "篩選", "フィルター")}
-          aria-expanded={filtersOpen}
-          aria-controls="usage-filter-panel"
-          onClick={() => setFiltersOpen((current) => !current)}
-        >
-          <SlidersHorizontal aria-hidden="true" />
-          <strong>{copy("Filters", "筛选", "篩選", "フィルター")}</strong>
-          <span aria-hidden="true">{sinceOptions.find((range) => range.value === since)?.label}</span>
-          {hasFilters && <em aria-hidden="true">{[agentFilter, upstreamFilter, modelFilter].filter(Boolean).length}</em>}
-        </button>
         <div className="usage-filter-actions">
-          {hasFilters && (
-            <button className="usage-clear-filters" type="button" onClick={() => { setAgentFilter(""); setUpstreamFilter(""); setModelFilter(""); }}>
-              {copy("Clear filters", "清除筛选", "清除篩選", "フィルタをクリア")}
-            </button>
-          )}
+          <button
+            className="usage-filter-toggle"
+            type="button"
+            aria-label={copy("Filters", "筛选", "篩選", "フィルター")}
+            aria-expanded={filtersOpen}
+            aria-controls="usage-filter-panel"
+            onClick={() => setFiltersOpen((current) => !current)}
+          >
+            <SlidersHorizontal aria-hidden="true" />
+            <strong>{copy("Filters", "筛选", "篩選", "フィルター")}</strong>
+            <span aria-hidden="true">{sinceOptions.find((range) => range.value === since)?.label}</span>
+            {hasFilters && <em aria-hidden="true">{[agentFilter, upstreamFilter, modelFilter].filter(Boolean).length}</em>}
+          </button>
           <button
             className={`usage-refresh-button usage-refresh-button-visible ${refreshing ? "busy" : ""}`}
             type="button"
@@ -417,6 +412,11 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
               : copy("Refresh", "刷新", "重新整理", "更新")}</span>
           </button>
         </div>
+        {hasFilters && (
+          <button className="usage-clear-filters" type="button" onClick={() => { setAgentFilter(""); setUpstreamFilter(""); setModelFilter(""); }}>
+            {copy("Clear filters", "清除筛选", "清除篩選", "フィルタをクリア")}
+          </button>
+        )}
       </div>
 
       {filtersOpen && <div id="usage-filter-panel" className="usage-toolbar" aria-label={copy("Usage filters", "用量筛选", "用量篩選", "使用状況フィルター")}>

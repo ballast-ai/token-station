@@ -251,7 +251,10 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
     await screen.findByText("1,500");
     expect(screen.getByRole("button", { name: "筛选" })).toHaveAttribute("aria-expanded", "false");
+    const filter = screen.getByRole("button", { name: "筛选" });
     const refresh = screen.getByRole("button", { name: "刷新用量" });
+    expect(filter.parentElement).toBe(refresh.parentElement);
+    expect(filter.compareDocumentPosition(refresh) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(refresh).toHaveTextContent("刷新");
 
     const pending: Array<{

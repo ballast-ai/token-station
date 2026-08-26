@@ -67,11 +67,14 @@ describe("SettingsHub clipboard feedback", () => {
       </ErrorToastProvider>,
     );
 
-    const general = screen.getByRole("button", { name: /通用/ });
+    const general = screen.getByRole("button", { name: /代理/ });
     const apiKey = screen.getByRole("button", { name: /API Key/ });
     const runtime = screen.getByRole("button", { name: /运行信息/ });
     const agentVisibility = screen.getByRole("button", { name: /Agent 显示/ });
     const about = screen.getByRole("button", { name: /关于/ });
+
+    expect(about).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "关于 · 更新" })).toBeInTheDocument();
 
     general.focus();
     await user.keyboard("{ArrowDown}");
@@ -123,7 +126,7 @@ describe("SettingsHub clipboard feedback", () => {
     );
 
     const about = screen.getByRole("button", { name: /关于/ });
-    const general = screen.getByRole("button", { name: /通用/ });
+    const general = screen.getByRole("button", { name: /代理/ });
 
     fireEvent.click(about);
     expect(about).toHaveFocus();
@@ -185,7 +188,7 @@ describe("SettingsHub clipboard feedback", () => {
     );
 
     const navigation = screen.getByRole("navigation", { name: "设置分类" });
-    const general = screen.getByRole("button", { name: /通用/ });
+    const general = screen.getByRole("button", { name: /代理/ });
 
     expect(navigation).toHaveAttribute("data-input-mode", "pointer");
     general.focus();
@@ -335,8 +338,8 @@ describe("SettingsHub clipboard feedback", () => {
     await user.click(screen.getByRole("button", { name: "复制" }));
 
     const message = "无法复制虚拟 API Key。请检查系统剪贴板权限，然后重试。";
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
-      .toHaveTextContent(message);
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText(message))
+      .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "复制" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "已复制" })).not.toBeInTheDocument();
     expect(screen.queryByText("vk-test-secret")).not.toBeInTheDocument();

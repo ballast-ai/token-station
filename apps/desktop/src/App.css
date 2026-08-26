@@ -6435,17 +6435,16 @@ pre.block {
 }
 
 .direct-applied-target {
-  flex: 0 0 auto;
-  max-width: 44%;
-  overflow: hidden;
+  flex: 0 1 auto;
+  max-width: min(420px, 48vw);
   padding: 5px 8px;
   border: 1px solid var(--success-border);
   border-radius: 999px;
   color: var(--success);
   background: var(--success-soft);
   font: 9.5px/1.2 "IBM Plex Mono", monospace;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .direct-provider-list {
@@ -7182,7 +7181,8 @@ pre.block {
 .agent-route-disclosure-trigger[data-slot="button"] {
   width: 100%;
   min-height: 40px;
-  justify-content: space-between;
+  justify-content: flex-end;
+  gap: 8px;
   padding-inline: 9px;
   border-radius: 8px;
   color: var(--muted);
@@ -7331,10 +7331,10 @@ pre.block {
   align-items: center;
   gap: 11px;
   padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--signal) 28%, var(--line));
+  border: 1px solid var(--line);
   border-radius: 9px;
-  color: var(--signal);
-  background: color-mix(in srgb, var(--signal) 5%, var(--surface));
+  color: var(--muted);
+  background: var(--surface-2);
 }
 .agent-default-route-state > span {
   width: 24px;
@@ -7343,8 +7343,8 @@ pre.block {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  color: var(--signal);
-  background: var(--signal-soft);
+  color: var(--muted);
+  background: var(--surface);
   font-weight: 700;
 }
 .agent-default-route-state > span svg { width: 13px; height: 13px; }
@@ -10576,7 +10576,7 @@ samp {
 .usage-filter-disclosure {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   min-height: 36px;
   gap: 10px;
 }
@@ -10642,7 +10642,7 @@ samp {
   min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
 }
 
@@ -10985,8 +10985,13 @@ samp {
 }
 .model-test-composer::placeholder { color: var(--muted); }
 .model-test-composer:focus {
-  border-color: color-mix(in srgb, var(--signal) 58%, var(--line));
-  box-shadow: 0 -1px 0 color-mix(in srgb, var(--signal) 20%, transparent);
+  border-color: var(--line);
+  box-shadow: none;
+}
+.model-test-composer:focus-visible {
+  outline: 0;
+  border-color: var(--line);
+  box-shadow: none;
 }
 .model-test-composer-error {
   color: var(--danger);

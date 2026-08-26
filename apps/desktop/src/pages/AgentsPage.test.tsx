@@ -67,6 +67,8 @@ describe("AgentsPage split workspaces", () => {
     expect(within(selector).getByRole("button", { name: "企业路由" })).toBeVisible();
     const globalRoute = within(selector).getByRole("button", { name: "全局路由" });
     const enterpriseRoute = within(selector).getByRole("button", { name: "企业路由" });
+    expect(globalRoute.querySelector("svg.lucide-route")).not.toBeNull();
+    expect(enterpriseRoute.querySelector("svg.lucide-building-2")).not.toBeNull();
     const globalGroup = selector.querySelector(".routing-scope-global-group");
     expect(globalGroup).not.toBeNull();
     expect(screen.getByRole("group", { name: "全局路由与 Agent 路由" })).toBe(globalGroup);
@@ -81,6 +83,7 @@ describe("AgentsPage split workspaces", () => {
     const disclosure = within(selector).getByRole("button", { name: "Agent 路由" });
     expect(globalGroup).toContainElement(disclosure);
     expect(disclosure).toHaveTextContent("Agent 路由2");
+    expect(disclosure).toHaveClass("agent-route-disclosure-trigger");
     expect(selector.querySelector('[data-slot="card-header"] [data-slot="badge"]')).toBeNull();
     expect(globalRoute.compareDocumentPosition(disclosure) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(disclosure.compareDocumentPosition(enterpriseRoute) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

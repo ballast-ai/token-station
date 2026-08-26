@@ -1,9 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { Building2, ChevronDown, RefreshCw } from "lucide-react";
+import { Building2, ChevronDown, RefreshCw, Route } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
-import TokenStationMark from "../components/TokenStationMark";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -137,7 +136,7 @@ export default function AgentsPage({
                       onClick={onOpenHome}
                     >
                       <span className="agent-master-icon global-route-mark" aria-hidden="true">
-                        <TokenStationMark size={36} />
+                        <Route />
                       </span>
                       <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong></span>
                       <Badge variant={homeSelected ? "secondary" : "ghost"}>{homeSelected

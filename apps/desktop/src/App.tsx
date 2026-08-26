@@ -1198,7 +1198,7 @@ function StationApp() {
             setFirstRunGuideOpen(true);
           }}
           onSaved={showState}
-          initialSection={view === "logs" ? "request-logs" : "general"}
+          initialSection={view === "logs" ? "request-logs" : "about"}
         />
       )}
       {(view === "add-provider" || view === "add-model") && (

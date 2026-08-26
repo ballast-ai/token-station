@@ -380,7 +380,7 @@ function SettingsHubContent({
   onAgentVisibilityChange,
   onOpenFirstRunGuide,
   onSaved,
-  initialSection = "general",
+  initialSection = "about",
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [navigationInputMode, setNavigationInputMode] = useState<"pointer" | "keyboard">("pointer");

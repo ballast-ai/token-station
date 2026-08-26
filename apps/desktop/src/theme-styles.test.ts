@@ -209,6 +209,9 @@ describe("retained page theme styles", () => {
     expect(hoveredProviderRule).toMatch(/background:\s*var\(--signal-hover-soft\)/);
     expect(appliedTargetRule).toMatch(/border:\s*1px solid var\(--success-border\)/);
     expect(appliedTargetRule).toMatch(/background:\s*var\(--success-soft\)/);
+    expect(appliedTargetRule).toMatch(/white-space:\s*normal/);
+    expect(appliedTargetRule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(appliedTargetRule).not.toMatch(/text-overflow:\s*ellipsis/);
     expect(toastRule).toMatch(/border:\s*1px solid var\(--toast-border\)/);
     expect(toastRule).toMatch(/background:\s*var\(--toast-soft\)/);
 
@@ -274,6 +277,7 @@ describe("retained page theme styles", () => {
     expect(agentImageRule).toMatch(/height:\s*36px/);
     expect(routeLabelRule).toMatch(/font-size:\s*13px/);
     expect(disclosureTriggerRule).toMatch(/min-height:\s*40px/);
+    expect(disclosureTriggerRule).toMatch(/justify-content:\s*flex-end/);
     expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(selectedAgentRule).not.toMatch(/box-shadow:/);
     expect(disclosureRule).not.toMatch(/border-left:/);
@@ -306,9 +310,21 @@ describe("retained page theme styles", () => {
     const previewRule = appCss.match(/\.agent-default-route-state\s*\{([^}]*)\}/s)?.[1] ?? "";
     const previewIconRule = appCss.match(/\.agent-default-route-state\s*>\s*span\s*\{([^}]*)\}/s)?.[1] ?? "";
 
-    expect(previewRule).toMatch(/var\(--signal\)/);
-    expect(previewIconRule).toMatch(/var\(--signal-soft\)/);
-    expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--success\)/);
+    expect(previewRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(previewRule).toMatch(/color:\s*var\(--muted\)/);
+    expect(previewRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(previewIconRule).toMatch(/color:\s*var\(--muted\)/);
+    expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--signal\)|var\(--success\)/);
+  });
+
+  it("uses only the composer's border as its focus indicator", () => {
+    const composerFocusRule = appCss.match(
+      /\.model-test-composer:focus-visible\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(composerFocusRule).toMatch(/outline:\s*0/);
+    expect(composerFocusRule).toMatch(/border-color:\s*var\(--line\)/);
+    expect(composerFocusRule).toMatch(/box-shadow:\s*none/);
   });
 
   it("removes Agent discovery motion when reduced motion is requested", () => {

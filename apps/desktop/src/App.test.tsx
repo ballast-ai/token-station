@@ -1095,8 +1095,7 @@ it("reopens the guide from the About page without clearing the dismissed version
   render(<App />);
 
   await user.click(await screen.findByRole("button", { name: "设置" }));
-  expect(screen.queryByRole("button", { name: "重新查看新手引导" })).toBeNull();
-  await user.click(screen.getByRole("button", { name: /关于/ }));
+  expect(screen.getByRole("button", { name: "重新查看新手引导" })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
 
   expect(await screen.findByRole("dialog", { name: "从这里随时回到主页" })).toBeInTheDocument();
@@ -2590,7 +2589,8 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(await screen.findByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     const settingsNavigation = screen.getByRole("navigation", { name: "设置分类" });
-    expect(within(settingsNavigation).getByRole("button", { name: /通用/ })).toHaveAttribute("aria-current", "page");
+    expect(within(settingsNavigation).getByRole("button", { name: /代理/ })).toBeInTheDocument();
+    expect(within(settingsNavigation).getByRole("button", { name: /关于/ })).toHaveAttribute("aria-current", "page");
     expect(within(settingsNavigation).queryByRole("button", { name: /路由表/ })).toBeNull();
     expect(within(settingsNavigation).queryByRole("button", { name: /插件/ })).toBeNull();
     expect(within(settingsNavigation).getByRole("button", { name: /Agent 显示/ })).toBeInTheDocument();
