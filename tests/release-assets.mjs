@@ -37,6 +37,10 @@ try {
     `token-station_${version}_x86_64.dmg`,
     `token-station_${version}_aarch64.app.tar.gz`,
     `token-station_${version}_x86_64.app.tar.gz`,
+    `token-station_${version}_x86_64.msi`,
+    `token-station_${version}_x86_64.deb`,
+    `token-station_${version}_x86_64.AppImage`,
+    `token-station_${version}_x86_64.rpm`,
   ];
   for (const file of binaryAssets) fs.writeFileSync(path.join(stage, file), `fixture:${file}\n`);
 

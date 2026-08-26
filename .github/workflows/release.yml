@@ -87,7 +87,10 @@ jobs:
             TOKEN_STATION_UPDATER_PUBKEY,
             APPLE_CERTIFICATE,
             APPLE_SIGNING_IDENTITY,
-            APPLE_API_KEY_CONTENT
+            APPLE_API_KEY_CONTENT,
+            WINDOWS_CERTIFICATE,
+            WINDOWS_CERTIFICATE_PASSWORD,
+            WINDOWS_TIMESTAMP_URL
           # Presence only. A secret's value never reaches the process.
           TS_HAS_TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED == 'true' }}
           TS_HAS_TOKEN_STATION_RELEASE_PUBKEY_HEX: ${{ vars.TOKEN_STATION_RELEASE_PUBKEY_HEX != '' }}
@@ -95,6 +98,9 @@ jobs:
           TS_HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
           TS_HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
           TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
+          TS_HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+          TS_HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          TS_HAS_WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL != '' }}
         run: node scripts/resolve-release-mode.mjs
 
   build:
@@ -234,8 +240,64 @@ jobs:
           path: desktop-dist/*
           if-no-files-found: error
 
+  desktop-windows:
+    needs: [release-mode, verify-main-full-ci, platform-gates]
+    if: needs.release-mode.outputs.enabled == 'true'
+    name: Desktop Windows (x86_64-pc-windows-msvc)
+    runs-on: windows-2025
+    env:
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2,x86_64-pc-windows-msvc
+      - run: npm --prefix apps/desktop ci
+      - name: Check formal Windows metadata
+        shell: bash
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "发布标签 $GITHUB_REF_NAME 与桌面版本 $version 不一致。" >&2
+            exit 1
+          fi
+          node scripts/check-release-readiness.mjs --version "$version" --formal
+          node scripts/check-windows-release-config.mjs
+      - name: Import Windows signing certificate
+        shell: pwsh
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw "WINDOWS_CERTIFICATE_PASSWORD is required" }
+          if (-not $env:WINDOWS_TIMESTAMP_URL) { throw "WINDOWS_TIMESTAMP_URL is required" }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "token-station-certificate.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $certificate.Thumbprint) { throw "certificate import returned no thumbprint" }
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build, sign, audit, and stage MSI
+        shell: bash
+        run: |
+          scripts/build-desktop.sh --production --target x86_64-pc-windows-msvc
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          mkdir desktop-dist
+          cp apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi "desktop-dist/token-station_${version}_x86_64.msi"
+          test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-station-desktop-x86_64-pc-windows-msvc
+          path: desktop-dist/*
+          if-no-files-found: error
+
   publish:
-    needs: [release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos]
+    needs: [release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows]
     if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -261,4 +323,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
             --title "Token Station $GITHUB_REF_NAME" \
             --notes "Draft. Awaiting offline CLI and updater signatures. Run the prepare, sign, and publish formal-release scripts." \
-            dist/*.tar.gz dist/*.dmg dist/manifest.json
+            dist/*.tar.gz dist/*.dmg dist/*.msi dist/*.deb dist/*.AppImage dist/*.rpm dist/manifest.json

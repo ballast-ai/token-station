@@ -58,13 +58,19 @@ jobs:
             TOKEN_STATION_UPDATER_PUBKEY,
             APPLE_CERTIFICATE,
             APPLE_SIGNING_IDENTITY,
-            APPLE_API_KEY_CONTENT
+            APPLE_API_KEY_CONTENT,
+            WINDOWS_CERTIFICATE,
+            WINDOWS_CERTIFICATE_PASSWORD,
+            WINDOWS_TIMESTAMP_URL
           # Presence only. A secret's value never reaches the process.
           TS_HAS_TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED == 'true' }}
           TS_HAS_TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY != '' }}
           TS_HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
           TS_HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
           TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
+          TS_HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+          TS_HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          TS_HAS_WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL != '' }}
         run: node scripts/resolve-release-mode.mjs
 
   macos:
@@ -153,8 +159,8 @@ jobs:
   windows:
     name: Windows (x86_64-pc-windows-msvc)
     needs: [release-mode, verify-main-full-ci, platform-gates]
-    if: ${{ false }} # First public desktop release is macOS-only.
-    runs-on: windows-latest
+    if: needs.release-mode.outputs.enabled == 'true'
+    runs-on: windows-2025
     env:
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -190,8 +196,15 @@ jobs:
         run: |
           node scripts/check-windows-release-config.mjs
           scripts/build-desktop.sh --production --target x86_64-pc-windows-msvc
+      - name: Stage normalized Windows release input
+        shell: bash
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          mkdir desktop-dist
+          cp apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi "desktop-dist/token-station_${version}_x86_64.msi"
+          test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 1
       - uses: actions/upload-artifact@v4
         with:
           name: token-station-desktop-x86_64-pc-windows-msvc
-          path: apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          path: desktop-dist/*
           if-no-files-found: error

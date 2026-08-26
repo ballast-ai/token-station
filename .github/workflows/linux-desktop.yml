@@ -1,8 +1,8 @@
 name: Build Linux Desktop
 
 # Linux desktop packages are unsigned and are only produced when the formal
-# artifact gate is explicitly enabled. Successful packages remain internal
-# workflow artifacts and are not attached to a GitHub Release automatically.
+# artifact gate is explicitly enabled. The release caller downloads these
+# normalized workflow artifacts into the formal GitHub Release draft.
 on:
   workflow_call:
     inputs:
@@ -97,11 +97,17 @@ jobs:
       - name: Build and audit Linux desktop packages
         run: scripts/build-desktop.sh --local
 
+      - name: Stage normalized Linux release inputs
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          mkdir desktop-dist
+          cp apps/desktop/src-tauri/target/release/bundle/deb/*.deb "desktop-dist/token-station_${version}_x86_64.deb"
+          cp apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage "desktop-dist/token-station_${version}_x86_64.AppImage"
+          cp apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm "desktop-dist/token-station_${version}_x86_64.rpm"
+          test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 3
+
       - uses: actions/upload-artifact@v4
         with:
           name: token-station-desktop-linux-x86_64
-          path: |
-            apps/desktop/src-tauri/target/release/bundle/deb/*.deb
-            apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
-            apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm
+          path: desktop-dist/*
           if-no-files-found: error

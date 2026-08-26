@@ -139,13 +139,14 @@ pub(crate) fn executable_candidates(
         }
     }
 
-    if environment.platform == Platform::Macos
-        && matches!(
-            descriptor.version_probe.runtime.as_ref(),
-            Some(ProbeRuntime::NodePackage { .. })
-        )
-    {
-        if let Some(prefix) = macos_npm_prefix(environment) {
+    if matches!(
+        environment.platform,
+        Platform::Macos | Platform::Linux | Platform::Wsl
+    ) && matches!(
+        descriptor.version_probe.runtime.as_ref(),
+        Some(ProbeRuntime::NodePackage { .. })
+    ) {
+        if let Some(prefix) = user_npm_prefix(environment) {
             for executable in &descriptor.executable_candidates {
                 candidates.push(ExecutableCandidate {
                     path: prefix.join("bin").join(executable),
@@ -153,6 +154,12 @@ pub(crate) fn executable_candidates(
                     path_order: None,
                 });
             }
+        }
+        if matches!(environment.platform, Platform::Linux | Platform::Wsl) {
+            candidates.extend(linux_node_manager_candidates(
+                environment,
+                &descriptor.executable_candidates,
+            ));
         }
     }
 
@@ -338,9 +345,9 @@ fn npm_npx_cache_candidates(
         .collect()
 }
 
-fn macos_npm_prefix(environment: &ScanEnvironment) -> Option<PathBuf> {
+fn user_npm_prefix(environment: &ScanEnvironment) -> Option<PathBuf> {
     let home = environment.variables.get("HOME")?;
-    if !is_absolute_for(Platform::Macos, home) {
+    if !is_absolute_for(environment.platform, home) {
         return None;
     }
     let mut file = std::fs::File::open(PathBuf::from(home).join(".npmrc")).ok()?;
@@ -366,17 +373,17 @@ fn macos_npm_prefix(environment: &ScanEnvironment) -> Option<PathBuf> {
             let value = value
                 .trim()
                 .trim_matches(|character| matches!(character, '\'' | '"'));
-            prefix = safe_absolute_user_prefix(value);
+            prefix = safe_absolute_user_prefix(value, environment.platform);
         }
     }
     prefix
 }
 
-fn safe_absolute_user_prefix(value: &str) -> Option<PathBuf> {
+fn safe_absolute_user_prefix(value: &str, platform: Platform) -> Option<PathBuf> {
     if value.is_empty()
         || value.contains(['\0', '$', '`'])
         || value.contains("://")
-        || !is_absolute_for(Platform::Macos, value)
+        || !is_absolute_for(platform, value)
     {
         return None;
     }
@@ -390,6 +397,55 @@ fn safe_absolute_user_prefix(value: &str) -> Option<PathBuf> {
         return None;
     }
     Some(path)
+}
+
+const MAX_NODE_MANAGER_VERSIONS: usize = 64;
+
+fn linux_node_manager_candidates(
+    environment: &ScanEnvironment,
+    executables: &[String],
+) -> Vec<ExecutableCandidate> {
+    let Some(home) = environment.variables.get("HOME") else {
+        return Vec::new();
+    };
+    if !is_absolute_for(environment.platform, home) {
+        return Vec::new();
+    }
+    let home = PathBuf::from(home);
+    let mut version_bins = bounded_node_manager_bins(&home.join(".nvm/versions/node"), "bin");
+    version_bins.extend(bounded_node_manager_bins(
+        &home.join(".local/share/fnm/node-versions"),
+        "installation/bin",
+    ));
+    version_bins.sort();
+
+    version_bins
+        .into_iter()
+        .flat_map(|bin| {
+            executables
+                .iter()
+                .map(move |executable| ExecutableCandidate {
+                    path: bin.join(executable),
+                    source: DiscoverySource::KnownPath,
+                    path_order: None,
+                })
+        })
+        .collect()
+}
+
+fn bounded_node_manager_bins(root: &Path, bin_suffix: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .take(MAX_NODE_MANAGER_VERSIONS)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            (metadata.is_dir() && !metadata.file_type().is_symlink()).then(|| path.join(bin_suffix))
+        })
+        .collect()
 }
 
 fn macos_python_user_candidates(
@@ -691,10 +747,20 @@ fn is_absolute_for(platform: Platform, value: &str) -> bool {
     match platform {
         Platform::Windows => {
             let bytes = normalized.as_bytes();
-            bytes.len() >= 3
+            let drive_rooted = bytes.len() >= 3
                 && bytes[0].is_ascii_alphabetic()
                 && bytes[1] == b':'
-                && bytes[2] == b'/'
+                && bytes[2] == b'/';
+            let unc_share = normalized.strip_prefix("//").is_some_and(|rest| {
+                let mut segments = rest.split('/');
+                let server = segments.next().unwrap_or_default();
+                let share = segments.next().unwrap_or_default();
+                !server.is_empty()
+                    && !share.is_empty()
+                    && !matches!(server, "." | ".." | "?")
+                    && !matches!(share, "." | "..")
+            });
+            drive_rooted || unc_share
         }
         Platform::Macos | Platform::Linux | Platform::Wsl => normalized.starts_with('/'),
     }
@@ -792,6 +858,23 @@ mod tests {
             .path_entries
             .iter()
             .all(|entry| entry.is_absolute()));
+    }
+
+    #[test]
+    fn discovery_accepts_a_windows_unc_share_as_an_absolute_environment_root() {
+        let mut context = environment(Platform::Windows);
+        context.variables.insert(
+            "APPDATA".to_string(),
+            r"\\fileserver\profiles\tester\AppData\Roaming".to_string(),
+        );
+
+        let expanded = expand_template("${APPDATA}/npm/kimi.cmd", &context)
+            .expect("a complete UNC share is an absolute Windows root");
+
+        assert_eq!(
+            expanded.to_string_lossy().replace('\\', "/"),
+            "//fileserver/profiles/tester/AppData/Roaming/npm/kimi.cmd",
+        );
     }
 
     #[test]
@@ -954,10 +1037,111 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn linux_node_agents_include_the_safe_npm_prefix_from_user_config() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-linux-npm-prefix-platform-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".npmrc"),
+            format!("prefix={}\n", root.join("local/npm-global").display()),
+        )
+        .unwrap();
+
+        let mut context = environment(Platform::Linux);
+        context
+            .variables
+            .insert("HOME".to_string(), root.to_string_lossy().into_owned());
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "claude-code")
+            .unwrap();
+
+        let expected = root.join("local/npm-global/bin/claude");
+        assert!(
+            executable_candidates(descriptor, &context)
+                .iter()
+                .any(|candidate| candidate.path == expected
+                    && candidate.source == DiscoverySource::KnownPath),
+            "Linux GUI discovery did not include {}",
+            expected.display(),
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn linux_node_agents_discover_nvm_version_bins_without_a_login_shell() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-linux-nvm-platform-{}",
+            std::process::id()
+        ));
+        let expected = root.join(".nvm/versions/node/v22.14.0/bin/claude");
+        fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        fs::write(&expected, "#!/usr/bin/env node\n").unwrap();
+
+        let mut context = environment(Platform::Linux);
+        context
+            .variables
+            .insert("HOME".to_string(), root.to_string_lossy().into_owned());
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "claude-code")
+            .unwrap();
+
+        assert!(
+            executable_candidates(descriptor, &context)
+                .iter()
+                .any(|candidate| candidate.path == expected
+                    && candidate.source == DiscoverySource::KnownPath),
+            "Linux GUI discovery did not inspect the bounded NVM version bin"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn linux_node_agents_discover_fnm_installation_bins_without_a_login_shell() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-linux-fnm-platform-{}",
+            std::process::id()
+        ));
+        let expected = root.join(".local/share/fnm/node-versions/v22.14.0/installation/bin/claude");
+        fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        fs::write(&expected, "#!/usr/bin/env node\n").unwrap();
+
+        let mut context = environment(Platform::Linux);
+        context
+            .variables
+            .insert("HOME".to_string(), root.to_string_lossy().into_owned());
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "claude-code")
+            .unwrap();
+
+        assert!(
+            executable_candidates(descriptor, &context)
+                .iter()
+                .any(|candidate| candidate.path == expected
+                    && candidate.source == DiscoverySource::KnownPath),
+            "Linux GUI discovery did not inspect the bounded fnm installation bin"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn macos_npm_prefix_rejects_values_that_expand_or_escape() {
         assert_eq!(
-            safe_absolute_user_prefix("/Users/tester/local/npm-global"),
+            safe_absolute_user_prefix("/Users/tester/local/npm-global", Platform::Macos),
             Some(PathBuf::from("/Users/tester/local/npm-global"))
         );
         for value in [
@@ -967,7 +1151,10 @@ mod tests {
             "https://example.invalid/npm",
             "/Users/tester/../escape",
         ] {
-            assert!(safe_absolute_user_prefix(value).is_none(), "{value}");
+            assert!(
+                safe_absolute_user_prefix(value, Platform::Macos).is_none(),
+                "{value}"
+            );
         }
     }
 

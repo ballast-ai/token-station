@@ -290,6 +290,10 @@ pub struct AgentIntegrationPaths {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            desktop_shell::restore_main_window_after_second_launch(app);
+        }))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(desktop_shell::handle_window_event)
@@ -313,10 +317,10 @@ pub fn run() {
             // behind the recovery shell.
             app.manage(desktop_paths.clone());
             app.manage(DesktopUpdateOperation::default());
+            desktop_shell::prepare_close_fallback(app.handle());
             if recovery::inspect_recovery_state(&desktop_paths.data_dir).mode == RecoveryMode::Safe
             {
-                #[cfg(target_os = "macos")]
-                desktop_shell::install(
+                desktop_shell::complete_install(desktop_shell::install(
                     app.handle(),
                     desktop_shell::ProxyMenuMode::RecoverySafe,
                     |_app| {
@@ -328,7 +332,7 @@ pub fn run() {
                     },
                     |_app| desktop_shell::AgentMenuSnapshot::default(),
                     |_app, _action, _expected_generation| {},
-                )?;
+                ))?;
                 return Ok(());
             }
 
@@ -360,7 +364,6 @@ pub fn run() {
             ) {
                 eprintln!("历史未知成本回填失败：{error}");
             }
-            #[cfg(target_os = "macos")]
             let read_only = inner.load_error.is_some();
             app.manage(AppStateManaged(Mutex::new(inner)));
             app.manage(ModelTestStreamState::default());
@@ -377,8 +380,7 @@ pub fn run() {
             app.manage(paths);
             app.manage(agent_commands);
             app.manage(CursorTunnelState::default());
-            #[cfg(target_os = "macos")]
-            desktop_shell::install(
+            desktop_shell::complete_install(desktop_shell::install(
                 app.handle(),
                 if read_only {
                     desktop_shell::ProxyMenuMode::ConfigReadOnly
@@ -435,25 +437,22 @@ pub fn run() {
                         desktop_shell::ProxyMenuAction::None => {}
                     }
                 },
-            )?;
+            ))?;
 
-            #[cfg(target_os = "macos")]
-            {
-                // Native state must remain truthful even when the WebView is
-                // hidden or its JavaScript timers are throttled. Each request
-                // is resolved against the authoritative supervisor only when
-                // its main-thread refresh executes.
-                let status_app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        if status_app.try_state::<AppStateManaged>().is_none() {
-                            break;
-                        }
-                        desktop_shell::update_proxy_menu(&status_app);
+            // Native state must remain truthful even when the WebView is
+            // hidden or its JavaScript timers are throttled. Each request is
+            // resolved against the authoritative supervisor only when its
+            // main-thread refresh executes.
+            let status_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if status_app.try_state::<AppStateManaged>().is_none() {
+                        break;
                     }
-                });
-            }
+                    desktop_shell::update_proxy_menu(&status_app);
+                }
+            });
 
             Ok(())
         })

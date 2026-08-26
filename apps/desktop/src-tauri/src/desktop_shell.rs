@@ -1,17 +1,17 @@
 //! Native desktop shell policy for background residency and the status menu.
 
-// The native status menu is installed only on macOS. Linux CI still compiles
-// this module so its platform-neutral state policy remains unit tested and the
-// cross-platform refresh call can stay a harmless no-op without cfg sprawl.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// The native status menu is the cross-platform owner of background residency.
+// Closing the main window hides it; the menu restores it or explicitly quits.
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime, Window, WindowEvent};
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 pub(crate) const MENU_OPEN_ID: &str = "desktop-shell-open";
@@ -149,7 +149,9 @@ impl ProxyMenuView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WindowRequest {
     Close,
+    CloseWithoutTray,
     Reopen,
+    SecondInstance,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +177,7 @@ pub(crate) struct WindowResponse {
     pub(crate) show: bool,
     pub(crate) unminimize: bool,
     pub(crate) focus: bool,
+    pub(crate) confirm_exit: bool,
 }
 
 pub(crate) fn window_response(request: WindowRequest) -> WindowResponse {
@@ -185,13 +188,23 @@ pub(crate) fn window_response(request: WindowRequest) -> WindowResponse {
             show: false,
             unminimize: false,
             focus: false,
+            confirm_exit: false,
         },
-        WindowRequest::Reopen => WindowResponse {
+        WindowRequest::CloseWithoutTray => WindowResponse {
+            prevent_close: true,
+            hide: false,
+            show: false,
+            unminimize: false,
+            focus: false,
+            confirm_exit: true,
+        },
+        WindowRequest::Reopen | WindowRequest::SecondInstance => WindowResponse {
             prevent_close: false,
             hide: false,
             show: true,
             unminimize: true,
             focus: true,
+            confirm_exit: false,
         },
     }
 }
@@ -314,6 +327,33 @@ struct DesktopShellState<R: Runtime> {
     read_agent_state: Box<AgentStateReader<R>>,
 }
 
+#[derive(Default)]
+struct CloseFallbackState {
+    confirmation_open: AtomicBool,
+}
+
+/// Installs the close fallback before tray creation is attempted. If a Linux
+/// or Windows desktop cannot create a tray, the main window remains the only
+/// control surface and Close must ask before stopping the gateway.
+pub(crate) fn prepare_close_fallback<R: Runtime>(app: &AppHandle<R>) {
+    app.manage(CloseFallbackState::default());
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn complete_install(result: tauri::Result<()>) -> tauri::Result<()> {
+    result
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn complete_install(result: tauri::Result<()>) -> tauri::Result<()> {
+    if let Err(error) = result {
+        eprintln!(
+            "system tray unavailable; keeping the main window as the control surface: {error}"
+        );
+    }
+    Ok(())
+}
+
 /// Installs the single native status-menu surface. The callback receives only
 /// validated proxy actions; state changes still run through the app's existing
 /// lifecycle coordinator in the caller.
@@ -393,7 +433,21 @@ where
         .icon_as_template(cfg!(target_os = "macos"))
         .tooltip(view.tooltip())
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
+        .on_tray_icon_event(|tray, event| {
+            if !cfg!(target_os = "macos")
+                && matches!(
+                    event,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                )
+            {
+                restore_main_window(tray.app_handle());
+            }
+        })
         .on_menu_event(move |app, event| {
             let (snapshot, agents, read_only) = {
                 let Some(shell) = app.try_state::<DesktopShellState<R>>() else {
@@ -593,28 +647,83 @@ fn apply_proxy_menu_view<R: Runtime>(
 }
 
 pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, event);
-    #[cfg(target_os = "macos")]
-    {
-        if window.label() != MAIN_WINDOW_LABEL {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return;
+    }
+    if let WindowEvent::CloseRequested { api, .. } = event {
+        let has_tray = window
+            .app_handle()
+            .try_state::<DesktopShellState<R>>()
+            .is_some();
+        if !has_tray
+            && window
+                .app_handle()
+                .try_state::<CloseFallbackState>()
+                .is_none()
+        {
             return;
         }
-        if let WindowEvent::CloseRequested { api, .. } = event {
-            let response = window_response(WindowRequest::Close);
-            if response.prevent_close {
-                api.prevent_close();
-            }
-            if response.hide {
-                let _ = window.hide();
-            }
+        let request = if has_tray {
+            WindowRequest::Close
+        } else {
+            WindowRequest::CloseWithoutTray
+        };
+        let response = window_response(request);
+        if response.prevent_close {
+            api.prevent_close();
+        }
+        if response.hide {
+            let _ = window.hide();
+        }
+        if response.confirm_exit {
+            confirm_exit_without_tray(window);
         }
     }
 }
 
+fn confirm_exit_without_tray<R: Runtime>(window: &Window<R>) {
+    let app = window.app_handle().clone();
+    let Some(state) = app.try_state::<CloseFallbackState>() else {
+        return;
+    };
+    if state.confirmation_open.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    let dialog_app = app.clone();
+    app.dialog()
+        .message(
+            "The system tray is unavailable. Exiting will stop the local gateway.\n\n系统托盘不可用。退出将停止本地网关。",
+        )
+        .title("Quit Token Station?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Quit / 退出".to_owned(),
+            "Cancel / 取消".to_owned(),
+        ))
+        .show(move |confirmed| {
+            if let Some(state) = dialog_app.try_state::<CloseFallbackState>() {
+                state.confirmation_open.store(false, Ordering::Release);
+            }
+            if confirmed {
+                dialog_app.exit(0);
+            }
+        });
+}
+
 /// Restores the existing main window for both the status menu and Dock reopen.
 pub(crate) fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
-    let response = window_response(WindowRequest::Reopen);
+    restore_main_window_for_request(app, WindowRequest::Reopen);
+}
+
+/// Restores the already-running process when the operating system launches a
+/// second copy of the desktop executable.
+pub(crate) fn restore_main_window_after_second_launch<R: Runtime>(app: &AppHandle<R>) {
+    restore_main_window_for_request(app, WindowRequest::SecondInstance);
+}
+
+fn restore_main_window_for_request<R: Runtime>(app: &AppHandle<R>, request: WindowRequest) {
+    let response = window_response(request);
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return;
     };
@@ -820,7 +929,20 @@ mod tests {
                 show: false,
                 unminimize: false,
                 focus: false,
+                confirm_exit: false,
             }
+        );
+        assert_eq!(
+            window_response(WindowRequest::CloseWithoutTray),
+            WindowResponse {
+                prevent_close: true,
+                hide: false,
+                show: false,
+                unminimize: false,
+                focus: false,
+                confirm_exit: true,
+            },
+            "a missing tray must never hide the only recovery surface"
         );
         assert_eq!(
             window_response(WindowRequest::Reopen),
@@ -830,7 +952,13 @@ mod tests {
                 show: true,
                 unminimize: true,
                 focus: true,
+                confirm_exit: false,
             }
+        );
+        assert_eq!(
+            window_response(WindowRequest::SecondInstance),
+            window_response(WindowRequest::Reopen),
+            "a repeated launch must restore the existing gateway window"
         );
     }
 

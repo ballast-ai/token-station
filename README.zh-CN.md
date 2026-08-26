@@ -74,13 +74,13 @@
   </tr>
 </table>
 
-其中 11 个 Agent 使用内置 Connector。Cursor 在 macOS 与 Windows 上走独立接入路径。协议与接入细节见 [指南](docs/guides/) 和 [参考](docs/reference.zh-CN.md#agent)。
+其中 11 个 Agent 使用内置 Connector。Cursor 的独立接入目前只支持 macOS。协议与接入细节见 [指南](docs/guides/) 和 [参考](docs/reference.zh-CN.md#agent)。
 
 ## 快速开始
 
 你需要一个供应商 API Key，或一个本地模型端点。Token Station 不会把 Agent 订阅或 OAuth 会话导入成供应商账户。
 
-1. 从 [Releases](https://github.com/ballast-ai/token-station/releases/latest) 下载最新版本。
+1. 从 [Releases](https://github.com/ballast-ai/token-station/releases/latest) 下载最新版本：macOS 使用 DMG，Windows 使用 MSI，x86_64 Linux 可选 AppImage、DEB 或 RPM。
 2. 打开 Token Station，添加供应商。使用预设，或填写自定义 OpenAI 兼容端点。
 3. 在 **主页** 将全局路由设为单独路由、智能分档或额度优先。
 4. 对内置 Connector，选择已发现的 Agent 并点击 **一键接入**。Cursor 请使用独立接入流程。
@@ -88,7 +88,7 @@
 
 默认监听地址是 `127.0.0.1:8787`。
 
-在 macOS 上，关闭窗口只会隐藏 App。网关会继续运行，直到你从菜单栏退出。
+在 macOS、Windows 和 Linux 上，关闭窗口只会隐藏 App，网关仍会继续运行。可通过菜单栏/系统托盘图标恢复窗口，也可以再次启动 Token Station；单实例机制会唤起已有进程。只有在原生菜单中选择“退出 Token Station”才会结束进程。自动更新仍仅支持 macOS，Windows 与 Linux 需要从 Releases 手动更新。
 
 ## 从源码安装
 

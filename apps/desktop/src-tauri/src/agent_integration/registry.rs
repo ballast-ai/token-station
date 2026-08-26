@@ -769,6 +769,70 @@ mod tests {
     }
 
     #[test]
+    fn cursor_dedicated_setup_is_macos_only_until_a_native_backend_exists() {
+        use super::super::types::Platform;
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let cursor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "cursor")
+            .unwrap();
+
+        assert!(cursor
+            .known_install_locations
+            .contains_key(&Platform::Macos));
+        assert!(!cursor
+            .known_install_locations
+            .contains_key(&Platform::Windows));
+    }
+
+    #[test]
+    fn kimi_windows_npm_install_uses_the_validated_node_package_probe() {
+        let registry = AgentRegistry::builtin().unwrap();
+        let kimi = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "kimi-code")
+            .unwrap();
+
+        assert!(matches!(
+            kimi.version_probe.runtime,
+            Some(ProbeRuntime::NodePackage { .. })
+        ));
+    }
+
+    #[test]
+    fn linux_node_package_agents_cover_common_user_managers() {
+        use super::super::types::Platform;
+
+        let registry = AgentRegistry::builtin().unwrap();
+        for descriptor in registry.descriptors().iter().filter(|descriptor| {
+            matches!(
+                descriptor.version_probe.runtime,
+                Some(ProbeRuntime::NodePackage { .. })
+            )
+        }) {
+            let executable = &descriptor.executable_candidates[0];
+            for platform in [Platform::Linux, Platform::Wsl] {
+                let locations = &descriptor.known_install_locations[&platform];
+                for expected in [
+                    format!("${{HOME}}/.npm-global/bin/{executable}"),
+                    format!("${{HOME}}/.local/share/pnpm/{executable}"),
+                    format!("${{HOME}}/.bun/bin/{executable}"),
+                    format!("${{HOME}}/.volta/bin/{executable}"),
+                ] {
+                    assert!(
+                        locations.contains(&expected),
+                        "{} is missing {expected} on {platform:?}",
+                        descriptor.agent_id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn path_templates_reject_traversal_and_unknown_variables() {
         let mut traversal = fixture();
         traversal["agents"][0]["known_install_locations"]["macos"] =

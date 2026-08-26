@@ -74,13 +74,13 @@ Connect Claude Code, Codex, Gemini CLI, Cursor, and other agents to the models y
   </tr>
 </table>
 
-Eleven agents use a built-in connector. Cursor uses a dedicated setup on macOS and Windows. See the [guides](docs/guides/) and [reference](docs/reference.md#agents) for protocols and connector notes.
+Eleven agents use a built-in connector. Cursor's dedicated setup is currently macOS-only. See the [guides](docs/guides/) and [reference](docs/reference.md#agents) for protocols and connector notes.
 
 ## Quick start
 
 You need a provider API key or a local model endpoint. Token Station does not import agent subscriptions or OAuth sessions.
 
-1. Download the latest build from [Releases](https://github.com/ballast-ai/token-station/releases/latest).
+1. Download the latest build from [Releases](https://github.com/ballast-ai/token-station/releases/latest): DMG for macOS, MSI for Windows, or AppImage/DEB/RPM for x86_64 Linux.
 2. Open Token Station and add a provider. Use a preset or a custom OpenAI-compatible endpoint.
 3. On **Home**, set the global route to Direct, Smart tiers, or Quota first.
 4. For a built-in connector, select a detected agent and click **Connect**. Configure Cursor through its dedicated setup flow.
@@ -88,7 +88,7 @@ You need a provider API key or a local model endpoint. Token Station does not im
 
 The default listen address is `127.0.0.1:8787`.
 
-On macOS, closing the window hides the app. The gateway keeps running until you quit from the menu bar.
+On macOS, Windows, and Linux, closing the window hides the app while the gateway keeps running. Restore it from the menu-bar or system-tray icon, or launch Token Station again. Use **Quit Token Station** in the native menu to stop the process. Automatic updates remain macOS-only; Windows and Linux builds update manually from Releases.
 
 ## Install from source
 

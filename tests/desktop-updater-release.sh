@@ -110,8 +110,11 @@ if (!macos.includes(required)) {
     throw new Error(`macOS release path lost required updater setting: ${required}`);
   }
 }
-if (!windows.includes("if: ${{ false }} # First public desktop release is macOS-only.")) {
-  throw new Error("Windows desktop release job must be explicitly skipped for the first release");
+if (!windows.includes("if: needs.release-mode.outputs.enabled == 'true'")) {
+  throw new Error("Windows desktop release job must run in formal mode");
+}
+if (!windows.includes("token-station_${version}_x86_64.msi")) {
+  throw new Error("Windows desktop release must stage the normalized MSI name");
 }
 for (const forbidden of [
   "TOKEN_STATION_UPDATER_PUBKEY",

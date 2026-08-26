@@ -55,7 +55,7 @@ App 提供首次使用引导、Agent 重新扫描、供应商、用量、设置�
 | [OpenClaw](https://github.com/openclaw/openclaw) | 内置 Connector | OpenAI Chat Completions |
 | [WorkBuddy](https://www.workbuddy.ai/) | 内置 Connector | OpenAI Chat Completions |
 | [OpenCode](https://github.com/anomalyco/opencode) | 内置 Connector | OpenAI Chat Completions |
-| [Cursor](https://github.com/cursor/cursor) | macOS 与 Windows 专用接入 | OpenAI 兼容端点 |
+| [Cursor](https://github.com/cursor/cursor) | 仅 macOS 专用接入 | OpenAI 兼容端点 |
 
 Claude Desktop 目前没有公开的产品仓库。该链接指向 Anthropic 官方 GitHub 组织页。
 
@@ -65,7 +65,7 @@ Grok Build 使用 `~/.grok/config.toml`；设置 `GROK_HOME` 后使用 `$GROK_HO
 
 对十一种内置 Connector，点击“一键接入”即代表同意立即应用一份边界明确的计划。Token Station 会在需要时启动网关，并在首次接入后展示已改动字段。Connector 的可用平台取决于对应 Agent 和操作系统，并不代表 Token Station 已为该平台发布安装包。
 
-Cursor 在 macOS 与 Windows 上使用独立接入路径。请先退出 Cursor。Token Station 会私有备份相关 SQLite 记录，写入 OpenAI 兼容端点、虚拟 Key 和启用标记，回读校验失败时恢复原值。完成后重新启动 Cursor，并选择支持自定义 OpenAI Key 路径的模型。该路径不受标准 Connector 的字段归属和应用内断开流程管理。
+Cursor 使用仅限 macOS 的独立接入路径。请先退出 Cursor。Token Station 会私有备份相关 SQLite 记录，写入 OpenAI 兼容端点、虚拟 Key 和启用标记，回读校验失败时恢复原值。完成后重新启动 Cursor，并选择支持自定义 OpenAI Key 路径的模型。在 Windows 与 Linux 的凭证和数据库路径具备等价后端前，这两个平台不会宣称支持 Cursor 独立接入。该路径不受标准 Connector 的字段归属和应用内断开流程管理。
 
 ## 必须留在本机的工作负载
 

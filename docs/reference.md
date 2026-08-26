@@ -55,7 +55,7 @@ Background mode is not a system daemon, a login item, or an automatic crash-rest
 | [OpenClaw](https://github.com/openclaw/openclaw) | Built-in connector | OpenAI Chat Completions |
 | [WorkBuddy](https://www.workbuddy.ai/) | Built-in connector | OpenAI Chat Completions |
 | [OpenCode](https://github.com/anomalyco/opencode) | Built-in connector | OpenAI Chat Completions |
-| [Cursor](https://github.com/cursor/cursor) | Dedicated setup on macOS and Windows | OpenAI-compatible endpoint |
+| [Cursor](https://github.com/cursor/cursor) | Dedicated setup on macOS only | OpenAI-compatible endpoint |
 
 Claude Desktop does not currently have a public product repository. Its link opens Anthropic's official GitHub organization.
 
@@ -65,7 +65,7 @@ Grok Build uses `~/.grok/config.toml`, or `$GROK_HOME/config.toml` when `GROK_HO
 
 For the eleven built-in connectors, clicking **Connect** is consent to apply a bounded plan immediately. Token Station starts the gateway when needed and shows the fields changed by the first connection. Connector availability depends on the agent and operating system. It does not imply that Token Station publishes an installer for that platform.
 
-Cursor uses a separate path on macOS and Windows. Quit Cursor first. Token Station privately backs up the relevant SQLite records, writes the OpenAI-compatible endpoint, virtual key, and enablement flag, verifies the result, and restores the previous values if verification fails. Restart Cursor afterward and choose a model that supports its custom OpenAI key path. This path is not covered by standard connector ownership or managed disconnect.
+Cursor uses a separate macOS-only path. Quit Cursor first. Token Station privately backs up the relevant SQLite records, writes the OpenAI-compatible endpoint, virtual key, and enablement flag, verifies the result, and restores the previous values if verification fails. Restart Cursor afterward and choose a model that supports its custom OpenAI key path. Windows and Linux builds do not advertise this setup until their native credential and database paths have an equivalent backend. This path is not covered by standard connector ownership or managed disconnect.
 
 ## Workloads that must stay on the device
 

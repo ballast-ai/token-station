@@ -20,9 +20,21 @@
           "${HOME}/.bun/bin/claude",
           "${HOME}/.volta/bin/claude"
         ],
-        "linux": ["${HOME}/.local/bin/claude"],
+        "linux": [
+          "${HOME}/.local/bin/claude",
+          "${HOME}/.npm-global/bin/claude",
+          "${HOME}/.local/share/pnpm/claude",
+          "${HOME}/.bun/bin/claude",
+          "${HOME}/.volta/bin/claude"
+        ],
         "windows": ["${APPDATA}/npm/claude.cmd", "${USERPROFILE}/.local/bin/claude.exe"],
-        "wsl": ["${HOME}/.local/bin/claude"]
+        "wsl": [
+          "${HOME}/.local/bin/claude",
+          "${HOME}/.npm-global/bin/claude",
+          "${HOME}/.local/share/pnpm/claude",
+          "${HOME}/.bun/bin/claude",
+          "${HOME}/.volta/bin/claude"
+        ]
       },
       "version_probe": {
         "argv": ["--version"],
@@ -119,6 +131,10 @@
         "linux": [
           "${HOME}/.local/bin/codex",
           "${HOME}/.cargo/bin/codex",
+          "${HOME}/.npm-global/bin/codex",
+          "${HOME}/.local/share/pnpm/codex",
+          "${HOME}/.bun/bin/codex",
+          "${HOME}/.volta/bin/codex",
           "/usr/local/bin/codex",
           "/usr/bin/codex"
         ],
@@ -126,6 +142,10 @@
         "wsl": [
           "${HOME}/.local/bin/codex",
           "${HOME}/.cargo/bin/codex",
+          "${HOME}/.npm-global/bin/codex",
+          "${HOME}/.local/share/pnpm/codex",
+          "${HOME}/.bun/bin/codex",
+          "${HOME}/.volta/bin/codex",
           "/usr/local/bin/codex",
           "/usr/bin/codex"
         ]
@@ -191,9 +211,9 @@
           "/opt/homebrew/bin/gemini",
           "/usr/local/bin/gemini"
         ],
-        "linux": ["${HOME}/.local/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"],
+        "linux": ["${HOME}/.local/bin/gemini", "${HOME}/.npm-global/bin/gemini", "${HOME}/.local/share/pnpm/gemini", "${HOME}/.bun/bin/gemini", "${HOME}/.volta/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"],
         "windows": ["${APPDATA}/npm/gemini.cmd"],
-        "wsl": ["${HOME}/.local/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"]
+        "wsl": ["${HOME}/.local/bin/gemini", "${HOME}/.npm-global/bin/gemini", "${HOME}/.local/share/pnpm/gemini", "${HOME}/.bun/bin/gemini", "${HOME}/.volta/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"]
       },
       "version_probe": {
         "argv": ["--version"],
@@ -301,15 +321,26 @@
           "${HOME}/.bun/bin/kimi",
           "${HOME}/.volta/bin/kimi"
         ],
-        "linux": ["${HOME}/.local/bin/kimi", "${HOME}/.kimi-code/bin/kimi", "/usr/local/bin/kimi", "/usr/bin/kimi"],
+        "linux": ["${HOME}/.local/bin/kimi", "${HOME}/.kimi-code/bin/kimi", "${HOME}/.npm-global/bin/kimi", "${HOME}/.local/share/pnpm/kimi", "${HOME}/.bun/bin/kimi", "${HOME}/.volta/bin/kimi", "/usr/local/bin/kimi", "/usr/bin/kimi"],
         "windows": ["${APPDATA}/npm/kimi.cmd", "${USERPROFILE}/.kimi-code/bin/kimi.exe", "${USERPROFILE}/.local/bin/kimi.exe"],
-        "wsl": ["${HOME}/.local/bin/kimi", "${HOME}/.kimi-code/bin/kimi", "/usr/local/bin/kimi", "/usr/bin/kimi"]
+        "wsl": ["${HOME}/.local/bin/kimi", "${HOME}/.kimi-code/bin/kimi", "${HOME}/.npm-global/bin/kimi", "${HOME}/.local/share/pnpm/kimi", "${HOME}/.bun/bin/kimi", "${HOME}/.volta/bin/kimi", "/usr/local/bin/kimi", "/usr/bin/kimi"]
       },
       "version_probe": {
         "argv": ["--version"],
         "timeout_ms": 2000,
         "max_output_bytes": 65536,
-        "output_matcher": "SEMVER_ANYWHERE"
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "node_package",
+          "interpreter_candidates": ["node", "node.exe"],
+          "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
+          "known_install_locations": {
+            "macos": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "linux": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
+            "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
+            "wsl": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
+          }
+        }
       },
       "config_locations": [
         {
@@ -352,9 +383,9 @@
           "${HOME}/.bun/bin/dsh",
           "${HOME}/.volta/bin/dsh"
         ],
-        "linux": ["${HOME}/.npm-global/bin/dsh", "${HOME}/.local/share/pnpm/dsh", "/usr/local/bin/dsh", "/usr/bin/dsh"],
+        "linux": ["${HOME}/.npm-global/bin/dsh", "${HOME}/.local/share/pnpm/dsh", "${HOME}/.bun/bin/dsh", "${HOME}/.volta/bin/dsh", "/usr/local/bin/dsh", "/usr/bin/dsh"],
         "windows": ["${APPDATA}/npm/dsh.cmd"],
-        "wsl": ["${HOME}/.npm-global/bin/dsh", "${HOME}/.local/share/pnpm/dsh", "/usr/local/bin/dsh", "/usr/bin/dsh"]
+        "wsl": ["${HOME}/.npm-global/bin/dsh", "${HOME}/.local/share/pnpm/dsh", "${HOME}/.bun/bin/dsh", "${HOME}/.volta/bin/dsh", "/usr/local/bin/dsh", "/usr/bin/dsh"]
       },
       "version_probe": {
         "argv": ["--version"],
@@ -460,9 +491,9 @@
           "${HOME}/.bun/bin/openclaw",
           "${HOME}/.volta/bin/openclaw"
         ],
-        "linux": ["${HOME}/.local/bin/openclaw"],
+        "linux": ["${HOME}/.local/bin/openclaw", "${HOME}/.npm-global/bin/openclaw", "${HOME}/.local/share/pnpm/openclaw", "${HOME}/.bun/bin/openclaw", "${HOME}/.volta/bin/openclaw"],
         "windows": ["${APPDATA}/npm/openclaw.cmd", "${USERPROFILE}/.local/bin/openclaw.exe"],
-        "wsl": ["${HOME}/.local/bin/openclaw"]
+        "wsl": ["${HOME}/.local/bin/openclaw", "${HOME}/.npm-global/bin/openclaw", "${HOME}/.local/share/pnpm/openclaw", "${HOME}/.bun/bin/openclaw", "${HOME}/.volta/bin/openclaw"]
       },
       "version_probe": {
         "argv": ["--version"],
@@ -535,8 +566,7 @@
       "admission": "discovery_only",
       "executable_candidates": ["cursor"],
       "known_install_locations": {
-        "macos": ["/Applications/Cursor.app/Contents/MacOS/Cursor"],
-        "windows": ["${LOCALAPPDATA}/Programs/Cursor/Cursor.exe"]
+        "macos": ["/Applications/Cursor.app/Contents/MacOS/Cursor"]
       },
       "version_probe": {
         "argv": [],
@@ -640,6 +670,10 @@
         "linux": [
           "${HOME}/.local/bin/opencode",
           "${HOME}/.opencode/bin/opencode",
+          "${HOME}/.npm-global/bin/opencode",
+          "${HOME}/.local/share/pnpm/opencode",
+          "${HOME}/.bun/bin/opencode",
+          "${HOME}/.volta/bin/opencode",
           "/usr/local/bin/opencode",
           "/usr/bin/opencode"
         ],
@@ -647,6 +681,10 @@
         "wsl": [
           "${HOME}/.local/bin/opencode",
           "${HOME}/.opencode/bin/opencode",
+          "${HOME}/.npm-global/bin/opencode",
+          "${HOME}/.local/share/pnpm/opencode",
+          "${HOME}/.bun/bin/opencode",
+          "${HOME}/.volta/bin/opencode",
           "/usr/local/bin/opencode",
           "/usr/bin/opencode"
         ]

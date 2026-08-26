@@ -9,14 +9,19 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 
 const releaseWorkflow = read(".github/workflows/release.yml");
+const linuxWorkflow = read(".github/workflows/linux-desktop.yml");
 assert.match(releaseWorkflow, /desktop-macos:/);
+assert.match(releaseWorkflow, /desktop-windows:/);
 assert.match(releaseWorkflow, /verify-main-full-ci:\n    runs-on:/);
 assert.match(releaseWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
-assert.match(releaseWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos\]/);
+assert.match(releaseWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows\]/);
 assert.match(releaseWorkflow, /token-station-desktop-\$\{\{ matrix\.target \}\}/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/dmg\/\*\.dmg/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/macos\/\*\.app\.tar\.gz/);
 assert.match(releaseWorkflow, /path: desktop-dist\/\*/);
+for (const asset of ["x86_64.msi", "x86_64.deb", "x86_64.AppImage", "x86_64.rpm"]) {
+  assert.match(releaseWorkflow + linuxWorkflow, new RegExp(`token-station_\\$\\{version\\}_${asset.replace(".", "\\.")}`));
+}
 assert.doesNotMatch(releaseWorkflow, /^[ \t]+.*\*\.sig[ \t]*$/m);
 assert.match(releaseWorkflow, /Awaiting offline CLI and updater signatures/);
 
@@ -26,8 +31,8 @@ assert.doesNotMatch(desktopWorkflow, /push:\s*\n\s*tags:/);
 assert.match(desktopWorkflow, /verify-main-full-ci:\n    runs-on:/);
 assert.match(desktopWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
 assert.match(desktopWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates\]/);
+assert.doesNotMatch(desktopWorkflow, /if: \$\{\{ false \}\}/);
 
-const linuxWorkflow = read(".github/workflows/linux-desktop.yml");
 assert.match(linuxWorkflow, /workflow_call:/);
 assert.doesNotMatch(linuxWorkflow, /push:\s*\n\s*tags:/);
 assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[verify-main-full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);

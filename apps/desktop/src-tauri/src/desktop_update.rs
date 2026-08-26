@@ -12,9 +12,9 @@ pub const STABLE_LATEST_JSON_URL: &str =
 const CONFIGURED_LATEST_JSON_URL: Option<&str> = option_env!("TOKEN_STATION_UPDATER_ENDPOINT");
 pub const PROGRESS_EVENT: &str = "desktop-update-progress";
 pub const WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE: &str =
-    "Windows 首版暂不支持应用内更新；请从正式发布页手动下载安装。";
+    "Windows 暂不支持应用内更新；请从正式发布页手动下载安装。";
 pub const MACOS_ONLY_FIRST_RELEASE_UNSUPPORTED_MESSAGE: &str =
-    "首版应用内更新仅支持 macOS；请从正式发布页手动下载安装。";
+    "应用内更新目前仅支持 macOS；请从正式发布页手动下载安装。";
 
 /// The private key never reaches the build. Production builds inject only the
 /// matching public key; source/local builds deliberately compile without one.
