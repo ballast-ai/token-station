@@ -52,6 +52,25 @@ describe("DirectRoutePanel", () => {
       .toBeInTheDocument();
   });
 
+  it("keeps the applied badge to one unambiguous state label", () => {
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+      />,
+    );
+
+    const applied = document.querySelector(".direct-applied-target");
+    expect(applied).toHaveTextContent(/^已应用$/);
+    expect(applied).not.toHaveTextContent("deepseek-account");
+    const selectedRow = screen.getByRole("radio", { name: /deepseek-account/ }).closest(".direct-provider-row");
+    expect(selectedRow).toHaveTextContent("deepseek-account");
+    expect(selectedRow).toHaveTextContent("deepseek-chat");
+  });
+
   it("lists every provider once with its brand and only its managed models", async () => {
     const user = userEvent.setup();
     render(
@@ -658,7 +677,7 @@ describe("DirectRoutePanel", () => {
     expect(screen.getByRole("combobox", { name: "openai-account 模型" }))
       .toHaveTextContent("请选择");
     expect(screen.getByRole("button", { name: "应用" })).toBeDisabled();
-    expect(screen.getByText("配置未完成 · openai-account / 待选择模型")).toBeInTheDocument();
+    expect(screen.getByText("配置未完成", { selector: ".direct-applied-target" })).toBeInTheDocument();
     expect(screen.getByText("已保留供应商 openai-account；请选择模型后再应用。")).toBeInTheDocument();
   });
 

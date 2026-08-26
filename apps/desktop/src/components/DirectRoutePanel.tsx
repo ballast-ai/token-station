@@ -379,8 +379,8 @@ export default function DirectRoutePanel({
           {target && (
             <span className="direct-applied-target">
               {target.model
-                ? <>{copy("Applied", "已应用", "已應用", "適用済み")} · {target.upstream} / {target.model}</>
-                : <>{copy("Incomplete", "配置未完成", "未完成", "未完成")} · {target.upstream} / {copy("Select a model", "待选择模型", "待選擇模型", "選択するモデル")}</>}
+                ? copy("Applied", "已应用", "已應用", "適用済み")
+                : copy("Incomplete", "配置未完成", "未完成", "未完成")}
             </span>
           )}
           <button
