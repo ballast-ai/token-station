@@ -303,7 +303,6 @@ impl RunningServer {
         self.app_state.control.stop_accepting();
     }
 
-    #[cfg(target_os = "macos")]
     pub(crate) fn is_accepting(&self) -> bool {
         self.app_state.control.is_accepting()
     }
