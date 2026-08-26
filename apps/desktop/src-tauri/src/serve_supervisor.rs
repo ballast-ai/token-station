@@ -7,7 +7,6 @@ pub(crate) fn emit_serve_state<R: Runtime>(app: &AppHandle<R>, view: &ServeView)
     let _ = app.emit(SERVE_STATE_CHANGED_EVENT, view.clone());
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn publish_status_menu_start_error<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppStateManaged,
@@ -38,7 +37,6 @@ pub(crate) fn publish_status_menu_start_error<R: Runtime>(
     desktop_shell::restore_main_window(app);
 }
 
-#[cfg(any(target_os = "macos", test))]
 pub(crate) fn desktop_shell_applying_phase(
     task_alive: bool,
     accepting: bool,
@@ -50,7 +48,6 @@ pub(crate) fn desktop_shell_applying_phase(
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn desktop_shell_snapshot(inner: &AppInner) -> desktop_shell::ProxyMenuSnapshot {
     let generation = inner.server.generation();
     let (phase, listen) = match &inner.server {
@@ -450,7 +447,6 @@ where
         .map(|snapshot| snapshot.expect("unconditional proxy start cannot be rejected as stale"))
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn begin_serve_start_if_generation<R, F>(
     app: AppHandle<R>,
     state: &AppStateManaged,
@@ -751,7 +747,6 @@ pub(crate) fn begin_serve_stop<R: Runtime>(
         .expect("unconditional proxy stop cannot be rejected as stale")
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn begin_serve_stop_if_generation<R: Runtime>(
     app: AppHandle<R>,
     state: &AppStateManaged,

@@ -1010,7 +1010,6 @@ impl AgentCommandState {
     /// Projects the last completed discovery scan into a path-free status-menu
     /// view. Ownership is the durable "connected through Token Station" fact;
     /// unlike runtime validation it remains truthful while the proxy is stopped.
-    #[cfg(target_os = "macos")]
     pub(crate) fn managed_agent_menu_entries(&self) -> Vec<(String, String, u16)> {
         let records = self
             .session
