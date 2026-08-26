@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "用法：scripts/package-macos-dmg.sh --app <app> --output <dmg> --volume-name <name> --version <x.y.z> --architecture <aarch64|x86_64> [--signing-identity <identity> | --unsigned-test --app-source-commit <40位提交>]" >&2
+  echo "用法：scripts/package-macos-dmg.sh --app <app> --output <dmg> --volume-name <name> --version <x.y.z> --architecture <aarch64|x86_64> [--signing-identity <identity> | --unsigned-test --source-tag <vX.Y.Z|preview-vX.Y.Z> --app-source-commit <40位提交>]" >&2
   exit 2
 }
 
@@ -14,6 +14,7 @@ version=""
 architecture=""
 unsigned_test=false
 app_source_commit=""
+source_tag=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --app) app_path=${2:-}; shift 2 ;;
@@ -23,6 +24,7 @@ while [[ $# -gt 0 ]]; do
     --version) version=${2:-}; shift 2 ;;
     --architecture) architecture=${2:-}; shift 2 ;;
     --unsigned-test) unsigned_test=true; shift ;;
+    --source-tag) source_tag=${2:-}; shift 2 ;;
     --app-source-commit) app_source_commit=${2:-}; shift 2 ;;
     *) usage ;;
   esac
@@ -61,14 +63,18 @@ if [[ "$unsigned_test" == "true" ]]; then
     echo "未签名测试模式需要 40 位 --app-source-commit。" >&2
     exit 1
   }
+  [[ "$source_tag" == "v${version}" || "$source_tag" == "preview-v${version}" ]] || {
+    echo "未签名测试模式需要与版本一致的 --source-tag。" >&2
+    exit 1
+  }
   expected_filename="token-station_${version}_${architecture}_UNSIGNED-UNNOTARIZED.dmg"
   [[ "$(basename "$output_path")" == "$expected_filename" ]] || {
     echo "测试 DMG 文件名必须明确标出未签名和未公证，应为：$expected_filename" >&2
     exit 1
   }
-  tag_commit=$(git -C "$root" rev-parse "v${version}^{}" 2>/dev/null || true)
+  tag_commit=$(git -C "$root" rev-parse "${source_tag}^{}" 2>/dev/null || true)
   [[ "$tag_commit" == "$app_source_commit" ]] || {
-    echo "App 源码提交与 v${version} 标签不一致，已停止打包。" >&2
+    echo "App 源码提交与 ${source_tag} 标签不一致，已停止打包。" >&2
     exit 1
   }
   packaging_source_commit=$(git -C "$root" rev-parse HEAD)
@@ -85,7 +91,7 @@ else
     echo "正式 DMG 必须提供非 ad-hoc 签名身份。" >&2
     exit 1
   }
-  [[ -z "$app_source_commit" ]] || usage
+  [[ -z "$app_source_commit" && -z "$source_tag" ]] || usage
   expected_filename="token-station_${version}_${architecture}.dmg"
   [[ "$(basename "$output_path")" == "$expected_filename" ]] || {
     echo "正式 DMG 文件名应为：$expected_filename" >&2
@@ -154,8 +160,8 @@ if [[ "$unsigned_test" == "true" ]]; then
   printf '%s\n' \
     '警告：此 DMG 未签名、未经 Apple 公证，仅供测试。安装前请阅读 README，并核对 SHA-256。' \
     >"$stage/.release-metadata/unsigned-test-warning.txt"
-  printf 'App source tag: v%s\nApp source commit: %s\nPackaging source commit: %s\n' \
-    "$version" "$app_source_commit" "$packaging_source_commit" \
+  printf 'App source tag: %s\nApp source commit: %s\nPackaging source commit: %s\n' \
+    "$source_tag" "$app_source_commit" "$packaging_source_commit" \
     >"$stage/.release-metadata/provenance.txt"
 else
   printf 'Release version: %s\n' "$version" >"$stage/.release-metadata/release.txt"

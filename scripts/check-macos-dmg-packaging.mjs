@@ -71,6 +71,7 @@ const packagerPatterns = [
   ["票据装订", /stapler staple/],
   ["显式未签名测试模式", /--unsigned-test/],
   ["测试 DMG 警告文件名", /UNSIGNED-UNNOTARIZED/],
+  ["测试包版本标签", /--source-tag/],
   ["App 源码提交", /--app-source-commit/],
   ["打包源码提交", /packaging_source_commit/],
   ["测试包隐藏风险标记", /unsigned-test-warning\.txt/],

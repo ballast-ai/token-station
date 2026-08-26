@@ -124,7 +124,8 @@ credentials. Publish it as a GitHub pre-release. Do not mark it as a stable or f
 2. Push the release commit. Wait for the exact commit's Full CI run to pass.
 3. Dispatch `.github/workflows/preview-platform-artifacts.yml` on that exact commit. Wait for Full CI
    verification, Platform Gates, the Windows MSI build, and all Linux package builds to pass.
-4. Build the two macOS preview targets on the authorized offline updater-signing host:
+4. Create an annotated `preview-vX.Y.Z` tag locally on the verified release commit, but do not push it yet.
+   Build the two macOS preview targets on the authorized offline updater-signing host:
 
 ```bash
 scripts/build-desktop.sh --preview --target aarch64-apple-darwin
@@ -134,8 +135,8 @@ scripts/build-desktop.sh --preview --target x86_64-apple-darwin
 5. Assemble the two unsigned DMGs and checksum files, two updater payloads and signatures, Windows MSI,
    Linux AppImage, Debian, and RPM packages, and `latest.json` in one new empty directory.
 6. Create `SHA256SUMS`. Run `scripts/check-preview-release-assets.mjs` against the assembled directory.
-7. Create an annotated `preview-vX.Y.Z` tag on the release commit. Push the tag only after every package
-   audit passes. This tag must not match the formal `v*` release trigger.
+7. Push the pre-created `preview-vX.Y.Z` tag only after every package audit passes. This tag must not match
+   the formal `v*` release trigger.
 8. Create a GitHub pre-release named `Token Station vX.Y.Z`. Upload the exact verified directory. Do not
    overwrite an asset in a published versioned preview.
 9. Replace only `updater-preview/latest.json` after every versioned asset URL, updater signature, and checksum

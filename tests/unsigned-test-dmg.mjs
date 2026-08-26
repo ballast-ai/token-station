@@ -24,6 +24,8 @@ for (const pattern of [
   /--unsigned-test/,
   /UNSIGNED-UNNOTARIZED/,
   /--app-source-commit/,
+  /--source-tag/,
+  /preview-v/,
   /packaging_source_commit/,
   /\.release-metadata\/unsigned-test-warning\.txt/,
   /\.release-metadata\/provenance\.txt/,

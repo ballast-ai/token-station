@@ -374,12 +374,17 @@ if [[ "$host_os" == "Darwin" && "$mode" != "local" ]]; then
       ;;
   esac
   if [[ "$mode" == "preview" ]]; then
+    preview_source_tag="preview-v${desktop_version}"
+    if ! git -C "$root" rev-parse "${preview_source_tag}^{}" >/dev/null 2>&1; then
+      preview_source_tag="v${desktop_version}"
+    fi
     dmg_path="$bundle_root/dmg/token-station_${desktop_version}_${release_architecture}_UNSIGNED-UNNOTARIZED.dmg"
     "$root/scripts/package-macos-dmg.sh" \
       --app "$app_path" \
       --output "$dmg_path" \
       --volume-name "Token Station ${desktop_version}" \
       --unsigned-test \
+      --source-tag "$preview_source_tag" \
       --app-source-commit "$(git -C "$root" rev-parse HEAD 2>/dev/null || true)" \
       --version "$desktop_version" \
       --architecture "$release_architecture"

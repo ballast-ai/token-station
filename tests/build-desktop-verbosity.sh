@@ -243,6 +243,8 @@ test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg() {
     || fail "macOS preview build did not provide the updater public key to the Tauri bundler"
   grep -Fxq -- '--unsigned-test' "$state/dmg-package-args" \
     || fail "macOS preview build did not use the unsigned test DMG policy"
+  grep -Fxq -- '--source-tag' "$state/dmg-package-args" \
+    || fail "macOS preview build did not bind the DMG to a source tag"
   grep -Fxq -- '--architecture' "$state/dmg-package-args" \
     || fail "macOS preview build did not pass a DMG architecture"
   grep -Fxq -- 'aarch64' "$state/dmg-package-args" \

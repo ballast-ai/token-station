@@ -201,7 +201,7 @@ if [[ "$unsigned_test" == "true" ]]; then
       exit 1
     }
   done
-  /usr/bin/grep -Eq '^App source tag: v[0-9]+\.[0-9]+\.[0-9]+$' "$mounted_provenance" || {
+  /usr/bin/grep -Eq '^App source tag: (preview-)?v[0-9]+\.[0-9]+\.[0-9]+$' "$mounted_provenance" || {
     echo "构建来源缺少 App 标签。" >&2
     exit 1
   }
