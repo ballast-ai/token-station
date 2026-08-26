@@ -2433,24 +2433,26 @@ pub(crate) fn runtime_from_app(
         .collect();
     let config = serving.serving_config();
     let mut model_metadata = BTreeMap::new();
-    for connector in builtin_connectors() {
-        let agent_id = connector.agent_id();
-        if model_metadata.contains_key(agent_id) {
-            continue;
-        }
-        let router =
-            serving_router_for_agent(serving, agent_id).map_err(AgentCommandError::internal)?;
-        if let Some(metadata) =
-            agent_model_metadata_for_router(config, &router).map_err(AgentCommandError::internal)?
-        {
-            model_metadata.insert(agent_id.to_string(), metadata);
-        }
-    }
     let mut connection_issues = BTreeMap::new();
-    let opencode_router =
-        serving_router_for_agent(serving, "opencode").map_err(AgentCommandError::internal)?;
-    if let Some(issue) = opencode_connection_issue(config, &opencode_router) {
-        connection_issues.insert("opencode-v1".to_owned(), issue);
+    if !config.home_route_is_unconfigured() {
+        for connector in builtin_connectors() {
+            let agent_id = connector.agent_id();
+            if model_metadata.contains_key(agent_id) {
+                continue;
+            }
+            let router =
+                serving_router_for_agent(serving, agent_id).map_err(AgentCommandError::internal)?;
+            if let Some(metadata) = agent_model_metadata_for_router(config, &router)
+                .map_err(AgentCommandError::internal)?
+            {
+                model_metadata.insert(agent_id.to_string(), metadata);
+            }
+        }
+        let opencode_router =
+            serving_router_for_agent(serving, "opencode").map_err(AgentCommandError::internal)?;
+        if let Some(issue) = opencode_connection_issue(config, &opencode_router) {
+            connection_issues.insert("opencode-v1".to_owned(), issue);
+        }
     }
     let virtual_key = serve.virtual_key.ok_or_else(|| {
         AgentCommandError::boundary(
@@ -4200,6 +4202,56 @@ mod tests {
             assert_eq!(error.code, expected_code);
             std::fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[test]
+    fn commands_runtime_accepts_a_running_gateway_that_is_waiting_for_a_route() {
+        let root = scratch("runtime-waiting-route");
+        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("plugins-dist");
+        let mut draft = crate::template(&root.join("data"), &plugins_dir);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["server"]["auth"] = json!(true);
+        draft["data"]["metrics"] = json!(false);
+        let config =
+            serde_json::from_value::<token_station_cli::config::ClientConfig>(draft.clone())
+                .unwrap();
+        let running = crate::serve_lifecycle::prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(7, BTreeMap::new())
+            .unwrap();
+        let mut inner = crate::AppInner::new(root.join("token-station.json"), draft, None);
+        inner.server = crate::ServerLifecycle::Running {
+            generation: 1,
+            server: running,
+            apply_error: None,
+        };
+        let state = AppStateManaged(Mutex::new(inner));
+
+        let runtime = runtime_from_app(&state)
+            .expect("a waiting gateway remains a valid Agent connection runtime");
+        assert!(runtime
+            .input_for("claude-code-v1")
+            .unwrap()
+            .model_metadata
+            .is_none());
+
+        let running = {
+            let mut inner = state.0.lock().unwrap();
+            let lifecycle = std::mem::replace(
+                &mut inner.server,
+                crate::ServerLifecycle::Stopped { generation: 2 },
+            );
+            let crate::ServerLifecycle::Running { server, .. } = lifecycle else {
+                panic!("fixture runtime must be serving");
+            };
+            server
+        };
+        running.drain_and_shutdown();
+        std::fs::remove_dir_all(root).ok();
     }
 
     // Not under `bundled-plugins`. This test needs `agent-openai` to be a

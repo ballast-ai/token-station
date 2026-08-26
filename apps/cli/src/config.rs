@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
 use token_station_router_core::{
-    ConfigSource, RecoveryPolicy, RouterConfig, RoutingMode as CoreRoutingMode, UpstreamModel,
-    UpstreamRef,
+    CONFIG_VERSION, ConfigError as RouterConfigError, ConfigSource, RecoveryPolicy, RouterConfig,
+    RoutingMode as CoreRoutingMode, UpstreamModel, UpstreamRef,
 };
 
 const TIER_HIGH: &str = "tier_high";
@@ -737,6 +737,22 @@ impl ClientConfig {
             && self.router.default_pool.is_empty()
     }
 
+    pub(crate) fn validate_waiting_home_router(&self) -> Result<(), String> {
+        if self.router.version != CONFIG_VERSION {
+            return Err(RouterConfigError::UnsupportedVersion(self.router.version).to_string());
+        }
+        if self.router.assumed_context_window == 0 {
+            return Err(RouterConfigError::AssumedContextWindowIsZero.to_string());
+        }
+        if self.router.routing_mode != CoreRoutingMode::Tiered {
+            return Err("an unconfigured Home route requires a tiered base router".to_owned());
+        }
+        if !matches!(self.router.recovery, RecoveryPolicy::Strict) {
+            return Err("an unconfigured Home route requires strict recovery".to_owned());
+        }
+        Ok(())
+    }
+
     /// Compiles the host-level Home mode into the protected two-state
     /// router-core contract consumed by the Gateway.
     ///
@@ -907,8 +923,10 @@ impl ClientConfig {
         }
         if self.effective_home_routing_mode() == RoutingMode::Direct
             && self.effective_home_direct_target().is_none()
-            && !self.home_route_is_unconfigured()
         {
+            if self.home_route_is_unconfigured() {
+                return self.validate_waiting_home_router();
+            }
             return Err("Home direct routing requires direct_target".to_owned());
         }
         Ok(())
@@ -1918,6 +1936,39 @@ mod tests {
 
         assert!(config.home_route_is_unconfigured());
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn empty_desktop_route_does_not_bypass_router_invariants() {
+        for (label, field, invalid) in [
+            ("version", "version", serde_json::json!(2)),
+            (
+                "assumed-context-window",
+                "assumed_context_window",
+                serde_json::json!(0),
+            ),
+            (
+                "recovery",
+                "recovery",
+                serde_json::json!({"policy": "ordered", "pools": ["missing"]}),
+            ),
+        ] {
+            let mut value = example();
+            value["upstreams"] = serde_json::json!({});
+            value["routing"] = serde_json::json!({"mode": "direct"});
+            value["router"]["pools"] = serde_json::json!({});
+            value["router"]["rules"] = serde_json::json!([]);
+            value["router"]["hint_routes"] = serde_json::json!([]);
+            value["router"]["heuristic"] = serde_json::Value::Null;
+            value["router"]["default_pool"] = serde_json::json!("");
+            value["router"][field] = invalid;
+
+            let path = scratch(&format!("empty-desktop-route-{label}"), &value.to_string());
+            let error = ClientConfig::load(&path)
+                .expect_err("an invalid Router document cannot enter the waiting state");
+            assert!(!error.detail.is_empty());
+            fs::remove_file(path).ok();
+        }
     }
 
     #[test]

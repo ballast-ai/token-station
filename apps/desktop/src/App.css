@@ -6446,6 +6446,17 @@ pre.block {
   overflow-wrap: anywhere;
   white-space: normal;
 }
+.direct-applied-target.is-draft {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+.direct-applied-detail {
+  max-width: min(420px, 48vw);
+  color: var(--muted);
+  font: 9.5px/1.35 "IBM Plex Mono", monospace;
+  overflow-wrap: anywhere;
+}
 
 .direct-provider-list {
   display: grid;
@@ -10990,7 +11001,7 @@ samp {
 }
 .model-test-composer:focus-visible {
   outline: 0;
-  border-color: var(--line);
+  border-color: color-mix(in srgb, var(--ink) 52%, var(--line));
   box-shadow: none;
 }
 .model-test-composer-error {

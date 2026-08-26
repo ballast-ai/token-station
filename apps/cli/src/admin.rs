@@ -45,6 +45,7 @@ impl AdminContext {
     /// the effective Home mode cannot be compiled.
     pub fn from_config(config: &ClientConfig) -> Result<Self, String> {
         let router = if config.home_route_is_unconfigured() {
+            config.validate_waiting_home_router()?;
             config.router.clone()
         } else {
             config.home_router_config()?

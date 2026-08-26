@@ -317,13 +317,21 @@ describe("retained page theme styles", () => {
     expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--signal\)|var\(--success\)/);
   });
 
-  it("uses only the composer's border as its focus indicator", () => {
+  it("uses a visible neutral border as the composer's focus indicator", () => {
+    const composerRule = appCss.match(
+      /\.model-test-composer\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
     const composerFocusRule = appCss.match(
       /\.model-test-composer:focus-visible\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
 
+    expect(composerRule).toMatch(/border:\s*1px solid var\(--line\)/);
     expect(composerFocusRule).toMatch(/outline:\s*0/);
-    expect(composerFocusRule).toMatch(/border-color:\s*var\(--line\)/);
+    expect(composerFocusRule).toMatch(
+      /border-color:\s*color-mix\(in srgb, var\(--ink\) 52%, var\(--line\)\)/,
+    );
+    expect(appCss).toMatch(/--ink:\s*#[0-9a-f]{6}/i);
+    expect(composerFocusRule).not.toMatch(/var\(--signal\)/);
     expect(composerFocusRule).toMatch(/box-shadow:\s*none/);
   });
 

@@ -632,19 +632,28 @@ impl Guest for GeminiClient {
 
     fn map_inbound_error(error: String, _context: String) -> Result<String, String> {
         let error: ErrorEnvelope = parse(&error)?;
-        let status = match error.code {
-            ErrorCode::InvalidRequest => "INVALID_ARGUMENT",
-            ErrorCode::Auth => "UNAUTHENTICATED",
-            ErrorCode::PaymentRequired => "FAILED_PRECONDITION",
-            ErrorCode::RateLimit => "RESOURCE_EXHAUSTED",
-            ErrorCode::Capacity | ErrorCode::UpstreamUnavailable => "UNAVAILABLE",
-            ErrorCode::Capability => "FAILED_PRECONDITION",
-            ErrorCode::ContentPolicy => "PERMISSION_DENIED",
-            ErrorCode::ContextLength => "OUT_OF_RANGE",
-            ErrorCode::Timeout => "DEADLINE_EXCEEDED",
-            ErrorCode::TransportTruncated
-            | ErrorCode::ProviderProtocolError
-            | ErrorCode::Internal => "INTERNAL",
+        let status = if error
+            .extensions
+            .get("client_error_code")
+            .and_then(Value::as_str)
+            == Some("route_not_configured")
+        {
+            "FAILED_PRECONDITION"
+        } else {
+            match error.code {
+                ErrorCode::InvalidRequest => "INVALID_ARGUMENT",
+                ErrorCode::Auth => "UNAUTHENTICATED",
+                ErrorCode::PaymentRequired => "FAILED_PRECONDITION",
+                ErrorCode::RateLimit => "RESOURCE_EXHAUSTED",
+                ErrorCode::Capacity | ErrorCode::UpstreamUnavailable => "UNAVAILABLE",
+                ErrorCode::Capability => "FAILED_PRECONDITION",
+                ErrorCode::ContentPolicy => "PERMISSION_DENIED",
+                ErrorCode::ContextLength => "OUT_OF_RANGE",
+                ErrorCode::Timeout => "DEADLINE_EXCEEDED",
+                ErrorCode::TransportTruncated
+                | ErrorCode::ProviderProtocolError
+                | ErrorCode::Internal => "INTERNAL",
+            }
         };
         let mut body = Map::new();
         body.insert("code".to_owned(), json!(error.http_status));

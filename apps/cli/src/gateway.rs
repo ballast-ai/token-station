@@ -1958,6 +1958,7 @@ impl Gateway {
         // empty desktop setup state may proceed without a Router. A partially
         // configured Direct route still fails closed.
         let home_router_config = if config.home_route_is_unconfigured() {
+            config.validate_waiting_home_router()?;
             None
         } else {
             Some(config.home_router_config()?)
@@ -3098,21 +3099,36 @@ impl Gateway {
             }
         };
         let Some(router) = router else {
-            let mut record = begin_record(started_at_ms, "auto".to_owned(), None, running_revision);
-            tag_transport(&mut record, method, path, false);
+            let selected = self.select_agent(method, path, headers);
+            let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
+            let mut record = begin_record(started_at_ms, protocol, agent_id, running_revision);
+            tag_transport(&mut record, method, path, selected.is_some());
+            let mut refusal = ErrorEnvelope::new(
+                ErrorCode::InvalidRequest,
+                503,
+                "Configure a personal or enterprise route in Token Station.",
+            );
+            refusal.extensions.insert(
+                "client_error_code".to_owned(),
+                json!("route_not_configured"),
+            );
             record.status = 503;
-            record.error_code = Some(ErrorCode::InvalidRequest);
-            emit(Reply::BeginJson(JsonReply {
-                status: 503,
-                body: json!({
-                    "error": {
-                        "message": "Configure a personal or enterprise route in Token Station.",
-                        "type": "route_not_configured",
-                        "code": "route_not_configured"
-                    }
-                })
-                .to_string(),
-            }));
+            record.error_code = Some(refusal.code);
+            let rendered = selected.map_or_else(
+                || JsonReply {
+                    status: 503,
+                    body: json!({
+                        "error": {
+                            "message": refusal.message,
+                            "type": "route_not_configured",
+                            "code": "route_not_configured"
+                        }
+                    })
+                    .to_string(),
+                },
+                |agent| Self::render_error(agent, &refusal),
+            );
+            emit(Reply::BeginJson(rendered));
             record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
             self.recorder.record(&record);
             return;
@@ -4463,5 +4479,74 @@ mod waiting_route_tests {
         };
         assert_eq!(reply.status, 503);
         assert!(reply.body.contains(r#""code":"route_not_configured""#));
+    }
+
+    #[test]
+    fn unconfigured_gateway_uses_each_inbound_protocol_error_envelope() {
+        let mut value: Value = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        value["upstreams"] = json!({});
+        value["routing"] = json!({"mode": "direct"});
+        value["router"]["pools"] = json!({});
+        value["router"]["rules"] = json!([]);
+        value["router"]["hint_routes"] = json!([]);
+        value["router"]["heuristic"] = Value::Null;
+        value["router"]["default_pool"] = json!("");
+        value["plugins"]["agents"] = json!([
+            "agent-openai",
+            "agent-openai-responses",
+            "agent-anthropic",
+            "agent-gemini"
+        ]);
+        value["plugins"]["allow_unsigned"] = json!(true);
+        value["plugins"]["dir"] = json!(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("plugins-dist")
+        );
+        let config: crate::config::ClientConfig = serde_json::from_value(value).unwrap();
+        let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder)).unwrap();
+
+        for (path, headers, expected) in [
+            (
+                "/v1/responses",
+                Vec::new(),
+                ("responses", "route_not_configured"),
+            ),
+            (
+                "/v1/messages",
+                vec![("anthropic-version".to_owned(), "2023-06-01".to_owned())],
+                ("error", "invalid_request_error"),
+            ),
+            (
+                "/v1beta/models/gemini-2.5-pro:generateContent",
+                Vec::new(),
+                ("gemini", "FAILED_PRECONDITION"),
+            ),
+        ] {
+            let mut replies = Vec::new();
+            gateway.chat(
+                "POST",
+                path,
+                &headers,
+                br#"{"model":"auto","messages":[]}"#,
+                &mut |reply| {
+                    replies.push(reply);
+                    true
+                },
+            );
+            let Reply::BeginJson(reply) = replies.remove(0) else {
+                panic!("the waiting gateway returns one protocol-shaped refusal");
+            };
+            let body: Value = serde_json::from_str(&reply.body).unwrap();
+            match expected.0 {
+                "error" => {
+                    assert_eq!(body["type"], json!("error"));
+                    assert_eq!(body["error"]["type"], json!(expected.1));
+                }
+                "responses" => assert_eq!(body["error"]["code"], json!(expected.1)),
+                "gemini" => assert_eq!(body["error"]["status"], json!(expected.1)),
+                _ => unreachable!(),
+            }
+        }
     }
 }

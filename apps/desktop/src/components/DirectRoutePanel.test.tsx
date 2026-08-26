@@ -71,6 +71,27 @@ describe("DirectRoutePanel", () => {
     expect(selectedRow).toHaveTextContent("deepseek-chat");
   });
 
+  it("keeps the applied route visible while a different target is only a draft", async () => {
+    const user = userEvent.setup();
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /openai-account/ }));
+
+    expect(document.querySelector(".direct-applied-target")).toHaveTextContent("更改未应用");
+    expect(document.querySelector(".direct-applied-target")).toHaveClass("is-draft");
+    expect(screen.getByText("当前已应用：deepseek-account / deepseek-chat"))
+      .toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /openai-account/ })).toBeChecked();
+  });
+
   it("lists every provider once with its brand and only its managed models", async () => {
     const user = userEvent.setup();
     render(

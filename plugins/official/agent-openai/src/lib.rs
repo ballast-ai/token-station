@@ -548,7 +548,11 @@ impl Guest for OpenAiClient {
 
     fn map_inbound_error(error: String, _context: String) -> Result<String, String> {
         let error: ErrorEnvelope = parse_input(&error)?;
-        let code = serde_json::to_value(error.code).map_err(internal)?;
+        let code = error
+            .extensions
+            .get("client_error_code")
+            .cloned()
+            .unwrap_or(serde_json::to_value(error.code).map_err(internal)?);
         to_output(&json!({
             "error": {
                 "message": error.message,

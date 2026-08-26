@@ -350,6 +350,9 @@ export default function DirectRoutePanel({
   const selectedTargetValid = providers.some((provider) => (
     provider.name === selectedProvider && provider.models.includes(selectedModel)
   ));
+  const hasUnappliedTarget = Boolean(target && selectedTargetValid && (
+    selectedProvider !== target.upstream || selectedModel !== (target.model ?? "")
+  ));
 
   return (
     <section
@@ -377,11 +380,20 @@ export default function DirectRoutePanel({
         </div>
         <div className="direct-route-heading-actions">
           {target && (
-            <span className="direct-applied-target">
-              {target.model
-                ? copy("Applied", "已应用", "已應用", "適用済み")
-                : copy("Incomplete", "配置未完成", "未完成", "未完成")}
-            </span>
+            <>
+              <span className={`direct-applied-target${hasUnappliedTarget ? " is-draft" : ""}`}>
+                {hasUnappliedTarget
+                  ? copy("Changes not applied", "更改未应用", "變更未套用", "変更は未適用")
+                  : target.model
+                    ? copy("Applied", "已应用", "已應用", "適用済み")
+                    : copy("Incomplete", "配置未完成", "未完成", "未完成")}
+              </span>
+              {hasUnappliedTarget && target.model && (
+                <span className="direct-applied-detail">
+                  {copy("Currently applied: ", "当前已应用：", "目前已套用：", "現在適用中：")}{target.upstream} / {target.model}
+                </span>
+              )}
+            </>
           )}
           <button
             className="btn primary"

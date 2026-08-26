@@ -2575,10 +2575,15 @@ impl Guest for ResponsesClient {
 
     fn map_inbound_error(error: String, _context: String) -> Result<String, String> {
         let error: ErrorEnvelope = parse_input(&error)?;
+        let code = error
+            .extensions
+            .get("client_error_code")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| error_code(error.code));
         to_output(&json!({
             "error": {
                 "type": "error",
-                "code": error_code(error.code),
+                "code": code,
                 "message": error.message
             }
         }))
