@@ -936,7 +936,7 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(screen.getByText(
-      "The operation could not be completed. Try again. If it still fails, open the local logs from Recovery mode.",
+      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
     )).toBeInTheDocument();
     expect(screen.queryByText(/当前版本在阻断列表/)).not.toBeInTheDocument();
   });

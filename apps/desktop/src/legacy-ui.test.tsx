@@ -235,7 +235,7 @@ describe("legacy desktop read-only pages", () => {
     first.unmount();
     vi.mocked(getRouterTable).mockRejectedValueOnce(new Error("router down"));
     render(<RouterTable />);
-    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
+    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).toBeInTheDocument();
   });
 
   it("loads grouped stats, changes scope and detail view, and formats nullable cost", async () => {
@@ -336,7 +336,7 @@ describe("legacy desktop read-only pages", () => {
     first.unmount();
     vi.mocked(getStats).mockRejectedValueOnce(new Error("stats down"));
     render(<Stats />);
-    expect((await screen.findAllByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).length).toBeGreaterThan(0);
   });
 
   it("loads and refreshes plugin metadata, including empty values", async () => {
@@ -354,7 +354,7 @@ describe("legacy desktop read-only pages", () => {
   it("shows plugin errors", async () => {
     vi.mocked(getPlugins).mockRejectedValue(new Error("plugin down"));
     render(<Plugins />);
-    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
+    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).toBeInTheDocument();
   });
 });
 
@@ -459,9 +459,9 @@ describe("settings and update actions", () => {
     await user.click(screen.getByRole("switch", { name: /本地指标/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
     const viewport = screen.getByTestId("error-toast-viewport");
-    expect(await within(viewport).findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。"))
+    expect(await within(viewport).findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。"))
       .toBeInTheDocument();
-    expect(screen.queryByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。", { selector: ".settings-card .banner" }))
+    expect(screen.queryByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。", { selector: ".settings-card .banner" }))
       .toBeNull();
   });
 
@@ -660,7 +660,7 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     expect(await screen.findByText("暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存模型" }));
-    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
+    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
   });
 
@@ -1273,7 +1273,7 @@ describe("provider deletion lifecycle", () => {
     );
 
     expect(screen.getByText(
-      "The operation could not be completed. Try again. If it still fails, open the local logs from Recovery mode.",
+      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
     )).toBeInTheDocument();
     expect(screen.queryByText(/\/Users\/example/)).not.toBeInTheDocument();
   });

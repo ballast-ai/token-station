@@ -522,10 +522,10 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
   },
   {
     matches: /database|sqlite|schema|指标库|数据库/i,
-    en: "The local data store could not be opened safely. Use Recovery mode to inspect or export the local data.",
-    zh: "本地数据无法安全打开。请使用自救模式检查或导出本地数据。",
-    zhTW: "無法安全開啟本機資料儲存區。請使用復原模式檢查或匯出本機資料。",
-    ja: "ローカルデータストアを安全に開けませんでした。リカバリーモードでローカルデータを確認またはエクスポートしてください。",
+    en: "The local data could not be opened. Update Token Station and try again; if the problem continues, contact support.",
+    zh: "无法打开本地数据。请更新 Token Station 后重试；如果仍然失败，请联系支持。",
+    zhTW: "無法開啟本機資料。請更新 Token Station 後重試；如果仍然失敗，請聯絡支援。",
+    ja: "ローカルデータを開けません。Token Station を更新して再試行し、問題が続く場合はサポートにお問い合わせください。",
   },
   {
     matches: /model_catalog_provider_required/i,
@@ -639,10 +639,10 @@ function selectedAppLanguage(language?: Language): Language {
 function genericAppError(language: Language): string {
   return localizedCopy(
     language,
-    "The operation could not be completed. Try again. If it still fails, open the local logs from Recovery mode.",
-    "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
-    "操作未能完成。請重試。如果仍然失敗，請從復原模式開啟本機記錄。",
-    "操作を完了できませんでした。もう一度お試しください。それでも失敗する場合は、リカバリーモードからローカルログを開いてください。",
+    "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
+    "操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。",
+    "操作未能完成。請重試。如果仍然失敗，請更新 Token Station 或聯絡支援。",
+    "操作を完了できませんでした。もう一度お試しください。問題が続く場合は Token Station を更新するかサポートにお問い合わせください。",
   );
 }
 

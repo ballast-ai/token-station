@@ -37,6 +37,6 @@ pub(crate) fn open_recovery_folder(paths: State<'_, DesktopPaths>) -> Result<Str
     std::fs::create_dir_all(&paths.data_dir)
         .map_err(|error| format!("{}: {error}", paths.data_dir.display()))?;
     tauri_plugin_opener::open_path(&paths.data_dir, None::<&str>)
-        .map_err(|error| format!("打开自救目录失败：{error}"))?;
+        .map_err(|error| format!("打开本地数据目录失败：{error}"))?;
     Ok(paths.data_dir.display().to_string())
 }

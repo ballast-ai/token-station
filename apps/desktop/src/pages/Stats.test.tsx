@@ -381,7 +381,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
     });
     await waitFor(() => expect(refresh).not.toBeDisabled());
     expect(within(screen.getByTestId("error-toast-viewport")).getByText(
-      "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
+      "操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。",
     )).toBeInTheDocument();
   });
 

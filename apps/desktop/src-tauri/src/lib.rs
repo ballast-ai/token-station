@@ -327,7 +327,7 @@ pub fn run() {
                         desktop_shell::ProxyMenuSnapshot::new(
                             0,
                             desktop_shell::ProxyMenuPhase::Stopped,
-                            "不可用（恢复安全模式不读取配置）",
+                            "不可用（本地数据格式需要更新）",
                         )
                     },
                     |_app| desktop_shell::AgentMenuSnapshot::default(),

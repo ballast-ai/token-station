@@ -1927,7 +1927,7 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText(/配置已应用/)).toBeNull();
     if (expectedError) {
       expect(await within(screen.getByTestId("error-toast-viewport")).findByText(
-        "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
+        "操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。",
       )).toBeInTheDocument();
     }
   });

@@ -197,12 +197,23 @@ describe("humanizeAppError", () => {
     const raw = "secret internal transaction detail /Users/example/config.json";
 
     expect(humanizeAppError(raw, "en")).toBe(
-      "The operation could not be completed. Try again. If it still fails, open the local logs from Recovery mode.",
+      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
     );
     expect(humanizeAppError(raw, "zh-CN")).toBe(
-      "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
+      "操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。",
     );
+    expect(humanizeAppError(raw, "en")).not.toMatch(/recovery mode/i);
+    expect(humanizeAppError(raw, "zh-CN")).not.toContain("自救模式");
     expect(humanizeAppError(raw, "en")).not.toContain("/Users/example");
+  });
+
+  it("does not direct database failures to a recovery screen", () => {
+    expect(humanizeAppError("metrics database schema mismatch", "en")).toBe(
+      "The local data could not be opened. Update Token Station and try again; if the problem continues, contact support.",
+    );
+    expect(humanizeAppError("指标库 schema 不兼容", "zh-CN")).toBe(
+      "无法打开本地数据。请更新 Token Station 后重试；如果仍然失败，请联系支持。",
+    );
   });
 
   it("preserves the affected model in actionable OpenCode contract guidance", () => {

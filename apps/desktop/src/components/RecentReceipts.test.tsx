@@ -253,7 +253,7 @@ describe("RecentReceipts", () => {
     await user.click(refreshButton);
 
     expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
-      .toHaveTextContent("本地数据无法安全打开");
+      .toHaveTextContent("无法打开本地数据");
     expect(screen.queryByText(/更新失败，当前显示上次数据/)).toBeNull();
     expect(screen.getByText("provider-final/model-final")).toBeInTheDocument();
     expect(screen.getByTestId("receipt-updated-at")).toHaveAttribute(
@@ -514,7 +514,7 @@ describe("RecentReceipts", () => {
 
     vi.mocked(getRecentReceipts).mockRejectedValue(new Error("database unavailable"));
     render(<RecentReceipts />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("本地数据无法安全打开。请使用自救模式检查或导出本地数据。");
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法打开本地数据。请更新 Token Station 后重试；如果仍然失败，请联系支持。");
   });
 
   it("unknown 成本不把后端异常零值展示成零成本", async () => {

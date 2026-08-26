@@ -32,7 +32,7 @@ Anthropic 线协议的上游（`provider: anthropic`，即 Anthropic API 本身�
 
 ## 桌面端
 
-App 提供首次使用引导、Agent 重新扫描、供应商、用量、设置、明暗主题、中英文、请求日志查看、加密 Connector 快照、供应商回收站和安全模式只读导出。
+App 提供首次使用引导、Agent 重新扫描、供应商、用量、设置、明暗主题、中英文、请求日志查看、加密 Connector 快照和供应商回收站。
 
 带签名的应用内更新检查与安装只适用于受支持的官方 macOS 构建。没有正式公钥的源码或本地构建，以及 Windows 和 Linux，需要手动更新。插件管理属于 CLI 工作流。
 

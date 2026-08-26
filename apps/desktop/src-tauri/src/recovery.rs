@@ -142,7 +142,7 @@ fn state_from_compatibility(
             RecoveryMode::Safe,
             Some("metrics_schema_newer".to_string()),
             Some(format!(
-                "指标库 schema v{found} 高于当前程序支持的 v{supported}；已进入只读自救模式，未打开或迁移业务库。"
+                "指标库 schema v{found} 高于当前程序支持的 v{supported}；已停止启动业务功能，未打开或迁移本地数据库。请更新应用后重试。"
             )),
             Some(found),
             Some(supported),

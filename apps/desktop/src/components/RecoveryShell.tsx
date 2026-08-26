@@ -1,17 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   checkDesktopUpdate,
-  exportRecoveryBundle,
-  getRecoveryDiagnostics,
-  getRecoveryState,
-  openRecoveryFolder,
-  recordFrontendDiagnostic,
   installDesktopUpdateAndRestart,
-  type DiagnosticPreview,
+  recordFrontendDiagnostic,
   type DesktopUpdateView,
   type RecoveryState,
 } from "../api";
-import { diagnosticInput, redactDiagnosticText } from "../diagnostics";
+import { diagnosticInput } from "../diagnostics";
 import { humanizeAppError } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 import TokenStationMark from "./TokenStationMark";
@@ -54,72 +49,14 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
   const { copy, language } = useLocalizedCopy();
   const languageRef = useRef(language);
   languageRef.current = language;
-  const [state, setState] = useState<RecoveryState | null>(initialState ?? null);
-  const [preview, setPreview] = useState<DiagnosticPreview | null>(null);
-  const [confirmed, setConfirmed] = useState(false);
-  const [busy, setBusy] = useState("");
+  const [busy, setBusy] = useState(initialError ? "" : "check-update");
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
   const [upgrade, setUpgrade] = useState<DesktopUpdateView | null>(null);
   const [confirmUpdate, setConfirmUpdate] = useState(false);
   const cancelUpdateRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    let disposed = false;
-    if (initialError) {
-      void recordFrontendDiagnostic(
-        diagnosticInput("render_error", initialError),
-      ).catch(() => undefined);
-    }
-    const load = async () => {
-      try {
-        const nextState = initialState ?? await getRecoveryState();
-        const nextPreview = await getRecoveryDiagnostics();
-        if (!disposed) {
-          setState(nextState);
-          setPreview(nextPreview);
-        }
-      } catch (caught) {
-        if (!disposed) setError(humanizeAppError(caught, languageRef.current));
-      }
-    };
-    void load();
-    return () => { disposed = true; };
-  }, [initialError, initialState]);
-
-  const diagnosticText = useMemo(() => redactDiagnosticText(JSON.stringify({
-      recovery: preview?.recovery ?? null,
-      frontend_events: preview?.frontend_events ?? [],
-      local_only: true,
-      redacted: true,
-      auto_upload: false,
-    }, null, 2)), [preview]);
-
-  const run = async (name: string, action: () => Promise<string>) => {
-    setBusy(name);
-    setError("");
-    setMessage("");
-    try {
-      setMessage(await action());
-    } catch (caught) {
-      setError(humanizeAppError(caught, languageRef.current));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const copyDiagnostics = async () => {
-    await run("copy", async () => {
-      await navigator.clipboard.writeText(diagnosticText);
-      return copy(
-        "Copied the redacted diagnostic preview",
-        "已复制经过二次脱敏的诊断预览", "已複製經過二次遮蔽的診斷預覽", "二重にマスキングされた診断プレビューをコピーしました"
-      );
-    });
-  };
-
   const check = async () => {
-    setBusy("upgrade");
+    setBusy("check-update");
     setError("");
     try {
       setUpgrade(await checkDesktopUpdate());
@@ -130,12 +67,26 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
     }
   };
 
+  useEffect(() => {
+    if (initialError) {
+      void recordFrontendDiagnostic(
+        diagnosticInput("render_error", initialError),
+      ).catch(() => undefined);
+      return;
+    }
+    void check();
+  // The startup condition is immutable for the lifetime of this screen.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialError]);
+
   const installUpdate = async () => {
     const expectedVersion = upgrade?.version;
     if (!expectedVersion) {
       const message = copy(
-        "The selected update version is missing; check again.",
-        "缺少已确认的更新版本，请重新检查。", "所選的更新版本遺失；請重新檢查。", "選択したアップデートバージョンが見つからない；再度確認してください。"
+        "The selected update is no longer available. Check again.",
+        "之前确认的更新已不可用，请重新检查。",
+        "之前確認的更新已無法使用，請重新檢查。",
+        "選択した更新は利用できなくなりました。もう一度確認してください。",
       );
       setConfirmUpdate(false);
       setUpgrade((current) => invalidateUpdateCandidate(current, message));
@@ -147,101 +98,97 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
     setError("");
     try {
       const started = await installDesktopUpdateAndRestart(expectedVersion);
-      if (!started) {
-        setUpgrade(await checkDesktopUpdate());
-        setBusy("");
-      }
+      if (!started) await check();
     } catch (caught) {
       const rawMessage = String(caught);
-      const message = humanizeAppError(caught, languageRef.current);
       if (requiresFreshUpdateCheck(rawMessage)) {
         setUpgrade((current) => invalidateUpdateCandidate(current, rawMessage));
-      } else {
-        setError(message);
       }
+      setError(humanizeAppError(caught, languageRef.current));
       setBusy("");
     }
   };
+
+  if (initialError) {
+    return (
+      <main className="recovery-shell">
+        <section className="recovery-card" aria-live="polite">
+          <TokenStationMark className="recovery-mark" size={42} />
+          <div>
+            <p className="eyebrow">TOKEN STATION</p>
+            <h1>{copy("The interface failed to load", "界面加载失败", "介面載入失敗", "画面の読み込みに失敗しました")}</h1>
+            <p className="sub">{copy(
+              "Reload Token Station. If the problem continues, update to the latest version or contact support.",
+              "请重新加载 Token Station。如果仍然失败，请更新到最新版本或联系支持。",
+              "請重新載入 Token Station。如果仍然失敗，請更新至最新版本或聯絡支援。",
+              "Token Station を再読み込みしてください。問題が続く場合は、最新版に更新するかサポートにお問い合わせください。",
+            )}</p>
+          </div>
+          <div className="recovery-actions">
+            <button className="btn primary" onClick={() => window.location.reload()}>
+              {copy("Reload", "重新加载", "重新載入", "再読み込み")}
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  const newerLocalData = initialState?.reason_code === "metrics_schema_newer";
 
   return (
     <main className="recovery-shell">
       <section className="recovery-card" aria-live="polite">
         <TokenStationMark className="recovery-mark" size={42} />
         <div>
-          <p className="eyebrow">{copy(
-            "READ-ONLY · LOCAL · NO AUTOMATIC UPLOAD",
-            "只读 · 本地 · 不自动上传", "唯讀 · 本地 · 不自動上傳", "読み取り専用 · ローカル · 自動アップロードなし"
-          )}</p>
-          <h1>{copy("Token Station recovery mode", "Token Station 自救模式", "Token Station 恢復模式", "Token Station リカバリーモード")}</h1>
-          <p className="sub">
-            {copy(
-              "This screen does not depend on the metrics database. You can check for updates, create a read-only export, open the local backup folder, copy diagnostics, or retry.",
-              "该界面不依赖业务指标库。这里只提供检查更新、只读导出、打开本地备份位置、复制诊断和重试。", "此畫面不依賴指標資料庫。您可以檢查更新、建立唯讀匯出、開啟本地備份資料夾、複製診斷資訊或重試。", "この画面は指標データベースに依存しません。更新を確認したり、読み取り専用のエクスポートを作成したり、ローカルのバックアップフォルダを開いたり、診断情報をコピーしたり、再試行したりできます。"
-            )}
-          </p>
+          <p className="eyebrow">TOKEN STATION</p>
+          <h1>{newerLocalData
+            ? copy("Token Station needs an update", "需要更新 Token Station", "需要更新 Token Station", "Token Station の更新が必要です")
+            : copy("Local data could not be opened", "无法打开本地数据", "無法開啟本機資料", "ローカルデータを開けません")}</h1>
+          <p className="sub">{newerLocalData
+            ? copy(
+              "This local data was created by a newer version. Update to continue; your data will not be deleted.",
+              "本机数据由较新版本创建。更新后即可继续使用，数据不会被删除。",
+              "本機資料由較新版本建立。更新後即可繼續使用，資料不會被刪除。",
+              "このローカルデータはより新しいバージョンで作成されました。更新後に続行でき、データは削除されません。",
+            )
+            : copy(
+              "Restart Token Station. If the problem continues, install the latest version or contact support.",
+              "请重启 Token Station。如果仍无法打开，请安装最新版本或联系支持。",
+              "請重新啟動 Token Station。如果仍無法開啟，請安裝最新版本或聯絡支援。",
+              "Token Station を再起動してください。開けない場合は、最新版をインストールするかサポートにお問い合わせください。",
+            )}</p>
         </div>
 
-        {(initialError || state?.message) && (
-          <div className="banner warn recovery-reason">
-            <b>{initialError
-              ? copy("Interface rendering error", "前端渲染异常", "介面渲染錯誤", "インターフェースレンダリングエラー")
-              : copy("Database compatibility protection", "数据库兼容性保护", "資料庫相容性保護", "データベース互換性保護")}</b>
-            <span>{humanizeAppError(initialError ?? state?.message, language)}</span>
-          </div>
-        )}
-        {state?.found_schema != null && (
-          <div className="kv-grid">
-            <div className="kv-k">{copy("Detected schema", "检测到 schema", "偵測到的結構描述", "検出されたスキーマ")}</div>
-            <div className="kv-v mono">v{state.found_schema}</div>
-            <div className="kv-k">{copy("Supported schema", "当前支持", "支援的結構描述", "対応するスキーマ")}</div>
-            <div className="kv-v mono">v{state.supported_schema ?? "—"}</div>
-            <div className="kv-k">{copy("Metrics database", "指标库", "指標資料庫", "指標データベース")}</div>
-            <div className="kv-v mono">{state.metrics_path}</div>
-          </div>
-        )}
-
         {error && <div className="banner err">{error}</div>}
-        {message && <div className="banner ok mono">{message}</div>}
-        {upgrade && (
-          <div className={`banner ${upgrade.status === "unavailable" ? "err" : upgrade.status === "update_available" ? "warn" : "ok"}`}>
-            {upgrade.status === "update_available"
-              ? copy(`Version ${upgrade.version} is available`, `发现新版本 ${upgrade.version}`, `發現新版本 ${upgrade.version}`, `新バージョン ${upgrade.version} が発見されました`)
-              : upgrade.status === "up_to_date"
-                ? copy(`Version ${upgrade.current_version} is up to date`, `当前已是最新版本 ${upgrade.current_version}`, `版本 ${upgrade.current_version} 已為最新`, `バージョン ${upgrade.current_version} は最新です`)
-                : humanizeAppError(upgrade.message, language)}
-            {upgrade.release_url && <span className="mono"> · {upgrade.release_url}</span>}
-          </div>
+        {upgrade?.status === "up_to_date" && (
+          <div className="banner warn">{copy(
+            `Version ${upgrade.current_version} is already the latest. Reinstall it or contact support if the problem continues.`,
+            `当前已是最新版本 ${upgrade.current_version}。如果问题仍然存在，请重新安装或联系支持。`,
+            `目前已是最新版本 ${upgrade.current_version}。如果問題仍然存在，請重新安裝或聯絡支援。`,
+            `現在の ${upgrade.current_version} は最新版です。問題が続く場合は、再インストールするかサポートにお問い合わせください。`,
+          )}</div>
+        )}
+        {(upgrade?.status === "unavailable" || upgrade?.status === "unsupported") && upgrade.message && (
+          <div className="banner err">{humanizeAppError(upgrade.message, language)}</div>
         )}
 
         <div className="recovery-actions">
-          <button
-            className="btn"
-            disabled={Boolean(busy)}
-            onClick={upgrade?.status === "update_available" ? () => setConfirmUpdate(true) : () => void check()}
-          >
-            {busy === "upgrade"
-              ? copy("Checking…", "检查中…", "檢查中…", "確認中…")
-              : busy === "install-update"
-                ? copy("Verifying and installing…", "正在验证并安装…", "驗證並安裝中…", "検証およびインストール中…")
-                : upgrade?.status === "update_available"
-                  ? copy(`Download and update to ${upgrade.version}`, `下载并更新到 ${upgrade.version}`, `下載並更新至 ${upgrade.version}`, `ダウンロードして ${upgrade.version} に更新`)
-                  : copy("Check for updates", "检查更新", "檢查更新", "更新を確認")}
-          </button>
-          <button
-            className="btn"
-            disabled={Boolean(busy)}
-            onClick={() => void run("open", async () => {
-              const path = await openRecoveryFolder();
-              return copy(`Opened: ${path}`, `已打开：${path}`, `已開啟：${path}`, `開いている：${path}`);
-            })}
-          >
-            {copy("Open backup folder", "打开备份位置", "開啟備份資料夾", "バックアップフォルダを開く")}
-          </button>
-          <button className="btn" disabled={Boolean(busy)} onClick={() => void copyDiagnostics()}>
-            {copy("Copy redacted diagnostics", "复制脱敏诊断", "複製脫敏診斷資訊", "診断情報を匿名化してコピー")}
-          </button>
+          {upgrade?.status === "update_available" && upgrade.version ? (
+            <button className="btn primary" disabled={Boolean(busy)} onClick={() => setConfirmUpdate(true)}>
+              {busy === "install-update"
+                ? copy("Installing update…", "正在安装更新…", "正在安裝更新…", "更新をインストール中…")
+                : copy(`Update to ${upgrade.version}`, `更新到 ${upgrade.version}`, `更新至 ${upgrade.version}`, `${upgrade.version} に更新`)}
+            </button>
+          ) : (
+            <button className="btn primary" disabled={Boolean(busy)} onClick={() => void check()}>
+              {busy === "check-update"
+                ? copy("Checking for updates…", "正在检查更新…", "正在檢查更新…", "更新を確認中…")
+                : copy("Check again", "重新检查", "重新檢查", "再確認")}
+            </button>
+          )}
           <button className="btn" onClick={() => window.location.reload()}>
-            {copy("Run checks again", "重新检测", "重新執行檢查", "再度確認")}
+            {copy("Restart screen", "重新加载", "重新載入", "再読み込み")}
           </button>
         </div>
 
@@ -255,56 +202,20 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
             <AlertDialogHeader>
               <AlertDialogTitle>{copy("Install app update?", "安装应用更新？", "安裝應用更新？", "アプリの更新をインストールしますか？")}</AlertDialogTitle>
               <AlertDialogDescription>{copy(
-                "The signed update will be downloaded and verified first. The local gateway stops only for final installation, then the app restarts.",
-                "将先下载并验证签名更新；仅在最终安装时安全停止本地网关，随后 App 自动重启。", "將先下載並驗證簽名更新；僅在最終安裝時安全停止本地閘道，隨後 App 自動重啟。", "署名された更新はまずダウンロードおよび検証されます。最終的なインストール時のみローカルゲートウェイが安全に停止し、その後アプリが自動的に再起動します。"
+                "The signed update will be verified, installed, and then Token Station will restart.",
+                "更新包将先验证签名，安装完成后 Token Station 会自动重启。",
+                "更新套件會先驗證簽章，安裝完成後 Token Station 會自動重新啟動。",
+                "署名を検証して更新をインストール後、Token Station を再起動します。",
               )}</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel ref={cancelUpdateRef}>{copy("Cancel", "取消", "取消", "キャンセル")}</AlertDialogCancel>
               <AlertDialogAction onClick={() => void installUpdate()}>
-                {copy("Confirm update and restart", "确认更新并重启", "確認更新並重啟", "更新を確認して再起動")}
+                {copy("Confirm update and restart", "确认更新并重启", "確認更新並重新啟動", "更新して再起動")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
-
-        <div className="recovery-export">
-          <h2>{copy("Read-only export", "只读导出", "只讀匯出", "読み取り専用でエクスポート")}</h2>
-          <p>
-            {copy(
-              "The bundle is written only to the local recovery folder and is never uploaded. It may contain the original configuration, metrics database, and SQLite sidecars. Interface diagnostics are redacted again.",
-              "导出包仅写入本地自救目录，不上传。它可能包含原始配置、原始指标库及 SQLite sidecar；前端诊断会再次脱敏。", "匯出包僅寫入本地自救目錄，不上傳。它可能包含原始配置、原始指標庫及 SQLite sidecar；前端診斷會再次脫敏。", "エクスポートパッケージはローカルの回復フォルダにのみ書き込まれ、アップロードされません。これは元の設定、元のメトリクスデータベース、およびSQLite sidecarを含む可能性があります。フロントエンド診断情報は再度匿名化されます。"
-            )}
-          </p>
-          {preview?.export_includes.length ? (
-            <ul>{preview.export_includes.map((item) => <li key={item}>{item}</li>)}</ul>
-          ) : null}
-          <label className="recovery-confirm">
-            <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
-            <span>{copy(
-              "I understand this exports the listed raw local data, and I will protect the exported file.",
-              "确认导出上述原始本地数据，并自行保管导出文件。", "確認此處導出列出的原始本地資料，並自行保管導出文件。", "ここでのエクスポートはリストされたローカルの原始データを含み、エクスポートされたファイルは自分で保管します。"
-            )}</span>
-          </label>
-          <button
-            className="btn primary"
-            disabled={!confirmed || Boolean(busy)}
-            onClick={() => void run("export", async () => {
-              const path = await exportRecoveryBundle(true);
-              return copy(`Exported: ${path}`, `已导出：${path}`, `已匯出：${path}`, `エクスポート済み：${path}`);
-            })}
-          >
-            {busy === "export" ? copy("Exporting…", "导出中…", "匯出中…", "エクスポート中…") : copy("Export recovery bundle", "导出自救包", "匯出復原包", "復元パッケージのエクスポート")}
-          </button>
-        </div>
-
-        <details className="recovery-diagnostics">
-          <summary>{copy(
-            "Diagnostic preview (allowlisted fields, size limits, and a second redaction pass)",
-            "诊断预览（字段白名单、长度预算、二次脱敏）", "診斷預覽（允許欄位、長度限制、二次審查）", "診断プレビュー（許可フィールド、長さ制限、二次審査）"
-          )}</summary>
-          <pre>{diagnosticText}</pre>
-        </details>
       </section>
     </main>
   );
