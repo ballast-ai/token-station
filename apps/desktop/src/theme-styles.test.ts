@@ -62,6 +62,36 @@ describe("retained page theme styles", () => {
     expect(routeSnapshotRule).not.toMatch(/align-content:\s*center/);
   });
 
+  it("renders top-level routing scopes as cards and nests Agent routes under global routing", () => {
+    const scopeCardRule = appCss.match(
+      /\.routing-scope-item\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const selectedRule = appCss.match(
+      /\.routing-scope-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const selectedRailRule = appCss.match(
+      /\.routing-scope-item\[data-slot="button"\]\[aria-current="page"\]::before\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const nestedListRule = appCss.match(/\.agent-route-list\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const childDisclosureRule = appCss.match(
+      /\.agent-route-disclosure\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const childConnectorRule = appCss.match(
+      /\.agent-route-disclosure::before\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(scopeCardRule).toMatch(/min-height:\s*62px/);
+    expect(scopeCardRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(selectedRule).toMatch(/border-color:\s*var\(--signal-selection-border\)/);
+    expect(selectedRailRule).toMatch(/width:\s*3px/);
+    expect(selectedRailRule).toMatch(/background:\s*var\(--signal\)/);
+    expect(childDisclosureRule).toMatch(/margin-left:\s*18px/);
+    expect(childDisclosureRule).toMatch(/padding-left:\s*14px/);
+    expect(childConnectorRule).toMatch(/border-left:\s*1px solid var\(--line-strong\)/);
+    expect(childConnectorRule).toMatch(/border-bottom:\s*1px solid var\(--line-strong\)/);
+    expect(nestedListRule).toMatch(/border-left:\s*1px solid var\(--line-strong\)/);
+  });
+
   it("keeps the Agent actions compact in the card's top-right corner", () => {
     const actionRule = appCss.match(/\.overview-agent-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
 
@@ -230,7 +260,7 @@ describe("retained page theme styles", () => {
     expect(appCss).toMatch(/\.error-toast\.is-error\s*\{[^}]*--toast-soft:\s*var\(--danger-soft\)/s);
   });
 
-  it("keeps routing rows comfortably sized and free of decorative left rails", () => {
+  it("keeps Agent rows comfortably sized inside the routing card system", () => {
     const permanentGlobalRouteRule = appCss.match(
       /\.agent-master-home\[data-slot="button"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -252,14 +282,8 @@ describe("retained page theme styles", () => {
     const routeLabelRule = appCss.match(
       /\.agent-master-item strong\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    const disclosureTriggerRule = appCss.match(
-      /\.agent-route-disclosure-trigger\[data-slot="button"\]\s*\{([^}]*)\}/s,
-    )?.[1] ?? "";
     const selectedAgentRule = appCss.match(
       /\.agent-master-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
-    )?.[1] ?? "";
-    const disclosureRule = appCss.match(
-      /\.routing-scope-global-group \.agent-route-disclosure\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
 
     expect(permanentGlobalRouteRule).not.toMatch(/background:/);
@@ -276,12 +300,8 @@ describe("retained page theme styles", () => {
     expect(agentImageRule).toMatch(/width:\s*36px/);
     expect(agentImageRule).toMatch(/height:\s*36px/);
     expect(routeLabelRule).toMatch(/font-size:\s*13px/);
-    expect(disclosureTriggerRule).toMatch(/min-height:\s*40px/);
-    expect(disclosureTriggerRule).toMatch(/justify-content:\s*flex-end/);
     expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(selectedAgentRule).not.toMatch(/box-shadow:/);
-    expect(disclosureRule).not.toMatch(/border-left:/);
-    expect(appCss).not.toMatch(/\.routing-scope-global-group \.agent-route-disclosure::before/);
   });
 
   it("uses one focus indicator for enterprise connection inputs", () => {
