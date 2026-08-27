@@ -668,13 +668,6 @@ export interface AgentOperationView {
   maintenance_warning: string | null;
 }
 
-export interface SensitiveChangePreviewView {
-  target_config_path: string;
-  path: { segments: string[] };
-  before_preview: string | null;
-  after_preview: string | null;
-}
-
 export interface SnapshotView {
   snapshot_id: string;
   agent_id: AgentId;
@@ -1207,14 +1200,6 @@ export const applyAgentPlan = (
   operationId: string,
   confirmationToken: string,
 ) => invoke<AgentOperationView>("apply_agent_plan", {
-  operationId,
-  confirmationToken,
-});
-
-export const revealAgentPlanSensitiveValues = (
-  operationId: string,
-  confirmationToken: string,
-) => invoke<SensitiveChangePreviewView[]>("reveal_agent_plan_sensitive_values", {
   operationId,
   confirmationToken,
 });

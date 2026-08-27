@@ -21,6 +21,7 @@ import {
   serveStop,
   setAdminEndpoint,
   setDirectRoute,
+  setLocalRouting,
   setQuotaAccounts,
   setQuotaPlan,
   setRoutingMode,
@@ -1037,6 +1038,9 @@ function StationApp() {
               configError={state.config_error ? humanizeAppError(state.config_error, language) : null}
               keywords={state.keywords}
               saveStatus={saveStatus}
+              localOnly={state.local_only}
+              allowCloudFallback={state.allow_cloud_fallback}
+              onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
               onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
               onSaveProfile={(name) => run(
                 () => saveHomeRouteAsProfile(name),

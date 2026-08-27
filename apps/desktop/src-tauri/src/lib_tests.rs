@@ -4572,11 +4572,154 @@ fn managed_enterprise_command_replaces_a_legacy_managed_route() {
     let target = view.direct_target.expect("the replacement route is direct");
     assert_eq!(target.upstream, "tokenstation");
     assert_eq!(target.model.as_deref(), Some("deepseek-v4-pro-0813"));
+    assert_eq!(
+        secrets::store_get(&data_dir, "q", "provider_api_key")
+            .expect("the legacy credential stays available until durable save"),
+        "legacy-key"
+    );
+    assert!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key").is_err(),
+        "the replacement credential must remain pending before durable save"
+    );
+    {
+        let managed = app.state::<AppStateManaged>();
+        managed
+            .0
+            .lock()
+            .unwrap()
+            .save_draft()
+            .expect("the replacement draft saves atomically");
+    }
     assert!(secrets::store_get(&data_dir, "q", "provider_api_key").is_err());
     assert_eq!(
         secrets::store_get(&data_dir, "tokenstation", "provider_api_key")
             .expect("the replacement credential is stored"),
         "replacement-key"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_keeps_the_legacy_credential_when_save_fails() {
+    let root = scratch_home("managed-enterprise-failed-save");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let data_dir = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.draft["upstreams"]["q"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.tokenstation.link/v1",
+            "auth": { "slot": "provider_api_key", "store": true },
+            "managed_route": true,
+            "models": [{ "model": "auto", "tool": true }]
+        });
+        inner.draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "q", "model": "auto" }
+        });
+        inner.observe_draft().expect("the legacy route is valid");
+        inner.data_dir()
+    };
+    secrets::store_set(&data_dir, "q", "provider_api_key", "legacy-key")
+        .expect("the legacy credential is stored");
+
+    add_managed_enterprise_route(
+        app.state(),
+        "https://api.tokenstation.link/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "deepseek-v4-pro-0813".to_owned(),
+    )
+    .expect("the replacement remains a valid draft");
+
+    let save_error = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.config_path = root.clone();
+        inner
+            .save_draft()
+            .expect_err("saving a config over an existing directory must fail")
+    };
+    assert!(save_error.contains("写配置失败"), "{save_error}");
+    assert_eq!(
+        secrets::store_get(&data_dir, "q", "provider_api_key")
+            .expect("the legacy credential survives the failed save"),
+        "legacy-key"
+    );
+    assert!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key").is_err(),
+        "the replacement credential must roll back when config save fails"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn reusing_a_legacy_provider_name_cancels_its_pending_credential_removal() {
+    let root = scratch_home("managed-enterprise-reused-provider-name");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let data_dir = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.draft["upstreams"]["q"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.tokenstation.link/v1",
+            "auth": { "slot": "provider_api_key", "store": true },
+            "managed_route": true,
+            "models": [{ "model": "auto", "tool": true }]
+        });
+        inner.draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "q", "model": "auto" }
+        });
+        inner.observe_draft().expect("the legacy route is valid");
+        inner.data_dir()
+    };
+    secrets::store_set(&data_dir, "q", "provider_api_key", "legacy-key")
+        .expect("the legacy credential is stored");
+
+    add_managed_enterprise_route(
+        app.state(),
+        "https://api.tokenstation.link/v1".to_owned(),
+        "managed-key".to_owned(),
+        "deepseek-v4-pro-0813".to_owned(),
+    )
+    .expect("the managed replacement is valid");
+    add_provider(
+        app.state(),
+        "q".to_owned(),
+        "https://reused.example.com/v1".to_owned(),
+        vec!["reused-model".to_owned()],
+        Some("reused-key".to_owned()),
+        false,
+    )
+    .expect("the released provider name can be reused before save");
+
+    {
+        let managed = app.state::<AppStateManaged>();
+        managed
+            .0
+            .lock()
+            .unwrap()
+            .save_draft()
+            .expect("the combined draft saves atomically");
+    }
+    assert_eq!(
+        secrets::store_get(&data_dir, "q", "provider_api_key")
+            .expect("the reused provider keeps its replacement credential"),
+        "reused-key"
     );
 
     std::fs::remove_dir_all(root).ok();

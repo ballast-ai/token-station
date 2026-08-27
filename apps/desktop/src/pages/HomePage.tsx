@@ -36,6 +36,9 @@ interface HomePageProps {
   applying: boolean;
   configError: string | null;
   saveStatus: string;
+  localOnly: boolean;
+  allowCloudFallback: boolean;
+  onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
   onSaveProfile: (name: string) => Promise<boolean>;
   onDeleteProfile: (name: string) => Promise<boolean>;
@@ -63,6 +66,9 @@ export default function HomePage({
   applying,
   configError,
   saveStatus,
+  localOnly,
+  allowCloudFallback,
+  onSetLocalRouting,
   onTierChange,
   onSaveProfile,
   onDeleteProfile,
@@ -78,6 +84,7 @@ export default function HomePage({
     mid: Boolean(tiers.mid?.upstream && tiers.mid?.model),
     low: Boolean(tiers.low?.upstream && tiers.low?.model),
   };
+  const hasLocalProvider = providers.some((provider) => provider.local);
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -275,6 +282,73 @@ export default function HomePage({
         onAdd={onAddKeyword}
         onRemove={onRemoveKeyword}
       />
+
+      <section className="panel local-routing-panel">
+        <div className="panel-head split-heading">
+          <div>
+            <h2>{copy("Local only", "只走本地", "只走本地", "ローカルのみ")}</h2>
+            <p className="sub">
+              {hasLocalProvider
+                ? copy(
+                    "Use only Providers marked as local. Requests stay on this device unless cloud fallback is enabled.",
+                    "只使用标为本地的供应商。除非启用云端兜底，否则请求不会离开本机。",
+                    "只使用標為本地的供應商。除非啟用雲端備援，否則請求不會離開本機。",
+                    "ローカルとして設定されたプロバイダーのみを使用します。クラウドフォールバックを有効にしない限り、リクエストはこのデバイス内に留まります。",
+                  )
+                : localOnly
+                  ? copy(
+                      "Strict local routing is active, but no local Provider exists. Disable it here or add a local Provider.",
+                      "严格本地路由仍处于启用状态，但当前没有本地供应商。请在此关闭，或添加本地供应商。",
+                      "嚴格本地路由仍處於啟用狀態，但目前沒有本地供應商。請在此關閉，或新增本地供應商。",
+                      "厳格なローカルルーティングは有効ですが、ローカルプロバイダーがありません。ここで無効にするか、ローカルプロバイダーを追加してください。",
+                    )
+                  : copy(
+                      "Add a local Provider before enabling this privacy mode.",
+                      "请先添加本地供应商，再启用此隐私模式。",
+                      "請先新增本地供應商，再啟用此隱私模式。",
+                      "このプライバシーモードを有効にする前に、ローカルプロバイダーを追加してください。",
+                    )}
+            </p>
+          </div>
+          <span className="default-route-chip">{copy("Privacy first", "隐私优先", "隱私優先", "プライバシー優先")}</span>
+        </div>
+
+        <label className="switch-row">
+          <input
+            type="checkbox"
+            checked={localOnly}
+            disabled={busy || (!hasLocalProvider && !localOnly)}
+            onChange={(event) =>
+              onSetLocalRouting(event.target.checked, event.target.checked && allowCloudFallback)
+            }
+          />
+          <span>{copy("Use local models only", "只走本地模型（请求不出本机）", "僅使用本機模型（請求不會離開本機）", "ローカルモデルのみを使用")}</span>
+        </label>
+        {localOnly && (
+          <label className="switch-row switch-row-sub">
+            <input
+              type="checkbox"
+              checked={allowCloudFallback}
+              disabled={busy}
+              onChange={(event) => onSetLocalRouting(true, event.target.checked)}
+            />
+            <span>
+              {copy(
+                "Allow cloud fallback when local models are unavailable",
+                "本地不可用时，允许使用云模型兜底",
+                "本地不可用時，允許使用雲端模型備援",
+                "ローカルモデルを利用できない場合にクラウドへのフォールバックを許可",
+              )}
+              <em>{copy(
+                " Off means requests fail instead of leaving this device.",
+                " 关闭后，请求会失败而不会离开本机。",
+                " 關閉後，請求會失敗而不會離開本機。",
+                " オフの場合、リクエストは外部へ送信されず失敗します。",
+              )}</em>
+            </span>
+          </label>
+        )}
+      </section>
 
       </>
       )}

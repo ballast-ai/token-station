@@ -501,6 +501,7 @@ impl AppInner {
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
+            pending_provider_key_removals: BTreeSet::new(),
             pending_provider_discoveries: BTreeSet::new(),
             south_approved_dialects,
             upstream_epochs: BTreeMap::new(),
@@ -597,6 +598,24 @@ impl AppInner {
                 ));
             }
             return Err(message);
+        }
+        let removable_keys = self
+            .pending_provider_key_removals
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for upstream in removable_keys {
+            match secrets::store_remove(&data_dir, &upstream, "provider_api_key") {
+                Ok(()) => {
+                    self.pending_provider_key_removals.remove(&upstream);
+                    self.bump_upstream_epoch(&upstream);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "configuration saved but legacy Provider credential cleanup failed for `{upstream}`: {error}"
+                    );
+                }
+            }
         }
         if let Err(error) = self.config_state.finish_save(&draft) {
             // The config committed atomically. The pending journal will be

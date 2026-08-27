@@ -3,8 +3,6 @@ import {
   AlertTriangle,
   Check as CheckIcon,
   Copy as CopyIcon,
-  Eye,
-  EyeOff,
   FileDiff,
   FolderOpen,
   Globe2,
@@ -24,7 +22,6 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
-  revealAgentPlanSensitiveValues,
   saveAgentRoutes,
   restartAgentRoute,
   restoreCursorProvider,
@@ -37,7 +34,6 @@ import {
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
-  type SensitiveChangePreviewView,
   type ProviderView,
   type QuotaAccount,
   type RoutingMode,
@@ -137,10 +133,9 @@ function changeState(
   side: "before" | "after",
   intent: "connect" | "restore" | "review",
   preview: string | undefined,
-  sensitiveRevealed: boolean,
   copy: LocalizedCopy,
 ) {
-  if (sensitive && !sensitiveRevealed) {
+  if (sensitive) {
     return side === "before"
       ? copy("Current sensitive value (content hidden)", "当前敏感值（内容已隐藏）", "目前敏感值（內容已隱藏）", "現在の機密値（内容は非表示）")
       : copy("Local credential (content hidden)", "本机凭据（内容已隐藏）", "本機憑證（內容已隱藏）", "ローカル認証情報（内容は非表示）");
@@ -353,9 +348,6 @@ export default function AgentRoutePage({
     intent: "connect" | "restore" | "review";
     plan: ConfigPlanView;
   } | null>(null);
-  const [sensitiveRevealWarningOpen, setSensitiveRevealWarningOpen] = useState(false);
-  const [revealedSensitiveValues, setRevealedSensitiveValues] = useState<SensitiveChangePreviewView[] | null>(null);
-  const [revealingSensitiveValues, setRevealingSensitiveValues] = useState(false);
   const [restoreConflict, setRestoreConflict] = useState<AgentDriftView[] | null>(null);
   const [cursorRestorePending, setCursorRestorePending] = useState(false);
   const [copiedDiscoveryPath, setCopiedDiscoveryPath] = useState<{ path: string } | null>(null);
@@ -367,12 +359,6 @@ export default function AgentRoutePage({
   useEffect(() => {
     setIndependentEditorOpen(!followsGlobal);
   }, [followsGlobal, metadata.agent_id]);
-
-  useEffect(() => {
-    setSensitiveRevealWarningOpen(false);
-    setRevealedSensitiveValues(null);
-    setRevealingSensitiveValues(false);
-  }, [pendingPlan?.plan.operation_id]);
 
   useEffect(() => {
     if (selectedInstallationPath !== undefined) return;
@@ -622,23 +608,6 @@ export default function AgentRoutePage({
       showError(errorText(caught), `agent-review-connection:${metadata.agent_id}`);
     } finally {
       setBusy(false);
-    }
-  };
-
-  const revealSensitiveValues = async () => {
-    if (!pendingPlan || revealingSensitiveValues) return;
-    setSensitiveRevealWarningOpen(false);
-    setRevealingSensitiveValues(true);
-    try {
-      const revealed = await revealAgentPlanSensitiveValues(
-        pendingPlan.plan.operation_id,
-        pendingPlan.plan.confirmation_token,
-      );
-      setRevealedSensitiveValues(revealed);
-    } catch (caught) {
-      showError(errorText(caught), `agent-reveal-sensitive:${metadata.agent_id}`);
-    } finally {
-      setRevealingSensitiveValues(false);
     }
   };
 
@@ -1042,57 +1011,25 @@ export default function AgentRoutePage({
                     <div className="agent-change-list">
                       {file.changes.map((change, index) => {
                         const changePath = change.path.segments.join(".");
-                        const revealedChange = change.sensitive
-                          ? revealedSensitiveValues?.find((candidate) => (
-                            candidate.target_config_path === file.path
-                            && candidate.path.segments.join(".") === changePath
-                          ))
-                          : undefined;
-                        const sensitiveRevealed = revealedChange !== undefined;
-                        const beforePreview = sensitiveRevealed
-                          ? (pendingPlan.intent === "review" ? revealedChange.after_preview : revealedChange.before_preview) ?? undefined
-                          : change.before_preview;
-                        const afterPreview = sensitiveRevealed
-                          ? (pendingPlan.intent === "review" ? revealedChange.before_preview : revealedChange.after_preview) ?? undefined
-                          : change.after_preview;
+                        const beforePreview = change.before_preview;
+                        const afterPreview = change.after_preview;
                         const beforeMeaning = changeValueMeaning(changePath, beforePreview, copy);
                         const afterMeaning = changeValueMeaning(changePath, afterPreview, copy);
                         return (
                         <article className="agent-change-row" key={`${changePath}-${index}`}>
                           <div className="agent-change-path-group">
                             <code className="agent-change-path">{changePath}</code>
-                            {change.sensitive ? (
-                              <Button
-                                className="agent-sensitive-toggle"
-                                variant="ghost"
-                                size="sm"
-                                type="button"
-                                disabled={revealingSensitiveValues}
-                                onClick={() => {
-                                  if (revealedSensitiveValues) {
-                                    setRevealedSensitiveValues(null);
-                                  } else {
-                                    setSensitiveRevealWarningOpen(true);
-                                  }
-                                }}
-                              >
-                                {revealedSensitiveValues ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
-                                {revealedSensitiveValues
-                                  ? copy("Hide full values", "隐藏完整值", "隱藏完整值", "完全な値を非表示")
-                                  : copy("Show full values", "显示完整值", "顯示完整值", "完全な値を表示")}
-                              </Button>
-                            ) : null}
                           </div>
                           <div className="agent-change-states">
                             <div>
                               <span>{copy("Before", "修改前", "修改前", "変更前")}</span>
-                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "before", pendingPlan.intent, beforePreview, sensitiveRevealed, copy)}</strong>
+                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "before", pendingPlan.intent, beforePreview, copy)}</strong>
                               {beforeMeaning ? <small>{beforeMeaning}</small> : null}
                             </div>
                             <span className="agent-change-arrow" aria-hidden="true">→</span>
                             <div className="after">
                               <span>{copy("After", "修改后", "修改後", "変更後")}</span>
-                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "after", pendingPlan.intent, afterPreview, sensitiveRevealed, copy)}</strong>
+                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "after", pendingPlan.intent, afterPreview, copy)}</strong>
                               {afterMeaning ? <small>{afterMeaning}</small> : null}
                             </div>
                           </div>
@@ -1132,27 +1069,6 @@ export default function AgentRoutePage({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <AlertDialog open={sensitiveRevealWarningOpen} onOpenChange={setSensitiveRevealWarningOpen}>
-        <AlertDialogContent className="agent-sensitive-warning-dialog">
-          <AlertDialogHeader>
-            <span className="agent-restore-warning-mark" aria-hidden="true"><AlertTriangle /></span>
-            <AlertDialogTitle>{copy("Show sensitive configuration values?", "显示敏感配置完整值？", "顯示敏感設定完整值？", "機密設定の完全な値を表示しますか？")}</AlertDialogTitle>
-            <AlertDialogDescription>{copy(
-              "The current value may be a real upstream API key. Continue only when nobody can see your screen; screenshots and screen sharing can capture it.",
-              "修改前的值可能是真实的上游 API Key。请确保无人能看到屏幕后再继续；截图和屏幕共享都可能记录完整值。",
-              "修改前的值可能是真實的上游 API Key。請確保無人能看到螢幕後再繼續；截圖和螢幕分享都可能記錄完整值。",
-              "変更前の値は実際の上流 API キーの可能性があります。画面を他人が見られないことを確認してください。スクリーンショットや画面共有に記録される可能性があります。",
-            )}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{copy("Keep hidden", "继续隐藏", "繼續隱藏", "非表示のまま")}</AlertDialogCancel>
-            <AlertDialogAction disabled={revealingSensitiveValues} onClick={() => void revealSensitiveValues()}>
-              {copy("Show full values", "显示完整值", "顯示完整值", "完全な値を表示")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <AlertDialog open={restoreConflict !== null} onOpenChange={(open) => !open && setRestoreConflict(null)}>
         <AlertDialogContent className="agent-restore-conflict-dialog">

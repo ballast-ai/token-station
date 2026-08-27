@@ -34,7 +34,6 @@ import {
   listenDesktopUpdateProgress,
   planAgentConnection,
   planAgentDisconnect,
-  revealAgentPlanSensitiveValues,
   planSnapshotRestore,
   mountAgentProfile,
   previewProviderRemoval,
@@ -162,12 +161,6 @@ describe("structured Agent IPC", () => {
       "apply connection or disconnect",
       () => applyAgentPlan("operation", "confirmation"),
       "apply_agent_plan",
-      { operationId: "operation", confirmationToken: "confirmation" },
-    ],
-    [
-      "reveal sensitive values for the same pending plan",
-      () => revealAgentPlanSensitiveValues("operation", "confirmation"),
-      "reveal_agent_plan_sensitive_values",
       { operationId: "operation", confirmationToken: "confirmation" },
     ],
     [

@@ -1721,9 +1721,34 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText("强模型")).toBeNull();
     expect(screen.queryByText("中模型")).toBeNull();
     expect(screen.queryByText("弱模型")).toBeNull();
-    expect(screen.queryByRole("heading", { name: "只走本地" })).toBeNull();
-    expect(screen.queryByRole("checkbox", { name: /只走本地模型/ })).toBeNull();
-    expect(invokeMock).not.toHaveBeenCalledWith("set_local_routing", expect.anything());
+  });
+
+  it("keeps a persisted strict local route visible and lets the user disable it", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture({ local_only: true, allow_cloud_fallback: false });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      if (command === "set_local_routing") {
+        return { ...initial, local_only: false, allow_cloud_fallback: false };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openRouting(user);
+
+    expect(screen.getByRole("heading", { name: "只走本地" })).toBeInTheDocument();
+    const localOnly = screen.getByRole("checkbox", { name: /只走本地模型/ });
+    expect(localOnly).toBeChecked();
+    expect(localOnly).toBeEnabled();
+    await user.click(localOnly);
+
+    expect(invokeMock).toHaveBeenCalledWith("set_local_routing", {
+      localOnly: false,
+      allowCloudFallback: false,
+    });
   });
 
   it("connects and applies a server-managed enterprise route in one action", async () => {
