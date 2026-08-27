@@ -12,6 +12,7 @@ import {
   checkDesktopUpdate,
   discoverProviderModels,
   deleteProfile,
+  discardAgentPlan,
   editProvider,
   getPlugins,
   getEgress,
@@ -165,6 +166,12 @@ describe("structured Agent IPC", () => {
       "reveal sensitive values for the same pending plan",
       () => revealAgentPlanSensitiveValues("operation", "confirmation"),
       "reveal_agent_plan_sensitive_values",
+      { operationId: "operation", confirmationToken: "confirmation" },
+    ],
+    [
+      "discard an unconsumed pending plan",
+      () => discardAgentPlan("operation", "confirmation"),
+      "discard_agent_plan",
       { operationId: "operation", confirmationToken: "confirmation" },
     ],
     [

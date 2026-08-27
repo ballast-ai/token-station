@@ -7340,6 +7340,12 @@ pre.block {
 
 .agent-connection-change h3 { margin: 0; font-size: 13px; }
 .agent-connection-change p { margin: 0; color: var(--muted); font-size: 10px; }
+.agent-review-changes {
+  min-height: 30px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.agent-review-changes svg { width: 14px; height: 14px; }
 .agent-connection-file {
   display: grid;
   gap: 5px;

@@ -2116,6 +2116,21 @@ impl AgentCommandState {
         )
     }
 
+    fn discard_plan(
+        &self,
+        operation_id: &str,
+        confirmation_token: &str,
+        session_label: &str,
+    ) -> Result<(), AgentCommandError> {
+        let _ = self.take_plan(
+            operation_id,
+            confirmation_token,
+            session_label,
+            &[PlanIntent::Connect, PlanIntent::Disconnect, PlanIntent::Restore],
+        )?;
+        Ok(())
+    }
+
     /// Apply a confirmed plan against the scan snapshot already stored in this
     /// command state. Production callers refresh immediately before reaching
     /// this boundary; tests inject an isolated scan so the full confirmation,
@@ -2643,6 +2658,16 @@ pub(crate) fn reveal_agent_plan_sensitive_values(
         &confirmation_token,
         window.label(),
     )
+}
+
+#[tauri::command(async)]
+pub(crate) fn discard_agent_plan(
+    state: State<'_, AgentCommandState>,
+    window: WebviewWindow,
+    operation_id: String,
+    confirmation_token: String,
+) -> Result<(), AgentCommandError> {
+    state.discard_plan(&operation_id, &confirmation_token, window.label())
 }
 
 #[tauri::command(async)]
@@ -3645,6 +3670,35 @@ mod tests {
                 &[PlanIntent::Connect],
             )
             .is_err());
+    }
+
+    #[test]
+    fn commands_discard_consumes_only_the_exact_pending_plan() {
+        let state = state("discard");
+        let target = scratch("discard-target").join("settings.json");
+        let prepared = prepared(&target, "vk-discard-secret", state.clock.now_ms());
+        let view = state
+            .issue_plan(prepared, &record(&target, false), "main", None)
+            .unwrap();
+
+        let wrong_token = state
+            .discard_plan(
+                &view.plan.operation_id,
+                &"00".repeat(CONFIRMATION_TOKEN_BYTES),
+                "main",
+            )
+            .unwrap_err();
+        assert_eq!(wrong_token.code, "confirmation_token_mismatch");
+        assert!(state.plan_intent(&view.plan.operation_id).is_ok());
+
+        state
+            .discard_plan(
+                &view.plan.operation_id,
+                &view.confirmation_token,
+                "main",
+            )
+            .unwrap();
+        assert!(state.plan_intent(&view.plan.operation_id).is_err());
     }
 
     #[test]

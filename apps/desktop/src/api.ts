@@ -1211,6 +1211,14 @@ export const revealAgentPlanSensitiveValues = (
   confirmationToken,
 });
 
+export const discardAgentPlan = (
+  operationId: string,
+  confirmationToken: string,
+) => invoke<void>("discard_agent_plan", {
+  operationId,
+  confirmationToken,
+});
+
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 

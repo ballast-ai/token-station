@@ -6,6 +6,7 @@ import { ErrorToastProvider } from "../components/ErrorToast";
 import {
   applyAgentPlan,
   configureCursorProvider,
+  discardAgentPlan,
   ensureServeRunning,
   forceForgetAgent,
   getAgentDrift,
@@ -25,6 +26,7 @@ import {
 vi.mock("../api", () => ({
   applyAgentPlan: vi.fn(),
   configureCursorProvider: vi.fn(),
+  discardAgentPlan: vi.fn(),
   ensureServeRunning: vi.fn(),
   forceForgetAgent: vi.fn(),
   getAgentDrift: vi.fn(),
@@ -88,6 +90,7 @@ describe("AgentRoutePage multi-install admission", () => {
       state: "connected",
       message: "Cursor 已配置",
     });
+    vi.mocked(discardAgentPlan).mockReset().mockResolvedValue(undefined);
     vi.mocked(getAgentDrift).mockReset().mockResolvedValue([]);
     vi.mocked(getCursorProviderStatus).mockReset().mockResolvedValue({
       state: "disconnected",
@@ -289,6 +292,102 @@ describe("AgentRoutePage multi-install admission", () => {
       .toBeLessThan(vi.mocked(applyAgentPlan).mock.invocationCallOrder[0]);
     expect(vi.mocked(applyAgentPlan).mock.invocationCallOrder[0])
       .toBeLessThan(onRefreshAgents.mock.invocationCallOrder[0]);
+  });
+
+  it("接入后可以只读回看当时的修改并在关闭时丢弃计划", async () => {
+    const user = userEvent.setup();
+    const found = installation("/opt/homebrew/bin/claude", "2.1.211");
+    found.managed = true;
+    found.connected = true;
+    found.compatibility.status = "CONNECTED";
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "claude-code",
+        legacy_kind: "cc",
+        display_name: "Claude Code",
+        icon_key: "claude",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "CONNECTED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+    vi.mocked(planAgentDisconnect).mockResolvedValueOnce({
+      operation_id: "review-operation",
+      confirmation_token: "review-confirmation",
+      target_config_path: "/Users/x/.claude/settings.json",
+      changes: [],
+      projection: {
+        schema_version: 1,
+        files: [{
+          target_config_path: "/Users/x/.claude/settings.json",
+          forward_changes: [{
+            operation: "replace",
+            path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
+            sensitive: false,
+            summary: "<恢复接管前受管值>",
+            before_preview: '"http://127.0.0.1:8787/agents/claude-code"',
+            after_preview: '"https://api.anthropic.com"',
+          }],
+          reverse_changes: [{
+            operation: "replace",
+            path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
+            sensitive: false,
+            summary: "<恢复接管前受管值>",
+            before_preview: '"https://api.anthropic.com"',
+            after_preview: '"http://127.0.0.1:8787/agents/claude-code"',
+          }],
+        }],
+      },
+      human_diff: "restore endpoint",
+    } as never);
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "tiered",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning
+        applying={false}
+        onStateChange={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "查看接入改动" }));
+    const review = await screen.findByRole("dialog", { name: "接入改动" });
+    expect(review).toHaveTextContent('"https://api.anthropic.com"');
+    expect(review).toHaveTextContent('"http://127.0.0.1:8787/agents/claude-code"');
+    expect(review).toHaveTextContent("这是只读记录");
+    expect(within(review).queryByRole("button", { name: "确认接入" })).not.toBeInTheDocument();
+    expect(applyAgentPlan).not.toHaveBeenCalled();
+
+    const footer = review.querySelector('[data-slot="dialog-footer"]');
+    expect(footer).not.toBeNull();
+    await user.click(
+      within(footer as HTMLElement).getByRole("button", { name: "关闭" }),
+    );
+    expect(discardAgentPlan).toHaveBeenCalledWith("review-operation", "review-confirmation");
+    expect(applyAgentPlan).not.toHaveBeenCalled();
   });
 
   it("OpenCode 路由模型缺少输出上限时显示持久修复原因并禁止接入", () => {

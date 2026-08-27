@@ -14,6 +14,7 @@ import {
 import {
   applyAgentPlan,
   configureCursorProvider,
+  discardAgentPlan,
   ensureServeRunning,
   getAgentDrift,
   getCursorProviderStatus,
@@ -117,11 +118,11 @@ function errorText(error: unknown) {
   return humanizeAppError(error);
 }
 
-function planFiles(plan: ConfigPlanView) {
+function planFiles(plan: ConfigPlanView, direction: "forward" | "reverse" = "forward") {
   if (plan.projection?.files?.length) {
     return plan.projection.files.map((file) => ({
       path: file.target_config_path,
-      changes: file.forward_changes,
+      changes: direction === "reverse" ? file.reverse_changes : file.forward_changes,
     }));
   }
   return [{ path: plan.target_config_path, changes: plan.changes ?? [] }];
@@ -131,7 +132,7 @@ function changeState(
   operation: ConfigPlanView["changes"][number]["operation"],
   sensitive: boolean,
   side: "before" | "after",
-  intent: "connect" | "restore",
+  intent: "connect" | "restore" | "review",
   preview: string | undefined,
   sensitiveRevealed: boolean,
   copy: LocalizedCopy,
@@ -346,7 +347,7 @@ export default function AgentRoutePage({
   const [busy, setBusy] = useState(false);
   const [cursorStatus, setCursorStatus] = useState<CursorProviderStatusView | null>(null);
   const [pendingPlan, setPendingPlan] = useState<{
-    intent: "connect" | "restore";
+    intent: "connect" | "restore" | "review";
     plan: ConfigPlanView;
   } | null>(null);
   const [sensitiveRevealWarningOpen, setSensitiveRevealWarningOpen] = useState(false);
@@ -532,7 +533,7 @@ export default function AgentRoutePage({
   };
 
   const applyPendingPlan = async () => {
-    if (!pendingPlan || busy) return;
+    if (!pendingPlan || pendingPlan.intent === "review" || busy) return;
     const { intent, plan } = pendingPlan;
     setBusy(true);
     try {
@@ -551,6 +552,33 @@ export default function AgentRoutePage({
       }
     } catch (caught) {
       showError(errorText(caught), `agent-${intent}:${metadata.agent_id}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const closePendingPlan = () => {
+    const closing = pendingPlan;
+    setPendingPlan(null);
+    if (closing) {
+      void discardAgentPlan(
+        closing.plan.operation_id,
+        closing.plan.confirmation_token,
+      ).catch(() => undefined);
+    }
+  };
+
+  const reviewConnectionChanges = async () => {
+    if (!installation || !managed || metadata.agent_id === "cursor" || busy) return;
+    setBusy(true);
+    try {
+      const plan = await planAgentDisconnect(
+        metadata.agent_id,
+        installation.discovery.canonical_path,
+      );
+      setPendingPlan({ intent: "review", plan });
+    } catch (caught) {
+      showError(errorText(caught), `agent-review-connection:${metadata.agent_id}`);
     } finally {
       setBusy(false);
     }
@@ -872,7 +900,21 @@ export default function AgentRoutePage({
         <div className="agent-connection-change">
           <div>
             <h3>{copy("Safe configuration change", "安全修改配置", "安全修改設定", "安全な設定変更")}</h3>
-            <p>{copy("Preview first. Back up second. Write only after confirmation.", "先预览，再备份，确认后才写入。", "先預覽，再備份，確認後才寫入。", "先にプレビューし、次にバックアップし、確認後のみ書き込みます。")}</p>
+            {managed && metadata.agent_id !== "cursor" ? (
+              <Button
+                className="agent-review-changes"
+                variant="outline"
+                size="sm"
+                type="button"
+                disabled={busy || !installation}
+                onClick={() => void reviewConnectionChanges()}
+              >
+                <FileDiff aria-hidden="true" />
+                {copy("Review connection changes", "查看接入改动", "查看接入變更", "接続変更を確認")}
+              </Button>
+            ) : (
+              <p>{copy("Preview first. Back up second. Write only after confirmation.", "先预览，再备份，确认后才写入。", "先預覽，再備份，確認後才寫入。", "先にプレビューし、次にバックアップし、確認後のみ書き込みます。")}</p>
+            )}
           </div>
           <div className="agent-connection-file">
             <code>{connectionTarget}</code>
@@ -903,20 +945,27 @@ export default function AgentRoutePage({
       <Dialog
         open={pendingPlan !== null}
         onOpenChange={(open) => {
-          if (!open && !busy) setPendingPlan(null);
+          if (!open && !busy) closePendingPlan();
         }}
       >
         <DialogContent className="agent-change-dialog" closeLabel={copy("Close", "关闭", "關閉", "閉じる")}>
           <DialogHeader>
             <span className="agent-change-dialog-mark" aria-hidden="true"><FileDiff /></span>
-            <DialogTitle>{pendingPlan?.intent === "restore"
-              ? copy("Confirm backup restore", "确认恢复备份", "確認恢復備份", "バックアップの復元を確認")
-              : copy("Confirm connection changes", "确认接入改动", "確認連線變更", "接続変更を確認")}</DialogTitle>
+            <DialogTitle>{pendingPlan?.intent === "review"
+              ? copy("Connection changes", "接入改动", "接入變更", "接続変更")
+              : pendingPlan?.intent === "restore"
+                ? copy("Confirm backup restore", "确认恢复备份", "確認恢復備份", "バックアップの復元を確認")
+                : copy("Confirm connection changes", "确认接入改动", "確認連線變更", "接続変更を確認")}</DialogTitle>
             <DialogDescription>{pendingPlan?.intent === "restore"
               ? copy(
                 "Review the owned fields that will return to their pre-connection state.",
                 "请确认将恢复到接入前状态的受管字段。", "請確認將恢復到連線前狀態的受管欄位。", "接続前の状態に戻す管理フィールドを確認してください。"
               )
+              : pendingPlan?.intent === "review"
+                ? copy(
+                  "These are the exact Connector-owned values Token Station changed during connection.",
+                  "这是 Token Station 接入时修改的确切受管值。", "這是 Token Station 接入時修改的確切受管值。", "Token Station が接続時に変更した正確な管理値です。"
+                )
               : copy(
                 "No file has been changed yet. Review every field before continuing.",
                 "配置文件尚未修改。请先核对每一项改动。", "設定檔案尚未修改。請先核對每一項變更。", "設定ファイルはまだ変更されていません。続行する前に各フィールドを確認してください。"
@@ -925,7 +974,7 @@ export default function AgentRoutePage({
           <div className="agent-change-scroll" role="region" aria-label={copy("Configuration changes", "配置改动", "設定變更", "設定変更")} tabIndex={0}>
             {pendingPlan ? (
               <div className="agent-change-files">
-                {planFiles(pendingPlan.plan).map((file, fileIndex) => (
+                {planFiles(pendingPlan.plan, pendingPlan.intent === "review" ? "reverse" : "forward").map((file, fileIndex) => (
                   <section className="agent-change-file" key={`${file.path}-${fileIndex}`}>
                     <div className="agent-change-file-head">
                       <span>{copy("Target file", "目标文件", "目標檔案", "対象ファイル")}</span>
@@ -942,10 +991,10 @@ export default function AgentRoutePage({
                           : undefined;
                         const sensitiveRevealed = revealedChange !== undefined;
                         const beforePreview = sensitiveRevealed
-                          ? revealedChange.before_preview ?? undefined
+                          ? (pendingPlan.intent === "review" ? revealedChange.after_preview : revealedChange.before_preview) ?? undefined
                           : change.before_preview;
                         const afterPreview = sensitiveRevealed
-                          ? revealedChange.after_preview ?? undefined
+                          ? (pendingPlan.intent === "review" ? revealedChange.before_preview : revealedChange.after_preview) ?? undefined
                           : change.after_preview;
                         const beforeMeaning = changeValueMeaning(changePath, beforePreview, copy);
                         const afterMeaning = changeValueMeaning(changePath, afterPreview, copy);
@@ -1002,21 +1051,25 @@ export default function AgentRoutePage({
                 <strong>{copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
                 <span>{pendingPlan?.intent === "restore"
                   ? copy("Only Token Station-owned fields change. Other fields stay as they are.", "只恢复 Token Station 受管字段，其他字段保持不变。", "只恢復 Token Station 受管欄位，其他欄位保持不變。", "Token Station 管理フィールドのみ復元し、他のフィールドは保持します。")
+                  : pendingPlan?.intent === "review"
+                    ? copy("This is a read-only record. Closing it does not change the file.", "这是只读记录，关闭不会修改文件。", "這是唯讀記錄，關閉不會修改檔案。", "読み取り専用の記録です。閉じてもファイルは変更されません。")
                   : copy("Token Station saves the original file locally immediately before writing.", "写入前会在本机保存原文件的加密快照。", "寫入前會在本機儲存原檔案的加密快照。", "書き込み直前に元のファイルをローカルへ暗号化保存します。")}</span>
               </div>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" type="button" disabled={busy} onClick={() => setPendingPlan(null)}>
-              {copy("Cancel", "取消", "取消", "キャンセル")}
+            <Button variant="outline" type="button" disabled={busy} onClick={closePendingPlan}>
+              {pendingPlan?.intent === "review"
+                ? copy("Close", "关闭", "關閉", "閉じる")
+                : copy("Cancel", "取消", "取消", "キャンセル")}
             </Button>
-            <Button type="button" disabled={busy} onClick={() => void applyPendingPlan()}>
+            {pendingPlan?.intent !== "review" ? <Button type="button" disabled={busy} onClick={() => void applyPendingPlan()}>
               {busy
                 ? copy("Working…", "处理中…", "處理中…", "処理中…")
                 : pendingPlan?.intent === "restore"
                   ? copy("Restore backup & disconnect", "恢复备份并断开", "恢復備份並斷開", "バックアップを復元して切断")
                   : copy("Confirm connection", "确认接入", "確認連線", "接続を確認")}
-            </Button>
+            </Button> : null}
           </DialogFooter>
         </DialogContent>
       </Dialog>
