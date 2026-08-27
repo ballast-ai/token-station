@@ -11433,6 +11433,28 @@ samp {
   padding: 16px 52px 8px 16px;
 }
 
+.station-content-overview .overview-model-summary > [data-slot="card-header"] {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+}
+
+.station-content-overview .overview-model-summary [data-slot="card-header"] > span {
+  grid-column: 1 / -1;
+}
+
+.station-content-overview .overview-model-summary [data-slot="card-title"] {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.station-content-overview .overview-model-summary [data-slot="card-header"] > p {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: center;
+  min-width: 0;
+}
+
 .station-content-overview .overview-summary-card > [data-slot="card-content"] {
   padding: 6px 16px 14px;
 }

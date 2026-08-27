@@ -265,7 +265,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
           </CardContent>
         </Card>
 
-        <Card className="overview-summary-card" role="region" aria-label={copy("Model overview", "模型概览", "模型概覽", "モデル概要")}>
+        <Card className="overview-summary-card overview-model-summary" role="region" aria-label={copy("Model overview", "模型概览", "模型概覽", "モデル概要")}>
           <CardHeader>
             <span><Boxes aria-hidden="true" />{copy("Models", "模型", "模型", "モデル")}</span>
             <CardTitle>{copy(`${modelCount} models`, `${modelCount} 个模型`, `${modelCount} 個模型`, `${modelCount} 個モデル`)}</CardTitle>
