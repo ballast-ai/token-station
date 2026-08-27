@@ -62,34 +62,30 @@ describe("retained page theme styles", () => {
     expect(routeSnapshotRule).not.toMatch(/align-content:\s*center/);
   });
 
-  it("renders top-level routing scopes as cards and nests Agent routes under global routing", () => {
+  it("nests compact Agent routes without decorative tree lines", () => {
     const scopeCardRule = appCss.match(
       /\.routing-scope-item\[data-slot="button"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const selectedRule = appCss.match(
       /\.routing-scope-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    const selectedRailRule = appCss.match(
-      /\.routing-scope-item\[data-slot="button"\]\[aria-current="page"\]::before\s*\{([^}]*)\}/s,
-    )?.[1] ?? "";
     const nestedListRule = appCss.match(/\.agent-route-list\s*\{([^}]*)\}/s)?.[1] ?? "";
     const childDisclosureRule = appCss.match(
       /\.agent-route-disclosure\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    const childConnectorRule = appCss.match(
-      /\.agent-route-disclosure::before\s*\{([^}]*)\}/s,
+    const compactAgentRule = appCss.match(
+      /\.agent-route-list \.agent-master-item\[data-slot="button"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
 
     expect(scopeCardRule).toMatch(/min-height:\s*62px/);
     expect(scopeCardRule).toMatch(/border:\s*1px solid var\(--line\)/);
     expect(selectedRule).toMatch(/border-color:\s*var\(--signal-selection-border\)/);
-    expect(selectedRailRule).toMatch(/width:\s*3px/);
-    expect(selectedRailRule).toMatch(/background:\s*var\(--signal\)/);
     expect(childDisclosureRule).toMatch(/margin-left:\s*18px/);
-    expect(childDisclosureRule).toMatch(/padding-left:\s*14px/);
-    expect(childConnectorRule).toMatch(/border-left:\s*1px solid var\(--line-strong\)/);
-    expect(childConnectorRule).toMatch(/border-bottom:\s*1px solid var\(--line-strong\)/);
-    expect(nestedListRule).toMatch(/border-left:\s*1px solid var\(--line-strong\)/);
+    expect(childDisclosureRule).toMatch(/padding-left:\s*0/);
+    expect(nestedListRule).toMatch(/border:\s*0/);
+    expect(compactAgentRule).toMatch(/height:\s*46px/);
+    expect(appCss).not.toMatch(/\.agent-route-disclosure::before/);
+    expect(appCss).not.toMatch(/\.routing-scope-item\[data-slot="button"\]\[aria-current="page"\]::before/);
   });
 
   it("keeps the Agent actions compact in the card's top-right corner", () => {

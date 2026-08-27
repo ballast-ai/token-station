@@ -7198,24 +7198,10 @@ pre.block {
 }
 
 .agent-route-disclosure {
-  position: relative;
   margin-left: 18px;
-  padding-left: 14px;
+  padding-left: 0;
   display: grid;
   gap: 6px;
-}
-
-.agent-route-disclosure::before {
-  content: "";
-  position: absolute;
-  top: -6px;
-  left: 0;
-  width: 14px;
-  height: 36px;
-  border-left: 1px solid var(--line-strong);
-  border-bottom: 1px solid var(--line-strong);
-  border-radius: 0 0 0 7px;
-  pointer-events: none;
 }
 
 .agent-route-disclosure-trigger[data-slot="button"] {
@@ -7280,9 +7266,29 @@ pre.block {
 .agent-route-list {
   display: grid;
   gap: 2px;
-  margin-left: 15px;
-  padding: 0 0 0 10px;
-  border-left: 1px solid var(--line-strong);
+  margin-left: 8px;
+  padding: 2px 0 0;
+  border: 0;
+}
+
+.agent-route-list .agent-master-item[data-slot="button"] {
+  height: 46px;
+  gap: 8px;
+  padding: 5px 8px;
+}
+
+.agent-route-list .agent-master-item .agent-master-icon {
+  width: 30px;
+  height: 30px;
+  flex-basis: 30px !important;
+}
+
+.agent-route-list .agent-master-item .agent-master-icon > .agent-brand-glyph,
+.agent-route-list .agent-master-item .agent-brand-glyph > svg,
+.agent-route-list .agent-master-item .agent-brand-glyph > img,
+.agent-route-list .agent-master-item .agent-brand-glyph > .brand-fallback {
+  width: 28px !important;
+  height: 28px !important;
 }
 
 .agent-connection-detail {
@@ -10677,15 +10683,6 @@ samp {
   border-color: var(--signal-selection-border);
   color: var(--ink);
   background: var(--signal-soft);
-}
-
-.routing-scope-item[data-slot="button"][aria-current="page"]::before {
-  content: "";
-  position: absolute;
-  inset: 10px auto 10px 0;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--signal);
 }
 
 .routing-scope-item .agent-master-icon {
