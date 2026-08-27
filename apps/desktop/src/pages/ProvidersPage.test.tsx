@@ -28,12 +28,12 @@ describe("ProvidersPage enterprise entry", () => {
     const onConnectEnterprise = vi.fn().mockResolvedValue(true);
     render(<ProvidersPage {...baseProps} onConnectEnterprise={onConnectEnterprise} />);
 
-    const enterprise = screen.getByRole("button", { name: "企业路由" });
+    const enterprise = screen.getByRole("button", { name: "添加企业模型" });
     const addModel = screen.getByRole("button", { name: "添加模型" });
     expect(enterprise.compareDocumentPosition(addModel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(enterprise);
-    const dialog = screen.getByRole("dialog", { name: "添加企业路由" });
+    const dialog = screen.getByRole("dialog", { name: "添加企业模型" });
     expect(within(dialog).getByText("Token-station")).toBeInTheDocument();
     await user.type(within(dialog).getByRole("textbox", { name: "Base URL" }), "https://enterprise.example.com/v1");
     await user.type(within(dialog).getByLabelText("API Key"), "secret-key");

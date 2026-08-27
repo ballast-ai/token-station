@@ -59,6 +59,23 @@ describe("ModelTestConsole", () => {
     expect(screen.getByLabelText("草稿全局路由：简单路由")).toBeInTheDocument();
   });
 
+  it("labels a managed direct target as enterprise routing", () => {
+    render(
+      <LanguageProvider>
+        <ModelTestConsole
+          open
+          onOpenChange={vi.fn()}
+          routingMode="direct"
+          routeState="draft"
+          enterpriseRoute
+        />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByLabelText("草稿全局路由：企业路由")).toBeInTheDocument();
+    expect(screen.queryByText("简单路由")).toBeNull();
+  });
+
   it("renders real deltas before completion and shows first-text and total latency", async () => {
     const user = userEvent.setup();
     let finishRequest: ((reply: { content: string; first_token_ms: number; latency_ms: number }) => void) | undefined;

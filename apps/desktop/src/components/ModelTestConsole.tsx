@@ -16,6 +16,7 @@ interface ModelTestConsoleProps {
   onOpenChange: (open: boolean) => void;
   routingMode: StateView["routing_mode"];
   routeState: "running" | "draft";
+  enterpriseRoute?: boolean;
 }
 
 export type TranscriptItem = ModelTestMessage & {
@@ -119,6 +120,7 @@ export default function ModelTestConsole({
   onOpenChange,
   routingMode,
   routeState,
+  enterpriseRoute = false,
 }: ModelTestConsoleProps) {
   const { copy } = useLocalizedCopy();
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -132,7 +134,9 @@ export default function ModelTestConsole({
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const focusComposer = (delay = 60) => window.setTimeout(() => composerRef.current?.focus(), delay);
-  const routeModeLabel = routingMode === "direct"
+  const routeModeLabel = enterpriseRoute
+    ? copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")
+    : routingMode === "direct"
     ? copy("Direct", "简单路由", "簡單路由", "ダイレクト")
     : routingMode === "quota_first"
       ? copy("Quota-first", "额度优先", "額度優先", "クォータ優先")

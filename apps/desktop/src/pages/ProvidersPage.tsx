@@ -46,7 +46,7 @@ export default function ProvidersPage(props: ProvidersPageProps) {
         <div className="providers-heading-actions">
           <Button className="providers-enterprise-button" variant="outline" type="button" onClick={() => setEnterpriseOpen(true)}>
             <Building2 aria-hidden="true" />
-            {copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}
+            {copy("Add enterprise model", "添加企业模型", "新增企業模型", "企業モデルを追加")}
           </Button>
           <Button
             className="providers-add-button"
@@ -63,7 +63,7 @@ export default function ProvidersPage(props: ProvidersPageProps) {
       <Dialog open={enterpriseOpen} onOpenChange={setEnterpriseOpen}>
         <DialogContent className="enterprise-route-dialog" closeLabel={copy("Close", "关闭", "關閉", "閉じる")}>
           <DialogHeader>
-            <DialogTitle>{copy("Add enterprise route", "添加企业路由", "新增企業路由", "企業ルートを追加")}</DialogTitle>
+            <DialogTitle>{copy("Add enterprise model", "添加企业模型", "新增企業模型", "企業モデルを追加")}</DialogTitle>
             <DialogDescription>{copy(
               "Connect a Token-station endpoint, verify its credential, and select one model.",
               "连接 Token-station 地址，验证凭据并选择一个模型。",

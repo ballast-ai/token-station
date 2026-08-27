@@ -202,11 +202,7 @@ export default function HomePage({
             tiers={tiers}
             providers={providers}
             disabled={busy}
-            keywordCounts={{
-              high: keywords.high.length,
-              mid: keywords.mid.length,
-              low: keywords.low.length,
-            }}
+            keywords={keywords}
             onEditKeywords={setKeywordTier}
             onTierChange={onTierChange}
           />

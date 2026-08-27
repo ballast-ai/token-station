@@ -86,7 +86,7 @@ describe("TierRouteEditor", () => {
       <TierRouteEditor
         tiers={tiers}
         providers={providers}
-        keywordCounts={{ high: 2, mid: 0, low: 1 }}
+        keywords={{ high: ["代码", "推理"], mid: [], low: ["摘要"] }}
         onEditKeywords={vi.fn()}
         onTierChange={vi.fn()}
       />,
@@ -95,14 +95,17 @@ describe("TierRouteEditor", () => {
     expect(screen.getByText("上档")).toBeInTheDocument();
     expect(screen.getByText("中档")).toBeInTheDocument();
     expect(screen.getByText("下档")).toBeInTheDocument();
-    expect(screen.getByText("复杂推理与代码")).toBeInTheDocument();
-    expect(screen.getByText("简单快速任务")).toBeInTheDocument();
+    expect(screen.queryByText("复杂推理与代码")).toBeNull();
+    expect(screen.queryByText("简单快速任务")).toBeNull();
     expect(screen.getByLabelText("上档供应商")).toHaveTextContent("deepseek");
     expect(screen.getByLabelText("上档模型")).toHaveTextContent("deepseek-v4-pro");
     expect(screen.getByLabelText("下档模型")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "编辑上档关键词，当前 2 个" })).toHaveTextContent("关键词 2");
-    expect(screen.getByRole("button", { name: "编辑中档关键词，当前 0 个" })).toHaveTextContent("关键词");
-    expect(screen.getByRole("button", { name: "编辑下档关键词，当前 1 个" })).toHaveTextContent("关键词 1");
+    expect(screen.getByRole("button", { name: "编辑上档关键词，当前 2 个" })).toHaveTextContent("编辑");
+    expect(screen.getByRole("button", { name: "编辑中档关键词，当前 0 个" })).toHaveTextContent("+ 添加关键词");
+    expect(screen.getByRole("button", { name: "编辑下档关键词，当前 1 个" })).toHaveTextContent("编辑");
+    expect(screen.getByLabelText("上档已设置关键词")).toHaveTextContent("代码");
+    expect(screen.getByLabelText("上档已设置关键词")).toHaveTextContent("推理");
+    expect(screen.queryByLabelText("中档已设置关键词")).toBeNull();
     expect(screen.queryByRole("button", { name: "同步三档" })).not.toBeInTheDocument();
   });
 
@@ -113,7 +116,7 @@ describe("TierRouteEditor", () => {
       <TierRouteEditor
         tiers={tiers}
         providers={providers}
-        keywordCounts={{ high: 0, mid: 3, low: 0 }}
+        keywords={{ high: [], mid: ["a", "b", "c"], low: [] }}
         onEditKeywords={onEditKeywords}
         onTierChange={vi.fn()}
       />,

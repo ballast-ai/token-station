@@ -42,8 +42,8 @@ describe("retained page theme styles", () => {
     const summaryLinkRule = appCss.match(
       /\.station-content-overview \.overview-summary-link\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    const summaryListRule = appCss.match(
-      /\.station-content-overview \.overview-summary-list\s*\{([^}]*)\}/s,
+    const alignedSummaryRowsRule = appCss.match(
+      /\.station-content-overview \.overview-summary-list,\s*\.station-content-overview \.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const routeSummaryListRule = appCss.match(
       /\.station-content-overview \.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,
@@ -55,10 +55,12 @@ describe("retained page theme styles", () => {
     expect(summaryLinkRule).toMatch(/top:\s*14px/);
     expect(summaryLinkRule).toMatch(/right:\s*14px/);
     expect(summaryLinkRule).toMatch(/bottom:\s*auto/);
-    expect(summaryListRule).toMatch(/flex:\s*1/);
-    expect(summaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, 44px\)/);
-    expect(routeSummaryListRule).toMatch(/display:\s*block/);
-    expect(routeSummaryRowRule).toMatch(/height:\s*44px/);
+    expect(alignedSummaryRowsRule).toMatch(/flex:\s*1/);
+    expect(alignedSummaryRowsRule).toMatch(/display:\s*grid/);
+    expect(alignedSummaryRowsRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
+    expect(routeSummaryListRule).toMatch(/display:\s*grid/);
+    expect(routeSummaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
+    expect(routeSummaryRowRule).toMatch(/height:\s*auto/);
     expect(routeSummaryRowRule).toMatch(/min-height:\s*0/);
   });
 
@@ -238,8 +240,9 @@ describe("retained page theme styles", () => {
     expect(routingModeRule).toMatch(/border-color:\s*var\(--signal-selection-border\)/);
     expect(routingModeRule).toMatch(/background:\s*var\(--signal-soft\)/);
     expect(routingModeRule).toMatch(/box-shadow:\s*var\(--signal-selection-shadow\)/);
-    expect(selectedProviderRule).toMatch(/border-color:\s*var\(--signal-selection-border\)/);
-    expect(selectedProviderRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(selectedProviderRule).toMatch(/border-color:\s*var\(--line\)/);
+    expect(selectedProviderRule).toMatch(/background:\s*var\(--surface\)/);
+    expect(selectedProviderRule).toMatch(/box-shadow:\s*none/);
     expect(hoveredProviderRule).toMatch(/border-color:\s*var\(--signal-hover-border\)/);
     expect(hoveredProviderRule).toMatch(/background:\s*var\(--signal-hover-soft\)/);
     expect(appliedTargetRule).toMatch(/border:\s*1px solid var\(--success-border\)/);

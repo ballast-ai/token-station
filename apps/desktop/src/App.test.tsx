@@ -404,14 +404,14 @@ it("serve lifecycle events keep the model-test route label in the same generatio
   })));
 
   await user.click(screen.getByRole("button", { name: "验证模型连接" }));
-  expect(screen.getByText("运行中的全局路由")).toBeInTheDocument();
+  expect(await screen.findByText("运行中的全局路由")).toBeInTheDocument();
 
   act(() => emitServe?.(serveFixture({
     phase: "error",
     error: "serve_task_exited",
     model_test_uses_running_gateway: false,
   })));
-  expect(screen.getByText("草稿全局路由")).toBeInTheDocument();
+  expect(await screen.findByText("草稿全局路由")).toBeInTheDocument();
 });
 
 it("新用户首次打开先询问是否需要教程，暂不需要后不再自动询问", async () => {
@@ -1807,9 +1807,9 @@ describe("desktop station navigation", () => {
 
     render(<App />);
     await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="模型"]')!);
-    await user.click(await screen.findByRole("button", { name: "企业路由" }));
+    await user.click(await screen.findByRole("button", { name: "添加企业模型" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "添加企业路由" });
+    const dialog = await screen.findByRole("dialog", { name: "添加企业模型" });
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), enterpriseProvider.base_url);
     await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(within(dialog).getByRole("button", { name: "验证并获取模型" }));
@@ -1829,7 +1829,7 @@ describe("desktop station navigation", () => {
     });
     expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("set_direct_route", expect.anything());
-    expect(screen.queryByRole("dialog", { name: "添加企业路由" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加企业模型" })).toBeNull();
     expect(await screen.findByRole("group", { name: "Token-station 供应商" })).toBeInTheDocument();
   });
 
@@ -1865,7 +1865,7 @@ describe("desktop station navigation", () => {
 
     render(<App />);
     await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="模型"]')!);
-    await user.click(await screen.findByRole("button", { name: "企业路由" }));
+    await user.click(await screen.findByRole("button", { name: "添加企业模型" }));
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://enterprise.example.com/v1");
     await user.type(screen.getByLabelText("API Key"), "invalid-key");
     await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
