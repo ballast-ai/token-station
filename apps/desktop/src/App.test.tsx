@@ -1788,7 +1788,7 @@ describe("desktop station navigation", () => {
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), enterpriseProvider.base_url);
     await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(within(dialog).getByRole("button", { name: "验证并获取模型" }));
-    await user.selectOptions(await within(dialog).findByRole("combobox", { name: "模型" }), "enterprise-reasoner");
+    await user.click(await within(dialog).findByRole("radio", { name: "enterprise-reasoner" }));
     await user.click(within(dialog).getByRole("button", { name: "添加并使用" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));

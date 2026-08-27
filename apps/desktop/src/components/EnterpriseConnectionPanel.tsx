@@ -156,23 +156,42 @@ export default function EnterpriseConnectionPanel({
             }}
           />
         </label>
-        <label>
-          <span>{copy("Model", "模型", "模型", "モデル")}</span>
-          <select className="select" aria-label={copy("Model", "模型", "模型", "モデル")} value={model} disabled={disabled || models.length === 0} onChange={(event) => setModel(event.target.value)}>
-            <option value="">{copy("Select a verified model", "选择已验证模型", "選擇已驗證模型", "検証済みモデルを選択")}</option>
-            {models.map((item) => <option value={item} key={item}>{item}</option>)}
-          </select>
-        </label>
       </div>
-      <div className="enterprise-dialog-actions">
+      <div className="enterprise-verify-actions">
         <button className="btn" type="button" disabled={disabled} onClick={() => void verify()}>
           {verifying ? copy("Verifying…", "验证中…", "驗證中…", "検証中…") : copy("Verify and load models", "验证并获取模型", "驗證並取得模型", "検証してモデルを取得")}
         </button>
+      </div>
+      {message && <p className="enterprise-connection-status" role="status" aria-live="polite">{message}</p>}
+      {models.length > 0 && (
+        <section className="enterprise-model-picker" aria-labelledby="enterprise-model-picker-label">
+          <div className="enterprise-model-picker-heading">
+            <strong id="enterprise-model-picker-label">{copy("Model", "模型", "模型", "モデル")}</strong>
+            <span>{copy("Select one", "选择一个", "選擇一個", "1つ選択")}</span>
+          </div>
+          <div className="enterprise-model-pills" role="radiogroup" aria-labelledby="enterprise-model-picker-label">
+            {models.map((item) => (
+              <label className="enterprise-model-pill" key={item}>
+                <input
+                  type="radio"
+                  name="enterprise-model"
+                  value={item}
+                  checked={model === item}
+                  disabled={disabled}
+                  onChange={() => setModel(item)}
+                />
+                <span className="enterprise-model-mark" aria-hidden="true">{model === item ? "✓" : "+"}</span>
+                <span className="enterprise-model-name">{item}</span>
+              </label>
+            ))}
+          </div>
+        </section>
+      )}
+      <div className="enterprise-dialog-actions">
         <button className="btn primary" type="button" disabled={disabled || !model} onClick={() => void connect()}>
           {working ? copy("Adding…", "添加中…", "新增中…", "追加中…") : copy("Add and use", "添加并使用", "新增並使用", "追加して使用")}
         </button>
       </div>
-      {message && <p className="enterprise-connection-status" role="status" aria-live="polite">{message}</p>}
       <p className="enterprise-secret-note">{copy(
         "The API key is stored in the local credential store and is not shown again.",
         "API Key 仅保存到本机凭据存储，接入后不会再次显示。",

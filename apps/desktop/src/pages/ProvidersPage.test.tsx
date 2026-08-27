@@ -38,10 +38,10 @@ describe("ProvidersPage enterprise entry", () => {
     await user.type(within(dialog).getByRole("textbox", { name: "Base URL" }), "https://enterprise.example.com/v1");
     await user.type(within(dialog).getByLabelText("API Key"), "secret-key");
     await user.click(within(dialog).getByRole("button", { name: "验证并获取模型" }));
-    expect(await within(dialog).findByRole("combobox", { name: "模型" })).toBeEnabled();
+    expect(await within(dialog).findByRole("radiogroup", { name: "模型" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "添加并使用" })).toBeDisabled();
 
-    await user.selectOptions(within(dialog).getByRole("combobox", { name: "模型" }), "enterprise-reasoner");
+    await user.click(within(dialog).getByRole("radio", { name: "enterprise-reasoner" }));
     await user.click(within(dialog).getByRole("button", { name: "添加并使用" }));
     expect(onConnectEnterprise).toHaveBeenCalledWith({
       name: "tokenstation",

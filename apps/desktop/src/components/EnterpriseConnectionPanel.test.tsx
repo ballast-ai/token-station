@@ -45,7 +45,7 @@ describe("EnterpriseConnectionPanel", () => {
     );
 
     expect(screen.getByText("Token-station")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "模型" })).toBeDisabled();
+    expect(screen.queryByRole("radiogroup", { name: "模型" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
     expect(screen.getByRole("status")).toHaveTextContent("请填写 Base URL 和 API Key");
 
@@ -57,10 +57,16 @@ describe("EnterpriseConnectionPanel", () => {
       baseUrl: "https://api.example.com/v1",
       apiKey: "secret-key",
     }));
-    expect(screen.getByRole("combobox", { name: "模型" })).toBeEnabled();
+    expect(screen.getByRole("radiogroup", { name: "模型" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "enterprise-chat" })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: "enterprise-reasoner" })).not.toBeChecked();
     expect(screen.getByRole("button", { name: "添加并使用" })).toBeDisabled();
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "模型" }), "enterprise-reasoner");
+    await user.click(screen.getByRole("radio", { name: "enterprise-chat" }));
+    await user.click(screen.getByRole("radio", { name: "enterprise-reasoner" }));
+    expect(screen.getByRole("radio", { name: "enterprise-chat" })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: "enterprise-reasoner" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "添加并使用" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "添加并使用" }));
     await waitFor(() => expect(onConnect).toHaveBeenCalledWith({
       name: "tokenstation",
@@ -83,8 +89,8 @@ describe("EnterpriseConnectionPanel", () => {
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
     await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
-    expect(await screen.findByRole("combobox", { name: "模型" })).toBeEnabled();
+    expect(await screen.findByRole("radiogroup", { name: "模型" })).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "/next");
-    expect(screen.getByRole("combobox", { name: "模型" })).toBeDisabled();
+    expect(screen.queryByRole("radiogroup", { name: "模型" })).toBeNull();
   });
 });
