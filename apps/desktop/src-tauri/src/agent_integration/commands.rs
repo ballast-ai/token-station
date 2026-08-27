@@ -15,7 +15,7 @@ use ring::hmac;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, State, WebviewWindow};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
 use super::config_codec::{
@@ -53,7 +53,7 @@ const MAX_PENDING_PLANS: usize = 64;
 const MAX_SESSION_LABEL_BYTES: usize = 128;
 const CONFIRMATION_TOKEN_BYTES: usize = 32;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstallationView {
     pub discovery: DiscoveryRecord,
@@ -90,6 +90,26 @@ pub struct ConfigPlanView {
     #[serde(flatten)]
     pub plan: ConfigChangePlan,
     pub confirmation_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SensitiveChangePreviewView {
+    pub target_config_path: String,
+    pub path: super::types::ConfigPath,
+    pub before_preview: Option<String>,
+    pub after_preview: Option<String>,
+}
+
+impl Drop for SensitiveChangePreviewView {
+    fn drop(&mut self) {
+        if let Some(value) = self.before_preview.as_mut() {
+            value.zeroize();
+        }
+        if let Some(value) = self.after_preview.as_mut() {
+            value.zeroize();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -1967,6 +1987,61 @@ impl AgentCommandState {
             .ok_or_else(|| AgentCommandError::boundary("unknown_operation", "计划不存在或已消费"))
     }
 
+    fn reveal_plan_sensitive_values(
+        &self,
+        operation_id: &str,
+        confirmation_token: &str,
+        session_label: &str,
+    ) -> Result<Vec<SensitiveChangePreviewView>, AgentCommandError> {
+        validate_operation_id(operation_id)?;
+        validate_session_label(session_label)?;
+        let token = decode_token(confirmation_token)?;
+        let now_ms = self.clock.now_ms();
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?;
+        prune_expired(&mut session.plans, now_ms);
+        let stored = session.plans.get(operation_id).ok_or_else(|| {
+            AgentCommandError::boundary(
+                "unknown_or_expired_operation",
+                "计划不存在、已过期或已消费",
+            )
+        })?;
+        if stored.session_label != session_label {
+            return Err(AgentCommandError::boundary(
+                "operation_session_mismatch",
+                "计划与当前窗口会话不匹配",
+            ));
+        }
+        let payload = confirmation_payload(
+            operation_id,
+            &stored.view_hash,
+            session_label,
+            stored.prepared.view.expires_at_ms,
+            &token,
+        );
+        hmac::verify(
+            &self.token_key,
+            &payload,
+            stored.confirmation_tag.as_slice(),
+        )
+        .map_err(|_| {
+            AgentCommandError::boundary("confirmation_token_mismatch", "确认令牌不匹配")
+        })?;
+        Ok(stored
+            .prepared
+            .sensitive_previews
+            .iter()
+            .map(|preview| SensitiveChangePreviewView {
+                target_config_path: preview.target_config_path.clone(),
+                path: preview.path.clone(),
+                before_preview: preview.before_preview.clone(),
+                after_preview: preview.after_preview.clone(),
+            })
+            .collect())
+    }
+
     fn take_plan(
         &self,
         operation_id: &str,
@@ -2554,6 +2629,20 @@ pub(crate) fn apply_agent_plan(
     )?;
     crate::desktop_shell::update_agent_menu(&app);
     Ok(outcome)
+}
+
+#[tauri::command(async)]
+pub(crate) fn reveal_agent_plan_sensitive_values(
+    state: State<'_, AgentCommandState>,
+    window: WebviewWindow,
+    operation_id: String,
+    confirmation_token: String,
+) -> Result<Vec<SensitiveChangePreviewView>, AgentCommandError> {
+    state.reveal_plan_sensitive_values(
+        &operation_id,
+        &confirmation_token,
+        window.label(),
+    )
 }
 
 #[tauri::command(async)]
@@ -3491,6 +3580,33 @@ mod tests {
         let encoded = serde_json::to_string(&view).unwrap();
         assert!(!encoded.contains("vk-command-secret"));
         assert!(!encoded.contains("projected_bytes"));
+
+        let reveal_wrong_session = state
+            .reveal_plan_sensitive_values(
+                &view.plan.operation_id,
+                &view.confirmation_token,
+                "other-window",
+            )
+            .unwrap_err();
+        assert_eq!(reveal_wrong_session.code, "operation_session_mismatch");
+        let reveal_wrong_token = state
+            .reveal_plan_sensitive_values(
+                &view.plan.operation_id,
+                &"00".repeat(CONFIRMATION_TOKEN_BYTES),
+                "main",
+            )
+            .unwrap_err();
+        assert_eq!(reveal_wrong_token.code, "confirmation_token_mismatch");
+        let revealed = state
+            .reveal_plan_sensitive_values(
+                &view.plan.operation_id,
+                &view.confirmation_token,
+                "main",
+            )
+            .unwrap();
+        assert!(revealed.iter().any(|change| {
+            change.after_preview.as_deref() == Some("\"vk-command-secret\"")
+        }));
 
         let wrong_session = state
             .take_plan(

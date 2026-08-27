@@ -1,7 +1,7 @@
 use std::path::{Component, Path};
 
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::config_codec::{
     apply_patch, apply_patch_with_reverse, is_empty_owned_projection, parse_rendered,
@@ -76,11 +76,31 @@ fn projected_permissions() -> Option<u32> {
 /// patch values stay in memory and can contain credentials.
 pub struct PreparedChangePlan {
     pub view: ConfigChangePlan,
+    pub(crate) sensitive_previews: Vec<SensitiveChangePreview>,
     pub(crate) projected_bytes: Zeroizing<Vec<u8>>,
     pub(crate) format: DocumentFormat,
     pub(crate) label: &'static str,
     pub(crate) ownership: Option<PlanOwnershipBinding>,
     pub(crate) companions: Vec<PreparedFileProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SensitiveChangePreview {
+    pub target_config_path: String,
+    pub path: ConfigPath,
+    pub before_preview: Option<String>,
+    pub after_preview: Option<String>,
+}
+
+impl Drop for SensitiveChangePreview {
+    fn drop(&mut self) {
+        if let Some(value) = self.before_preview.as_mut() {
+            value.zeroize();
+        }
+        if let Some(value) = self.after_preview.as_mut() {
+            value.zeroize();
+        }
+    }
 }
 
 pub(crate) struct PreparedFileProjection {
@@ -306,8 +326,14 @@ fn build_connection_or_refresh_plan(
         source.original_owner.clone(),
     );
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
-    let changes = redact_changes(&operations, &connector.sensitive_paths());
-    let reverse_changes = redact_reverse_changes(&reverse_operations, &connector.sensitive_paths());
+    let changes = redact_changes(&operations, &reverse_operations, &connector.sensitive_paths());
+    let reverse_changes = redact_reverse_changes(&reverse_operations, &operations, &connector.sensitive_paths());
+    let mut sensitive_previews = sensitive_change_previews(
+        strict_path_text(target_path)?,
+        &operations,
+        &reverse_operations,
+        &connector.sensitive_paths(),
+    );
     let companion_raw = connector.companion_projections(target_path, input)?;
     let mut companions = Vec::with_capacity(companion_raw.len());
     let mut related_config_paths = Vec::with_capacity(companion_raw.len());
@@ -374,9 +400,19 @@ fn build_connection_or_refresh_plan(
             companion.original_owner.clone(),
         );
         let target = strict_path_text(&companion.target_path)?.to_string();
+        sensitive_previews.extend(sensitive_change_previews(
+            &target,
+            &companion.operations,
+            &reverse_operations,
+            &companion.sensitive_paths,
+        ));
         let before_hash = file_revision_hash(&companion.target_path, &source)?;
         let expected_after_hash = file_revision_hash(&companion.target_path, &projected)?;
-        for change in redact_changes(&companion.operations, &companion.sensitive_paths) {
+        for change in redact_changes(
+            &companion.operations,
+            &reverse_operations,
+            &companion.sensitive_paths,
+        ) {
             companion_diff.push(format!(
                 "{} {} :: {}: {}",
                 patch_symbol(change.operation),
@@ -392,13 +428,22 @@ fn build_connection_or_refresh_plan(
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
             owned_paths: companion.owned_paths.clone(),
-            forward_changes: redact_changes(&companion.operations, &companion.sensitive_paths),
-            reverse_changes: redact_reverse_changes(
+            forward_changes: redact_changes(
+                &companion.operations,
                 &reverse_operations,
                 &companion.sensitive_paths,
             ),
+            reverse_changes: redact_reverse_changes(
+                &reverse_operations,
+                &companion.operations,
+                &companion.sensitive_paths,
+            ),
             credential_bindings: credential_bindings(
-                &redact_changes(&companion.operations, &companion.sensitive_paths),
+                &redact_changes(
+                    &companion.operations,
+                    &reverse_operations,
+                    &companion.sensitive_paths,
+                ),
                 CredentialSource::LocalVirtualKey,
             ),
         });
@@ -442,6 +487,7 @@ fn build_connection_or_refresh_plan(
         .min(compatibility_expires_at_ms.unwrap_or(u64::MAX));
 
     Ok(PreparedChangePlan {
+        sensitive_previews,
         view: ConfigChangePlan {
             schema_version: PLAN_SCHEMA_VERSION,
             operation_id,
@@ -642,10 +688,10 @@ pub fn attach_disconnect_companions(
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
             owned_paths: companion.owned_paths.clone(),
-            forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
-            reverse_changes: redact_reverse_changes(&reverse_operations, &sensitive_paths),
+            forward_changes: redact_restore_changes(&forward_operations, &reverse_operations, &sensitive_paths),
+            reverse_changes: redact_reverse_changes(&reverse_operations, &forward_operations, &sensitive_paths),
             credential_bindings: credential_bindings(
-                &redact_restore_changes(&forward_operations, &sensitive_paths),
+                &redact_restore_changes(&forward_operations, &reverse_operations, &sensitive_paths),
                 CredentialSource::EncryptedSnapshot,
             ),
         });
@@ -765,10 +811,10 @@ pub fn attach_restore_companions(
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
             owned_paths: companion.owned_paths.clone(),
-            forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
-            reverse_changes: redact_reverse_changes(&reverse_operations, &sensitive_paths),
+            forward_changes: redact_restore_changes(&forward_operations, &reverse_operations, &sensitive_paths),
+            reverse_changes: redact_reverse_changes(&reverse_operations, &forward_operations, &sensitive_paths),
             credential_bindings: credential_bindings(
-                &redact_restore_changes(&forward_operations, &sensitive_paths),
+                &redact_restore_changes(&forward_operations, &reverse_operations, &sensitive_paths),
                 CredentialSource::EncryptedSnapshot,
             ),
         });
@@ -923,8 +969,14 @@ fn build_owned_projection_plan(
     };
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
     let sensitive_paths = connector.sensitive_paths();
-    let changes = redact_restore_changes(&forward_operations, &sensitive_paths);
-    let reverse_changes = redact_reverse_changes(&reverse_operations, &sensitive_paths);
+    let changes = redact_restore_changes(&forward_operations, &reverse_operations, &sensitive_paths);
+    let reverse_changes = redact_reverse_changes(&reverse_operations, &forward_operations, &sensitive_paths);
+    let sensitive_previews = sensitive_change_previews(
+        &ownership.target_config_path,
+        &forward_operations,
+        &reverse_operations,
+        &sensitive_paths,
+    );
     let human_diff = changes
         .iter()
         .map(|change| format!("~ {}: {}", change.path, change.summary))
@@ -932,6 +984,7 @@ fn build_owned_projection_plan(
         .join("\n");
     let expires_at_ms = now_ms.saturating_add(DEFAULT_PLAN_TTL_MS);
     Ok(PreparedChangePlan {
+        sensitive_previews,
         view: ConfigChangePlan {
             schema_version: PLAN_SCHEMA_VERSION,
             operation_id,
@@ -954,10 +1007,10 @@ fn build_owned_projection_plan(
                     before_hash: before_hash.clone(),
                     expected_after_hash: expected_after_hash.clone(),
                     owned_paths: projected_owned_paths,
-                    forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
+                    forward_changes: redact_restore_changes(&forward_operations, &reverse_operations, &sensitive_paths),
                     reverse_changes,
                     credential_bindings: credential_bindings(
-                        &redact_restore_changes(&forward_operations, &sensitive_paths),
+                        &redact_restore_changes(&forward_operations, &reverse_operations, &sensitive_paths),
                         CredentialSource::EncryptedSnapshot,
                     ),
                 }],
@@ -1139,6 +1192,7 @@ fn owned_path_is_touched(owned: &ConfigPath, operations: &[PatchOperation]) -> b
 
 fn redact_changes(
     operations: &[PatchOperation],
+    inverse_operations: &[PatchOperation],
     sensitive_paths: &[ConfigPath],
 ) -> Vec<RedactedChange> {
     operations
@@ -1154,21 +1208,64 @@ fn redact_changes(
                 (PatchKind::Remove, _) => "<移除受管值>".to_string(),
                 (PatchKind::Test, _) => "<核对受管值>".to_string(),
             };
+            let inverse = inverse_operations
+                .iter()
+                .find(|candidate| candidate.path == operation.path);
             RedactedChange {
                 operation: operation.operation,
                 path: operation.path.clone(),
                 sensitive,
                 summary,
+                before_preview: (!sensitive)
+                    .then(|| inverse.and_then(operation_preview))
+                    .flatten(),
+                after_preview: (!sensitive).then(|| operation_preview(operation)).flatten(),
             }
         })
         .collect()
 }
 
+fn sensitive_change_previews(
+    target_config_path: &str,
+    operations: &[PatchOperation],
+    inverse_operations: &[PatchOperation],
+    sensitive_paths: &[ConfigPath],
+) -> Vec<SensitiveChangePreview> {
+    operations
+        .iter()
+        .filter(|operation| {
+            sensitive_paths.iter().any(|sensitive| {
+                is_path_prefix(&operation.path, sensitive)
+                    || is_path_prefix(sensitive, &operation.path)
+            })
+        })
+        .map(|operation| {
+            let inverse = inverse_operations
+                .iter()
+                .find(|candidate| candidate.path == operation.path);
+            SensitiveChangePreview {
+                target_config_path: target_config_path.to_string(),
+                path: operation.path.clone(),
+                before_preview: inverse.and_then(full_operation_preview),
+                after_preview: full_operation_preview(operation),
+            }
+        })
+        .collect()
+}
+
+fn full_operation_preview(operation: &PatchOperation) -> Option<String> {
+    if operation.operation == PatchKind::Remove {
+        return None;
+    }
+    serde_json::to_string(operation.value.as_ref()?).ok()
+}
+
 fn redact_reverse_changes(
     operations: &[PatchOperation],
+    inverse_operations: &[PatchOperation],
     sensitive_paths: &[ConfigPath],
 ) -> Vec<RedactedChange> {
-    redact_changes(operations, sensitive_paths)
+    redact_changes(operations, inverse_operations, sensitive_paths)
         .into_iter()
         .map(|mut change| {
             change.summary = if change.sensitive {
@@ -1184,9 +1281,10 @@ fn redact_reverse_changes(
 
 fn redact_restore_changes(
     operations: &[PatchOperation],
+    inverse_operations: &[PatchOperation],
     sensitive_paths: &[ConfigPath],
 ) -> Vec<RedactedChange> {
-    redact_changes(operations, sensitive_paths)
+    redact_changes(operations, inverse_operations, sensitive_paths)
         .into_iter()
         .map(|mut change| {
             change.summary = if change.sensitive {
@@ -1198,6 +1296,20 @@ fn redact_restore_changes(
             change
         })
         .collect()
+}
+
+fn operation_preview(operation: &PatchOperation) -> Option<String> {
+    if operation.operation == PatchKind::Remove {
+        return None;
+    }
+    let serialized = serde_json::to_string(operation.value.as_ref()?).ok()?;
+    const MAX_PREVIEW_CHARS: usize = 512;
+    if serialized.chars().count() <= MAX_PREVIEW_CHARS {
+        return Some(serialized);
+    }
+    let mut preview = serialized.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    preview.push('…');
+    Some(preview)
 }
 
 fn credential_bindings(
@@ -1416,8 +1528,13 @@ mod tests {
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source_marker = "source-configuration-marker";
         let secret = "vk-sensitive-plan-secret";
+        let old_secret = "user-sensitive-plan-secret";
+        let old_base_url = "https://api.anthropic.com";
         let source = ConfigSource::existing(
-            format!("{{\"unowned\":\"{source_marker}\"}}").into_bytes(),
+            format!(
+                "{{\"unowned\":\"{source_marker}\",\"env\":{{\"ANTHROPIC_BASE_URL\":\"{old_base_url}\",\"ANTHROPIC_AUTH_TOKEN\":\"{old_secret}\"}}}}"
+            )
+            .into_bytes(),
             Some(0o640),
             Some("501:20".to_string()),
         );
@@ -1442,12 +1559,19 @@ mod tests {
 
         let serialized = serde_json::to_string(&prepared.view).unwrap();
         assert!(!serialized.contains(secret));
+        assert!(!serialized.contains(old_secret));
         assert!(!serialized.contains(source_marker));
+        assert!(serialized.contains(old_base_url));
+        assert!(serialized.contains("http://127.0.0.1:8787"));
         assert!(!serialized.contains("patch_operations"));
         assert_eq!(prepared.view.compatibility_sequence, 7);
         assert_eq!(prepared.view.expires_at_ms, 20_000);
         assert_eq!(prepared.view.installation_path, "/opt/claude");
         assert!(prepared.view.changes.iter().any(|change| change.sensitive));
+        assert!(prepared.sensitive_previews.iter().any(|change| {
+            change.before_preview.as_deref() == Some("\"user-sensitive-plan-secret\"")
+                && change.after_preview.as_deref() == Some("\"vk-sensitive-plan-secret\"")
+        }));
         assert_eq!(prepared.view.projection.schema_version, 1);
         assert_eq!(prepared.view.projection.files.len(), 1);
         assert!(prepared.view.projection.files[0]

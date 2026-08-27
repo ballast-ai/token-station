@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   Check as CheckIcon,
   Copy as CopyIcon,
+  Eye,
+  EyeOff,
   FileDiff,
   Globe2,
   Route as RouteIcon,
@@ -18,6 +20,7 @@ import {
   mountAgentProfile,
   planAgentConnection,
   planAgentDisconnect,
+  revealAgentPlanSensitiveValues,
   saveAgentRoutes,
   restartAgentRoute,
   restoreCursorProvider,
@@ -30,6 +33,7 @@ import {
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
+  type SensitiveChangePreviewView,
   type ProviderView,
   type QuotaAccount,
   type RoutingMode,
@@ -128,18 +132,43 @@ function changeState(
   sensitive: boolean,
   side: "before" | "after",
   intent: "connect" | "restore",
+  preview: string | undefined,
+  sensitiveRevealed: boolean,
   copy: LocalizedCopy,
 ) {
+  if (sensitive && !sensitiveRevealed) {
+    return side === "before"
+      ? copy("Current sensitive value (content hidden)", "当前敏感值（内容已隐藏）", "目前敏感值（內容已隱藏）", "現在の機密値（内容は非表示）")
+      : copy("Local credential (content hidden)", "本机凭据（内容已隐藏）", "本機憑證（內容已隱藏）", "ローカル認証情報（内容は非表示）");
+  }
+  if (preview !== undefined) return preview;
   if (side === "before") {
-    if (operation === "add") return copy("Not set", "未设置", "未設定", "未設定");
-    return copy("Current value", "当前值", "目前值", "現在の値");
+    return copy("Not set", "未设置", "未設定", "未設定");
   }
   if (operation === "remove") return copy("Remove this field", "删除此字段", "刪除此欄位", "このフィールドを削除");
   if (operation === "test") return copy("Keep unchanged", "保持不变", "保持不變", "変更しない");
-  if (sensitive) return copy("Local credential (content hidden)", "本机凭据（内容已隐藏）", "本機憑證（內容已隱藏）", "ローカル認証情報（内容は非表示）");
   return intent === "restore"
     ? copy("Value from the pre-connection backup", "接入前备份值", "連線前備份值", "接続前のバックアップ値")
     : copy("Token Station managed value", "Token Station 受管值", "Token Station 受管值", "Token Station 管理値");
+}
+
+function changeValueMeaning(path: string, preview: string | undefined, copy: LocalizedCopy) {
+  if (preview === '"0"' && path === "env.MAX_THINKING_TOKENS") {
+    return copy("No Thinking token budget", "Thinking token 预算设为 0", "Thinking token 預算設為 0", "Thinking token 予算を 0 に設定");
+  }
+  if (preview !== '"1"') return null;
+  switch (path) {
+    case "env.CLAUDE_CODE_DISABLE_THINKING":
+      return copy("Disable Thinking", "关闭 Thinking", "關閉 Thinking", "Thinking を無効化");
+    case "env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING":
+      return copy("Disable adaptive Thinking", "关闭自适应 Thinking", "關閉自適應 Thinking", "アダプティブ Thinking を無効化");
+    case "env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS":
+      return copy("Disable experimental beta features", "关闭实验性 Beta 功能", "關閉實驗性 Beta 功能", "実験的な Beta 機能を無効化");
+    case "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":
+      return copy("Disable nonessential network traffic", "关闭非必要网络请求", "關閉非必要網路請求", "必須でないネットワーク通信を無効化");
+    default:
+      return null;
+  }
 }
 
 export function compactDiscoveryPath(path: string): string {
@@ -320,6 +349,9 @@ export default function AgentRoutePage({
     intent: "connect" | "restore";
     plan: ConfigPlanView;
   } | null>(null);
+  const [sensitiveRevealWarningOpen, setSensitiveRevealWarningOpen] = useState(false);
+  const [revealedSensitiveValues, setRevealedSensitiveValues] = useState<SensitiveChangePreviewView[] | null>(null);
+  const [revealingSensitiveValues, setRevealingSensitiveValues] = useState(false);
   const [restoreConflict, setRestoreConflict] = useState<AgentDriftView[] | null>(null);
   const [cursorRestorePending, setCursorRestorePending] = useState(false);
   const [copiedDiscoveryPath, setCopiedDiscoveryPath] = useState<{ path: string } | null>(null);
@@ -329,6 +361,12 @@ export default function AgentRoutePage({
   useEffect(() => {
     setIndependentEditorOpen(!followsGlobal);
   }, [followsGlobal, metadata.agent_id]);
+
+  useEffect(() => {
+    setSensitiveRevealWarningOpen(false);
+    setRevealedSensitiveValues(null);
+    setRevealingSensitiveValues(false);
+  }, [pendingPlan?.plan.operation_id]);
 
   useEffect(() => {
     if (selectedInstallationPath !== undefined) return;
@@ -515,6 +553,23 @@ export default function AgentRoutePage({
       showError(errorText(caught), `agent-${intent}:${metadata.agent_id}`);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const revealSensitiveValues = async () => {
+    if (!pendingPlan || revealingSensitiveValues) return;
+    setSensitiveRevealWarningOpen(false);
+    setRevealingSensitiveValues(true);
+    try {
+      const revealed = await revealAgentPlanSensitiveValues(
+        pendingPlan.plan.operation_id,
+        pendingPlan.plan.confirmation_token,
+      );
+      setRevealedSensitiveValues(revealed);
+    } catch (caught) {
+      showError(errorText(caught), `agent-reveal-sensitive:${metadata.agent_id}`);
+    } finally {
+      setRevealingSensitiveValues(false);
     }
   };
 
@@ -867,43 +922,88 @@ export default function AgentRoutePage({
                 "配置文件尚未修改。请先核对每一项改动。", "設定檔案尚未修改。請先核對每一項變更。", "設定ファイルはまだ変更されていません。続行する前に各フィールドを確認してください。"
               )}</DialogDescription>
           </DialogHeader>
-          {pendingPlan ? (
-            <div className="agent-change-files">
-              {planFiles(pendingPlan.plan).map((file, fileIndex) => (
-                <section className="agent-change-file" key={`${file.path}-${fileIndex}`}>
-                  <div className="agent-change-file-head">
-                    <span>{copy("Target file", "目标文件", "目標檔案", "対象ファイル")}</span>
-                    <code>{file.path}</code>
-                  </div>
-                  <div className="agent-change-list">
-                    {file.changes.map((change, index) => (
-                      <article className="agent-change-row" key={`${change.path.segments.join(".")}-${index}`}>
-                        <code className="agent-change-path">{change.path.segments.join(".")}</code>
-                        <div className="agent-change-states">
-                          <div>
-                            <span>{copy("Before", "修改前", "修改前", "変更前")}</span>
-                            <strong>{changeState(change.operation, change.sensitive, "before", pendingPlan.intent, copy)}</strong>
+          <div className="agent-change-scroll" role="region" aria-label={copy("Configuration changes", "配置改动", "設定變更", "設定変更")} tabIndex={0}>
+            {pendingPlan ? (
+              <div className="agent-change-files">
+                {planFiles(pendingPlan.plan).map((file, fileIndex) => (
+                  <section className="agent-change-file" key={`${file.path}-${fileIndex}`}>
+                    <div className="agent-change-file-head">
+                      <span>{copy("Target file", "目标文件", "目標檔案", "対象ファイル")}</span>
+                      <code>{file.path}</code>
+                    </div>
+                    <div className="agent-change-list">
+                      {file.changes.map((change, index) => {
+                        const changePath = change.path.segments.join(".");
+                        const revealedChange = change.sensitive
+                          ? revealedSensitiveValues?.find((candidate) => (
+                            candidate.target_config_path === file.path
+                            && candidate.path.segments.join(".") === changePath
+                          ))
+                          : undefined;
+                        const sensitiveRevealed = revealedChange !== undefined;
+                        const beforePreview = sensitiveRevealed
+                          ? revealedChange.before_preview ?? undefined
+                          : change.before_preview;
+                        const afterPreview = sensitiveRevealed
+                          ? revealedChange.after_preview ?? undefined
+                          : change.after_preview;
+                        const beforeMeaning = changeValueMeaning(changePath, beforePreview, copy);
+                        const afterMeaning = changeValueMeaning(changePath, afterPreview, copy);
+                        return (
+                        <article className="agent-change-row" key={`${changePath}-${index}`}>
+                          <div className="agent-change-path-group">
+                            <code className="agent-change-path">{changePath}</code>
+                            {change.sensitive ? (
+                              <Button
+                                className="agent-sensitive-toggle"
+                                variant="ghost"
+                                size="sm"
+                                type="button"
+                                disabled={revealingSensitiveValues}
+                                onClick={() => {
+                                  if (revealedSensitiveValues) {
+                                    setRevealedSensitiveValues(null);
+                                  } else {
+                                    setSensitiveRevealWarningOpen(true);
+                                  }
+                                }}
+                              >
+                                {revealedSensitiveValues ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+                                {revealedSensitiveValues
+                                  ? copy("Hide full values", "隐藏完整值", "隱藏完整值", "完全な値を非表示")
+                                  : copy("Show full values", "显示完整值", "顯示完整值", "完全な値を表示")}
+                              </Button>
+                            ) : null}
                           </div>
-                          <span className="agent-change-arrow" aria-hidden="true">→</span>
-                          <div className="after">
-                            <span>{copy("After", "修改后", "修改後", "変更後")}</span>
-                            <strong>{changeState(change.operation, change.sensitive, "after", pendingPlan.intent, copy)}</strong>
+                          <div className="agent-change-states">
+                            <div>
+                              <span>{copy("Before", "修改前", "修改前", "変更前")}</span>
+                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "before", pendingPlan.intent, beforePreview, sensitiveRevealed, copy)}</strong>
+                              {beforeMeaning ? <small>{beforeMeaning}</small> : null}
+                            </div>
+                            <span className="agent-change-arrow" aria-hidden="true">→</span>
+                            <div className="after">
+                              <span>{copy("After", "修改后", "修改後", "変更後")}</span>
+                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "after", pendingPlan.intent, afterPreview, sensitiveRevealed, copy)}</strong>
+                              {afterMeaning ? <small>{afterMeaning}</small> : null}
+                            </div>
                           </div>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              ))}
-            </div>
-          ) : null}
-          <div className="agent-backup-assurance">
-            <ShieldCheck aria-hidden="true" />
-            <div>
-              <strong>{copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
-              <span>{pendingPlan?.intent === "restore"
-                ? copy("Only Token Station-owned fields change. Other fields stay as they are.", "只恢复 Token Station 受管字段，其他字段保持不变。", "只恢復 Token Station 受管欄位，其他欄位保持不變。", "Token Station 管理フィールドのみ復元し、他のフィールドは保持します。")
-                : copy("Token Station saves the original file locally immediately before writing.", "写入前会在本机保存原文件的加密快照。", "寫入前會在本機儲存原檔案的加密快照。", "書き込み直前に元のファイルをローカルへ暗号化保存します。")}</span>
+                        </article>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            ) : null}
+            <div className="agent-backup-assurance">
+              <ShieldCheck aria-hidden="true" />
+              <div>
+                <strong>{copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
+                <span>{pendingPlan?.intent === "restore"
+                  ? copy("Only Token Station-owned fields change. Other fields stay as they are.", "只恢复 Token Station 受管字段，其他字段保持不变。", "只恢復 Token Station 受管欄位，其他欄位保持不變。", "Token Station 管理フィールドのみ復元し、他のフィールドは保持します。")
+                  : copy("Token Station saves the original file locally immediately before writing.", "写入前会在本机保存原文件的加密快照。", "寫入前會在本機儲存原檔案的加密快照。", "書き込み直前に元のファイルをローカルへ暗号化保存します。")}</span>
+              </div>
             </div>
           </div>
           <DialogFooter>
@@ -920,6 +1020,27 @@ export default function AgentRoutePage({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={sensitiveRevealWarningOpen} onOpenChange={setSensitiveRevealWarningOpen}>
+        <AlertDialogContent className="agent-sensitive-warning-dialog">
+          <AlertDialogHeader>
+            <span className="agent-restore-warning-mark" aria-hidden="true"><AlertTriangle /></span>
+            <AlertDialogTitle>{copy("Show sensitive configuration values?", "显示敏感配置完整值？", "顯示敏感設定完整值？", "機密設定の完全な値を表示しますか？")}</AlertDialogTitle>
+            <AlertDialogDescription>{copy(
+              "The current value may be a real upstream API key. Continue only when nobody can see your screen; screenshots and screen sharing can capture it.",
+              "修改前的值可能是真实的上游 API Key。请确保无人能看到屏幕后再继续；截图和屏幕共享都可能记录完整值。",
+              "修改前的值可能是真實的上游 API Key。請確保無人能看到螢幕後再繼續；截圖和螢幕分享都可能記錄完整值。",
+              "変更前の値は実際の上流 API キーの可能性があります。画面を他人が見られないことを確認してください。スクリーンショットや画面共有に記録される可能性があります。",
+            )}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{copy("Keep hidden", "继续隐藏", "繼續隱藏", "非表示のまま")}</AlertDialogCancel>
+            <AlertDialogAction disabled={revealingSensitiveValues} onClick={() => void revealSensitiveValues()}>
+              {copy("Show full values", "显示完整值", "顯示完整值", "完全な値を表示")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={restoreConflict !== null} onOpenChange={(open) => !open && setRestoreConflict(null)}>
         <AlertDialogContent className="agent-restore-conflict-dialog">

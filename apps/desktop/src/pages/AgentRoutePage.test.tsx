@@ -13,6 +13,7 @@ import {
   mountAgentProfile,
   planAgentConnection,
   planAgentDisconnect,
+  revealAgentPlanSensitiveValues,
   restartAgentRoute,
   restoreCursorProvider,
   saveAgentRoutes,
@@ -31,6 +32,7 @@ vi.mock("../api", () => ({
   mountAgentProfile: vi.fn(),
   planAgentConnection: vi.fn(),
   planAgentDisconnect: vi.fn(),
+  revealAgentPlanSensitiveValues: vi.fn(),
   restartAgentRoute: vi.fn(),
   restoreCursorProvider: vi.fn(),
   saveAgentRoutes: vi.fn(),
@@ -93,6 +95,7 @@ describe("AgentRoutePage multi-install admission", () => {
     });
     vi.mocked(planAgentConnection).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(planAgentDisconnect).mockReset().mockReturnValue(new Promise(() => undefined));
+    vi.mocked(revealAgentPlanSensitiveValues).mockReset().mockResolvedValue([]);
     vi.mocked(forceForgetAgent).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(mountAgentProfile).mockReset().mockResolvedValue({} as never);
     vi.mocked(restartAgentRoute).mockReset().mockResolvedValue({} as never);
@@ -179,11 +182,27 @@ describe("AgentRoutePage multi-install admission", () => {
         path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
         sensitive: false,
         summary: "<设置受管值>",
+        before_preview: '"https://api.anthropic.com"',
+        after_preview: '"http://127.0.0.1:8787/agents/claude-code/v1"',
       }, {
         operation: "replace",
         path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] },
         sensitive: true,
         summary: "<敏感值已隐藏>",
+        before_preview: '"must-not-render-old-secret"',
+        after_preview: '"must-not-render-new-secret"',
+      }, {
+        operation: "add",
+        path: { segments: ["env", "MAX_THINKING_TOKENS"] },
+        sensitive: false,
+        summary: "<设置受管值>",
+        after_preview: '"0"',
+      }, {
+        operation: "add",
+        path: { segments: ["env", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] },
+        sensitive: false,
+        summary: "<设置受管值>",
+        after_preview: '"1"',
       }],
       human_diff: "endpoint changed",
     } as never);
@@ -224,15 +243,42 @@ describe("AgentRoutePage multi-install admission", () => {
     await user.click(connect);
 
     const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+    expect(within(preview).getByRole("region", { name: "配置改动" })).toHaveClass("agent-change-scroll");
     expect(preview).toHaveTextContent("/Users/x/.claude/settings.json");
     expect(preview).toHaveTextContent("env.ANTHROPIC_BASE_URL");
     expect(preview).toHaveTextContent("修改前");
     expect(preview).toHaveTextContent("修改后");
-    expect(preview).toHaveTextContent("当前值");
-    expect(preview).toHaveTextContent("Token Station 受管值");
+    expect(preview).toHaveTextContent('"https://api.anthropic.com"');
+    expect(preview).toHaveTextContent('"http://127.0.0.1:8787/agents/claude-code/v1"');
+    expect(preview).toHaveTextContent("env.MAX_THINKING_TOKENS");
+    expect(preview).toHaveTextContent("未设置");
+    expect(preview).toHaveTextContent('"0"');
+    expect(preview).toHaveTextContent("Thinking token 预算设为 0");
+    expect(preview).toHaveTextContent("关闭自适应 Thinking");
+    expect(preview).toHaveTextContent("当前敏感值（内容已隐藏）");
     expect(preview).toHaveTextContent("本机凭据（内容已隐藏）");
+    expect(preview).not.toHaveTextContent("must-not-render-old-secret");
+    expect(preview).not.toHaveTextContent("must-not-render-new-secret");
     expect(preview).toHaveTextContent("已加密备份");
     expect(applyAgentPlan).not.toHaveBeenCalled();
+
+    vi.mocked(revealAgentPlanSensitiveValues).mockResolvedValue([{
+      target_config_path: "/Users/x/.claude/settings.json",
+      path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] },
+      before_preview: '"sk-ant-old-secret"',
+      after_preview: '"ts-local-credential"',
+    }]);
+    await user.click(within(preview).getByRole("button", { name: "显示完整值" }));
+    const revealWarning = await screen.findByRole("alertdialog", { name: "显示敏感配置完整值？" });
+    expect(revealWarning).toHaveTextContent("真实的上游 API Key");
+    expect(revealAgentPlanSensitiveValues).not.toHaveBeenCalled();
+    await user.click(within(revealWarning).getByRole("button", { name: "显示完整值" }));
+    await waitFor(() => expect(preview).toHaveTextContent('"sk-ant-old-secret"'));
+    expect(preview).toHaveTextContent('"ts-local-credential"');
+    expect(revealAgentPlanSensitiveValues).toHaveBeenCalledWith("operation-1", "confirmation-1");
+    await user.click(within(preview).getByRole("button", { name: "隐藏完整值" }));
+    expect(preview).not.toHaveTextContent("sk-ant-old-secret");
+    expect(preview).not.toHaveTextContent("ts-local-credential");
 
     await user.click(within(preview).getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
