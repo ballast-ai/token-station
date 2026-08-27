@@ -187,10 +187,46 @@ export function compactDiscoveryPath(path: string): string {
   return `${prefix}${start}${separator}…${separator}${end}`;
 }
 
+function connectedRouteDetail(route: AgentRouteView, copy: LocalizedCopy): string {
+  if (route.routing_mode === "direct") {
+    const upstream = route.direct_target?.upstream;
+    const model = route.direct_target?.model;
+    if (upstream && model) {
+      return copy(
+        `Connected to the local gateway. Active route: ${upstream} / ${model}.`,
+        `已连接本机网关。当前路由：${upstream} / ${model}。`,
+        `已連接本機閨道。目前路由：${upstream} / ${model}。`,
+        `ローカルゲートウェイに接続済みです。現在のルート：${upstream} / ${model}。`,
+      );
+    }
+    return copy(
+      "Connected to the local gateway. The Direct route is incomplete.",
+      "已连接本机网关。当前直连路由尚未完整配置。",
+      "已連接本機閨道。目前直連路由尚未完整設定。",
+      "ローカルゲートウェイに接続済みです。ダイレクトルートの設定が完了していません。",
+    );
+  }
+  if (route.routing_mode === "quota_first") {
+    return copy(
+      "Connected to the local gateway. The current quota policy selects the Provider and model.",
+      "已连接本机网关。Provider 与模型由当前额度策略选择。",
+      "已連接本機閨道。Provider 與模型由目前額度策略選擇。",
+      "ローカルゲートウェイに接続済みです。Provider とモデルは現在のクォータポリシーで選択されます。",
+    );
+  }
+  return copy(
+    "Connected to the local gateway. The current tier rules select the Provider and model.",
+    "已连接本机网关。Provider 与模型由当前分档规则选择。",
+    "已連接本機閨道。Provider 與模型由目前分檔規則選擇。",
+    "ローカルゲートウェイに接続済みです。Provider とモデルは現在の階層ルールで選択されます。",
+  );
+}
+
 function statusCopy(
   metadata: AgentUiMetadataView,
   agent: AgentView | undefined,
   installation: AgentInstallationView | undefined,
+  route: AgentRouteView,
   copy: LocalizedCopy,
   language: Language,
 ) {
@@ -264,7 +300,7 @@ function statusCopy(
     return {
       tone: "success",
       label: copy("Connected", "已接入", "已接入", "接続済み"),
-      detail: copy("Requests are routed through Token Station.", "请求已通过 Token Station。", "請求已通過 Token Station。", "リクエストは Token Station を通じてルーティングされます。"),
+      detail: connectedRouteDetail(route, copy),
     };
   }
   if (metadata.agent_id === "cursor" && installation) {
@@ -412,15 +448,12 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const discoveredStatus = statusCopy(metadata, agent, installation, copy, language);
+  const discoveredStatus = statusCopy(metadata, agent, installation, route, copy, language);
   const status = metadata.agent_id === "cursor" && cursorStatus?.state === "connected"
     ? {
       tone: "success" as const,
       label: copy("Connected", "已接入", "已接入", "接続済み"),
-      detail: cursorStatus.message ?? copy(
-        "Requests are routed through Token Station.",
-        "请求已通过 Token Station。", "請求已通過 Token Station。", "リクエストは Token Station を通じてルーティングされます。"
-      ),
+      detail: connectedRouteDetail(route, copy),
     }
     : metadata.agent_id === "cursor" && cursorStatus?.state === "repair_required"
       ? {

@@ -152,6 +152,66 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(heading?.querySelector('[data-agent-brand="claude-code"]')).toBeInTheDocument();
   });
 
+  it("distinguishes the local gateway from the effective Provider route", () => {
+    const found = installation("/opt/homebrew/bin/claude", "2.1.247");
+    found.connected = true;
+    found.managed = true;
+    found.compatibility = {
+      ...found.compatibility,
+      status: "DETECTED_VERIFIED",
+      reason_code: "DEFAULT_ADMISSION",
+      connector_id: "claude-code-v1",
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "claude-code",
+        legacy_kind: "cc",
+        display_name: "Claude Code",
+        icon_key: "claude",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "CONNECTED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "direct",
+          direct_target: { upstream: "kimi", model: "kimi-k2.6" },
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning
+        applying={false}
+        onStateChange={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+        pageMode="connection"
+      />,
+    );
+
+    expect(screen.getByText("已连接本机网关。当前路由：kimi / kimi-k2.6。")).toBeInTheDocument();
+    expect(screen.queryByText("请求已通过 Token Station。")).not.toBeInTheDocument();
+  });
+
   it("shows the exact encrypted backup directory and can open it without sending a renderer path", async () => {
     const user = userEvent.setup();
     render(
