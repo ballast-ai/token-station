@@ -11602,7 +11602,11 @@ samp {
 .station-content-overview .overview-summary-list {
   flex: 1;
   min-height: 0;
-  grid-template-rows: repeat(5, minmax(0, 1fr));
+  grid-template-rows: repeat(5, 44px);
+}
+
+.station-content-overview .overview-route-summary .overview-route-list {
+  display: block;
 }
 
 .station-content-overview .overview-summary-link {
@@ -11615,7 +11619,8 @@ samp {
 }
 
 .station-content-overview .overview-route-summary .overview-route-list > div {
-  min-height: 44px;
+  height: 44px;
+  min-height: 0;
 }
 
 .routing-mode-section,
