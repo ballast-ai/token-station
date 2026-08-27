@@ -50,7 +50,7 @@ describe("retained page theme styles", () => {
     expect(summaryLinkRule).toMatch(/right:\s*14px/);
     expect(summaryLinkRule).toMatch(/bottom:\s*auto/);
     expect(summaryListRule).toMatch(/flex:\s*1/);
-    expect(summaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
+    expect(summaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, 44px\)/);
   });
 
   it("keeps a one-row global route snapshot at the top of its summary card", () => {

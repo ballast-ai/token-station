@@ -11834,3 +11834,156 @@ samp {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* Quiet surface hierarchy: keep full borders for controls and independent entities. */
+.station-content-overview .overview-runtime-metrics {
+  gap: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.station-content-overview .overview-runtime-metrics > [data-slot="card"] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.station-content-overview .overview-runtime-metrics > [data-slot="card"] + [data-slot="card"] {
+  border-left: 1px solid var(--line);
+}
+
+.station-content-overview .overview-summary-card[data-slot="card"] {
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.agent-master-list-card {
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-master-content .home-page > .panel {
+  padding: 18px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-master-content .home-page > .panel + .panel {
+  margin-top: 2px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.agent-route-embedded .agent-route-hero {
+  padding: 8px 0 18px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-route-embedded .agent-connection-detail {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.enterprise-connected-summary {
+  padding: 14px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.providers-page > .provider-panel {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.providers-page .provider-card {
+  border: 1px solid var(--line);
+}
+
+.provider-card .provider-primary-models[data-layout="compact-three-column"] > div {
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.provider-card .provider-primary-models[data-layout="compact-three-column"] > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.provider-recovery {
+  border: 0;
+  background: var(--surface-2);
+}
+
+.settings-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.settings-card > [data-slot="card-header"],
+.settings-card > [data-slot="card-content"],
+.settings-card-content {
+  padding-inline: 0;
+}
+
+.settings-page .about-product-card,
+.settings-page .about-trust-card {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.settings-page .about-product-head,
+.settings-page .about-trust-head,
+.settings-page .about-trust-grid {
+  padding-inline: 0;
+}
+
+.settings-page .about-trust-card {
+  padding-top: 2px;
+  border-top: 1px solid var(--line);
+}
+
+.usage-page .usage-hero {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+@media (max-width: 860px) {
+  .agent-master-detail > .agent-master-list-card {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 620px) {
+  .station-content-overview .overview-runtime-metrics > [data-slot="card"] + [data-slot="card"] {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
