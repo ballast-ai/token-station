@@ -267,6 +267,8 @@ const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(any(windows, test))]
 fn probe_creation_flags(platform: Platform) -> u32 {
     if platform == Platform::Windows {
+        // Do not use DETACHED_PROCESS here: a detached CLI can allocate a new
+        // default-terminal window. CREATE_NO_WINDOW keeps the probe invisible.
         WINDOWS_CREATE_NO_WINDOW
     } else {
         0
@@ -3098,6 +3100,58 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_version_probe_helper() {
+        if std::env::var_os("TOKEN_STATION_TEST_VERSION_PROBE").is_some() {
+            println!("agent-cli 1.2.3");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_agent_probe_reports_the_version_without_a_console() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let mut child_environment = BTreeMap::from([(
+            "TOKEN_STATION_TEST_VERSION_PROBE".to_string(),
+            "1".to_string(),
+        )]);
+        for name in ["SYSTEMROOT", "WINDIR"] {
+            if let Ok(value) = std::env::var(name) {
+                child_environment.insert(name.to_string(), value);
+            }
+        }
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: std::collections::BTreeSet::new(),
+            child_environment,
+        };
+        let probe = VersionProbe {
+            argv: vec![
+                "agent_integration::discovery::tests::windows_version_probe_helper".to_string(),
+                "--exact".to_string(),
+                "--nocapture".to_string(),
+            ],
+            timeout_ms: 2_000,
+            max_output_bytes: 65_536,
+            output_matcher: VersionOutputMatcher::SemverAnywhere,
+            retry_on_timeout: false,
+            runtime: None,
+        };
+
+        let outcome = run_probe_once(&executable, &executable, &probe, &context);
+
+        assert!(outcome.runnable);
+        assert!(outcome
+            .version_raw
+            .as_deref()
+            .is_some_and(|raw| raw.contains("agent-cli 1.2.3")));
+        assert_eq!(outcome.version_normalized.as_deref(), Some("1.2.3"));
+        assert!(outcome.diagnostics.is_empty());
+    }
+
     #[test]
     fn discovery_invalid_utf8_raw_output_stays_within_the_byte_limit() {
         let raw = sanitize_output(&[0xff; 64], 16).unwrap();
@@ -3387,3 +3441,4 @@ mod tests {
         }
     }
 }
+
