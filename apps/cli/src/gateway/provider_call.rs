@@ -117,6 +117,8 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<HttpResponseParts, AttemptTerminal> {
         let provider_protocol = upstream.config.provider.as_str();
+        let (status, headers) = response.head();
+        ctx.capture_upstream_response_head(status, headers);
         let parts = match response.into_parts() {
             Err(_) if ctx.is_cancelled() => {
                 record_conversion_cancelled(
@@ -144,6 +146,7 @@ impl Gateway {
             }
             Ok(parts) => parts,
         };
+        ctx.append_upstream_response_body(parts.body.as_bytes());
         if ctx.is_cancelled() {
             record_conversion_cancelled(
                 record,
@@ -657,6 +660,8 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         let mut parser = upstream.plugin.stream_parser();
+        let (status, headers) = response.head();
+        ctx.capture_upstream_response_head(status, headers);
         let mut reader = response.into_reader();
         let mut decoder = SseFrameDecoder::default();
         let mut committed = false;
@@ -838,6 +843,7 @@ impl Gateway {
                 }
             };
 
+            ctx.append_upstream_response_body(&buffer[..read]);
             let frames = match decoder.push(&buffer[..read]) {
                 Ok(frames) => frames,
                 Err(envelope) => {

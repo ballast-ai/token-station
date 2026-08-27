@@ -8,6 +8,27 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 
 #[test]
+fn agent_backup_directory_uses_the_backend_owned_snapshot_root() {
+    let root = scratch_home("agent-backup-directory");
+    let expected = root.join("agent-integration/snapshots");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AgentIntegrationPaths {
+        snapshot_root: expected.clone(),
+        ownership_root: root.join("agent-integration/ownership"),
+    }));
+
+    assert_eq!(
+        get_agent_backup_directory(app.state()),
+        expected.display().to_string()
+    );
+    assert!(
+        !expected.exists(),
+        "reading the path must not create a directory"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn desktop_update_runtime_support_is_macos_only() {
     #[cfg(target_os = "macos")]
     assert_eq!(desktop_update_platform_unsupported_message(), None);
@@ -1357,7 +1378,7 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
 
     let result = tauri::async_runtime::block_on(verify_enterprise_route(
         app.state(),
-        "enterprise_main".to_owned(),
+        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
         base_url,
         "secret-key".to_owned(),
     ))
@@ -1368,6 +1389,34 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
     assert!(!data_dir.join("model-catalog-cache.json").exists());
     assert!(get_state(app.state()).providers.is_empty());
     server.join().expect("model catalog fixture exits");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn enterprise_verification_rejects_the_reserved_provider_collision_before_network_io() {
+    let root = scratch_home("enterprise-verification-name-collision");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://ordinary.example/v1",
+        "models": [{"model": "ordinary-model"}]
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let error = tauri::async_runtime::block_on(verify_enterprise_route(
+        app.state(),
+        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
+        "not a valid URL".to_owned(),
+        "must-not-leave-process".to_owned(),
+    ))
+    .expect_err("the local provider collision must stop verification");
+
+    assert!(error.contains("已存在"), "{error}");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -3361,6 +3410,62 @@ fn restarting_one_agent_route_commits_and_installs_one_prevalidated_plan() {
 }
 
 #[test]
+fn restarting_one_agent_preserves_every_other_agents_pending_draft() {
+    let root = scratch_home("agent-route-scoped-draft");
+    let config_path = root.join("token-station.json");
+    let (draft, running) = published_agent_route_fixture(&root);
+    let mut inner = AppInner::new(config_path.clone(), draft, None);
+    inner.server = ServerLifecycle::Running {
+        generation: 7,
+        server: running,
+        apply_error: None,
+    };
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+    manage_test_agent_state(&app, &root);
+
+    for agent_id in ["codex", "opencode"] {
+        set_agent_route_mode(app.state(), agent_id.to_owned(), "custom".to_owned()).unwrap();
+        for slot in ["high", "mid", "low"] {
+            set_agent_tier(
+                app.state(),
+                agent_id.to_owned(),
+                slot.to_owned(),
+                Some("local".to_owned()),
+                Some("small".to_owned()),
+            )
+            .unwrap();
+        }
+    }
+
+    restart_agent_route(app.state(), app.state(), "opencode".to_owned()).unwrap();
+
+    let state = app.state::<AppStateManaged>();
+    let mut inner = state.0.lock().unwrap();
+    assert!(inner.agent_route_drafts.contains_key("codex"));
+    assert!(!inner.agent_route_drafts.contains_key("opencode"));
+    let persisted = ClientConfig::load(&config_path).unwrap();
+    assert!(!persisted.agent_routes.contains_key("codex"));
+    assert!(persisted.agent_routes["opencode"].custom_route.is_some());
+    let running = match &inner.server {
+        ServerLifecycle::Running { server, .. } => server,
+        _ => panic!("scoped reload must leave the proxy running"),
+    };
+    assert!(running.agent_router_override("codex").is_none());
+    assert!(running.agent_router_override("opencode").is_some());
+    let lifecycle = std::mem::replace(
+        &mut inner.server,
+        ServerLifecycle::Stopped { generation: 8 },
+    );
+    drop(inner);
+    let ServerLifecycle::Running { server, .. } = lifecycle else {
+        unreachable!()
+    };
+    server.drain_and_shutdown();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn agent_route_commands_save_one_profile_and_apply_home_without_deleting_its_draft() {
     let root = scratch_home("agent-route-commands");
     let mut inner = AppInner::new(
@@ -3756,7 +3861,7 @@ fn enterprise_route_apply_replaces_a_waiting_gateway() {
         app.state(),
         "enterprise_main".to_owned(),
         "https://enterprise.example.com/v1".to_owned(),
-        vec!["auto".to_owned()],
+        vec!["enterprise-reasoner".to_owned()],
         None,
         false,
         "env",
@@ -3765,7 +3870,10 @@ fn enterprise_route_apply_replaces_a_waiting_gateway() {
         true,
     )
     .expect("enterprise route becomes the complete Direct target");
-    assert_eq!(routed.direct_target.unwrap().model.as_deref(), Some("auto"));
+    assert_eq!(
+        routed.direct_target.unwrap().model.as_deref(),
+        Some("enterprise-reasoner")
+    );
 
     begin_serve_start(
         app.handle().clone(),
@@ -4431,7 +4539,7 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
         app.state(),
         "enterprise_main".to_owned(),
         "https://enterprise.example.com/v1".to_owned(),
-        vec!["auto".to_owned()],
+        vec!["enterprise-reasoner".to_owned()],
         None,
         false,
         "env",
@@ -4444,7 +4552,7 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
     assert_eq!(view.routing_mode, "direct");
     let target = view.direct_target.expect("the Direct target is complete");
     assert_eq!(target.upstream, "enterprise_main");
-    assert_eq!(target.model.as_deref(), Some("auto"));
+    assert_eq!(target.model.as_deref(), Some("enterprise-reasoner"));
     let provider = view
         .providers
         .iter()
@@ -4454,16 +4562,250 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
         provider.model_capabilities[0].vision,
         CapabilityState::Declared
     );
+    assert!(provider.managed_route);
 
     let managed = app.state::<AppStateManaged>();
     let inner = managed.0.lock().unwrap();
     let upstream = &inner.draft["upstreams"]["enterprise_main"];
-    assert!(upstream.get("managed_route").is_none());
+    assert_eq!(upstream["managed_route"], json!(true));
     assert_eq!(
         upstream["models"][0]["supported_parameters"],
         json!(["reasoning_effort"])
     );
     drop(inner);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_uses_the_valid_tokenstation_reference() {
+    let root = scratch_home("managed-enterprise-command-reference");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://enterprise.example.com/v1".to_owned(),
+        "test-key".to_owned(),
+        "enterprise-reasoner".to_owned(),
+    )
+    .expect("the fixed enterprise command uses a valid upstream reference");
+
+    let provider = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation")
+        .expect("the managed provider uses the tokenstation reference");
+    assert!(provider.managed_route);
+    assert_eq!(provider.models, ["enterprise-reasoner"]);
+    let target = view.direct_target.expect("the managed route is selected");
+    assert_eq!(target.upstream, "tokenstation");
+    assert_eq!(target.model.as_deref(), Some("enterprise-reasoner"));
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_replaces_a_legacy_managed_route() {
+    let root = scratch_home("managed-enterprise-legacy-migration");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let data_dir = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.draft["upstreams"]["q"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.tokenstation.link/v1",
+            "auth": { "slot": "provider_api_key", "store": true },
+            "managed_route": true,
+            "models": [{ "model": "auto", "tool": true }]
+        });
+        inner.draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "q", "model": "auto" }
+        });
+        inner.observe_draft().expect("the legacy route is valid");
+        inner.data_dir()
+    };
+    secrets::store_set(&data_dir, "q", "provider_api_key", "legacy-key")
+        .expect("the legacy credential is stored");
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://api.tokenstation.link/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "deepseek-v4-pro-0813".to_owned(),
+    )
+    .expect("the explicit enterprise model replaces the legacy route");
+
+    assert!(view.providers.iter().all(|provider| provider.name != "q"));
+    let provider = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation")
+        .expect("the replacement provider is visible");
+    assert_eq!(provider.models, ["deepseek-v4-pro-0813"]);
+    let target = view.direct_target.expect("the replacement route is direct");
+    assert_eq!(target.upstream, "tokenstation");
+    assert_eq!(target.model.as_deref(), Some("deepseek-v4-pro-0813"));
+    assert_eq!(
+        secrets::store_get(&data_dir, "q", "provider_api_key")
+            .expect("the legacy credential stays available until durable save"),
+        "legacy-key"
+    );
+    assert!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key").is_err(),
+        "the replacement credential must remain pending before durable save"
+    );
+    {
+        let managed = app.state::<AppStateManaged>();
+        managed
+            .0
+            .lock()
+            .unwrap()
+            .save_draft()
+            .expect("the replacement draft saves atomically");
+    }
+    assert!(secrets::store_get(&data_dir, "q", "provider_api_key").is_err());
+    assert_eq!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key")
+            .expect("the replacement credential is stored"),
+        "replacement-key"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_keeps_the_legacy_credential_when_save_fails() {
+    let root = scratch_home("managed-enterprise-failed-save");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let data_dir = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.draft["upstreams"]["q"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.tokenstation.link/v1",
+            "auth": { "slot": "provider_api_key", "store": true },
+            "managed_route": true,
+            "models": [{ "model": "auto", "tool": true }]
+        });
+        inner.draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "q", "model": "auto" }
+        });
+        inner.observe_draft().expect("the legacy route is valid");
+        inner.data_dir()
+    };
+    secrets::store_set(&data_dir, "q", "provider_api_key", "legacy-key")
+        .expect("the legacy credential is stored");
+
+    add_managed_enterprise_route(
+        app.state(),
+        "https://api.tokenstation.link/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "deepseek-v4-pro-0813".to_owned(),
+    )
+    .expect("the replacement remains a valid draft");
+
+    let save_error = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.config_path = root.clone();
+        inner
+            .save_draft()
+            .expect_err("saving a config over an existing directory must fail")
+    };
+    assert!(save_error.contains("写配置失败"), "{save_error}");
+    assert_eq!(
+        secrets::store_get(&data_dir, "q", "provider_api_key")
+            .expect("the legacy credential survives the failed save"),
+        "legacy-key"
+    );
+    assert!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key").is_err(),
+        "the replacement credential must roll back when config save fails"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn reusing_a_legacy_provider_name_cancels_its_pending_credential_removal() {
+    let root = scratch_home("managed-enterprise-reused-provider-name");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let data_dir = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.draft["upstreams"]["q"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.tokenstation.link/v1",
+            "auth": { "slot": "provider_api_key", "store": true },
+            "managed_route": true,
+            "models": [{ "model": "auto", "tool": true }]
+        });
+        inner.draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "q", "model": "auto" }
+        });
+        inner.observe_draft().expect("the legacy route is valid");
+        inner.data_dir()
+    };
+    secrets::store_set(&data_dir, "q", "provider_api_key", "legacy-key")
+        .expect("the legacy credential is stored");
+
+    add_managed_enterprise_route(
+        app.state(),
+        "https://api.tokenstation.link/v1".to_owned(),
+        "managed-key".to_owned(),
+        "deepseek-v4-pro-0813".to_owned(),
+    )
+    .expect("the managed replacement is valid");
+    add_provider(
+        app.state(),
+        "q".to_owned(),
+        "https://reused.example.com/v1".to_owned(),
+        vec!["reused-model".to_owned()],
+        Some("reused-key".to_owned()),
+        false,
+    )
+    .expect("the released provider name can be reused before save");
+
+    {
+        let managed = app.state::<AppStateManaged>();
+        managed
+            .0
+            .lock()
+            .unwrap()
+            .save_draft()
+            .expect("the combined draft saves atomically");
+    }
+    assert_eq!(
+        secrets::store_get(&data_dir, "q", "provider_api_key")
+            .expect("the reused provider keeps its replacement credential"),
+        "reused-key"
+    );
+
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -7011,6 +7353,8 @@ fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
     };
 
     assert_eq!(send("model-test-command-1").content, "model-test-ok");
+    assert!(!root.join("token-station-data/request-bodies").exists());
+    assert!(root.join("token-station-data/metrics.sqlite").exists());
     let first_gateway = Arc::clone(
         &app.state::<ModelTestStreamState>()
             .1
@@ -7142,7 +7486,7 @@ fn model_test_command_reuses_the_running_gateway_without_body_logging() {
     let mut draft = gateway_template_for_test(&root);
     draft["server"]["listen"] = json!("127.0.0.1:0");
     draft["server"]["auth"] = json!(false);
-    draft["data"]["metrics"] = json!(false);
+    draft["data"]["metrics"] = json!(true);
     draft["upstreams"]["fixture"] = json!({
         "provider": "openai-compatible",
         "base_url": upstream,
@@ -7195,12 +7539,12 @@ fn model_test_command_reuses_the_running_gateway_without_body_logging() {
     .unwrap();
 
     assert_eq!(reply.content, "model-test-live");
-    assert_eq!(
-        std::fs::read_dir(root.join("token-station-data/request-bodies"))
-            .unwrap()
-            .count(),
-        0
-    );
+    let body_log_dir = root.join("token-station-data/request-bodies");
+    let body_logs = std::fs::read_dir(&body_log_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(body_logs.is_empty());
     {
         let state = app.state::<AppStateManaged>();
         let mut inner = state.0.lock().unwrap();

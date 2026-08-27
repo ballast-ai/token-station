@@ -253,6 +253,38 @@ describe("OverviewPage summaries", () => {
     expect(within(routeSummary).queryByText("Claude Code", { selector: "strong" })).toBeNull();
   });
 
+  it("identifies an active managed route as enterprise routing", () => {
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={{
+            ...state,
+            providers: [{
+              name: "q",
+              provider: "openai-compatible",
+              base_url: "https://api.example.com/v1",
+              models: ["enterprise-reasoner"],
+              has_auth: true,
+              managed_route: true,
+            }],
+            direct_target: { upstream: "q", model: "enterprise-reasoner" },
+          }}
+          registry={registry}
+          agents={agents.map((agent) => ({ ...agent, status: "DETECTED_VERIFIED" }))}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    const routeSummary = screen.getByRole("region", { name: "路由概览" });
+    expect(within(routeSummary).getByText("企业路由")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("托管路由")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("enterprise-reasoner")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("q")).toBeInTheDocument();
+    expect(within(routeSummary).queryByText("全局路由")).toBeNull();
+    expect(within(routeSummary).queryByText("简单路由")).toBeNull();
+  });
+
   it("opens the model test console from one clear Overview action", async () => {
     const user = userEvent.setup();
     render(
@@ -273,7 +305,7 @@ describe("OverviewPage summaries", () => {
     await user.click(testButton);
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
-    expect(screen.getByText("草稿全局路由")).toBeInTheDocument();
+    expect(screen.getByText("测试路由")).toBeInTheDocument();
   });
 
   it("uses the backend Home-Gateway identity for the model test route label", async () => {
@@ -294,7 +326,7 @@ describe("OverviewPage summaries", () => {
 
     await user.click(screen.getByRole("button", { name: "验证模型连接" }));
 
-    expect(screen.getByText("运行中的全局路由")).toBeInTheDocument();
+    expect(screen.getByText("测试路由")).toBeInTheDocument();
   });
 
   it("keeps the model test action visible but disabled without configured models", () => {

@@ -69,8 +69,9 @@ use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, Prov
 use token_station_router_core::{UpstreamModel, UpstreamRef};
 
 use agent_integration::commands::{
-    apply_agent_plan, apply_snapshot_restore, force_forget_agent, get_agent_drift,
-    get_cached_agent_views, list_agent_registry, list_agent_snapshots, plan_agent_connection,
+    apply_agent_plan, apply_snapshot_restore, discard_agent_plan, force_forget_agent,
+    get_agent_backup_directory, get_agent_drift, get_cached_agent_views, list_agent_registry,
+    list_agent_snapshots, open_agent_backup_directory, plan_agent_connection,
     plan_agent_disconnect, plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
@@ -178,6 +179,8 @@ struct AppInner {
     pending_free_providers: BTreeSet<String>,
     /// Verified but unsaved provider keys. Clear them on exit to avoid orphaned keys without config references.
     pending_provider_keys: BTreeMap<String, Zeroizing<String>>,
+    /// Provider key names to remove only after the draft commits atomically.
+    pending_provider_key_removals: BTreeSet<String>,
     /// In-flight model discovery is bounded and single-flight per Provider name.
     pending_provider_discoveries: BTreeSet<String>,
     /// Official provider dialects approved for South at startup or explicit plugin refresh.
@@ -503,11 +506,14 @@ pub fn run() {
             list_agent_registry,
             scan_agents,
             get_cached_agent_views,
+            get_agent_backup_directory,
+            open_agent_backup_directory,
             plan_agent_connection,
             get_cursor_provider_status,
             configure_cursor_provider,
             restore_cursor_provider,
             apply_agent_plan,
+            discard_agent_plan,
             plan_agent_disconnect,
             force_forget_agent,
             list_agent_snapshots,

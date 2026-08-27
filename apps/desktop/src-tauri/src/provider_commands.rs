@@ -1,5 +1,7 @@
 use crate::*;
 
+pub(crate) const MANAGED_ENTERPRISE_PROVIDER_ID: &str = "tokenstation";
+
 pub(crate) const PROVIDER_BRANDS_BY_BASE_URL: &[(&str, &str)] = &[
     ("https://api.openai.com/v1", "openai"),
     ("https://api.anthropic.com/v1", "anthropic"),
@@ -511,6 +513,9 @@ pub(crate) async fn add_free_provider(
     inner
         .pending_provider_keys
         .insert(preset.upstream_name.to_owned(), Zeroizing::new(api_key));
+    inner
+        .pending_provider_key_removals
+        .remove(preset.upstream_name);
     Ok(inner.snapshot())
 }
 
@@ -748,15 +753,19 @@ pub(crate) fn add_provider_with_credential(
 #[tauri::command]
 pub(crate) fn add_managed_enterprise_route(
     state: State<'_, AppStateManaged>,
-    name: String,
     base_url: String,
     api_key: String,
+    model: String,
 ) -> Result<StateView, String> {
+    let model = model.trim().to_owned();
+    if model.is_empty() {
+        return Err("企业路由模型不能为空".to_owned());
+    }
     add_provider_impl(
         state,
-        name,
+        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
         base_url,
-        vec!["auto".to_owned()],
+        vec![model],
         Some(api_key),
         false,
         "store",
@@ -776,6 +785,12 @@ pub(crate) fn restore_managed_route_mutation(
         draft["routing"] = previous_routing.clone();
     } else if let Some(root) = draft.as_object_mut() {
         root.remove("routing");
+    }
+}
+
+fn restore_legacy_managed_upstreams(draft: &mut Value, legacy: &[(String, Value)]) {
+    for (name, upstream) in legacy {
+        draft["upstreams"][name] = upstream.clone();
     }
 }
 
@@ -820,10 +835,21 @@ pub(crate) fn add_provider_impl(
         ));
     }
 
+    let legacy_managed_upstreams = if managed_route {
+        inner.draft["upstreams"]
+            .as_object()
+            .into_iter()
+            .flat_map(|upstreams| upstreams.iter())
+            .filter(|(legacy_name, upstream)| {
+                legacy_name.as_str() != name && upstream["managed_route"].as_bool() == Some(true)
+            })
+            .map(|(legacy_name, upstream)| (legacy_name.clone(), upstream.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let models = normalize_provider_model_ids(models)?;
-    if managed_route && models.as_slice() != ["auto"] {
-        return Err("Enterprise managed route must use only the `auto` alias".to_owned());
-    }
+    let managed_model = managed_route.then(|| models[0].clone());
     let model_objs: Vec<Value> = models
         .iter()
         .map(|m| {
@@ -861,6 +887,9 @@ pub(crate) fn add_provider_impl(
     // A previous interrupted removal may have left only derived catalog data.
     // New Provider identity must never inherit it, even with the same name/URL.
     model_catalog::remove_provider(&data_dir, &name)?;
+    for (legacy_name, _) in &legacy_managed_upstreams {
+        model_catalog::remove_provider(&data_dir, legacy_name)?;
+    }
 
     let mut up = json!({
         "provider": provider_dialect,
@@ -872,6 +901,9 @@ pub(crate) fn add_provider_impl(
     // to keep traffic on the machine.
     if local {
         up["local"] = json!(true);
+    }
+    if managed_route {
+        up["managed_route"] = json!(true);
     }
     // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
     let api_key = api_key
@@ -896,13 +928,22 @@ pub(crate) fn add_provider_impl(
         None
     };
     let previous_router = inner.draft["router"].clone();
+    for (legacy_name, _) in &legacy_managed_upstreams {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(legacy_name);
+    }
     inner.draft["upstreams"][&name] = up;
     if managed_route {
         if !inner.draft["routing"].is_object() {
             inner.draft["routing"] = json!({});
         }
         inner.draft["routing"]["mode"] = json!("direct");
-        inner.draft["routing"]["direct_target"] = json!({ "upstream": name, "model": "auto" });
+        inner.draft["routing"]["direct_target"] = json!({
+            "upstream": name,
+            "model": managed_model.expect("managed routes have one normalized model")
+        });
         inner.draft["router"]["routing_mode"] = json!("tiered");
     }
     if let Err(error) = inner.observe_draft() {
@@ -911,6 +952,7 @@ pub(crate) fn add_provider_impl(
             .expect("upstreams is an object")
             .remove(&name);
         if managed_route {
+            restore_legacy_managed_upstreams(&mut inner.draft, &legacy_managed_upstreams);
             restore_managed_route_mutation(&mut inner.draft, &previous_routing, &previous_router);
         }
         return Err(error);
@@ -919,26 +961,15 @@ pub(crate) fn add_provider_impl(
         let Some(key) = api_key else {
             unreachable!("store source was validated above");
         };
-        if let Err(key_error) =
-            secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key)
-        {
-            inner.draft["upstreams"]
-                .as_object_mut()
-                .expect("upstreams is an object")
-                .remove(&name);
-            if managed_route {
-                restore_managed_route_mutation(
-                    &mut inner.draft,
-                    &previous_routing,
-                    &previous_router,
-                );
-            }
-            return match inner.observe_draft() {
-                Ok(()) => Err(key_error),
-                Err(rollback_error) => Err(format!(
-                    "{key_error}；同时回滚新增 Provider 草稿失败：{rollback_error}"
-                )),
-            };
+        inner
+            .pending_provider_keys
+            .insert(name.clone(), Zeroizing::new(key));
+        inner.pending_provider_key_removals.remove(&name);
+        for (legacy_name, _) in &legacy_managed_upstreams {
+            inner.pending_provider_keys.remove(legacy_name);
+            inner
+                .pending_provider_key_removals
+                .insert(legacy_name.clone());
         }
     }
     Ok(inner.snapshot())

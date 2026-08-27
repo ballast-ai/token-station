@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Building2, ChevronDown, RefreshCw, Route } from "lucide-react";
+import { ChevronDown, GitBranch, RefreshCw, Route } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
@@ -16,10 +16,8 @@ interface AgentsPageProps {
   revealingAgentIds: ReadonlySet<string>;
   selectedAgentId?: string;
   homeSelected: boolean;
-  enterpriseSelected?: boolean;
   scanBusy: boolean;
   onOpenHome: () => void;
-  onOpenEnterprise?: () => void;
   onOpenAgent: (agentId: string) => void;
   onRescan: () => void;
   children: ReactNode;
@@ -50,10 +48,8 @@ export default function AgentsPage({
   revealingAgentIds,
   selectedAgentId,
   homeSelected,
-  enterpriseSelected = false,
   scanBusy,
   onOpenHome,
-  onOpenEnterprise = onOpenHome,
   onOpenAgent,
   onRescan,
   children,
@@ -126,7 +122,7 @@ export default function AgentsPage({
                     aria-label={copy("Global routing and Agent routes", "全局路由与 Agent 路由", "全域路由與 Agent 路由", "グローバルルーティングと Agent ルーティング")}
                   >
                     <Button
-                      className="agent-master-item agent-master-home"
+                      className="agent-master-item agent-master-home routing-scope-item"
                       variant="ghost"
                       type="button"
                       aria-label={copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}
@@ -138,14 +134,15 @@ export default function AgentsPage({
                       <span className="agent-master-icon global-route-mark" aria-hidden="true">
                         <Route />
                       </span>
-                      <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong></span>
-                      <Badge variant={homeSelected ? "secondary" : "ghost"}>{homeSelected
-                        ? copy("Current", "当前", "當前", "表示中")
-                        : copy("Switch", "切换", "切換", "切替")}</Badge>
+                      <span className="agent-master-copy routing-scope-copy">
+                        <strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong>
+                        <small>{copy("Default route for every Agent", "所有 Agent 的默认路由", "所有 Agent 的預設路由", "すべての Agent のデフォルトルート")}</small>
+                      </span>
+                      {homeSelected && <Badge variant="secondary">{copy("Current", "当前", "當前", "表示中")}</Badge>}
                     </Button>
                     <div className="agent-route-disclosure">
                       <Button
-                        className="agent-route-disclosure-trigger"
+                        className="agent-route-disclosure-trigger agent-route-child-trigger"
                         variant="ghost"
                         type="button"
                         aria-label={copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}
@@ -153,9 +150,15 @@ export default function AgentsPage({
                         aria-controls="agent-route-list"
                         onClick={() => setRouteListOpen((open) => !open)}
                       >
-                        <span className="agent-route-disclosure-label">
-                          <span>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</span>
-                          <Badge variant="outline">{registry.length}</Badge>
+                        <span className="agent-master-icon agent-route-mark" aria-hidden="true">
+                          <GitBranch />
+                        </span>
+                        <span className="agent-route-disclosure-label routing-scope-copy">
+                          <span className="routing-scope-title">
+                            <strong>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</strong>
+                            <Badge variant="outline">{registry.length}</Badge>
+                          </span>
+                          <small>{copy("Override global routing for specific Agents", "覆盖全局路由的指定 Agent", "覆寫全域路由的指定 Agent", "特定の Agent でグローバルルーティングを上書き")}</small>
                         </span>
                         <ChevronDown data-icon="inline-end" aria-hidden="true" />
                       </Button>
@@ -218,30 +221,6 @@ export default function AgentsPage({
                     </Button>
                   );
                 })}
-                {!connections && (
-                  <Button
-                    className="agent-master-item agent-master-enterprise"
-                    variant="ghost"
-                    type="button"
-                    aria-label={copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}
-                    title={copy(
-                      "Connect and use a server-managed routing endpoint",
-                      "接入并使用由企业服务管理模型与策略的路由端点",
-                      "接入並使用由企業服務管理模型與策略的路由端點",
-                      "企業サービスがモデルとポリシーを管理するルーティングエンドポイントに接続して使用します",
-                    )}
-                    aria-current={enterpriseSelected ? "page" : undefined}
-                    onClick={onOpenEnterprise}
-                  >
-                    <span className="agent-master-icon enterprise-route-mark" aria-hidden="true">
-                      <Building2 />
-                    </span>
-                    <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</strong></span>
-                    <Badge variant={enterpriseSelected ? "secondary" : "ghost"}>{enterpriseSelected
-                      ? copy("Current", "当前", "當前", "表示中")
-                      : copy("Switch", "切换", "切換", "切替")}</Badge>
-                  </Button>
-                )}
               </nav>
             </ScrollArea>
           </CardContent>

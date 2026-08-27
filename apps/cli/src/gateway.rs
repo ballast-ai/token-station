@@ -3196,14 +3196,29 @@ impl Gateway {
         let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
         let mut record = begin_record(started_at_ms, protocol, agent_id, running_revision);
         tag_transport(&mut record, method, path, selected.is_some());
+        if record_body && self.body_log.is_some() {
+            ctx.enable_http_trace();
+        }
+        let inbound_url = agent_id.map_or_else(
+            || path.to_owned(),
+            |agent_id| format!("/agents/{agent_id}{path}"),
+        );
+        ctx.capture_agent_request(method, &inbound_url, headers, body);
 
         let mut captured_output = BoundedBody::default();
         {
             let mut capturing_emit = |reply: Reply| {
                 match &reply {
-                    Reply::BeginJson(reply) => captured_output.push(&reply.body),
-                    Reply::Chunk(chunk) => captured_output.push(chunk),
-                    Reply::BeginStream => {}
+                    Reply::BeginJson(reply) => {
+                        ctx.capture_agent_response_head(reply.status, false);
+                        ctx.append_agent_response_body(&reply.body);
+                        captured_output.push(&reply.body);
+                    }
+                    Reply::Chunk(chunk) => {
+                        ctx.append_agent_response_body(chunk);
+                        captured_output.push(chunk);
+                    }
+                    Reply::BeginStream => ctx.capture_agent_response_head(200, true),
                 }
                 emit(reply)
             };
@@ -3255,11 +3270,12 @@ impl Gateway {
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         if record_body
             && let Some(body_log) = &self.body_log
-            && let Err(error) = body_log.record(
+            && let Err(error) = body_log.record_with_http_trace(
                 &record.request_id,
                 started_at_ms,
                 BoundedBody::from_bytes(body),
                 captured_output,
+                ctx.http_trace_snapshot(),
             )
         {
             eprintln!("request body snapshot write failed: {error}");
@@ -3822,6 +3838,10 @@ impl Read for SouthStreamReader {
 }
 
 impl UpstreamResponse {
+    fn head(&self) -> (u16, &BTreeMap<String, String>) {
+        (self.status, &self.headers)
+    }
+
     fn from(response: ureq::http::Response<ureq::Body>, max_body_bytes: u64) -> Self {
         let status = response.status().as_u16();
         let mut headers = BTreeMap::new();

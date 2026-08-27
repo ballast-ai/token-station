@@ -8,6 +8,9 @@ export interface TierRouteEditorProps {
   providers: ProviderView[];
   disabled?: boolean;
   readOnly?: boolean;
+  keywords?: Record<TierSlot, string[]>;
+  onEditKeywords?: (slot: TierSlot) => void;
+  onRemoveKeyword?: (slot: TierSlot, keyword: string) => void | Promise<void>;
   onTierChange: (
     slot: TierSlot,
     upstream: string | null,
@@ -20,25 +23,28 @@ export default function TierRouteEditor({
   providers,
   disabled = false,
   readOnly = false,
+  keywords,
+  onEditKeywords,
+  onRemoveKeyword,
   onTierChange,
 }: TierRouteEditorProps) {
   const controlsDisabled = disabled || readOnly;
   const { copy } = useLocalizedCopy();
-  const tierMeta: { slot: TierSlot; label: string; hint: string }[] = [
-    { slot: "high", label: copy("High", "上档", "上檔", "上位モデル"), hint: copy("Complex reasoning and code", "复杂推理与代码", "複雜推理與程式碼", "複雑な推論とコード") },
-    { slot: "mid", label: copy("Medium", "中档", "中等", "中"), hint: copy("Everyday development", "日常开发任务", "日常開發任務", "日常開発タスク") },
-    { slot: "low", label: copy("Low", "下档", "低檔", "低"), hint: copy("Simple, fast tasks", "简单快速任务", "簡單快速任務", "シンプルで速いタスク") },
+  const tierMeta: { slot: TierSlot; label: string }[] = [
+    { slot: "high", label: copy("High", "上档", "上檔", "上位モデル") },
+    { slot: "mid", label: copy("Medium", "中档", "中檔", "中位") },
+    { slot: "low", label: copy("Low", "下档", "下檔", "下位") },
   ];
 
   return (
-    <div className="tier-grid">
+    <div className={`tier-grid${onEditKeywords ? " tier-grid-with-keywords" : ""}`}>
       <div className="tier-table-head">
         <div className="tier-col-head">{copy("Tier", "档位", "檔位", "グレード")}</div>
         <div className="tier-col-head">{copy("Provider", "供应商", "供應商", "プロバイダー")}</div>
         <div className="tier-col-head">{copy("Model", "模型", "模型", "モデル")}</div>
       </div>
 
-      {tierMeta.map(({ slot, label, hint }) => {
+      {tierMeta.map(({ slot, label }) => {
         const tier = tiers[slot];
         const provider = providers.find((candidate) => candidate.name === tier.upstream);
         // A stored selection whose provider/model no longer exists in the shared
@@ -90,6 +96,7 @@ export default function TierRouteEditor({
           { value: "", label: copy("Not selected", "未选择", "未選擇", "選択されていません") },
           ...providerModels.map((model) => ({ value: model, label: model })),
         ];
+        const tierKeywords = keywords?.[slot] ?? [];
 
         return (
           <div className={`tier-row tier-row-${slot}`} key={slot}>
@@ -97,7 +104,6 @@ export default function TierRouteEditor({
               <span className={`tier-node ${slot}`} aria-hidden="true" />
               <div className="tier-copy">
                 <strong>{label}</strong>
-                <span>{hint}</span>
               </div>
             </div>
             <CompactCombobox
@@ -124,6 +130,57 @@ export default function TierRouteEditor({
                 void onTierChange(slot, tier.upstream, model || null);
               }}
             />
+            {onEditKeywords && (
+              <div className="tier-keyword-summary">
+                {tierKeywords.length > 0 && (
+                  <div className="tier-keyword-values" aria-label={copy(
+                    `${label} configured keywords`,
+                    `${label}已设置关键词`,
+                    `${label}已設定關鍵詞`,
+                    `${label}の設定済みキーワード`,
+                  )}>
+                    <span className="tier-keyword-label">{copy("Keywords", "关键词", "關鍵詞", "キーワード")}</span>
+                    {tierKeywords.map((keyword) => (
+                      <span className="tier-keyword-value" key={keyword}>
+                        <span>{keyword}</span>
+                        {onRemoveKeyword && (
+                          <button
+                            className="tier-keyword-remove"
+                            type="button"
+                            disabled={controlsDisabled}
+                            aria-label={copy(
+                              `Delete ${label} keyword ${keyword}`,
+                              `删除${label}关键词 ${keyword}`,
+                              `刪除${label}關鍵詞 ${keyword}`,
+                              `${label}キーワード ${keyword} を削除`,
+                            )}
+                            onClick={() => void onRemoveKeyword(slot, keyword)}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <button
+                  className="tier-keyword-trigger"
+                  type="button"
+                  disabled={controlsDisabled}
+                  aria-label={copy(
+                    `Add ${label} keywords, ${tierKeywords.length} current`,
+                    `添加${label}关键词，当前 ${tierKeywords.length} 个`,
+                    `新增${label}關鍵詞，目前 ${tierKeywords.length} 個`,
+                    `${label}キーワードを追加、現在 ${tierKeywords.length} 件`,
+                  )}
+                  onClick={() => onEditKeywords(slot)}
+                >
+                  {tierKeywords.length > 0
+                    ? copy("+ Add", "+ 添加", "+ 新增", "+ 追加")
+                    : copy("+ Add keywords", "+ 添加关键词", "+ 新增關鍵詞", "+ キーワードを追加")}
+                </button>
+              </div>
+            )}
           </div>
         );
       })}

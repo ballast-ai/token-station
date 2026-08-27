@@ -1074,8 +1074,8 @@ export default function AddProviderPage({
                 onChange={(event) => setLocal(event.target.checked)}
               />
               <span>{copy(
-                "This model runs locally (for example, Ollama or LM Studio) and can be selected by Local only routing.",
-                "这是本机运行的本地模型（Ollama / LM Studio 等），可被“只走本地”路由锁定，请求不出本机。", "這是本機執行的本地模型（Ollama / LM Studio 等），可被「只走本地」路由鎖定，請求不出本機。", "これはローカルで実行されるローカルモデル（Ollama / LM Studio など）で、「ローカルのみ」ルーティングでロックされ、リクエストがローカル外に漏れません。"
+                "This model runs on this machine, for example through Ollama or LM Studio.",
+                "该模型在本机运行，例如通过 Ollama 或 LM Studio。", "該模型在本機執行，例如透過 Ollama 或 LM Studio。", "このモデルは Ollama や LM Studio などを介してこのマシン上で実行されます。"
               )}</span>
             </label>
             <p

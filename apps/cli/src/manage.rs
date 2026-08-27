@@ -106,6 +106,7 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             base_url,
             auth,
             local: spec.local,
+            managed_route: false,
             access_tier: AccessTier::default(),
             // `upstream add` creates a Canonical-IR (translated) upstream;
             // anthropic-native passthrough is opted into by editing the config.

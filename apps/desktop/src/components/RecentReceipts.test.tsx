@@ -83,6 +83,14 @@ beforeEach(() => {
 });
 
 describe("RecentReceipts", () => {
+  it("把无 Agent 命名空间的请求显示为主页路由", async () => {
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, { agent_id: null })]);
+    render(<RecentReceipts />);
+
+    expect(await screen.findByText(/^主页 · openai-chat-completions$/)).toBeInTheDocument();
+    expect(screen.queryByText(/未知 Agent/)).toBeNull();
+  });
+
   it("历史回执明确标记上游上报总量而不冒充规范总量", async () => {
     vi.mocked(getRecentReceipts).mockResolvedValue([
       receipt(1, { usage_semantics: "provider_reported_v1" }),

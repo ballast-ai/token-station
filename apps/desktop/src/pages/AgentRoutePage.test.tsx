@@ -6,15 +6,18 @@ import { ErrorToastProvider } from "../components/ErrorToast";
 import {
   applyAgentPlan,
   configureCursorProvider,
+  discardAgentPlan,
   ensureServeRunning,
   forceForgetAgent,
+  getAgentBackupDirectory,
   getAgentDrift,
   getCursorProviderStatus,
   mountAgentProfile,
+  openAgentBackupDirectory,
   planAgentConnection,
+  planAgentDisconnect,
   restartAgentRoute,
   restoreCursorProvider,
-  saveAgentRoutes,
   setAgentRouteMode,
   type AgentInstallationView,
   type AgentView,
@@ -23,15 +26,18 @@ import {
 vi.mock("../api", () => ({
   applyAgentPlan: vi.fn(),
   configureCursorProvider: vi.fn(),
+  discardAgentPlan: vi.fn(),
   ensureServeRunning: vi.fn(),
   forceForgetAgent: vi.fn(),
+  getAgentBackupDirectory: vi.fn(),
   getAgentDrift: vi.fn(),
   getCursorProviderStatus: vi.fn(),
   mountAgentProfile: vi.fn(),
+  openAgentBackupDirectory: vi.fn(),
   planAgentConnection: vi.fn(),
+  planAgentDisconnect: vi.fn(),
   restartAgentRoute: vi.fn(),
   restoreCursorProvider: vi.fn(),
-  saveAgentRoutes: vi.fn(),
   setAgentRouteMode: vi.fn(),
   setAgentTier: vi.fn(),
 }));
@@ -84,20 +90,23 @@ describe("AgentRoutePage multi-install admission", () => {
       state: "connected",
       message: "Cursor 已配置",
     });
+    vi.mocked(discardAgentPlan).mockReset().mockResolvedValue(undefined);
     vi.mocked(getAgentDrift).mockReset().mockResolvedValue([]);
     vi.mocked(getCursorProviderStatus).mockReset().mockResolvedValue({
       state: "disconnected",
       message: null,
     });
     vi.mocked(planAgentConnection).mockReset().mockReturnValue(new Promise(() => undefined));
+    vi.mocked(planAgentDisconnect).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(forceForgetAgent).mockReset().mockReturnValue(new Promise(() => undefined));
+    vi.mocked(getAgentBackupDirectory).mockReset().mockResolvedValue("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots");
     vi.mocked(mountAgentProfile).mockReset().mockResolvedValue({} as never);
+    vi.mocked(openAgentBackupDirectory).mockReset().mockResolvedValue("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots");
     vi.mocked(restartAgentRoute).mockReset().mockResolvedValue({} as never);
     vi.mocked(restoreCursorProvider).mockReset().mockResolvedValue({
       state: "disconnected",
       message: "已恢复 Cursor 官方配置并断开",
     });
-    vi.mocked(saveAgentRoutes).mockReset().mockResolvedValue({} as never);
     vi.mocked(setAgentRouteMode).mockReset().mockResolvedValue({} as never);
   });
 
@@ -140,7 +149,108 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(heading?.querySelector('[data-agent-brand="claude-code"]')).toBeInTheDocument();
   });
 
-  it("代理未启动时仍按 ensure → plan → apply → cached 顺序一键接入", async () => {
+  it("distinguishes the local gateway from the effective Provider route", () => {
+    const found = installation("/opt/homebrew/bin/claude", "2.1.247");
+    found.connected = true;
+    found.managed = true;
+    found.compatibility = {
+      ...found.compatibility,
+      status: "DETECTED_VERIFIED",
+      reason_code: "DEFAULT_ADMISSION",
+      connector_id: "claude-code-v1",
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "claude-code",
+        legacy_kind: "cc",
+        display_name: "Claude Code",
+        icon_key: "claude",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "CONNECTED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "direct",
+          direct_target: { upstream: "kimi", model: "kimi-k2.6" },
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning
+        applying={false}
+        onStateChange={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+        pageMode="connection"
+      />,
+    );
+
+    expect(screen.getByText("已连接本机网关。当前路由：kimi / kimi-k2.6。")).toBeInTheDocument();
+    expect(screen.queryByText("请求已通过 Token Station。")).not.toBeInTheDocument();
+  });
+
+  it("shows the exact encrypted backup directory and can open it without sending a renderer path", async () => {
+    const user = userEvent.setup();
+    render(
+      <AgentRoutePage
+        metadata={{
+          agent_id: "claude-code",
+          legacy_kind: "cc",
+          display_name: "Claude Code",
+          icon_key: "claude",
+          admission: "supported",
+        }}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "direct",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning={false}
+        applying={false}
+        onStateChange={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+        pageMode="connection"
+      />,
+    );
+
+    expect(await screen.findByText("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "打开备份文件夹" }));
+    expect(openAgentBackupDirectory).toHaveBeenCalledWith();
+  });
+
+  it("接入前展示字段级前后预览，确认后才按 ensure → plan → apply → cached 执行", async () => {
     const user = userEvent.setup();
     const found = installation("/opt/homebrew/bin/claude", "2.1.211");
     found.discovery.is_path_default = true;
@@ -170,8 +280,35 @@ describe("AgentRoutePage multi-install admission", () => {
     vi.mocked(planAgentConnection).mockResolvedValue({
       operation_id: "operation-1",
       confirmation_token: "confirmation-1",
-      changes: [],
-      human_diff: "",
+      target_config_path: "/Users/x/.claude/settings.json",
+      changes: [{
+        operation: "replace",
+        path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
+        sensitive: false,
+        summary: "<设置受管值>",
+        before_preview: '"https://api.anthropic.com"',
+        after_preview: '"http://127.0.0.1:8787/agents/claude-code/v1"',
+      }, {
+        operation: "replace",
+        path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] },
+        sensitive: true,
+        summary: "<敏感值已隐藏>",
+        before_preview: '"must-not-render-old-secret"',
+        after_preview: '"must-not-render-new-secret"',
+      }, {
+        operation: "add",
+        path: { segments: ["env", "MAX_THINKING_TOKENS"] },
+        sensitive: false,
+        summary: "<设置受管值>",
+        after_preview: '"0"',
+      }, {
+        operation: "add",
+        path: { segments: ["env", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] },
+        sensitive: false,
+        summary: "<设置受管值>",
+        after_preview: '"1"',
+      }],
+      human_diff: "endpoint changed",
     } as never);
     const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
 
@@ -203,11 +340,36 @@ describe("AgentRoutePage multi-install admission", () => {
       />,
     );
 
-    const connect = screen.getByRole("button", { name: "一键接入" });
+    const connect = screen.getByRole("button", { name: "预览并接入" });
     expect(connect).toBeEnabled();
     expect(screen.queryByText("点击一键接入后会自动启动代理，并等待代理可达。"))
       .not.toBeInTheDocument();
     await user.click(connect);
+
+    const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+    expect(within(preview).getByRole("region", { name: "配置改动" })).toHaveClass("agent-change-scroll");
+    expect(preview).toHaveTextContent("/Users/x/.claude/settings.json");
+    expect(preview).toHaveTextContent("env.ANTHROPIC_BASE_URL");
+    expect(preview).toHaveTextContent("修改前");
+    expect(preview).toHaveTextContent("修改后");
+    expect(preview).toHaveTextContent('"https://api.anthropic.com"');
+    expect(preview).toHaveTextContent('"http://127.0.0.1:8787/agents/claude-code/v1"');
+    expect(preview).toHaveTextContent("env.MAX_THINKING_TOKENS");
+    expect(preview).toHaveTextContent("未设置");
+    expect(preview).toHaveTextContent('"0"');
+    expect(preview).toHaveTextContent("Thinking token 预算设为 0");
+    expect(preview).toHaveTextContent("关闭自适应 Thinking");
+    expect(preview).toHaveTextContent("当前敏感值（内容已隐藏）");
+    expect(preview).toHaveTextContent("本机凭据（内容已隐藏）");
+    expect(preview).not.toHaveTextContent("must-not-render-old-secret");
+    expect(preview).not.toHaveTextContent("must-not-render-new-secret");
+    expect(preview).toHaveTextContent("已加密备份");
+    expect(applyAgentPlan).not.toHaveBeenCalled();
+
+    expect(within(preview).queryByRole("button", { name: "显示完整值" })).toBeNull();
+    expect(screen.queryByRole("alertdialog", { name: "显示敏感配置完整值？" })).toBeNull();
+
+    await user.click(within(preview).getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
 
     expect(vi.mocked(ensureServeRunning).mock.invocationCallOrder[0])
@@ -216,6 +378,162 @@ describe("AgentRoutePage multi-install admission", () => {
       .toBeLessThan(vi.mocked(applyAgentPlan).mock.invocationCallOrder[0]);
     expect(vi.mocked(applyAgentPlan).mock.invocationCallOrder[0])
       .toBeLessThan(onRefreshAgents.mock.invocationCallOrder[0]);
+  });
+
+  it("一次性接入计划失败后关闭旧预览并要求重新生成", async () => {
+    const user = userEvent.setup();
+    const found = installation("/opt/homebrew/bin/claude", "2.1.211");
+    found.discovery.is_path_default = true;
+    found.discovery.conflict_group = null;
+    found.discovery.diagnostics = [];
+    found.compatibility = {
+      ...found.compatibility,
+      status: "DETECTED_VERIFIED",
+      reason_code: "DEFAULT_ADMISSION",
+      connector_id: "claude-code-v1",
+    };
+    const agent: AgentView = {
+      metadata: { agent_id: "claude-code", legacy_kind: "cc", display_name: "Claude Code", icon_key: "claude", admission: "supported" },
+      installations: [found],
+      status: "DETECTED_VERIFIED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+    vi.mocked(planAgentConnection).mockResolvedValue({
+      operation_id: "consumed-operation",
+      confirmation_token: "consumed-confirmation",
+      changes: [],
+      human_diff: "endpoint changed",
+    } as never);
+    vi.mocked(applyAgentPlan).mockRejectedValueOnce(new Error("计划已过期，请重新预览"));
+    const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          metadata={agent.metadata}
+          agent={agent}
+          route={{ mode: "inherit", tiers: { high: { upstream: null, model: null }, mid: { upstream: null, model: null }, low: { upstream: null, model: null } }, config_error: null, profile: null, routing_mode: "tiered" }}
+          providers={[]}
+          profiles={[]}
+          quotaAccounts={[]}
+          serveRunning={false}
+          applying={false}
+          onStateChange={vi.fn()}
+          onRefreshAgents={onRefreshAgents}
+          onSaveQuota={vi.fn()}
+          onSaveQuotaPlan={vi.fn()}
+          onViewQuotaUsage={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
+    const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+    await user.click(within(preview).getByRole("button", { name: "确认接入" }));
+
+    await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog", { name: "确认接入改动" })).toBeNull();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
+    expect(applyAgentPlan).toHaveBeenCalledOnce();
+  });
+
+  it("接入后可以只读回看当时的修改并在关闭时丢弃计划", async () => {
+    const user = userEvent.setup();
+    const found = installation("/opt/homebrew/bin/claude", "2.1.211");
+    found.managed = true;
+    found.connected = true;
+    found.compatibility.status = "CONNECTED";
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "claude-code",
+        legacy_kind: "cc",
+        display_name: "Claude Code",
+        icon_key: "claude",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "CONNECTED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+    vi.mocked(planAgentDisconnect).mockResolvedValueOnce({
+      operation_id: "review-operation",
+      confirmation_token: "review-confirmation",
+      target_config_path: "/Users/x/.claude/settings.json",
+      changes: [],
+      projection: {
+        schema_version: 1,
+        files: [{
+          target_config_path: "/Users/x/.claude/settings.json",
+          forward_changes: [{
+            operation: "replace",
+            path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
+            sensitive: false,
+            summary: "<恢复接管前受管值>",
+            before_preview: '"http://127.0.0.1:8787/agents/claude-code"',
+            after_preview: '"https://api.anthropic.com"',
+          }],
+          reverse_changes: [{
+            operation: "replace",
+            path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
+            sensitive: false,
+            summary: "<恢复接管前受管值>",
+            before_preview: '"https://api.anthropic.com"',
+            after_preview: '"http://127.0.0.1:8787/agents/claude-code"',
+          }],
+        }],
+      },
+      human_diff: "restore endpoint",
+    } as never);
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "tiered",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning
+        applying={false}
+        onStateChange={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "查看接入改动" }));
+    const review = await screen.findByRole("dialog", { name: "接入改动" });
+    expect(review).toHaveTextContent('"https://api.anthropic.com"');
+    expect(review).toHaveTextContent('"http://127.0.0.1:8787/agents/claude-code"');
+    expect(review).toHaveTextContent("这是只读记录");
+    expect(within(review).queryByRole("button", { name: "确认接入" })).not.toBeInTheDocument();
+    expect(applyAgentPlan).not.toHaveBeenCalled();
+
+    const footer = review.querySelector('[data-slot="dialog-footer"]');
+    expect(footer).not.toBeNull();
+    await user.click(
+      within(footer as HTMLElement).getByRole("button", { name: "关闭" }),
+    );
+    expect(discardAgentPlan).toHaveBeenCalledWith("review-operation", "review-confirmation");
+    expect(applyAgentPlan).not.toHaveBeenCalled();
   });
 
   it("OpenCode 路由模型缺少输出上限时显示持久修复原因并禁止接入", () => {
@@ -253,7 +571,6 @@ describe("AgentRoutePage multi-install admission", () => {
       catalog_source: "builtin",
       catalog_warning: null,
     };
-
     render(
       <AgentRoutePage
         metadata={agent.metadata}
@@ -285,7 +602,7 @@ describe("AgentRoutePage multi-install admission", () => {
 
     expect(screen.getByText("路由待完善")).toBeInTheDocument();
     expect(screen.getByText(/kimi\/kimi-k3.*最大输出 Token/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeDisabled();
   });
 
   it("版本不兼容优先于 OpenCode 路由契约问题", () => {
@@ -318,7 +635,7 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.queryByText("路由待完善")).not.toBeInTheDocument();
   });
 
-  it("接入写入成功后，差异卡偏好存储失败不改变接入结果", async () => {
+  it("取消接入预览不会写入或刷新接管状态", async () => {
     const user = userEvent.setup();
     const found = installation("/opt/homebrew/bin/claude", "2.1.211");
     found.discovery.is_path_default = true;
@@ -352,60 +669,44 @@ describe("AgentRoutePage multi-install admission", () => {
       human_diff: "endpoint changed",
     } as never);
     const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
-    const originalSetItem = Storage.prototype.setItem;
-    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
-      this: Storage,
-      key: string,
-      value: string,
-    ) {
-      if (key === "ts:agent-connect-diff-shown:claude-code") {
-        throw new DOMException("storage unavailable", "QuotaExceededError");
-      }
-      return originalSetItem.call(this, key, value);
-    });
 
-    try {
-      render(
-        <ErrorToastProvider>
-          <AgentRoutePage
-            metadata={agent.metadata}
-            agent={agent}
-            route={{
-              mode: "inherit",
-              tiers: {
-                high: { upstream: null, model: null },
-                mid: { upstream: null, model: null },
-                low: { upstream: null, model: null },
-              },
-              config_error: null,
-              profile: null,
-              routing_mode: "tiered",
-            }}
-            providers={[]}
-            profiles={[]}
-            quotaAccounts={[]}
-            serveRunning={false}
-            applying={false}
-            onStateChange={vi.fn()}
-            onRefreshAgents={onRefreshAgents}
-            onSaveQuota={vi.fn()}
-            onSaveQuotaPlan={vi.fn()}
-            onViewQuotaUsage={vi.fn()}
-          />
-        </ErrorToastProvider>,
-      );
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          metadata={agent.metadata}
+          agent={agent}
+          route={{
+            mode: "inherit",
+            tiers: {
+              high: { upstream: null, model: null },
+              mid: { upstream: null, model: null },
+              low: { upstream: null, model: null },
+            },
+            config_error: null,
+            profile: null,
+            routing_mode: "tiered",
+          }}
+          providers={[]}
+          profiles={[]}
+          quotaAccounts={[]}
+          serveRunning={false}
+          applying={false}
+          onStateChange={vi.fn()}
+          onRefreshAgents={onRefreshAgents}
+          onSaveQuota={vi.fn()}
+          onSaveQuotaPlan={vi.fn()}
+          onViewQuotaUsage={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
 
-      await user.click(screen.getByRole("button", { name: "一键接入" }));
-      await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
+    const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+    await user.click(within(preview).getByRole("button", { name: "取消" }));
 
-      expect(applyAgentPlan).toHaveBeenCalledOnce();
-      const toastViewport = screen.getByTestId("error-toast-viewport");
-      expect(within(toastViewport).getByRole("status")).toHaveTextContent("Agent 已接入");
-      expect(within(toastViewport).getByRole("alert")).toHaveTextContent("无法保存首次接入差异提示状态");
-      expect(document.querySelector(".agent-route-page .banner")).toBeNull();
-    } finally {
-      setItem.mockRestore();
-    }
+    expect(screen.queryByRole("dialog", { name: "确认接入改动" })).toBeNull();
+    expect(applyAgentPlan).not.toHaveBeenCalled();
+    expect(onRefreshAgents).not.toHaveBeenCalled();
   });
 
   it("connection mode uses one action that becomes Restore after Cursor connects", async () => {
@@ -482,6 +783,8 @@ describe("AgentRoutePage multi-install admission", () => {
     const restoreButton = await screen.findByRole("button", { name: "恢复官方配置并断开" });
     expect(screen.queryByRole("button", { name: "重新接入" })).toBeNull();
     await user.click(restoreButton);
+    const restoreDialog = await screen.findByRole("alertdialog", { name: "恢复 Cursor 配置？" });
+    await user.click(within(restoreDialog).getByRole("button", { name: "恢复并断开" }));
 
     expect(restoreCursorProvider).toHaveBeenCalledOnce();
     expect(await screen.findByRole("button", { name: "一键接入并启动" })).toBeEnabled();
@@ -741,8 +1044,119 @@ describe("AgentRoutePage multi-install admission", () => {
     );
     await user.click(screen.getByRole("button", { name: "恢复主页路由" }));
     toastViewport = screen.getByTestId("error-toast-viewport");
-    expect(await within(toastViewport).findByRole("status")).toHaveTextContent("已恢复跟随主页");
+    expect(await within(toastViewport).findByRole("status")).toHaveTextContent("已恢复并应用主页路由");
+    expect(restartAgentRoute).toHaveBeenLastCalledWith("claude-code");
     expect(document.querySelector(".agent-route-page .banner")).toBeNull();
+  });
+
+  it("恢复前检测手动修改，并让用户选择自行处理或强制恢复备份", async () => {
+    const user = userEvent.setup();
+    const found = installation("/opt/homebrew/bin/claude", "2.1.211");
+    found.managed = true;
+    found.connected = true;
+    found.compatibility.status = "CONNECTED";
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "claude-code",
+        legacy_kind: "cc",
+        display_name: "Claude Code",
+        icon_key: "claude",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "CONNECTED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+    vi.mocked(getAgentDrift).mockResolvedValueOnce([{
+      agent_id: "claude-code",
+      installation_path: found.discovery.canonical_path,
+      target_config_path: "/Users/x/.claude/settings.json",
+      connector_id: "claude-code-v1",
+      status: "managed_changes",
+      baseline_hash: "a".repeat(64),
+      managed_hash: "b".repeat(64),
+      current_hash: "c".repeat(64),
+      checked_at_ms: 1,
+      changes: [{
+        path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
+        scope: "managed",
+        kind: "changed",
+        current_matches_managed: false,
+      }, {
+        path: { segments: ["theme"] },
+        scope: "unowned",
+        kind: "changed",
+        current_matches_managed: null,
+      }],
+      truncated: false,
+      message: "外部修改触及 Token Station 受管字段",
+    }]);
+    vi.mocked(planAgentDisconnect).mockResolvedValueOnce({
+      operation_id: "restore-operation",
+      confirmation_token: "restore-confirmation",
+      target_config_path: "/Users/x/.claude/settings.json",
+      changes: [{
+        operation: "replace",
+        path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
+        sensitive: false,
+        summary: "<恢复接管前受管值>",
+      }],
+      human_diff: "restore endpoint",
+    } as never);
+    const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          metadata={agent.metadata}
+          agent={agent}
+          route={{
+            mode: "inherit",
+            tiers: {
+              high: { upstream: null, model: null },
+              mid: { upstream: null, model: null },
+              low: { upstream: null, model: null },
+            },
+            config_error: null,
+            profile: null,
+            routing_mode: "tiered",
+          }}
+          providers={[]}
+          profiles={[]}
+          quotaAccounts={[]}
+          serveRunning
+          applying={false}
+          onStateChange={vi.fn()}
+          onRefreshAgents={onRefreshAgents}
+          onSaveQuota={vi.fn()}
+          onSaveQuotaPlan={vi.fn()}
+          onViewQuotaUsage={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "恢复官方配置并断开" }));
+
+    const conflict = await screen.findByRole("alertdialog", { name: "配置文件已被修改" });
+    expect(conflict).toHaveTextContent("env.ANTHROPIC_BASE_URL");
+    expect(conflict).toHaveTextContent("Token Station 管理的字段");
+    expect(conflict).toHaveTextContent("theme");
+    expect(conflict).toHaveTextContent("其他字段（将保留）");
+    expect(planAgentDisconnect).not.toHaveBeenCalled();
+    expect(applyAgentPlan).not.toHaveBeenCalled();
+
+    await user.click(within(conflict).getByRole("button", { name: "强制恢复备份" }));
+
+    await waitFor(() => expect(planAgentDisconnect).toHaveBeenCalledWith(
+      "claude-code",
+      found.discovery.canonical_path,
+    ));
+    expect(applyAgentPlan).toHaveBeenCalledWith("restore-operation", "restore-confirmation");
+    expect(forceForgetAgent).not.toHaveBeenCalled();
+    await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
   });
 
   it("恢复官方配置成功后的缓存刷新失败不反转恢复结果", async () => {
@@ -766,7 +1180,13 @@ describe("AgentRoutePage multi-install admission", () => {
       catalog_source: "builtin",
       catalog_warning: null,
     };
-    vi.mocked(forceForgetAgent).mockResolvedValueOnce(undefined as never);
+    vi.mocked(planAgentDisconnect).mockResolvedValueOnce({
+      operation_id: "restore-operation",
+      confirmation_token: "restore-confirmation",
+      target_config_path: "/Users/x/.claude/settings.json",
+      changes: [],
+      human_diff: "restore",
+    } as never);
 
     render(
       <ErrorToastProvider>
@@ -799,9 +1219,11 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "恢复官方配置并断开" }));
+    const restorePreview = await screen.findByRole("dialog", { name: "确认恢复备份" });
+    await user.click(within(restorePreview).getByRole("button", { name: "恢复备份并断开" }));
 
     const viewport = screen.getByTestId("error-toast-viewport");
-    expect(await within(viewport).findByRole("status")).toHaveTextContent("已恢复官方配置并断开");
+    expect(await within(viewport).findByRole("status")).toHaveTextContent("已恢复备份并断开");
     expect(within(viewport).getByRole("alert")).toHaveTextContent("操作未能完成");
     expect(document.querySelector(".agent-route-page .banner")).toBeNull();
   });
@@ -866,7 +1288,7 @@ describe("AgentRoutePage multi-install admission", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
 
     expect(applyAgentPlan).not.toHaveBeenCalled();
@@ -874,7 +1296,7 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(onConnectInFlightChange).toHaveBeenNthCalledWith(2, false);
     expect(onConnectInFlightChange.mock.invocationCallOrder[1])
       .toBeLessThan(onRefreshAgents.mock.invocationCallOrder[0]);
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
   });
 
   it("does not expose a raw compatibility message in English mode", () => {
@@ -993,7 +1415,7 @@ describe("AgentRoutePage multi-install admission", () => {
       />,
     );
 
-    const connect = screen.getByRole("button", { name: "一键接入" });
+    const connect = screen.getByRole("button", { name: "预览并接入" });
     expect(connect).toBeDisabled();
     await user.click(screen.getByRole("button", { name: /选择版本/ }));
     await user.click(screen.getByRole("option", { name: "claude · v2.1.211" }));
@@ -1043,6 +1465,13 @@ describe("AgentRoutePage multi-install admission", () => {
       catalog_source: "builtin",
       catalog_warning: null,
     };
+    vi.mocked(planAgentDisconnect).mockResolvedValueOnce({
+      operation_id: "repair-restore",
+      confirmation_token: "repair-confirmation",
+      target_config_path: "/Users/x/.config/opencode/opencode.json",
+      changes: [],
+      human_diff: "restore",
+    } as never);
 
     render(
       <AgentRoutePage
@@ -1075,10 +1504,12 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.getByText("需修复")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "恢复官方配置并断开" }));
 
-    await waitFor(() => expect(forceForgetAgent).toHaveBeenCalledWith(
+    await waitFor(() => expect(getAgentDrift).toHaveBeenCalledWith(
       "opencode",
       "/opt/homebrew/bin/opencode",
     ));
+    expect(await screen.findByRole("dialog", { name: "确认恢复备份" })).toBeInTheDocument();
+    expect(forceForgetAgent).not.toHaveBeenCalled();
     expect(planAgentConnection).not.toHaveBeenCalled();
   });
 
@@ -1146,7 +1577,7 @@ describe("AgentRoutePage multi-install admission", () => {
 
     expect(await screen.findByText("适配器未就绪")).toBeInTheDocument();
     expect(screen.getByText(/Agent 配置未被修改/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeDisabled();
     expect(planAgentConnection).not.toHaveBeenCalled();
   });
 
@@ -1306,7 +1737,7 @@ describe("AgentRoutePage split page modes", () => {
     expect(screen.getByText("/opt/homebrew/bin/claude")).toBeInTheDocument();
     expect(screen.getByText("2.1.211")).toBeInTheDocument();
     expect(screen.getByText("/Users/x/.claude/settings.json")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeInTheDocument();
     const routePreview = screen.getByText("接入后的路由预览").closest(".agent-default-route-state");
     expect(routePreview).not.toBeNull();
     expect(within(routePreview as HTMLElement).queryByText("✓")).not.toBeInTheDocument();
@@ -1450,7 +1881,7 @@ describe("AgentRoutePage split page modes", () => {
     expect(screen.getByText("跟随全局路由")).toBeInTheDocument();
     expect(screen.queryByRole("tablist", { name: "Agent 路由策略" })).toBeNull();
     expect(screen.queryByText("选择请求如何分配")).toBeNull();
-    expect(screen.queryByRole("button", { name: "一键接入" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "预览并接入" })).toBeNull();
     expect(screen.queryByText("发现路径")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "设置独立路由" }));

@@ -16,6 +16,7 @@ interface ModelTestConsoleProps {
   onOpenChange: (open: boolean) => void;
   routingMode: StateView["routing_mode"];
   routeState: "running" | "draft";
+  enterpriseRoute?: boolean;
 }
 
 export type TranscriptItem = ModelTestMessage & {
@@ -119,6 +120,7 @@ export default function ModelTestConsole({
   onOpenChange,
   routingMode,
   routeState,
+  enterpriseRoute = false,
 }: ModelTestConsoleProps) {
   const { copy } = useLocalizedCopy();
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -132,14 +134,14 @@ export default function ModelTestConsole({
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const focusComposer = (delay = 60) => window.setTimeout(() => composerRef.current?.focus(), delay);
-  const routeModeLabel = routingMode === "direct"
+  const routeModeLabel = enterpriseRoute
+    ? copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")
+    : routingMode === "direct"
     ? copy("Direct", "简单路由", "簡單路由", "ダイレクト")
     : routingMode === "quota_first"
       ? copy("Quota-first", "额度优先", "額度優先", "クォータ優先")
       : copy("Smart routing", "智能路由", "智慧路由", "スマートルーティング");
-  const routeStateLabel = routeState === "running"
-    ? copy("Running global route", "运行中的全局路由", "執行中的全域路由", "実行中のグローバルルート")
-    : copy("Draft global route", "草稿全局路由", "草稿全域路由", "下書きのグローバルルート");
+  const routeStateLabel = copy("Test route", "测试路由", "測試路由", "テストルート");
 
   const takePendingDelta = (request: ActiveRequest) => {
     if (request.flushTimer != null) window.clearTimeout(request.flushTimer);
@@ -392,6 +394,7 @@ export default function ModelTestConsole({
           </div>
           <div
             className="model-test-route-status"
+            data-route-source={routeState}
             aria-label={copy(
               `${routeStateLabel}: ${routeModeLabel}`,
               `${routeStateLabel}：${routeModeLabel}`,

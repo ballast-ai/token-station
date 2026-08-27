@@ -135,6 +135,26 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(formatBudgetAmount(0)).toBe("0.00");
   });
 
+  it("labels unscoped Agent traffic as model tests", async () => {
+    vi.mocked(getStats).mockImplementation(async (_since, by) => ({
+      total: aggregate,
+      groups: by === "upstream"
+        ? [["openai", aggregate]]
+        : by === "model"
+          ? [["gpt-5", aggregate]]
+          : by === "hour" || by === "day"
+            ? [[String(Date.now()), aggregate]]
+            : [["(unrouted)", aggregate]],
+      by,
+      empty: false,
+    }));
+
+    render(<Stats />);
+
+    expect(await screen.findByText("模型测试")).toBeInTheDocument();
+    expect(screen.queryByText("(unrouted)")).toBeNull();
+  });
+
   it("applies Agent, upstream, and model filters to the whole dashboard", async () => {
     const user = userEvent.setup();
     render(<Stats />);

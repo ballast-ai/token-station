@@ -30,7 +30,14 @@ assert.match(desktopWorkflow, /workflow_dispatch:/);
 assert.doesNotMatch(desktopWorkflow, /push:\s*\n\s*tags:/);
 assert.match(desktopWorkflow, /verify-main-full-ci:\n    runs-on:/);
 assert.match(desktopWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
-assert.match(desktopWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates\]/);
+assert.match(
+  desktopWorkflow,
+  /needs: \[release-mode, macos-preflight, verify-main-full-ci, platform-gates\]/,
+);
+assert.match(
+  desktopWorkflow,
+  /needs: \[release-mode, windows-preflight, verify-main-full-ci, platform-gates\]/,
+);
 assert.doesNotMatch(desktopWorkflow, /if: \$\{\{ false \}\}/);
 
 assert.match(linuxWorkflow, /workflow_call:/);

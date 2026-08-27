@@ -45,6 +45,13 @@ function mockInvokeImplementation(implementation: InvokeMockImplementation) {
       ) {
         return fallbackRuntime as never;
       }
+      if (
+        args[0] === "get_agent_backup_directory"
+        && error instanceof Error
+        && error.message.startsWith("unexpected IPC command:")
+      ) {
+        return "/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots" as never;
+      }
       throw error;
     }
   });
@@ -397,14 +404,14 @@ it("serve lifecycle events keep the model-test route label in the same generatio
   })));
 
   await user.click(screen.getByRole("button", { name: "验证模型连接" }));
-  expect(screen.getByText("运行中的全局路由")).toBeInTheDocument();
+  expect(await screen.findByText("测试路由")).toBeInTheDocument();
 
   act(() => emitServe?.(serveFixture({
     phase: "error",
     error: "serve_task_exited",
     model_test_uses_running_gateway: false,
   })));
-  expect(screen.getByText("草稿全局路由")).toBeInTheDocument();
+  expect(await screen.findByText("测试路由")).toBeInTheDocument();
 });
 
 it("新用户首次打开先询问是否需要教程，暂不需要后不再自动询问", async () => {
@@ -933,10 +940,12 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
   const connectCoachmark = await screen.findByRole("dialog", { name: "一键接入 Agent" });
-  const connect = screen.getByRole("button", { name: "一键接入" });
+  const connect = screen.getByRole("button", { name: "预览并接入" });
   expect(connect).toHaveAttribute("data-onboarding-active", "true");
   expect(connectCoachmark).toHaveTextContent("接入 Agent · 4/4");
   await user.click(connect);
+  const planPreview = await screen.findByRole("dialog", { name: "确认接入改动" });
+  await user.click(within(planPreview).getByRole("button", { name: "确认接入" }));
 
   await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
     "apply_agent_plan",
@@ -1017,7 +1026,7 @@ it("requires an exact installation choice before connecting a multi-installation
   await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
 
   expect(await screen.findByRole("dialog", { name: "一键接入 Agent" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "一键接入" }))
+  expect(screen.getByRole("button", { name: "预览并接入" }))
     .toHaveAttribute("data-onboarding-active", "true");
 });
 
@@ -1699,6 +1708,49 @@ describe("desktop station navigation", () => {
     expect(within(modeTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("merges keyword routing into the three smart-routing rows", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await openRouting(user);
+
+    expect(screen.queryByRole("heading", { name: "关键词路由" })).toBeNull();
+    for (const tier of ["上档", "中档", "下档"]) {
+      expect(screen.getByRole("button", { name: new RegExp(`添加${tier}关键词`) })).toBeInTheDocument();
+    }
+    expect(screen.queryByText("强模型")).toBeNull();
+    expect(screen.queryByText("中模型")).toBeNull();
+    expect(screen.queryByText("弱模型")).toBeNull();
+  });
+
+  it("keeps a persisted strict local route visible and lets the user disable it", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture({ local_only: true, allow_cloud_fallback: false });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      if (command === "set_local_routing") {
+        return { ...initial, local_only: false, allow_cloud_fallback: false };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openRouting(user);
+
+    expect(screen.getByRole("heading", { name: "只走本地" })).toBeInTheDocument();
+    const localOnly = screen.getByRole("checkbox", { name: /只走本地模型/ });
+    expect(localOnly).toBeChecked();
+    expect(localOnly).toBeEnabled();
+    await user.click(localOnly);
+
+    expect(invokeMock).toHaveBeenCalledWith("set_local_routing", {
+      localOnly: false,
+      allowCloudFallback: false,
+    });
+  });
+
   it("connects and applies a server-managed enterprise route in one action", async () => {
     const user = userEvent.setup();
     const account = { upstream: "kimi", model: "kimi-k3" };
@@ -1714,11 +1766,12 @@ describe("desktop station navigation", () => {
       quota_accounts: [account],
     });
     const enterpriseProvider = {
-      name: "enterprise_main",
+      name: "tokenstation",
       provider: "openai-compatible",
       base_url: "https://enterprise.example.com/v1",
-      models: ["auto"],
+      models: ["enterprise-reasoner"],
       has_auth: true,
+      managed_route: true,
     };
     const added = stateFixture({
       ...initial,
@@ -1727,7 +1780,7 @@ describe("desktop station navigation", () => {
     const routed = stateFixture({
       ...added,
       routing_mode: "direct",
-      direct_target: { upstream: "enterprise_main", model: "auto" },
+      direct_target: { upstream: "tokenstation", model: "enterprise-reasoner" },
     });
     const applying = stateFixture({
       ...routed,
@@ -1753,40 +1806,44 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await openRouting(user);
-    const scopes = screen.getByRole("region", { name: "路由范围" });
-    await user.click(within(scopes).getByRole("button", { name: "企业路由" }));
+    await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="模型"]')!);
+    await user.click(await screen.findByRole("button", { name: "添加企业模型" }));
 
-    expect(await screen.findByRole("heading", { name: "企业路由" })).toBeInTheDocument();
-    expect(screen.queryByRole("tablist", { name: "路由模式" })).toBeNull();
-    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeInTheDocument();
-    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "添加企业模型" });
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), enterpriseProvider.base_url);
     await user.type(screen.getByLabelText("API Key"), "secret-key");
-    await user.type(screen.getByRole("textbox", { name: "账户名称" }), enterpriseProvider.name);
-    await user.click(screen.getByRole("button", { name: "接入并使用" }));
+    await user.click(within(dialog).getByRole("button", { name: "验证并获取模型" }));
+    await user.click(await within(dialog).findByRole("radio", { name: "enterprise-reasoner" }));
+    await user.click(within(dialog).getByRole("button", { name: "添加并使用" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
     expect(invokeMock).toHaveBeenCalledWith("add_managed_enterprise_route", {
-      name: enterpriseProvider.name,
       baseUrl: enterpriseProvider.base_url,
       apiKey: "secret-key",
+      model: "enterprise-reasoner",
     });
     expect(invokeMock).toHaveBeenCalledWith("verify_enterprise_route", {
-      name: enterpriseProvider.name,
+      name: "tokenstation",
       baseUrl: enterpriseProvider.base_url,
       apiKey: "secret-key",
     });
     expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("set_direct_route", expect.anything());
-    expect(screen.getByText("企业路由已接入，正在应用配置…")).toBeInTheDocument();
-    expect(screen.queryByText("额度优先")).toBeNull();
-    expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加企业模型" })).toBeNull();
+    expect(await screen.findByRole("group", { name: "Token-station 供应商" })).toBeInTheDocument();
   });
 
   it("rejects cached enterprise verification and reloads authoritative state", async () => {
     const user = userEvent.setup();
-    const initial = stateFixture();
+    const initial = stateFixture({
+      providers: [{
+        name: "kimi",
+        provider: "openai-compatible",
+        base_url: "https://api.moonshot.cn/v1",
+        models: ["kimi-k3"],
+        has_auth: true,
+      }],
+    });
     let stateReads = 0;
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") {
@@ -1807,17 +1864,16 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await openRouting(user);
-    const scopes = screen.getByRole("region", { name: "路由范围" });
-    await user.click(within(scopes).getByRole("button", { name: "企业路由" }));
+    await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="模型"]')!);
+    await user.click(await screen.findByRole("button", { name: "添加企业模型" }));
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://enterprise.example.com/v1");
     await user.type(screen.getByLabelText("API Key"), "invalid-key");
-    await user.click(screen.getByRole("button", { name: "接入并使用" }));
+    await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
 
-    await waitFor(() => expect(stateReads).toBe(2));
+    await waitFor(() => expect(stateReads).toBe(1));
     expect(invokeMock).not.toHaveBeenCalledWith("add_managed_enterprise_route", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
-    expect(screen.getByText("接入未完成，请查看错误后重试。")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Provider rejected the API key");
     expect(screen.getByLabelText("API Key")).toHaveValue("invalid-key");
   });
 
@@ -2361,7 +2417,7 @@ describe("desktop station navigation", () => {
     await user.click(gemini);
     expect(await screen.findByRole("heading", { name: "Gemini CLI" })).toBeInTheDocument();
     expect(screen.getByText("没有在本机发现可管理的安装。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeDisabled();
   });
 
   it("restores an explicit undetected Agent after remount", async () => {
@@ -3087,7 +3143,7 @@ describe("desktop station navigation", () => {
     render(<App />);
     await waitFor(() => expect(scans).toBe(1));
     await openAgent(user, "Claude Code");
-    await user.click(await screen.findByRole("button", { name: "一键接入" }));
+    await user.click(await screen.findByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(
       invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
     ).toHaveLength(1));
@@ -3108,7 +3164,7 @@ describe("desktop station navigation", () => {
     expect(scans).toBe(1);
   });
 
-  it("applies the Connector plan directly on 一键接入", async () => {
+  it("shows the Connector plan before applying it", async () => {
     const user = userEvent.setup();
     let emitServe: ((serve: ServeView) => void) | undefined;
     listenMock.mockImplementation(async (_eventName, handler) => {
@@ -3146,15 +3202,19 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(scans).toBe(1));
     await openAgent(user, "Claude Code");
     expect(screen.queryByRole("button", { name: /选择版本/ })).toBeNull();
-    await user.click(await screen.findByRole("button", { name: "一键接入" }));
+    await user.click(await screen.findByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
       expectedVersion: "9.9.9",
     }));
-    // There is no separate write-confirmation step; apply immediately after planning.
+    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
+    const previewDialog = await screen.findByRole("dialog", { name: "确认接入改动" });
+    expect(previewDialog).toHaveTextContent("env.ANTHROPIC_BASE_URL");
+    expect(previewDialog).toHaveTextContent("本机凭据（内容已隐藏）");
+    await user.click(within(previewDialog).getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("Agent 已接入"))
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("Agent 已接入。"))
       .toBeInTheDocument();
     expect(scans).toBe(1);
     expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
@@ -3175,7 +3235,7 @@ describe("desktop station navigation", () => {
       ]);
   });
 
-  it("applies directly for an admitted state", async () => {
+  it("requires confirmation for an admitted state", async () => {
     const user = userEvent.setup();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     const admitted = defaultAdmittedClaude();
@@ -3194,20 +3254,22 @@ describe("desktop station navigation", () => {
     await openAgent(user, "Claude Code");
     expect(await screen.findByText("可接入")).toBeInTheDocument();
     expect(screen.queryByText(/未经验证|试验性/)).toBeNull();
-    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
       expectedVersion: "2.1.210",
     }));
-    // Apply immediately after planning without a confirmation step.
+    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
+    await user.click(within(await screen.findByRole("dialog", { name: "确认接入改动" }))
+      .getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-admitted",
       confirmationToken: "token-admitted",
     }));
   });
 
-  it("strips injected fields to the official config on 恢复官方配置并断开", async () => {
+  it("restores the encrypted baseline on 恢复官方配置并断开", async () => {
     const user = userEvent.setup();
     const connected = structuredClone(scannedClaude);
     connected.installations[0].managed = true;
@@ -3226,24 +3288,30 @@ describe("desktop station navigation", () => {
         detectedAgentsFixture.find((agent) => agent.metadata.agent_id === "opencode")!,
       ];
       if (command === "get_agent_drift") return [];
-      if (command === "force_forget_agent") return null;
+      if (command === "plan_agent_disconnect") return projectionPlan("restore-op", "restore-token", "disconnect");
+      if (command === "apply_agent_plan") return { operation_id: "restore-op", maintenance_warning: null };
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await openAgent(user, "Claude Code");
     await user.click(await screen.findByRole("button", { name: "恢复官方配置并断开" }));
-    // Restoring official config uses force_forget to remove injected fields without planning or confirming encrypted snapshot restoration.
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("force_forget_agent", {
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
     }));
-    expect(invokeMock).not.toHaveBeenCalledWith("plan_agent_disconnect", expect.anything());
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("已恢复官方配置并断开。"))
+    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
+    await user.click(within(await screen.findByRole("dialog", { name: "确认恢复备份" }))
+      .getByRole("button", { name: "恢复备份并断开" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
+      operationId: "restore-op",
+      confirmationToken: "restore-token",
+    }));
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("已恢复备份并断开。"))
       .toBeInTheDocument();
 
     await openAgent(user, "OpenCode");
-    expect(within(screen.getByTestId("error-toast-viewport")).getByText("已恢复官方配置并断开。"))
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText("已恢复备份并断开。"))
       .toBeInTheDocument();
     expect(document.querySelector(".agent-route-page > .banner.ok")).toBeNull();
   });
@@ -3288,7 +3356,7 @@ describe("desktop station navigation", () => {
     await user.click(await screen.findByRole("button", { name: "选择版本" }));
     await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
 
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
     await user.click(within(screen.getByRole("navigation", { name: "发现 Agent 列表" })).getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
     await user.click(within(screen.getByRole("navigation", { name: "发现 Agent 列表" })).getByRole("button", { name: "Claude Code" }));
@@ -3296,7 +3364,7 @@ describe("desktop station navigation", () => {
 
     await user.click(await screen.findByRole("button", { name: "选择版本" }));
     expect(screen.getByRole("option", { name: "claude-preview · v10.0.0" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
   });
 
   it("selects an exact installation and plans against its path", async () => {
@@ -3330,12 +3398,12 @@ describe("desktop station navigation", () => {
 
     render(<App />);
     await openAgent(user, "Claude Code");
-    expect(await screen.findByRole("button", { name: "一键接入" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "预览并接入" })).toBeDisabled();
     expect(screen.getByText("检测到多份安装，请先选择要接管的精确路径。")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: /选择版本/ }));
     await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
     expect(screen.queryByRole("listbox")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: secondInstallation.discovery.canonical_path,

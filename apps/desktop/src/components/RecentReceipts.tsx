@@ -488,7 +488,7 @@ export default function RecentReceipts() {
                     {formatTime(receipt.started_at_ms, language)}
                   </time>
                   <span className="receipt-agent">
-                    {receipt.agent_id ?? copy("Unknown Agent", "未知 Agent", "未知 Agent", "不明な Agent")} · {receipt.protocol}
+                    {receipt.agent_id ?? copy("Home", "主页", "主頁", "ホーム")} · {receipt.protocol}
                   </span>
                   <strong className="receipt-route">
                     {formatRoute(receipt.routing, copy("No route", "未产生路由", "未產生路由", "ルーティングが生成されませんでした"))}

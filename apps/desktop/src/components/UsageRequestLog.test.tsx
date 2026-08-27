@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getRequestReceipts, type ReceiptView, type RequestPlaintextView } from "../api";
-import UsageRequestLog from "./UsageRequestLog";
+import UsageRequestLog, { diffJson } from "./UsageRequestLog";
 
 const rawInput = JSON.stringify({
   system: [{ type: "text", text: "你是代码审查助手" }],
@@ -101,6 +101,20 @@ function receipt(overrides: Partial<ReceiptView>): ReceiptView {
 }
 
 describe("UsageRequestLog", () => {
+  it("bounds comparison of deeply nested JSON without overflowing the renderer stack", () => {
+    const depth = 5_000;
+    const before = `${"[".repeat(depth)}0${"]".repeat(depth)}`;
+    const after = `${"[".repeat(depth)}1${"]".repeat(depth)}`;
+
+    expect(diffJson(before, after)).toEqual([
+      {
+        kind: "modified",
+        path: "body",
+        before: "<comparison limit reached>",
+        after: "<comparison limit reached>",
+      },
+    ]);
+  });
   beforeEach(() => {
     vi.mocked(getRequestReceipts).mockReset().mockImplementation(async ({ page }) => ({
       items: page === 1
@@ -205,6 +219,29 @@ describe("UsageRequestLog", () => {
     await user.click(screen.getByText("deepseek/deepseek-v4-pro"));
     expect(screen.getByText("上游输入")).toBeInTheDocument();
     expect(screen.getByText("历史上游输入可能不含缓存 Token；总量并非规范总量。")).toBeInTheDocument();
+  });
+
+  it("把无 Agent 命名空间的请求标记为主页路由", async () => {
+    vi.mocked(getRequestReceipts).mockResolvedValue({
+      items: [receipt({ agent_id: null })],
+      plaintext_by_request_id: {},
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+
+    render(
+      <UsageRequestLog
+        since="24h"
+        agentId=""
+        upstream=""
+        model=""
+        refreshKey={0}
+      />,
+    );
+
+    expect(await screen.findByText("主页")).toBeInTheDocument();
+    expect(screen.queryByText("未知 Agent")).toBeNull();
   });
 
   it("shows paginated receipt metadata and explains unknown model pricing", async () => {
@@ -337,6 +374,78 @@ describe("UsageRequestLog", () => {
     const parsedOutput = screen.getByRole("region", { name: "明文输出" });
     expect(within(parsedOutput).getByText("助手思考")).toBeInTheDocument();
     expect(within(parsedOutput).getByText("工具调用 · read_file")).toBeInTheDocument();
+  });
+
+  it("shows complete redacted HTTP packets and marks request mutations", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getRequestReceipts).mockResolvedValue({
+      items: [receipt({ stream: false })],
+      plaintext_by_request_id: {
+        "req-1": {
+          request_id: "req-1",
+          captured_at_ms: new Date(2026, 7, 13, 17, 55).getTime(),
+          input: '{"model":"auto","messages":[{"role":"user","content":"hello"}]}',
+          output: '{"choices":[]}',
+          input_truncated: false,
+          output_truncated: false,
+          http_trace: {
+            agent_request: {
+              method: "POST",
+              url: "/agents/claude-code/v1/messages",
+              headers: [
+                { name: "authorization", value: "<redacted>", redacted: true },
+                { name: "user-agent", value: "claude-code/2.1", redacted: false },
+              ],
+              body: '{"model":"auto","messages":[{"role":"user","content":"hello"}]}',
+              body_truncated: false,
+            },
+            upstream_exchanges: [{
+              ordinal: 1,
+              upstream: "deepseek",
+              model: "deepseek-v4-pro",
+              request: {
+                method: "POST",
+                url: "https://api.deepseek.com/v1/chat/completions",
+                headers: [
+                  { name: "content-type", value: "application/json", redacted: false },
+                  { name: "authorization", value: "<redacted>", redacted: true },
+                ],
+                body: '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hello"}]}',
+                body_truncated: false,
+              },
+              response: {
+                status: 200,
+                headers: [{ name: "content-type", value: "application/json", redacted: false }],
+                body: '{"choices":[]}',
+                body_truncated: false,
+              },
+            }],
+            agent_response: {
+              status: 200,
+              headers: [{ name: "content-type", value: "application/json", redacted: false }],
+              body: '{"choices":[]}',
+              body_truncated: false,
+            },
+          },
+        },
+      },
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+
+    render(<UsageRequestLog since="24h" agentId="" upstream="" model="" refreshKey={0} />);
+    await user.click((await screen.findAllByText("deepseek/deepseek-v4-pro"))[0]);
+
+    expect(screen.getByRole("button", { name: "HTTP 链路" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Agent → Token Station")).toBeInTheDocument();
+    expect(screen.getByText("尝试 1 · Token Station → deepseek/deepseek-v4-pro")).toBeInTheDocument();
+    expect(screen.getByText("Token Station 改动")).toBeInTheDocument();
+    expect(screen.getByText("body.model")).toBeInTheDocument();
+    expect(screen.getAllByText("<redacted>").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("https://api.deepseek.com/v1/chat/completions", { exact: false }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("deepseek → Token Station")).toBeInTheDocument();
+    expect(screen.getByText("Token Station → Agent")).toBeInTheDocument();
   });
 
   it("uses a compact two-row trace and explains conversion stages in user language", async () => {

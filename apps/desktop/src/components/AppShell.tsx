@@ -16,7 +16,6 @@ import {
 export type AppView =
   | "overview"
   | "home"
-  | "enterprise-routing"
   | "agents"
   | "providers"
   | "usage"
@@ -59,7 +58,6 @@ function primaryView(view: AppView): AppView {
   if (view.startsWith("agent-route:")) return "home";
   if (view === "logs" || view === "settings") return "settings";
   if (view === "quota-usage" || view === "usage-management") return "usage";
-  if (view === "enterprise-routing") return "home";
   if (view === "add-provider" || view === "add-model" || view.startsWith("free-provider:")) return "providers";
   return view;
 }

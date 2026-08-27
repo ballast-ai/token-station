@@ -797,10 +797,17 @@ pub(crate) async fn run_model_test_chat<R: Runtime>(
                     )?;
                     gateway
                 } else {
-                    let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
+                    let mut sinks: Vec<Box<dyn token_station_metrics::Recorder>> = vec![Box::new(
+                        token_station_cli::filelog::FileLog::open(&config.data.dir)?,
+                    )];
+                    if config.data.metrics {
+                        sinks.push(Box::new(SqliteStore::open(
+                            &config.data.dir.join("metrics.sqlite"),
+                        )?));
+                    }
                     let gateway = Arc::new(Gateway::new_with_provider_runtime(
                         &config,
-                        recorder,
+                        Arc::new(token_station_cli::filelog::Recorders(sinks)),
                         provider_runtime,
                     )?);
                     ensure_model_test_plugin_identity_unchanged(

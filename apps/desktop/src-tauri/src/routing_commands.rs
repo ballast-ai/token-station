@@ -470,7 +470,7 @@ pub(crate) fn restart_agent_route(
         // Direct target must neither validate nor silently commit an incomplete
         // hidden tier draft; keep it in memory for when the operator switches back.
         if !applying_direct {
-            inner.promote_agent_route_drafts()?;
+            inner.promote_agent_route_draft(&agent_id)?;
         }
         // Prepare every fallible hot-reload step before persisting. A successful
         // config save must never be followed by a recoverable router-build failure,
@@ -493,7 +493,7 @@ pub(crate) fn restart_agent_route(
 
         inner.save_draft()?;
         if !applying_direct {
-            inner.agent_route_drafts.clear();
+            inner.agent_route_drafts.remove(&agent_id);
         }
         if let (Some(prepared), ServerLifecycle::Running { server, .. }) =
             (prepared, &mut inner.server)

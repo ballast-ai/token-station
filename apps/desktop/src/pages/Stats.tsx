@@ -67,6 +67,14 @@ function latency(ms: number): string {
   return `${ms}ms`;
 }
 
+function groupDisplayName(name: string, group: GroupValue, copy: LocalizedCopy): string {
+  if (name !== "(unrouted)") return name;
+  if (group === "agent") {
+    return copy("Model test", "模型测试", "模型測試", "モデルテスト");
+  }
+  return copy("Routing not completed", "未完成路由", "未完成路由", "ルーティング未完了");
+}
+
 function inputLabel(aggregate: AggView, copy: LocalizedCopy): string {
   return aggregate.legacy_input_requests > 0
     ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
@@ -589,7 +597,9 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
                 <tbody>
                   {(data?.groups ?? []).map(([name, item]) => (
                     <tr key={name}>
-                      <td><span className="usage-row-mark" />{activeGroup === "agent" ? displayName(name) : name}</td>
+                      <td><span className="usage-row-mark" />{activeGroup === "agent"
+                        ? displayName(groupDisplayName(name, activeGroup, copy))
+                        : groupDisplayName(name, activeGroup, copy)}</td>
                       <td>{item.requests.toLocaleString()}</td>
                       <td>{successRate(item)}</td>
                       <td title={(item.input_tokens + item.output_tokens).toLocaleString(language)}>{compact(item.input_tokens + item.output_tokens, language)}</td>

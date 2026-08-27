@@ -8,6 +8,12 @@ on:
         type: choice
         required: true
         options: [source-only, formal]
+      platform:
+        description: "desktop platform(s) to build"
+        type: choice
+        required: true
+        default: macos
+        options: [macos, windows, all]
 
 permissions:
   contents: read
@@ -53,29 +59,66 @@ jobs:
           TS_EVENT: ${{ github.event_name }}
           TS_REF: ${{ github.ref }}
           TS_REQUESTED_MODE: ${{ inputs.mode }}
+          TS_REQUIRED: TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED
+          # Presence only. A secret's value never reaches the process.
+          TS_HAS_TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED == 'true' }}
+        run: node scripts/resolve-release-mode.mjs
+
+  macos-preflight:
+    needs: release-mode
+    if: inputs.platform == 'macos' || inputs.platform == 'all'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require macOS release configuration by presence only
+        env:
+          TS_EVENT: ${{ github.event_name }}
+          TS_REF: ${{ github.ref }}
+          TS_REQUESTED_MODE: ${{ inputs.mode }}
           TS_REQUIRED: >-
-            TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED,
             TOKEN_STATION_UPDATER_PUBKEY,
             APPLE_CERTIFICATE,
+            APPLE_CERTIFICATE_PASSWORD,
             APPLE_SIGNING_IDENTITY,
-            APPLE_API_KEY_CONTENT,
+            APPLE_KEYCHAIN_PASSWORD,
+            APPLE_API_ISSUER,
+            APPLE_API_KEY,
+            APPLE_API_KEY_CONTENT
+          TS_HAS_TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY != '' }}
+          TS_HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          TS_HAS_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          TS_HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+          TS_HAS_APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD != '' }}
+          TS_HAS_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER != '' }}
+          TS_HAS_APPLE_API_KEY: ${{ secrets.APPLE_API_KEY != '' }}
+          TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
+        run: node scripts/resolve-release-mode.mjs
+
+  windows-preflight:
+    needs: release-mode
+    if: inputs.platform == 'windows' || inputs.platform == 'all'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require Windows release configuration by presence only
+        env:
+          TS_EVENT: ${{ github.event_name }}
+          TS_REF: ${{ github.ref }}
+          TS_REQUESTED_MODE: ${{ inputs.mode }}
+          TS_REQUIRED: >-
             WINDOWS_CERTIFICATE,
             WINDOWS_CERTIFICATE_PASSWORD,
             WINDOWS_TIMESTAMP_URL
-          # Presence only. A secret's value never reaches the process.
-          TS_HAS_TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED == 'true' }}
-          TS_HAS_TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY != '' }}
-          TS_HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
-          TS_HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
-          TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
           TS_HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
           TS_HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
           TS_HAS_WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL != '' }}
         run: node scripts/resolve-release-mode.mjs
 
   macos:
-    needs: [release-mode, verify-main-full-ci, platform-gates]
-    if: needs.release-mode.outputs.enabled == 'true'
+    needs: [release-mode, macos-preflight, verify-main-full-ci, platform-gates]
+    if: >-
+      needs.release-mode.outputs.enabled == 'true' &&
+      (inputs.platform == 'macos' || inputs.platform == 'all')
     name: macOS (${{ matrix.target }})
     runs-on: macos-latest
     strategy:
@@ -84,15 +127,6 @@ jobs:
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
-    env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-      TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -116,22 +150,21 @@ jobs:
       - name: Generate untrusted temporary updater bundler key
         run: |
           key_path="$RUNNER_TEMP/token-station-updater-ci.key"
+          echo "TAURI_TEMP_SIGNING_KEY_PATH=$key_path" >> "$GITHUB_ENV"
           npx --prefix apps/desktop tauri signer generate --ci --force --password temporary-ci-only --write-keys "$key_path" >/dev/null
           echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$key_path" >> "$GITHUB_ENV"
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=temporary-ci-only" >> "$GITHUB_ENV"
-      - name: Require Apple signing and notarization secrets
-        run: |
-          test -n "$APPLE_CERTIFICATE"
-          test -n "$APPLE_CERTIFICATE_PASSWORD"
-          test -n "$APPLE_SIGNING_IDENTITY"
-          test -n "$APPLE_KEYCHAIN_PASSWORD"
-          test -n "$APPLE_API_ISSUER"
-          test -n "$APPLE_API_KEY"
-          test -n "$APPLE_API_KEY_CONTENT"
       - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
         run: |
+          umask 077
           certificate="$RUNNER_TEMP/token-station-certificate.p12"
           keychain="$RUNNER_TEMP/token-station-signing.keychain-db"
+          echo "APPLE_TEMP_CERTIFICATE_PATH=$certificate" >> "$GITHUB_ENV"
+          echo "APPLE_TEMP_KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
           printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
           security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
@@ -141,12 +174,45 @@ jobs:
           security default-keychain -s "$keychain"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
       - name: Prepare App Store Connect key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
         run: |
+          umask 077
           key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
-          printf '%s' "$APPLE_API_KEY_CONTENT" > "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$key_path"
       - name: Build, sign, notarize, and audit
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
         run: scripts/build-desktop.sh --production --target "${{ matrix.target }}"
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          case "${APPLE_TEMP_KEYCHAIN_PATH:-}" in
+            "$RUNNER_TEMP"/*)
+              security default-keychain -d user -s login.keychain-db || true
+              security list-keychains -d user -s login.keychain-db || true
+              security delete-keychain "$APPLE_TEMP_KEYCHAIN_PATH" || /bin/rm -f -- "$APPLE_TEMP_KEYCHAIN_PATH"
+              ;;
+            "") ;;
+            *) echo "::error::Refusing to clean a keychain outside RUNNER_TEMP" >&2; exit 1 ;;
+          esac
+          for temporary_path in \
+            "${APPLE_TEMP_CERTIFICATE_PATH:-}" \
+            "${APPLE_API_KEY_PATH:-}" \
+            "${TAURI_TEMP_SIGNING_KEY_PATH:-}" \
+            "${TAURI_TEMP_SIGNING_KEY_PATH:-}.pub"
+          do
+            case "$temporary_path" in
+              "$RUNNER_TEMP"/*) /bin/rm -f -- "$temporary_path" ;;
+              ""|.pub) ;;
+              *) echo "::error::Refusing to clean a file outside RUNNER_TEMP" >&2; exit 1 ;;
+            esac
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: token-station-desktop-${{ matrix.target }}
@@ -158,13 +224,11 @@ jobs:
 
   windows:
     name: Windows (x86_64-pc-windows-msvc)
-    needs: [release-mode, verify-main-full-ci, platform-gates]
-    if: needs.release-mode.outputs.enabled == 'true'
+    needs: [release-mode, windows-preflight, verify-main-full-ci, platform-gates]
+    if: >-
+      needs.release-mode.outputs.enabled == 'true' &&
+      (inputs.platform == 'windows' || inputs.platform == 'all')
     runs-on: windows-2025
-    env:
-      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-      WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -176,16 +240,14 @@ jobs:
         with:
           targets: wasm32-wasip2,x86_64-pc-windows-msvc
       - run: npm --prefix apps/desktop ci
-      - name: Require Windows signing secrets
-        shell: pwsh
-        run: |
-          if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
-          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw "WINDOWS_CERTIFICATE_PASSWORD is required" }
-          if (-not $env:WINDOWS_TIMESTAMP_URL) { throw "WINDOWS_TIMESTAMP_URL is required" }
       - name: Import Windows signing certificate
         shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           $certificatePath = Join-Path $env:RUNNER_TEMP "token-station-certificate.pfx"
+          "WINDOWS_CERTIFICATE_PATH=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Append
           [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
           $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
@@ -193,9 +255,29 @@ jobs:
           "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Build, sign, and audit
         shell: bash
+        env:
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: |
           node scripts/check-windows-release-config.mjs
           scripts/build-desktop.sh --production --target x86_64-pc-windows-msvc
+      - name: Remove temporary signing material
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            if ($env:WINDOWS_CERTIFICATE_THUMBPRINT -notmatch '^[A-Fa-f0-9]+$') {
+              throw "Refusing to remove an invalid certificate thumbprint"
+            }
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+          if ($env:WINDOWS_CERTIFICATE_PATH) {
+            $certificatePath = [IO.Path]::GetFullPath($env:WINDOWS_CERTIFICATE_PATH)
+            $temporaryRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+            if (-not $certificatePath.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Refusing to clean a certificate outside RUNNER_TEMP"
+            }
+            Remove-Item $certificatePath -Force -ErrorAction SilentlyContinue
+          }
       - name: Stage normalized Windows release input
         shell: bash
         run: |

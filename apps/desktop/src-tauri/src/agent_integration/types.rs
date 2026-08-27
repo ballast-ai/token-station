@@ -250,7 +250,8 @@ pub struct CompatibilityDecision {
 }
 
 /// Redacted, IPC-safe view of a server-held configuration plan. Secret patch
-/// values and complete projected documents never enter this type.
+/// values and complete projected documents never enter this type. A plan can
+/// include bounded semantic previews for fields the Connector marks non-secret.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigChangePlan {
@@ -278,8 +279,8 @@ pub struct ConfigChangePlan {
     pub required_confirmations: Vec<ConfirmationKind>,
 }
 
-/// Public, value-free contract for one reversible Connector projection.
-/// Exact patch values stay exclusively in the server-held prepared plan.
+/// Public contract for one reversible Connector projection. It contains only
+/// bounded non-secret previews. Exact patch values stay in the prepared plan.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorProjection {
@@ -330,6 +331,10 @@ pub struct RedactedChange {
     pub path: ConfigPath,
     pub sensitive: bool,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_preview: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

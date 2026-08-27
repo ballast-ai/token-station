@@ -501,6 +501,7 @@ impl AppInner {
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
+            pending_provider_key_removals: BTreeSet::new(),
             pending_provider_discoveries: BTreeSet::new(),
             south_approved_dialects,
             upstream_epochs: BTreeMap::new(),
@@ -597,6 +598,24 @@ impl AppInner {
                 ));
             }
             return Err(message);
+        }
+        let removable_keys = self
+            .pending_provider_key_removals
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for upstream in removable_keys {
+            match secrets::store_remove(&data_dir, &upstream, "provider_api_key") {
+                Ok(()) => {
+                    self.pending_provider_key_removals.remove(&upstream);
+                    self.bump_upstream_epoch(&upstream);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "configuration saved but legacy Provider credential cleanup failed for `{upstream}`: {error}"
+                    );
+                }
+            }
         }
         if let Err(error) = self.config_state.finish_save(&draft) {
             // The config committed atomically. The pending journal will be
@@ -734,6 +753,10 @@ impl AppInner {
                         .is_none(),
                     south_header_auth_v1_unavailable_reason,
                     local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
+                    managed_route: up
+                        .get("managed_route")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     access_tier: access_tier.to_owned(),
                     quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
                         QuotaPlanView {
@@ -1474,6 +1497,27 @@ impl AppInner {
                 inner.draft["agent_routes"][agent_id]["mode"] = json!("custom");
                 inner.draft["agent_routes"][agent_id]["custom_route"] = route.clone();
             }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn promote_agent_route_draft(&mut self, agent_id: &str) -> Result<(), String> {
+        let Some(tiers) = self.agent_route_drafts.get(agent_id) else {
+            return Ok(());
+        };
+        let route = Self::complete_agent_route_draft(agent_id, tiers)?;
+        self.edit_validated_draft(|inner| {
+            if !inner.draft["agent_routes"].is_object() {
+                inner.draft["agent_routes"] = json!({});
+            }
+            if !inner.draft["agent_routes"][agent_id].is_object() {
+                inner.draft["agent_routes"][agent_id] = json!({});
+            }
+            if let Some(agent_route) = inner.draft["agent_routes"][agent_id].as_object_mut() {
+                agent_route.remove("profile");
+            }
+            inner.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+            inner.draft["agent_routes"][agent_id]["custom_route"] = route;
             Ok(())
         })
     }

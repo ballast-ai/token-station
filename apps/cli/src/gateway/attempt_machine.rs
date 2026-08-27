@@ -671,6 +671,7 @@ impl Gateway {
             }
         };
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
+        ctx.capture_upstream_request(target.upstream.as_str(), &target.model, &descriptor);
 
         let response = match self.send_provider_call(
             ctx,
@@ -709,6 +710,9 @@ impl Gateway {
             Ok(response) => response,
         };
         *upstream_http_status = Some(response.status);
+        // Preserve an observed response even when policy rejects it before the
+        // provider parser takes ownership (for example, a blocked redirect).
+        ctx.capture_upstream_response_head(response.status, &response.headers);
 
         if let Err(error) = EgressPolicy::reject_redirect(response.status) {
             record_conversion(

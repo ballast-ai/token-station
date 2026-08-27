@@ -13,8 +13,6 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
-import EnterpriseConnectionPanel from "../components/EnterpriseConnectionPanel";
-import type { EnterpriseConnectionInput } from "../components/EnterpriseConnectionPanel";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -48,9 +46,7 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
-  onEnterpriseConnect?: (connection: EnterpriseConnectionInput) => boolean | Promise<boolean>;
   embedded?: boolean;
-  scope?: "global" | "enterprise";
 }
 
 export default function HomePage({
@@ -80,9 +76,7 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
-  onEnterpriseConnect = () => false,
   embedded = false,
-  scope = "global",
 }: HomePageProps) {
   const { copy } = useLocalizedCopy();
   const tierConfigured: Record<TierSlot, boolean> = {
@@ -94,7 +88,7 @@ export default function HomePage({
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const enterprise = scope === "enterprise";
+  const [keywordTier, setKeywordTier] = useState<TierSlot | null>(null);
 
   const saveProfile = async () => {
     const name = profileName.trim();
@@ -121,31 +115,21 @@ export default function HomePage({
   };
   return (
     <div className="page-stack home-page">
-      {(!embedded || enterprise) && (
+      {!embedded && (
         <header className="page-title-row">
           <div>
-            {embedded
-              ? <h2>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</h2>
-              : <h1>{enterprise ? copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング") : copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</h1>}
+            <h1>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</h1>
           </div>
         </header>
       )}
 
-      {!enterprise && (
-        <RoutingModeSelector
-          value={routingMode}
-          disabled={busy}
-          onValueChange={onSetRoutingMode}
-        />
-      )}
+      <RoutingModeSelector
+        value={routingMode}
+        disabled={busy}
+        onValueChange={onSetRoutingMode}
+      />
 
-      {enterprise ? (
-        <EnterpriseConnectionPanel
-          providers={providers}
-          busy={busy}
-          onConnect={onEnterpriseConnect}
-        />
-      ) : routingMode === "direct" ? (
+      {routingMode === "direct" ? (
         <DirectRoutePanel
           providers={providers}
           target={directTarget}
@@ -218,6 +202,9 @@ export default function HomePage({
             tiers={tiers}
             providers={providers}
             disabled={busy}
+            keywords={keywords}
+            onEditKeywords={setKeywordTier}
+            onRemoveKeyword={onRemoveKeyword}
             onTierChange={onTierChange}
           />
         </div>
@@ -283,28 +270,15 @@ export default function HomePage({
         </footer>
       </section>
 
-      <section className="panel keyword-panel">
-        <div className="panel-head split-heading">
-          <div>
-            <h2>{copy("Keyword routing", "关键词路由", "關鍵字路由", "キーワードルーティング")}</h2>
-            <p className="sub">
-              {copy(
-                "Add a keyword to a tier to override automatic classification whenever a request contains it. Save and apply when finished.",
-                "自动分档不称心？给某一档加个关键词，以后请求里只要出现它，就固定到这一档，优先于自动判断。加完按上方“保存并应用”生效。", "自動分檔不稱心？給某一檔加個關鍵字，以後請求裡只要出現它，就固定到這一檔，優先於自動判斷。加完按上方「儲存並應用」生效。", "自動分類に不満？特定の段階にキーワードを追加して、リクエストにそのキーワードが含まれる場合、その段階に固定して自動分類を優先するようにできます。完了したら上記の「保存して適用」をクリックしてください。"
-              )}
-            </p>
-          </div>
-          <span className="default-route-chip">{copy("Highest priority", "最高优先级", "最高優先順序", "最高優先度")}</span>
-        </div>
-
-        <TierKeywords
-          keywords={keywords}
-          configured={tierConfigured}
-          disabled={busy}
-          onAdd={onAddKeyword}
-          onRemove={onRemoveKeyword}
-        />
-      </section>
+      <TierKeywords
+        keywords={keywords}
+        configured={tierConfigured}
+        activeSlot={keywordTier}
+        disabled={busy}
+        onOpenChange={(open) => !open && setKeywordTier(null)}
+        onAdd={onAddKeyword}
+        onRemove={onRemoveKeyword}
+      />
 
       <section className="panel local-routing-panel">
         <div className="panel-head split-heading">
@@ -313,13 +287,24 @@ export default function HomePage({
             <p className="sub">
               {hasLocalProvider
                 ? copy(
-                    "Only providers marked as local will be used, so requests stay on this Mac. Save and apply when finished.",
-                    "打开后，路由只使用标为“本地”的供应商，请求不会离开本机。改完按上方“保存并应用”生效。", "開啟後，路由只使用標為「本地」的供應商，請求不會離開本機。改完按上方「儲存並應用」生效。", "開くと、ルーティングは「ローカル」にマークされたプロバイダーのみを使用し、リクエストがこのマシンの外に漏れません。変更が完了したら上記の「保存して適用」をクリックしてください。"
+                    "Use only Providers marked as local. Requests stay on this device unless cloud fallback is enabled.",
+                    "只使用标为本地的供应商。除非启用云端兜底，否则请求不会离开本机。",
+                    "只使用標為本地的供應商。除非啟用雲端備援，否則請求不會離開本機。",
+                    "ローカルとして設定されたプロバイダーのみを使用します。クラウドフォールバックを有効にしない限り、リクエストはこのデバイス内に留まります。",
                   )
-                : copy(
-                    "No local provider is configured. Add a provider and mark it as a local model first.",
-                    "还没有本地供应商。请先添加供应商并勾选“本地模型”。", "尚未設定任何本機供應商。請先新增供應商並勾選「本機模型」。", "ローカルプロバイダーが設定されていません。まずプロバイダーを追加し、「ローカルモデル」にチェックしてください。"
-                  )}
+                : localOnly
+                  ? copy(
+                      "Strict local routing is active, but no local Provider exists. Disable it here or add a local Provider.",
+                      "严格本地路由仍处于启用状态，但当前没有本地供应商。请在此关闭，或添加本地供应商。",
+                      "嚴格本地路由仍處於啟用狀態，但目前沒有本地供應商。請在此關閉，或新增本地供應商。",
+                      "厳格なローカルルーティングは有効ですが、ローカルプロバイダーがありません。ここで無効にするか、ローカルプロバイダーを追加してください。",
+                    )
+                  : copy(
+                      "Add a local Provider before enabling this privacy mode.",
+                      "请先添加本地供应商，再启用此隐私模式。",
+                      "請先新增本地供應商，再啟用此隱私模式。",
+                      "このプライバシーモードを有効にする前に、ローカルプロバイダーを追加してください。",
+                    )}
             </p>
           </div>
           <span className="default-route-chip">{copy("Privacy first", "隐私优先", "隱私優先", "プライバシー優先")}</span>
@@ -329,12 +314,12 @@ export default function HomePage({
           <input
             type="checkbox"
             checked={localOnly}
-            disabled={busy || !hasLocalProvider}
+            disabled={busy || (!hasLocalProvider && !localOnly)}
             onChange={(event) =>
               onSetLocalRouting(event.target.checked, event.target.checked && allowCloudFallback)
             }
           />
-          <span>{copy("Use local models only", "只走本地模型（请求不出本机）", "僅使用本機模型（請求不會離開本機）", "ローカルモデルのみを使用（リクエストはローカルにのみ発生）")}</span>
+          <span>{copy("Use local models only", "只走本地模型（请求不出本机）", "僅使用本機模型（請求不會離開本機）", "ローカルモデルのみを使用")}</span>
         </label>
         {localOnly && (
           <label className="switch-row switch-row-sub">
@@ -347,16 +332,21 @@ export default function HomePage({
             <span>
               {copy(
                 "Allow cloud fallback when local models are unavailable",
-                "本地不可用时，允许使用云模型兜底", "本地不可用時，允許使用雲模型作為備用", "ローカルモデルが利用不可な場合、クラウドモデルをバックアップとして使用を許可"
+                "本地不可用时，允许使用云模型兜底",
+                "本地不可用時，允許使用雲端模型備援",
+                "ローカルモデルを利用できない場合にクラウドへのフォールバックを許可",
               )}
               <em>{copy(
-                "(Off means strict local mode; requests fail instead of leaving this Mac.)",
-                "（关闭后为严格本地模式，本地不可用时请求会失败，不会外发。）", "（關閉後為嚴格本地模式，本地不可用時請求會失敗，不會外發。）", "（オフにすると厳格なローカルモードになります。ローカルモデルが利用不可な場合、リクエストは失敗し、外部に送信されません。）"
+                " Off means requests fail instead of leaving this device.",
+                " 关闭后，请求会失败而不会离开本机。",
+                " 關閉後，請求會失敗而不會離開本機。",
+                " オフの場合、リクエストは外部へ送信されず失敗します。",
               )}</em>
             </span>
           </label>
         )}
       </section>
+
       </>
       )}
 

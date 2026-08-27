@@ -53,7 +53,23 @@ const MAX_PENDING_PLANS: usize = 64;
 const MAX_SESSION_LABEL_BYTES: usize = 128;
 const CONFIRMATION_TOKEN_BYTES: usize = 32;
 
-#[derive(Clone, Debug, Serialize)]
+#[tauri::command]
+pub(crate) fn get_agent_backup_directory(paths: State<'_, AgentIntegrationPaths>) -> String {
+    paths.snapshot_root.display().to_string()
+}
+
+#[tauri::command]
+pub(crate) fn open_agent_backup_directory(
+    paths: State<'_, AgentIntegrationPaths>,
+) -> Result<String, String> {
+    super::safe_fs::ensure_private_dir(&paths.snapshot_root)
+        .map_err(|error| format!("创建 Agent 备份目录失败：{error}"))?;
+    tauri_plugin_opener::open_path(&paths.snapshot_root, None::<&str>)
+        .map_err(|error| format!("打开 Agent 备份目录失败：{error}"))?;
+    Ok(paths.snapshot_root.display().to_string())
+}
+
+#[derive(Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstallationView {
     pub discovery: DiscoveryRecord,
@@ -2041,6 +2057,25 @@ impl AgentCommandState {
         )
     }
 
+    fn discard_plan(
+        &self,
+        operation_id: &str,
+        confirmation_token: &str,
+        session_label: &str,
+    ) -> Result<(), AgentCommandError> {
+        let _ = self.take_plan(
+            operation_id,
+            confirmation_token,
+            session_label,
+            &[
+                PlanIntent::Connect,
+                PlanIntent::Disconnect,
+                PlanIntent::Restore,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Apply a confirmed plan against the scan snapshot already stored in this
     /// command state. Production callers refresh immediately before reaching
     /// this boundary; tests inject an isolated scan so the full confirmation,
@@ -2554,6 +2589,16 @@ pub(crate) fn apply_agent_plan(
     )?;
     crate::desktop_shell::update_agent_menu(&app);
     Ok(outcome)
+}
+
+#[tauri::command(async)]
+pub(crate) fn discard_agent_plan(
+    state: State<'_, AgentCommandState>,
+    window: WebviewWindow,
+    operation_id: String,
+    confirmation_token: String,
+) -> Result<(), AgentCommandError> {
+    state.discard_plan(&operation_id, &confirmation_token, window.label())
 }
 
 #[tauri::command(async)]
@@ -3529,6 +3574,31 @@ mod tests {
                 &[PlanIntent::Connect],
             )
             .is_err());
+    }
+
+    #[test]
+    fn commands_discard_consumes_only_the_exact_pending_plan() {
+        let state = state("discard");
+        let target = scratch("discard-target").join("settings.json");
+        let prepared = prepared(&target, "vk-discard-secret", state.clock.now_ms());
+        let view = state
+            .issue_plan(prepared, &record(&target, false), "main", None)
+            .unwrap();
+
+        let wrong_token = state
+            .discard_plan(
+                &view.plan.operation_id,
+                &"00".repeat(CONFIRMATION_TOKEN_BYTES),
+                "main",
+            )
+            .unwrap_err();
+        assert_eq!(wrong_token.code, "confirmation_token_mismatch");
+        assert!(state.plan_intent(&view.plan.operation_id).is_ok());
+
+        state
+            .discard_plan(&view.plan.operation_id, &view.confirmation_token, "main")
+            .unwrap();
+        assert!(state.plan_intent(&view.plan.operation_id).is_err());
     }
 
     #[test]
@@ -4737,6 +4807,7 @@ mod tests {
                             before_hash: "c".repeat(64),
                             managed_after_hash: "d".repeat(64),
                             owned_paths: vec![applied_id, entries],
+                            sensitive_paths: None,
                             owned_value_macs: companion_macs,
                         },
                     ],
@@ -5075,6 +5146,55 @@ mod tests {
         assert!(!settings.contains(fixture_runtime.virtual_key()));
         let credentials = std::fs::read_to_string(&case.companions[0].path).unwrap();
         assert!(credentials.contains(fixture_runtime.virtual_key()));
+        let disconnect = state
+            .plan_disconnect(
+                case.agent_id,
+                &case.installation_path,
+                "dsh-disconnect-review",
+            )
+            .unwrap();
+        let public_disconnect = serde_json::to_string(&disconnect.plan).unwrap();
+        assert!(
+            !public_disconnect.contains(fixture_runtime.virtual_key()),
+            "companion credentials must not enter the IPC-safe disconnect plan"
+        );
+        let credential_projection = disconnect
+            .plan
+            .projection
+            .files
+            .iter()
+            .find(|file| file.target_config_path == case.companions[0].path.to_string_lossy())
+            .expect("DeepSeek credentials companion must be present in the disconnect review");
+        assert!(
+            credential_projection
+                .forward_changes
+                .iter()
+                .any(|change| change.sensitive),
+            "legacy and current companion credentials must fail closed as sensitive"
+        );
+        assert!(credential_projection
+            .credential_bindings
+            .iter()
+            .any(|binding| {
+                binding.source
+                    == crate::agent_integration::types::CredentialSource::EncryptedSnapshot
+            }));
+        let baseline = state
+            .snapshots
+            .list_agent(case.agent_id)
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.target_config_path == case.primary.path.to_string_lossy())
+            .expect("DeepSeek primary baseline snapshot must exist");
+        let restore = state
+            .plan_restore(&baseline.snapshot_id, "dsh-restore-review")
+            .unwrap();
+        assert!(
+            !serde_json::to_string(&restore.plan)
+                .unwrap()
+                .contains(fixture_runtime.virtual_key()),
+            "companion credentials must not enter the IPC-safe restore plan"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -5332,6 +5452,7 @@ mod tests {
                             before_hash: "d".repeat(64),
                             managed_after_hash: "e".repeat(64),
                             owned_paths: vec![companion_path.clone()],
+                            sensitive_paths: None,
                             owned_value_macs: BTreeMap::from([(
                                 companion_path.to_string(),
                                 "f".repeat(64),
@@ -5418,6 +5539,7 @@ mod tests {
                             before_hash: "d".repeat(64),
                             managed_after_hash: "e".repeat(64),
                             owned_paths: vec![companion_path.clone()],
+                            sensitive_paths: None,
                             owned_value_macs: BTreeMap::from([(
                                 companion_path.to_string(),
                                 "f".repeat(64),
