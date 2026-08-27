@@ -1716,7 +1716,7 @@ describe("desktop station navigation", () => {
 
     expect(screen.queryByRole("heading", { name: "关键词路由" })).toBeNull();
     for (const tier of ["上档", "中档", "下档"]) {
-      expect(screen.getByRole("button", { name: new RegExp(`编辑${tier}关键词`) })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: new RegExp(`添加${tier}关键词`) })).toBeInTheDocument();
     }
     expect(screen.queryByText("强模型")).toBeNull();
     expect(screen.queryByText("中模型")).toBeNull();

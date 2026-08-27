@@ -10,6 +10,7 @@ export interface TierRouteEditorProps {
   readOnly?: boolean;
   keywords?: Record<TierSlot, string[]>;
   onEditKeywords?: (slot: TierSlot) => void;
+  onRemoveKeyword?: (slot: TierSlot, keyword: string) => void | Promise<void>;
   onTierChange: (
     slot: TierSlot,
     upstream: string | null,
@@ -24,6 +25,7 @@ export default function TierRouteEditor({
   readOnly = false,
   keywords,
   onEditKeywords,
+  onRemoveKeyword,
   onTierChange,
 }: TierRouteEditorProps) {
   const controlsDisabled = disabled || readOnly;
@@ -138,7 +140,27 @@ export default function TierRouteEditor({
                     `${label}の設定済みキーワード`,
                   )}>
                     <span className="tier-keyword-label">{copy("Keywords", "关键词", "關鍵詞", "キーワード")}</span>
-                    {tierKeywords.map((keyword) => <span className="tier-keyword-value" key={keyword}>{keyword}</span>)}
+                    {tierKeywords.map((keyword) => (
+                      <span className="tier-keyword-value" key={keyword}>
+                        <span>{keyword}</span>
+                        {onRemoveKeyword && (
+                          <button
+                            className="tier-keyword-remove"
+                            type="button"
+                            disabled={controlsDisabled}
+                            aria-label={copy(
+                              `Delete ${label} keyword ${keyword}`,
+                              `删除${label}关键词 ${keyword}`,
+                              `刪除${label}關鍵詞 ${keyword}`,
+                              `${label}キーワード ${keyword} を削除`,
+                            )}
+                            onClick={() => void onRemoveKeyword(slot, keyword)}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
                   </div>
                 )}
                 <button
@@ -146,15 +168,15 @@ export default function TierRouteEditor({
                   type="button"
                   disabled={controlsDisabled}
                   aria-label={copy(
-                    `Edit ${label} keywords, ${tierKeywords.length} current`,
-                    `编辑${label}关键词，当前 ${tierKeywords.length} 个`,
-                    `編輯${label}關鍵詞，目前 ${tierKeywords.length} 個`,
-                    `${label}キーワードを編集、現在 ${tierKeywords.length} 件`,
+                    `Add ${label} keywords, ${tierKeywords.length} current`,
+                    `添加${label}关键词，当前 ${tierKeywords.length} 个`,
+                    `新增${label}關鍵詞，目前 ${tierKeywords.length} 個`,
+                    `${label}キーワードを追加、現在 ${tierKeywords.length} 件`,
                   )}
                   onClick={() => onEditKeywords(slot)}
                 >
                   {tierKeywords.length > 0
-                    ? copy("Edit", "编辑", "編輯", "編集")
+                    ? copy("+ Add", "+ 添加", "+ 新增", "+ 追加")
                     : copy("+ Add keywords", "+ 添加关键词", "+ 新增關鍵詞", "+ キーワードを追加")}
                 </button>
               </div>

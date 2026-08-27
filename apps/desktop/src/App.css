@@ -6630,7 +6630,7 @@ pre.block {
 .tier-keyword-values {
   min-width: 0;
   display: flex;
-  flex: 1;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   gap: 6px;
 }
@@ -6642,8 +6642,11 @@ pre.block {
 }
 
 .tier-keyword-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   max-width: 100%;
-  padding: 3px 8px;
+  padding: 3px 4px 3px 8px;
   overflow-wrap: anywhere;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -6651,6 +6654,38 @@ pre.block {
   background: var(--surface-2);
   font-size: 10px;
   line-height: 1.35;
+}
+
+.tier-keyword-value > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tier-keyword-remove {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--muted);
+  background: transparent;
+  font: 600 14px/1 "IBM Plex Sans", sans-serif;
+  cursor: pointer;
+}
+
+.tier-keyword-remove:hover:not(:disabled),
+.tier-keyword-remove:focus-visible {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  outline: 0;
+}
+
+.tier-keyword-remove:disabled {
+  cursor: not-allowed;
+  opacity: .52;
 }
 
 .tier-keyword-dialog[data-slot="dialog-content"] {

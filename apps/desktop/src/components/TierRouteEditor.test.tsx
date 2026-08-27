@@ -88,6 +88,7 @@ describe("TierRouteEditor", () => {
         providers={providers}
         keywords={{ high: ["代码", "推理"], mid: [], low: ["摘要"] }}
         onEditKeywords={vi.fn()}
+        onRemoveKeyword={vi.fn()}
         onTierChange={vi.fn()}
       />,
     );
@@ -100,9 +101,10 @@ describe("TierRouteEditor", () => {
     expect(screen.getByLabelText("上档供应商")).toHaveTextContent("deepseek");
     expect(screen.getByLabelText("上档模型")).toHaveTextContent("deepseek-v4-pro");
     expect(screen.getByLabelText("下档模型")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "编辑上档关键词，当前 2 个" })).toHaveTextContent("编辑");
-    expect(screen.getByRole("button", { name: "编辑中档关键词，当前 0 个" })).toHaveTextContent("+ 添加关键词");
-    expect(screen.getByRole("button", { name: "编辑下档关键词，当前 1 个" })).toHaveTextContent("编辑");
+    expect(screen.getByRole("button", { name: "添加上档关键词，当前 2 个" })).toHaveTextContent("+ 添加");
+    expect(screen.getByRole("button", { name: "添加中档关键词，当前 0 个" })).toHaveTextContent("+ 添加关键词");
+    expect(screen.getByRole("button", { name: "添加下档关键词，当前 1 个" })).toHaveTextContent("+ 添加");
+    expect(screen.getByRole("button", { name: "删除上档关键词 代码" })).toHaveTextContent("×");
     expect(screen.getByLabelText("上档已设置关键词")).toHaveTextContent("代码");
     expect(screen.getByLabelText("上档已设置关键词")).toHaveTextContent("推理");
     expect(screen.queryByLabelText("中档已设置关键词")).toBeNull();
@@ -122,8 +124,28 @@ describe("TierRouteEditor", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "编辑中档关键词，当前 3 个" }));
+    await user.click(screen.getByRole("button", { name: "添加中档关键词，当前 3 个" }));
     expect(onEditKeywords).toHaveBeenCalledWith("mid");
+  });
+
+  it("removes a visible keyword without opening the dialog", async () => {
+    const user = userEvent.setup();
+    const onEditKeywords = vi.fn();
+    const onRemoveKeyword = vi.fn();
+    render(
+      <TierRouteEditor
+        tiers={tiers}
+        providers={providers}
+        keywords={{ high: ["代码"], mid: [], low: [] }}
+        onEditKeywords={onEditKeywords}
+        onRemoveKeyword={onRemoveKeyword}
+        onTierChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "删除上档关键词 代码" }));
+    expect(onRemoveKeyword).toHaveBeenCalledWith("high", "代码");
+    expect(onEditKeywords).not.toHaveBeenCalled();
   });
 
   it("selects the provider's first model when the provider changes", async () => {

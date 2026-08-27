@@ -204,6 +204,7 @@ export default function HomePage({
             disabled={busy}
             keywords={keywords}
             onEditKeywords={setKeywordTier}
+            onRemoveKeyword={onRemoveKeyword}
             onTierChange={onTierChange}
           />
         </div>
