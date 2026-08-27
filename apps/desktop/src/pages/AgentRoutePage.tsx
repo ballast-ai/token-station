@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Check as CheckIcon,
   Copy as CopyIcon,
+  FileDiff,
   Globe2,
   Route as RouteIcon,
+  ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
 import {
   applyAgentPlan,
   configureCursorProvider,
   ensureServeRunning,
-  forceForgetAgent,
+  getAgentDrift,
   getCursorProviderStatus,
   mountAgentProfile,
   planAgentConnection,
+  planAgentDisconnect,
   saveAgentRoutes,
   restartAgentRoute,
   restoreCursorProvider,
@@ -21,6 +25,7 @@ import {
   setAgentTier,
   type AgentInstallationView,
   type ConfigPlanView,
+  type AgentDriftView,
   type CursorProviderStatusView,
   type AgentRouteView,
   type AgentUiMetadataView,
@@ -49,6 +54,24 @@ import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy, type Language, type LocalizedCopy } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { Button } from "../components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import {
   Tooltip,
   TooltipContent,
@@ -86,14 +109,37 @@ interface AgentRoutePageProps {
   pageMode?: "combined" | "connection" | "routing";
 }
 
-/** Per-Agent key recording that connection changes were shown; localStorage makes it appear only once. */
-const diffShownKey = (agentId: string) => `ts:agent-connect-diff-shown:${agentId}`;
-
-/** Managed fields that best explain where data flows and therefore matter most to users. */
-const KEY_CHANGE_HINT = /url|base|token|key|auth|endpoint|host|proxy/i;
-
 function errorText(error: unknown) {
   return humanizeAppError(error);
+}
+
+function planFiles(plan: ConfigPlanView) {
+  if (plan.projection?.files?.length) {
+    return plan.projection.files.map((file) => ({
+      path: file.target_config_path,
+      changes: file.forward_changes,
+    }));
+  }
+  return [{ path: plan.target_config_path, changes: plan.changes ?? [] }];
+}
+
+function changeState(
+  operation: ConfigPlanView["changes"][number]["operation"],
+  sensitive: boolean,
+  side: "before" | "after",
+  intent: "connect" | "restore",
+  copy: LocalizedCopy,
+) {
+  if (side === "before") {
+    if (operation === "add") return copy("Not set", "未设置", "未設定", "未設定");
+    return copy("Current value", "当前值", "目前值", "現在の値");
+  }
+  if (operation === "remove") return copy("Remove this field", "删除此字段", "刪除此欄位", "このフィールドを削除");
+  if (operation === "test") return copy("Keep unchanged", "保持不变", "保持不變", "変更しない");
+  if (sensitive) return copy("Local credential (content hidden)", "本机凭据（内容已隐藏）", "本機憑證（內容已隱藏）", "ローカル認証情報（内容は非表示）");
+  return intent === "restore"
+    ? copy("Value from the pre-connection backup", "接入前备份值", "連線前備份值", "接続前のバックアップ値")
+    : copy("Token Station managed value", "Token Station 受管值", "Token Station 受管值", "Token Station 管理値");
 }
 
 export function compactDiscoveryPath(path: string): string {
@@ -270,12 +316,15 @@ export default function AgentRoutePage({
   const selectedPath = selectedInstallationPath ?? localSelectedPath;
   const [busy, setBusy] = useState(false);
   const [cursorStatus, setCursorStatus] = useState<CursorProviderStatusView | null>(null);
-  // Show configuration changes after the first connection, then persist dismissal in localStorage.
-  const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
+  const [pendingPlan, setPendingPlan] = useState<{
+    intent: "connect" | "restore";
+    plan: ConfigPlanView;
+  } | null>(null);
+  const [restoreConflict, setRestoreConflict] = useState<AgentDriftView[] | null>(null);
+  const [cursorRestorePending, setCursorRestorePending] = useState(false);
   const [copiedDiscoveryPath, setCopiedDiscoveryPath] = useState<{ path: string } | null>(null);
   const followsGlobal = route.inherits_global === true;
   const [independentEditorOpen, setIndependentEditorOpen] = useState(!followsGlobal);
-  const dismissConnectDiff = () => setConnectDiff(null);
 
   useEffect(() => {
     setIndependentEditorOpen(!followsGlobal);
@@ -404,10 +453,9 @@ export default function AgentRoutePage({
     }
   };
 
-  // Connect immediately after planning without a redundant confirmation wait.
-  // The post-connection diff card still appears once for transparency.
-  const applyConnection = async () => {
+  const previewConnection = async () => {
     if (!installation || !canOperate || busy) return;
+    let planReady = false;
     onConnectInFlightChange?.(true);
     setBusy(true);
     try {
@@ -428,83 +476,132 @@ export default function AgentRoutePage({
           ? { expectedVersion: installation.discovery.version_normalized as string }
           : undefined,
       );
-      await applyAgentPlan(plan.operation_id, plan.confirmation_token);
-      if (plan.changes?.length || plan.human_diff) {
-        let shouldShowDiff = true;
-        try {
-          shouldShowDiff = !localStorage.getItem(diffShownKey(metadata.agent_id));
-          if (shouldShowDiff) {
-            localStorage.setItem(diffShownKey(metadata.agent_id), String(Date.now()));
-          }
-        } catch {
-          showError(
-            copy(
-              "The Agent connected, but Token Station could not remember whether the first-connection changes were shown.",
-              "Agent 已接入，但无法保存首次接入差异提示状态。", "Agent 已接入，但無法儲存首次接入差異提示狀態。", "Agent が接続されました。ただし、最初の接続時の差異の表示状態を保存できません。"
-            ),
-            `agent-connect-diff-storage:${metadata.agent_id}`,
-          );
-        }
-        if (shouldShowDiff) setConnectDiff(plan);
-      }
-      showSuccess(
-        copy("Agent connected.", "Agent 已接入", "Agent 已連線。", "Agent が接続されました。"),
-        `agent-connect:${metadata.agent_id}`,
-      );
+      setPendingPlan({ intent: "connect", plan });
+      planReady = true;
     } catch (caught) {
       showError(errorText(caught), `agent-connect:${metadata.agent_id}`);
     } finally {
       onConnectInFlightChange?.(false);
       setBusy(false);
-      try {
-        await onRefreshAgents();
-      } catch (caught) {
-        showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
-      }
-    }
-  };
-
-  // Restore official configuration and disconnect by removing TS-managed fields
-  // according to ownership records, returning the Agent to official defaults,
-  // then clearing ownership. This deterministic path replaces the old force-
-  // disconnect fallback and does not depend on encrypted snapshots or a master key.
-  const restoreOfficial = async () => {
-    if (!installation || busy) return;
-    setBusy(true);
-    let restored = false;
-    try {
-      if (metadata.agent_id === "cursor") {
-        const next = await restoreCursorProvider();
-        setCursorStatus(next);
-        showSuccess(
-          next.message ?? copy(
-            "Restored the official Cursor configuration and disconnected.",
-            "已恢复 Cursor 官方配置并断开。", "已恢復 Cursor 官方設定並斷開。", "Cursor の公式設定を復元し、接続を解除しました。"
-          ),
-          `agent-restore-official:${metadata.agent_id}`,
-        );
-        restored = true;
-        return;
-      }
-      await forceForgetAgent(metadata.agent_id, installation.discovery.canonical_path);
-      restored = true;
-      showSuccess(
-        copy(
-          "Restored the official configuration and disconnected.",
-          "已恢复官方配置并断开。", "已恢復官方設定並斷開。", "公式設定を復元し、接続を解除しました。"
-        ),
-        `agent-restore-official:${metadata.agent_id}`,
-      );
-    } catch (caught) {
-      showError(errorText(caught), `agent-restore-official:${metadata.agent_id}`);
-    } finally {
-      if (restored) {
+      if (!planReady) {
         try {
           await onRefreshAgents();
         } catch (caught) {
           showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
         }
       }
+    }
+  };
+
+  const applyPendingPlan = async () => {
+    if (!pendingPlan || busy) return;
+    const { intent, plan } = pendingPlan;
+    setBusy(true);
+    try {
+      await applyAgentPlan(plan.operation_id, plan.confirmation_token);
+      setPendingPlan(null);
+      showSuccess(
+        intent === "connect"
+          ? copy("Agent connected.", "Agent 已接入。", "Agent 已連線。", "Agent が接続されました。")
+          : copy("Restored the backup and disconnected.", "已恢复备份并断开。", "已恢復備份並斷開。", "バックアップを復元して接続を解除しました。"),
+        `agent-${intent}:${metadata.agent_id}`,
+      );
+      try {
+        await onRefreshAgents();
+      } catch (caught) {
+        showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
+      }
+    } catch (caught) {
+      showError(errorText(caught), `agent-${intent}:${metadata.agent_id}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyCursorRestore = async () => {
+    if (busy) return;
+    setCursorRestorePending(false);
+    setBusy(true);
+    try {
+      const next = await restoreCursorProvider();
+      setCursorStatus(next);
+      showSuccess(
+        next.message ?? copy(
+          "Restored the official Cursor configuration and disconnected.",
+          "已恢复 Cursor 官方配置并断开。", "已恢復 Cursor 官方設定並斷開。", "Cursor の公式設定を復元し、接続を解除しました。"
+        ),
+        `agent-restore-official:${metadata.agent_id}`,
+      );
+      try {
+        await onRefreshAgents();
+      } catch (caught) {
+        showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
+      }
+    } catch (caught) {
+      showError(errorText(caught), `agent-restore-official:${metadata.agent_id}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createRestorePlan = async (applyImmediately: boolean) => {
+    if (!installation || busy) return;
+    setBusy(true);
+    try {
+      const plan = await planAgentDisconnect(
+        metadata.agent_id,
+        installation.discovery.canonical_path,
+      );
+      if (!applyImmediately) {
+        setPendingPlan({ intent: "restore", plan });
+        return;
+      }
+      await applyAgentPlan(plan.operation_id, plan.confirmation_token);
+      setRestoreConflict(null);
+      showSuccess(
+        copy(
+          "Restored the backup and disconnected.",
+          "已强制恢复备份并断开。", "已強制恢復備份並斷開。", "バックアップを強制復元して接続を解除しました。"
+        ),
+        `agent-restore-official:${metadata.agent_id}`,
+      );
+      try {
+        await onRefreshAgents();
+      } catch (caught) {
+        showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
+      }
+    } catch (caught) {
+      showError(errorText(caught), `agent-restore-official:${metadata.agent_id}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restoreOfficial = async () => {
+    if (!installation || busy) return;
+    if (metadata.agent_id === "cursor") {
+      setCursorRestorePending(true);
+      return;
+    }
+    setBusy(true);
+    try {
+      const drift = await getAgentDrift(
+        metadata.agent_id,
+        installation.discovery.canonical_path,
+      );
+      const changed = drift.filter((item) => item.status !== "in_sync");
+      if (changed.length > 0) {
+        setRestoreConflict(changed);
+      } else {
+        const plan = await planAgentDisconnect(
+          metadata.agent_id,
+          installation.discovery.canonical_path,
+        );
+        setPendingPlan({ intent: "restore", plan });
+      }
+    } catch (caught) {
+      showError(errorText(caught), `agent-restore-official:${metadata.agent_id}`);
+    } finally {
       setBusy(false);
     }
   };
@@ -636,7 +733,7 @@ export default function AgentRoutePage({
             type="button"
             data-onboarding-target={!managed ? "agent-connect" : undefined}
             disabled={busy || !canOperate}
-            onClick={() => void (managed ? restoreOfficial() : applyConnection())}
+            onClick={() => void (managed ? restoreOfficial() : previewConnection())}
             title={managed
               ? copy(
                 "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
@@ -652,7 +749,7 @@ export default function AgentRoutePage({
                   ? copy("Reconnect & launch", "重新接入并启动", "重新連線並啟動", "再接続して起動")
                   : metadata.agent_id === "cursor"
                     ? copy("Connect & launch", "一键接入并启动", "連線並啟動", "接続して起動")
-                    : copy("Connect", "一键接入", "連線", "接続")}
+                    : copy("Preview & connect", "预览并接入", "預覽並連線", "プレビューして接続")}
           </button>
           {pageMode !== "connection" && cursorRepairRequired ? (
             <button
@@ -719,8 +816,8 @@ export default function AgentRoutePage({
         </dl>
         <div className="agent-connection-change">
           <div>
-            <h3>{copy("Connection changes", "接入将修改", "連線將修改", "接続により変更されます")}</h3>
-            <p>{copy("Token Station backs up the original file before it writes managed routing fields.", "Token Station 写入受管路由字段前会备份原文件。", "Token Station 在寫入受管路由欄位前會備份原檔案。", "Token Station は受管ルーティングフィールドを書き込む前に元のファイルをバックアップします。")}</p>
+            <h3>{copy("Safe configuration change", "安全修改配置", "安全修改設定", "安全な設定変更")}</h3>
+            <p>{copy("Preview first. Back up second. Write only after confirmation.", "先预览，再备份，确认后才写入。", "先預覽，再備份，確認後才寫入。", "先にプレビューし、次にバックアップし、確認後のみ書き込みます。")}</p>
           </div>
           <div className="agent-connection-file">
             <code>{connectionTarget}</code>
@@ -728,6 +825,14 @@ export default function AgentRoutePage({
               ? copy(`Managed fields: ${ownedFields.join(", ")}`, `受管字段：${ownedFields.join("、")}`, `受管欄位：${ownedFields.join(", ")}`, `管理フィールド：${ownedFields.join(", ")}`)
               : copy("The exact non-sensitive changes appear after the connection plan is created.", "生成接入计划后会显示确切的非敏感改动。", "生成接入計劃後會顯示確切的非敏感修改。", "接続計画が作成されると、正確な非敏感な変更が表示されます。")}</small>
           </div>
+          <details className="agent-backup-policy">
+            <summary>{copy("How backup and restore work", "备份与恢复如何工作", "備份與恢復如何運作", "バックアップと復元の仕組み")}</summary>
+            <ol>
+              <li>{copy("Show the target file and field-level changes.", "展示目标文件与字段级改动。", "展示目標檔案與欄位級變更。", "対象ファイルとフィールド単位の変更を表示します。")}</li>
+              <li>{copy("Create an encrypted local snapshot immediately before writing.", "写入前立即创建本机加密快照。", "寫入前立即建立本機加密快照。", "書き込み直前にローカル暗号化スナップショットを作成します。")}</li>
+              <li>{copy("Check for later manual edits before restoring.", "恢复前检查接入后的手动修改。", "恢復前檢查連線後的手動修改。", "復元前に接続後の手動変更を確認します。")}</li>
+            </ol>
+          </details>
         </div>
         <div className={`agent-default-route-state ${routeNeedsAttention ? "warning" : ""}`}>
           <span aria-hidden="true">{routeNeedsAttention ? "!" : <RouteIcon />}</span>
@@ -740,51 +845,151 @@ export default function AgentRoutePage({
         </div>
       </section>
 
-      {connectDiff && (() => {
-        const changes = connectDiff.changes ?? [];
-        const keyChanges = changes.filter((change) => KEY_CHANGE_HINT.test(change.path.segments.join(".")));
-        const shown = keyChanges.length ? keyChanges : changes.slice(0, 3);
-        const rest = changes.length - shown.length;
-        return (
-          <section className="panel connect-diff-card">
-            <div className="connect-diff-head">
-              <div>
-                <h2>{copy(
-                  `${metadata.display_name.replace(" Agent", "")} is connected. Here is exactly what changed.`,
-                  `已接入 ${metadata.display_name.replace(" Agent", "")}，改动如实告知`, `${metadata.display_name.replace(" Agent", "")} 連線成功。以下是變更內容`, `${metadata.display_name.replace(" Agent", "")} に接続しました。変更内容を以下に示します`
-                )}</h2>
-              </div>
-              <button className="btn" type="button" onClick={dismissConnectDiff}>
-                {copy("Got it", "知道了", "瞭解了", "了解しました")}
-              </button>
-            </div>
-            <p className="connect-diff-intro">
-              {copy("Only the ", "只改了让请求经本地网关必需的", "只改了讓請求經本地閘道器必需的", "リクエストがローカルゲートウェイを経由する必要のある")}
-              <strong>{copy("required routing fields", "这几个关键字段", "幾個關鍵欄位", "いくつかの重要なフィールド")}</strong>
-              {copy(
-                " were changed. Your original configuration was backed up and can be restored when disconnecting:",
-                "，你的原配置已自动备份，断开时一键还原：", "被修改。您的原配置已自動備份，斷開時可一鍵還原：", "が変更されました。元の設定は自動的にバックアップされ、切断時に1クリックで復元できます："
-              )}
-            </p>
-            <ul className="connect-diff-list">
-              {shown.map((change, index) => (
-                <li key={index}>
-                  <code>{change.path.segments.join(".")}</code>
-                  <span className="connect-diff-summary">{change.summary}</span>
-                </li>
+      <Dialog
+        open={pendingPlan !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) setPendingPlan(null);
+        }}
+      >
+        <DialogContent className="agent-change-dialog" closeLabel={copy("Close", "关闭", "關閉", "閉じる")}>
+          <DialogHeader>
+            <span className="agent-change-dialog-mark" aria-hidden="true"><FileDiff /></span>
+            <DialogTitle>{pendingPlan?.intent === "restore"
+              ? copy("Confirm backup restore", "确认恢复备份", "確認恢復備份", "バックアップの復元を確認")
+              : copy("Confirm connection changes", "确认接入改动", "確認連線變更", "接続変更を確認")}</DialogTitle>
+            <DialogDescription>{pendingPlan?.intent === "restore"
+              ? copy(
+                "Review the owned fields that will return to their pre-connection state.",
+                "请确认将恢复到接入前状态的受管字段。", "請確認將恢復到連線前狀態的受管欄位。", "接続前の状態に戻す管理フィールドを確認してください。"
+              )
+              : copy(
+                "No file has been changed yet. Review every field before continuing.",
+                "配置文件尚未修改。请先核对每一项改动。", "設定檔案尚未修改。請先核對每一項變更。", "設定ファイルはまだ変更されていません。続行する前に各フィールドを確認してください。"
+              )}</DialogDescription>
+          </DialogHeader>
+          {pendingPlan ? (
+            <div className="agent-change-files">
+              {planFiles(pendingPlan.plan).map((file, fileIndex) => (
+                <section className="agent-change-file" key={`${file.path}-${fileIndex}`}>
+                  <div className="agent-change-file-head">
+                    <span>{copy("Target file", "目标文件", "目標檔案", "対象ファイル")}</span>
+                    <code>{file.path}</code>
+                  </div>
+                  <div className="agent-change-list">
+                    {file.changes.map((change, index) => (
+                      <article className="agent-change-row" key={`${change.path.segments.join(".")}-${index}`}>
+                        <code className="agent-change-path">{change.path.segments.join(".")}</code>
+                        <div className="agent-change-states">
+                          <div>
+                            <span>{copy("Before", "修改前", "修改前", "変更前")}</span>
+                            <strong>{changeState(change.operation, change.sensitive, "before", pendingPlan.intent, copy)}</strong>
+                          </div>
+                          <span className="agent-change-arrow" aria-hidden="true">→</span>
+                          <div className="after">
+                            <span>{copy("After", "修改后", "修改後", "変更後")}</span>
+                            <strong>{changeState(change.operation, change.sensitive, "after", pendingPlan.intent, copy)}</strong>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
               ))}
-            </ul>
-            {rest > 0 && <p className="connect-diff-rest">{copy(
-              `${rest} additional supporting settings were adjusted.`,
-              `另有 ${rest} 项辅助开关调整。`, `另有 ${rest} 項輔助開關調整。`, `${rest} 項の補助スイッチが調整されました。`
-            )}</p>}
-            <p className="connect-diff-foot">{copy(
-              "This notice appears only on the first connection.",
-              "此提示仅在首次接入时出现一次，之后不再打扰。", "此提示僅在首次接入時出現一次，之後不再打擾。", "この通知は最初の接続時のみ表示され、その後は表示されません。"
-            )}</p>
-          </section>
-        );
-      })()}
+            </div>
+          ) : null}
+          <div className="agent-backup-assurance">
+            <ShieldCheck aria-hidden="true" />
+            <div>
+              <strong>{copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
+              <span>{pendingPlan?.intent === "restore"
+                ? copy("Only Token Station-owned fields change. Other fields stay as they are.", "只恢复 Token Station 受管字段，其他字段保持不变。", "只恢復 Token Station 受管欄位，其他欄位保持不變。", "Token Station 管理フィールドのみ復元し、他のフィールドは保持します。")
+                : copy("Token Station saves the original file locally immediately before writing.", "写入前会在本机保存原文件的加密快照。", "寫入前會在本機儲存原檔案的加密快照。", "書き込み直前に元のファイルをローカルへ暗号化保存します。")}</span>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" type="button" disabled={busy} onClick={() => setPendingPlan(null)}>
+              {copy("Cancel", "取消", "取消", "キャンセル")}
+            </Button>
+            <Button type="button" disabled={busy} onClick={() => void applyPendingPlan()}>
+              {busy
+                ? copy("Working…", "处理中…", "處理中…", "処理中…")
+                : pendingPlan?.intent === "restore"
+                  ? copy("Restore backup & disconnect", "恢复备份并断开", "恢復備份並斷開", "バックアップを復元して切断")
+                  : copy("Confirm connection", "确认接入", "確認連線", "接続を確認")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={restoreConflict !== null} onOpenChange={(open) => !open && setRestoreConflict(null)}>
+        <AlertDialogContent className="agent-restore-conflict-dialog">
+          <AlertDialogHeader>
+            <span className="agent-restore-warning-mark" aria-hidden="true"><AlertTriangle /></span>
+            <AlertDialogTitle>{copy("Configuration file was modified", "配置文件已被修改", "設定檔案已被修改", "設定ファイルが変更されています")}</AlertDialogTitle>
+            <AlertDialogDescription>{copy(
+              "Token Station detected changes made after connection. Choose whether to restore the backup or cancel and edit the file yourself.",
+              "检测到接入后的手动修改。请选择强制恢复备份，或取消后自行修改。", "偵測到連線後的手動修改。請選擇強制恢復備份，或取消後自行修改。", "接続後の手動変更を検出しました。バックアップを強制復元するか、キャンセルして自分で編集してください。"
+            )}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="agent-drift-files">
+            {restoreConflict?.map((file) => {
+              const managedChanges = file.changes.filter((change) => change.scope === "managed");
+              const unownedChanges = file.changes.filter((change) => change.scope === "unowned");
+              return (
+                <section key={file.target_config_path}>
+                  <code>{file.target_config_path}</code>
+                  {managedChanges.length > 0 ? (
+                    <div className="agent-drift-group danger">
+                      <strong>{copy("Token Station managed fields", "Token Station 管理的字段", "Token Station 管理的欄位", "Token Station 管理フィールド")}</strong>
+                      <span>{managedChanges.map((change) => change.path.segments.join(".")).join("、")}</span>
+                    </div>
+                  ) : null}
+                  {unownedChanges.length > 0 ? (
+                    <div className="agent-drift-group">
+                      <strong>{copy("Other fields (kept)", "其他字段（将保留）", "其他欄位（將保留）", "その他のフィールド（保持）")}</strong>
+                      <span>{unownedChanges.map((change) => change.path.segments.join(".")).join("、")}</span>
+                    </div>
+                  ) : null}
+                  {file.changes.length === 0 ? <span className="agent-drift-message">{file.message}</span> : null}
+                </section>
+              );
+            })}
+          </div>
+          <p className="agent-force-restore-note">{copy(
+            "Force restore replaces Token Station-owned fields with their pre-connection values. Unrelated fields are preserved.",
+            "强制恢复会用接入前备份覆盖受管字段；不相关字段会保留。", "強制恢復會用連線前備份覆蓋受管欄位；不相關欄位會保留。", "強制復元は管理フィールドを接続前の値に戻し、無関係なフィールドを保持します。"
+          )}</p>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>{copy("I will edit it myself", "暂不恢复，我自行处理", "暫不恢復，我自行處理", "自分で編集する")}</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={busy}
+              onClick={(event) => {
+                event.preventDefault();
+                void createRestorePlan(true);
+              }}
+            >
+              {busy ? copy("Working…", "处理中…", "處理中…", "処理中…") : copy("Force restore backup", "强制恢复备份", "強制恢復備份", "バックアップを強制復元")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={cursorRestorePending} onOpenChange={setCursorRestorePending}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{copy("Restore Cursor configuration?", "恢复 Cursor 配置？", "恢復 Cursor 設定？", "Cursor 設定を復元しますか？")}</AlertDialogTitle>
+            <AlertDialogDescription>{copy(
+              "Cursor uses a separate integration. Token Station will restore its saved configuration and disconnect.",
+              "Cursor 使用独立接入方式。Token Station 将恢复已保存的配置并断开。", "Cursor 使用獨立連線方式。Token Station 將恢復已儲存的設定並斷開。", "Cursor は別の統合方式を使用します。保存済み設定を復元して切断します。"
+            )}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{copy("Cancel", "取消", "取消", "キャンセル")}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void applyCursorRestore()}>{copy("Restore & disconnect", "恢复并断开", "恢復並斷開", "復元して切断")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
         </>
       )}
       {pageMode !== "connection" && (

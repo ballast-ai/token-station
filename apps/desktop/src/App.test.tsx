@@ -933,10 +933,12 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
   const connectCoachmark = await screen.findByRole("dialog", { name: "一键接入 Agent" });
-  const connect = screen.getByRole("button", { name: "一键接入" });
+  const connect = screen.getByRole("button", { name: "预览并接入" });
   expect(connect).toHaveAttribute("data-onboarding-active", "true");
   expect(connectCoachmark).toHaveTextContent("接入 Agent · 4/4");
   await user.click(connect);
+  const planPreview = await screen.findByRole("dialog", { name: "确认接入改动" });
+  await user.click(within(planPreview).getByRole("button", { name: "确认接入" }));
 
   await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
     "apply_agent_plan",
@@ -1017,7 +1019,7 @@ it("requires an exact installation choice before connecting a multi-installation
   await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
 
   expect(await screen.findByRole("dialog", { name: "一键接入 Agent" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "一键接入" }))
+  expect(screen.getByRole("button", { name: "预览并接入" }))
     .toHaveAttribute("data-onboarding-active", "true");
 });
 
@@ -2361,7 +2363,7 @@ describe("desktop station navigation", () => {
     await user.click(gemini);
     expect(await screen.findByRole("heading", { name: "Gemini CLI" })).toBeInTheDocument();
     expect(screen.getByText("没有在本机发现可管理的安装。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeDisabled();
   });
 
   it("restores an explicit undetected Agent after remount", async () => {
@@ -3087,7 +3089,7 @@ describe("desktop station navigation", () => {
     render(<App />);
     await waitFor(() => expect(scans).toBe(1));
     await openAgent(user, "Claude Code");
-    await user.click(await screen.findByRole("button", { name: "一键接入" }));
+    await user.click(await screen.findByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(
       invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
     ).toHaveLength(1));
@@ -3108,7 +3110,7 @@ describe("desktop station navigation", () => {
     expect(scans).toBe(1);
   });
 
-  it("applies the Connector plan directly on 一键接入", async () => {
+  it("shows the Connector plan before applying it", async () => {
     const user = userEvent.setup();
     let emitServe: ((serve: ServeView) => void) | undefined;
     listenMock.mockImplementation(async (_eventName, handler) => {
@@ -3146,15 +3148,19 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(scans).toBe(1));
     await openAgent(user, "Claude Code");
     expect(screen.queryByRole("button", { name: /选择版本/ })).toBeNull();
-    await user.click(await screen.findByRole("button", { name: "一键接入" }));
+    await user.click(await screen.findByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
       expectedVersion: "9.9.9",
     }));
-    // There is no separate write-confirmation step; apply immediately after planning.
+    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
+    const previewDialog = await screen.findByRole("dialog", { name: "确认接入改动" });
+    expect(previewDialog).toHaveTextContent("env.ANTHROPIC_BASE_URL");
+    expect(previewDialog).toHaveTextContent("本机凭据（内容已隐藏）");
+    await user.click(within(previewDialog).getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("Agent 已接入"))
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("Agent 已接入。"))
       .toBeInTheDocument();
     expect(scans).toBe(1);
     expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
@@ -3175,7 +3181,7 @@ describe("desktop station navigation", () => {
       ]);
   });
 
-  it("applies directly for an admitted state", async () => {
+  it("requires confirmation for an admitted state", async () => {
     const user = userEvent.setup();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     const admitted = defaultAdmittedClaude();
@@ -3194,20 +3200,22 @@ describe("desktop station navigation", () => {
     await openAgent(user, "Claude Code");
     expect(await screen.findByText("可接入")).toBeInTheDocument();
     expect(screen.queryByText(/未经验证|试验性/)).toBeNull();
-    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
       expectedVersion: "2.1.210",
     }));
-    // Apply immediately after planning without a confirmation step.
+    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
+    await user.click(within(await screen.findByRole("dialog", { name: "确认接入改动" }))
+      .getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-admitted",
       confirmationToken: "token-admitted",
     }));
   });
 
-  it("strips injected fields to the official config on 恢复官方配置并断开", async () => {
+  it("restores the encrypted baseline on 恢复官方配置并断开", async () => {
     const user = userEvent.setup();
     const connected = structuredClone(scannedClaude);
     connected.installations[0].managed = true;
@@ -3226,24 +3234,30 @@ describe("desktop station navigation", () => {
         detectedAgentsFixture.find((agent) => agent.metadata.agent_id === "opencode")!,
       ];
       if (command === "get_agent_drift") return [];
-      if (command === "force_forget_agent") return null;
+      if (command === "plan_agent_disconnect") return projectionPlan("restore-op", "restore-token", "disconnect");
+      if (command === "apply_agent_plan") return { operation_id: "restore-op", maintenance_warning: null };
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await openAgent(user, "Claude Code");
     await user.click(await screen.findByRole("button", { name: "恢复官方配置并断开" }));
-    // Restoring official config uses force_forget to remove injected fields without planning or confirming encrypted snapshot restoration.
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("force_forget_agent", {
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
     }));
-    expect(invokeMock).not.toHaveBeenCalledWith("plan_agent_disconnect", expect.anything());
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("已恢复官方配置并断开。"))
+    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
+    await user.click(within(await screen.findByRole("dialog", { name: "确认恢复备份" }))
+      .getByRole("button", { name: "恢复备份并断开" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
+      operationId: "restore-op",
+      confirmationToken: "restore-token",
+    }));
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("已恢复备份并断开。"))
       .toBeInTheDocument();
 
     await openAgent(user, "OpenCode");
-    expect(within(screen.getByTestId("error-toast-viewport")).getByText("已恢复官方配置并断开。"))
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText("已恢复备份并断开。"))
       .toBeInTheDocument();
     expect(document.querySelector(".agent-route-page > .banner.ok")).toBeNull();
   });
@@ -3288,7 +3302,7 @@ describe("desktop station navigation", () => {
     await user.click(await screen.findByRole("button", { name: "选择版本" }));
     await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
 
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
     await user.click(within(screen.getByRole("navigation", { name: "发现 Agent 列表" })).getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
     await user.click(within(screen.getByRole("navigation", { name: "发现 Agent 列表" })).getByRole("button", { name: "Claude Code" }));
@@ -3296,7 +3310,7 @@ describe("desktop station navigation", () => {
 
     await user.click(await screen.findByRole("button", { name: "选择版本" }));
     expect(screen.getByRole("option", { name: "claude-preview · v10.0.0" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
   });
 
   it("selects an exact installation and plans against its path", async () => {
@@ -3330,12 +3344,12 @@ describe("desktop station navigation", () => {
 
     render(<App />);
     await openAgent(user, "Claude Code");
-    expect(await screen.findByRole("button", { name: "一键接入" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "预览并接入" })).toBeDisabled();
     expect(screen.getByText("检测到多份安装，请先选择要接管的精确路径。")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: /选择版本/ }));
     await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
     expect(screen.queryByRole("listbox")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: secondInstallation.discovery.canonical_path,
