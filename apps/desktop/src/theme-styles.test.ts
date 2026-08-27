@@ -308,6 +308,15 @@ describe("retained page theme styles", () => {
     expect(inputFocusRule).toMatch(/outline:\s*none/);
   });
 
+  it("stacks enterprise connection fields vertically", () => {
+    const credentialGridRule = appCss.match(
+      /\.enterprise-credential-grid\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(credentialGridRule).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+    expect(credentialGridRule).not.toMatch(/1\.25fr/);
+  });
+
   it("keeps the proxy control width stable across runtime states", () => {
     const baseRuntimeRules = Array.from(
       appCss.matchAll(/\.station-runtime-pill\[data-slot="button"\]\s*\{([^}]*)\}/g),

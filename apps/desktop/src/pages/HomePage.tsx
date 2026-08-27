@@ -13,8 +13,6 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
-import EnterpriseConnectionPanel from "../components/EnterpriseConnectionPanel";
-import type { EnterpriseConnectionInput } from "../components/EnterpriseConnectionPanel";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -48,9 +46,7 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
-  onEnterpriseConnect?: (connection: EnterpriseConnectionInput) => boolean | Promise<boolean>;
   embedded?: boolean;
-  scope?: "global" | "enterprise";
 }
 
 export default function HomePage({
@@ -80,9 +76,7 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
-  onEnterpriseConnect = () => false,
   embedded = false,
-  scope = "global",
 }: HomePageProps) {
   const { copy } = useLocalizedCopy();
   const tierConfigured: Record<TierSlot, boolean> = {
@@ -94,7 +88,7 @@ export default function HomePage({
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const enterprise = scope === "enterprise";
+  const [keywordTier, setKeywordTier] = useState<TierSlot | null>(null);
 
   const saveProfile = async () => {
     const name = profileName.trim();
@@ -121,31 +115,21 @@ export default function HomePage({
   };
   return (
     <div className="page-stack home-page">
-      {(!embedded || enterprise) && (
+      {!embedded && (
         <header className="page-title-row">
           <div>
-            {embedded
-              ? <h2>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</h2>
-              : <h1>{enterprise ? copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング") : copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</h1>}
+            <h1>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</h1>
           </div>
         </header>
       )}
 
-      {!enterprise && (
-        <RoutingModeSelector
-          value={routingMode}
-          disabled={busy}
-          onValueChange={onSetRoutingMode}
-        />
-      )}
+      <RoutingModeSelector
+        value={routingMode}
+        disabled={busy}
+        onValueChange={onSetRoutingMode}
+      />
 
-      {enterprise ? (
-        <EnterpriseConnectionPanel
-          providers={providers}
-          busy={busy}
-          onConnect={onEnterpriseConnect}
-        />
-      ) : routingMode === "direct" ? (
+      {routingMode === "direct" ? (
         <DirectRoutePanel
           providers={providers}
           target={directTarget}
@@ -218,6 +202,12 @@ export default function HomePage({
             tiers={tiers}
             providers={providers}
             disabled={busy}
+            keywordCounts={{
+              high: keywords.high.length,
+              mid: keywords.mid.length,
+              low: keywords.low.length,
+            }}
+            onEditKeywords={setKeywordTier}
             onTierChange={onTierChange}
           />
         </div>
@@ -283,28 +273,15 @@ export default function HomePage({
         </footer>
       </section>
 
-      <section className="panel keyword-panel">
-        <div className="panel-head split-heading">
-          <div>
-            <h2>{copy("Keyword routing", "关键词路由", "關鍵字路由", "キーワードルーティング")}</h2>
-            <p className="sub">
-              {copy(
-                "Add a keyword to a tier to override automatic classification whenever a request contains it. Save and apply when finished.",
-                "自动分档不称心？给某一档加个关键词，以后请求里只要出现它，就固定到这一档，优先于自动判断。加完按上方“保存并应用”生效。", "自動分檔不稱心？給某一檔加個關鍵字，以後請求裡只要出現它，就固定到這一檔，優先於自動判斷。加完按上方「儲存並應用」生效。", "自動分類に不満？特定の段階にキーワードを追加して、リクエストにそのキーワードが含まれる場合、その段階に固定して自動分類を優先するようにできます。完了したら上記の「保存して適用」をクリックしてください。"
-              )}
-            </p>
-          </div>
-          <span className="default-route-chip">{copy("Highest priority", "最高优先级", "最高優先順序", "最高優先度")}</span>
-        </div>
-
-        <TierKeywords
-          keywords={keywords}
-          configured={tierConfigured}
-          disabled={busy}
-          onAdd={onAddKeyword}
-          onRemove={onRemoveKeyword}
-        />
-      </section>
+      <TierKeywords
+        keywords={keywords}
+        configured={tierConfigured}
+        activeSlot={keywordTier}
+        disabled={busy}
+        onOpenChange={(open) => !open && setKeywordTier(null)}
+        onAdd={onAddKeyword}
+        onRemove={onRemoveKeyword}
+      />
 
       <section className="panel local-routing-panel">
         <div className="panel-head split-heading">

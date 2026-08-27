@@ -253,6 +253,38 @@ describe("OverviewPage summaries", () => {
     expect(within(routeSummary).queryByText("Claude Code", { selector: "strong" })).toBeNull();
   });
 
+  it("identifies an active managed route as enterprise routing", () => {
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={{
+            ...state,
+            providers: [{
+              name: "q",
+              provider: "openai-compatible",
+              base_url: "https://api.example.com/v1",
+              models: ["enterprise-reasoner"],
+              has_auth: true,
+              managed_route: true,
+            }],
+            direct_target: { upstream: "q", model: "enterprise-reasoner" },
+          }}
+          registry={registry}
+          agents={agents.map((agent) => ({ ...agent, status: "DETECTED_VERIFIED" }))}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    const routeSummary = screen.getByRole("region", { name: "路由概览" });
+    expect(within(routeSummary).getByText("企业路由")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("托管路由")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("enterprise-reasoner")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("q")).toBeInTheDocument();
+    expect(within(routeSummary).queryByText("全局路由")).toBeNull();
+    expect(within(routeSummary).queryByText("简单路由")).toBeNull();
+  });
+
   it("opens the model test console from one clear Overview action", async () => {
     const user = userEvent.setup();
     render(

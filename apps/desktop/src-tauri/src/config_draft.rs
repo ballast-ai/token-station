@@ -734,6 +734,10 @@ impl AppInner {
                         .is_none(),
                     south_header_auth_v1_unavailable_reason,
                     local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
+                    managed_route: up
+                        .get("managed_route")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     access_tier: access_tier.to_owned(),
                     quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
                         QuotaPlanView {

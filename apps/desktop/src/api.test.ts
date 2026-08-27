@@ -17,6 +17,7 @@ import {
   getPlugins,
   getEgress,
   getAgentDrift,
+  getAgentBackupDirectory,
   getAgentBudgets,
   getPriceTable,
   getRecentReceipts,
@@ -70,6 +71,7 @@ import {
   getRecoveryDiagnostics,
   getRecoveryState,
   openRecoveryFolder,
+  openAgentBackupDirectory,
   recordFrontendDiagnostic,
 } from "./api";
 import type { ServeView } from "./api";
@@ -339,6 +341,8 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
   it.each([
     ["get state", () => getState(), "get_state", undefined],
     ["get runtime facts", () => getRuntimeState(), "get_runtime_state", undefined],
+    ["get Agent backup directory", () => getAgentBackupDirectory(), "get_agent_backup_directory", undefined],
+    ["open Agent backup directory", () => openAgentBackupDirectory(), "open_agent_backup_directory", undefined],
     ["add provider", () => addProvider("p", "https://p/v1", ["m"], "k"), "add_provider_with_credential", {
       name: "p",
       baseUrl: "https://p/v1",
@@ -349,10 +353,10 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       credentialReference: null,
       providerDialect: "openai-compatible",
     }],
-    ["add managed enterprise route", () => addManagedEnterpriseRoute("enterprise_main", "https://enterprise.example.com/v1", "k"), "add_managed_enterprise_route", {
-      name: "enterprise_main",
+    ["add managed enterprise route", () => addManagedEnterpriseRoute("https://enterprise.example.com/v1", "k", "enterprise-reasoner"), "add_managed_enterprise_route", {
       baseUrl: "https://enterprise.example.com/v1",
       apiKey: "k",
+      model: "enterprise-reasoner",
     }],
     ["list free provider presets", () => listFreeProviderPresets(), "list_free_provider_presets", undefined],
     ["list public provider models", () => listPublicProviderModels(["openai", "qwen"]), "list_public_provider_models", { providerIds: ["openai", "qwen"] }],

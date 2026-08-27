@@ -898,9 +898,8 @@ function StationApp() {
   const selectedAgentId = connectionAgentId
     ?? routeAgentId
     ?? (view === "agents" ? visibleRegistry[0]?.agent_id : undefined);
-  const agentWorkspaceMode = view === "home" || view === "enterprise-routing" || routeAgentId ? "routing" : "connections";
+  const agentWorkspaceMode = view === "home" || routeAgentId ? "routing" : "connections";
   const showAgentWorkspace = view === "home"
-    || view === "enterprise-routing"
     || view === "agents"
     || Boolean(connectionAgentId)
     || Boolean(routeAgentId);
@@ -1003,10 +1002,8 @@ function StationApp() {
           revealingAgentIds={revealingAgentIds}
           selectedAgentId={selectedAgentId}
           homeSelected={view === "home"}
-          enterpriseSelected={view === "enterprise-routing"}
           scanBusy={scanBusy}
           onOpenHome={() => navigate("home")}
-          onOpenEnterprise={() => navigate("enterprise-routing")}
           onRescan={() => void rescanAgents()}
           onOpenAgent={(id) => {
             navigate(agentWorkspaceMode === "routing" ? `agent-route:${id}` : `agent:${id}`);
@@ -1071,24 +1068,7 @@ function StationApp() {
                     )
                   : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由", "全部 Agent 已恢復跟隨全域性路由", "すべての Agent がグローバルルーティングに従うようになりました"),
               )}
-              onEnterpriseConnect={(connection) => run(async () => {
-                  const discovery = await verifyEnterpriseRoute(
-                    connection.name,
-                    connection.baseUrl,
-                    connection.apiKey,
-                  );
-                  if (discovery.source !== "live") {
-                    throw new Error(discovery.warning ?? "Live credential verification failed");
-                  }
-                  await addManagedEnterpriseRoute(
-                    connection.name,
-                    connection.baseUrl,
-                    connection.apiKey,
-                  );
-                  return serveStart();
-                }, undefined, true, true)}
               embedded
-              scope={view === "enterprise-routing" ? "enterprise" : "global"}
             />
           )}
           {metadata && route && (
@@ -1167,6 +1147,19 @@ function StationApp() {
             copy("Provider restored from the recycle bin", "供应商已从回收站恢复", "供應商已從回收站恢復", "プロバイダーがゴミ箱から復元されました"),
           )}
           onStateChange={showState}
+          onVerifyEnterprise={(connection) => verifyEnterpriseRoute(
+            connection.name,
+            connection.baseUrl,
+            connection.apiKey,
+          )}
+          onConnectEnterprise={(connection) => run(async () => {
+            await addManagedEnterpriseRoute(
+              connection.baseUrl,
+              connection.apiKey,
+              connection.model,
+            );
+            return serveStart();
+          }, undefined, true, true)}
           onAddProvider={() => {
             if (firstRunGuideOpen) navigate("add-provider");
             else setModelEntryOpen(true);

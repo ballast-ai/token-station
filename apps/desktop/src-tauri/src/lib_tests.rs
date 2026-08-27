@@ -8,6 +8,27 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 
 #[test]
+fn agent_backup_directory_uses_the_backend_owned_snapshot_root() {
+    let root = scratch_home("agent-backup-directory");
+    let expected = root.join("agent-integration/snapshots");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AgentIntegrationPaths {
+        snapshot_root: expected.clone(),
+        ownership_root: root.join("agent-integration/ownership"),
+    }));
+
+    assert_eq!(
+        get_agent_backup_directory(app.state()),
+        expected.display().to_string()
+    );
+    assert!(
+        !expected.exists(),
+        "reading the path must not create a directory"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn desktop_update_runtime_support_is_macos_only() {
     #[cfg(target_os = "macos")]
     assert_eq!(desktop_update_platform_unsupported_message(), None);
@@ -3756,7 +3777,7 @@ fn enterprise_route_apply_replaces_a_waiting_gateway() {
         app.state(),
         "enterprise_main".to_owned(),
         "https://enterprise.example.com/v1".to_owned(),
-        vec!["auto".to_owned()],
+        vec!["enterprise-reasoner".to_owned()],
         None,
         false,
         "env",
@@ -3765,7 +3786,10 @@ fn enterprise_route_apply_replaces_a_waiting_gateway() {
         true,
     )
     .expect("enterprise route becomes the complete Direct target");
-    assert_eq!(routed.direct_target.unwrap().model.as_deref(), Some("auto"));
+    assert_eq!(
+        routed.direct_target.unwrap().model.as_deref(),
+        Some("enterprise-reasoner")
+    );
 
     begin_serve_start(
         app.handle().clone(),
@@ -4431,7 +4455,7 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
         app.state(),
         "enterprise_main".to_owned(),
         "https://enterprise.example.com/v1".to_owned(),
-        vec!["auto".to_owned()],
+        vec!["enterprise-reasoner".to_owned()],
         None,
         false,
         "env",
@@ -4444,7 +4468,7 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
     assert_eq!(view.routing_mode, "direct");
     let target = view.direct_target.expect("the Direct target is complete");
     assert_eq!(target.upstream, "enterprise_main");
-    assert_eq!(target.model.as_deref(), Some("auto"));
+    assert_eq!(target.model.as_deref(), Some("enterprise-reasoner"));
     let provider = view
         .providers
         .iter()
@@ -4454,11 +4478,12 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
         provider.model_capabilities[0].vision,
         CapabilityState::Declared
     );
+    assert!(provider.managed_route);
 
     let managed = app.state::<AppStateManaged>();
     let inner = managed.0.lock().unwrap();
     let upstream = &inner.draft["upstreams"]["enterprise_main"];
-    assert!(upstream.get("managed_route").is_none());
+    assert_eq!(upstream["managed_route"], json!(true));
     assert_eq!(
         upstream["models"][0]["supported_parameters"],
         json!(["reasoning_effort"])

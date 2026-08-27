@@ -6,6 +6,7 @@ import {
   Eye,
   EyeOff,
   FileDiff,
+  FolderOpen,
   Globe2,
   Route as RouteIcon,
   ShieldCheck,
@@ -17,8 +18,10 @@ import {
   discardAgentPlan,
   ensureServeRunning,
   getAgentDrift,
+  getAgentBackupDirectory,
   getCursorProviderStatus,
   mountAgentProfile,
+  openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
   revealAgentPlanSensitiveValues,
@@ -356,6 +359,8 @@ export default function AgentRoutePage({
   const [restoreConflict, setRestoreConflict] = useState<AgentDriftView[] | null>(null);
   const [cursorRestorePending, setCursorRestorePending] = useState(false);
   const [copiedDiscoveryPath, setCopiedDiscoveryPath] = useState<{ path: string } | null>(null);
+  const [backupDirectory, setBackupDirectory] = useState("");
+  const [backupDirectoryCopied, setBackupDirectoryCopied] = useState(false);
   const followsGlobal = route.inherits_global === true;
   const [independentEditorOpen, setIndependentEditorOpen] = useState(!followsGlobal);
 
@@ -392,6 +397,20 @@ export default function AgentRoutePage({
       cancelled = true;
     };
   }, [metadata.agent_id, showError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getAgentBackupDirectory()
+      .then((path) => {
+        if (!cancelled) setBackupDirectory(path);
+      })
+      .catch((caught) => {
+        if (!cancelled) showError(errorText(caught), "agent-backup-directory");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showError]);
 
   useEffect(() => {
     if (copiedDiscoveryPath === null) return undefined;
@@ -476,6 +495,28 @@ export default function AgentRoutePage({
         ),
         `agent-discovery-path-copy:${metadata.agent_id}`,
       );
+    }
+  };
+
+  const copyBackupDirectory = async () => {
+    if (!backupDirectory) return;
+    try {
+      await navigator.clipboard.writeText(backupDirectory);
+      setBackupDirectoryCopied(true);
+      window.setTimeout(() => setBackupDirectoryCopied(false), 1_600);
+    } catch {
+      showError(
+        copy("Unable to copy the backup directory.", "无法复制备份目录。", "無法複製備份目錄。", "バックアップディレクトリをコピーできません。"),
+        "agent-backup-directory-copy",
+      );
+    }
+  };
+
+  const openBackupDirectory = async () => {
+    try {
+      await openAgentBackupDirectory();
+    } catch (caught) {
+      showError(errorText(caught), "agent-backup-directory-open");
     }
   };
 
@@ -921,6 +962,24 @@ export default function AgentRoutePage({
             <small>{ownedFields.length > 0
               ? copy(`Managed fields: ${ownedFields.join(", ")}`, `受管字段：${ownedFields.join("、")}`, `受管欄位：${ownedFields.join(", ")}`, `管理フィールド：${ownedFields.join(", ")}`)
               : copy("The exact non-sensitive changes appear after the connection plan is created.", "生成接入计划后会显示确切的非敏感改动。", "生成接入計劃後會顯示確切的非敏感修改。", "接続計画が作成されると、正確な非敏感な変更が表示されます。")}</small>
+          </div>
+          <div className="agent-backup-location">
+            <div>
+              <span>{copy("Encrypted backup directory", "加密备份目录", "加密備份目錄", "暗号化バックアップディレクトリ")}</span>
+              <code>{backupDirectory || copy("Loading…", "正在获取…", "正在取得…", "読み込み中…")}</code>
+            </div>
+            <div className="agent-backup-location-actions">
+              <Button variant="ghost" size="icon-sm" type="button" disabled={!backupDirectory} aria-label={backupDirectoryCopied
+                ? copy("Backup directory copied", "备份目录已复制", "備份目錄已複製", "バックアップディレクトリをコピーしました")
+                : copy("Copy backup directory", "复制备份目录", "複製備份目錄", "バックアップディレクトリをコピー")}
+                onClick={() => void copyBackupDirectory()}>
+                {backupDirectoryCopied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
+              </Button>
+              <Button variant="outline" size="sm" type="button" disabled={!backupDirectory} onClick={() => void openBackupDirectory()}>
+                <FolderOpen aria-hidden="true" />
+                {copy("Open backup folder", "打开备份文件夹", "開啟備份資料夾", "バックアップフォルダを開く")}
+              </Button>
+            </div>
           </div>
           <details className="agent-backup-policy">
             <summary>{copy("How backup and restore work", "备份与恢复如何工作", "備份與恢復如何運作", "バックアップと復元の仕組み")}</summary>

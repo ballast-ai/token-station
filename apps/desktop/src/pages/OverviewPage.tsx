@@ -75,6 +75,11 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
     provider,
   }))).slice(0, 5);
   const modelCount = state.providers.reduce((total, provider) => total + provider.models.length, 0);
+  const activeEnterpriseProvider = state.routing_mode === "direct"
+    ? state.providers.find((provider) => (
+      provider.name === state.direct_target?.upstream && provider.managed_route
+    )) ?? null
+    : null;
 
   const routeModeName = (mode: StateView["routing_mode"]) => {
     if (mode === "direct") return copy("Direct", "简单路由", "簡單路由", "シンプルルーティング");
@@ -87,7 +92,9 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
     if (inherited) {
       return {
         metadata,
-        label: copy(`Global · ${routeModeName(state.routing_mode)}`, `全局 · ${routeModeName(state.routing_mode)}`, `全域性 · ${routeModeName(state.routing_mode)}`, `グローバル · ${routeModeName(state.routing_mode)}`),
+        label: activeEnterpriseProvider
+          ? copy("Enterprise · Managed route", "企业 · 托管路由", "企業 · 託管路由", "企業 · 管理ルート")
+          : copy(`Global · ${routeModeName(state.routing_mode)}`, `全局 · ${routeModeName(state.routing_mode)}`, `全域性 · ${routeModeName(state.routing_mode)}`, `グローバル · ${routeModeName(state.routing_mode)}`),
       };
     }
     if (route.mode === "profile") {
@@ -207,7 +214,9 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <span><Route aria-hidden="true" />{copy("Routing", "路由", "路由", "ルーティング")}</span>
             <CardTitle>{routeRows.length > 0
               ? copy("Agent routing", "Agent 路由", "Agent 路由", "Agent ルーティング")
-              : copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</CardTitle>
+              : activeEnterpriseProvider
+                ? copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")
+                : copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</CardTitle>
           </CardHeader>
           <CardContent>
             {routeRows.length > 0 ? (
@@ -225,7 +234,9 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             ) : state.routing_mode === "direct" ? (
               <div className="overview-route-list overview-global-route-list" data-routing-snapshot-mode="direct">
                 <div>
-                  <Badge variant="outline">{copy("Direct", "简单路由", "簡單路由", "シンプルルーティング")}</Badge>
+                  <Badge variant="outline">{activeEnterpriseProvider
+                    ? copy("Managed route", "托管路由", "託管路由", "管理ルート")
+                    : copy("Direct", "简单路由", "簡單路由", "シンプルルーティング")}</Badge>
                   <strong>{state.direct_target?.model ?? copy("Select a model", "待选择模型", "待選擇模型", "選択するモデル")}</strong>
                   <code>{state.direct_target?.upstream ?? copy("Select a provider", "待选择供应商", "選擇供應商", "プロバイダーを選択")}</code>
                 </div>
@@ -259,7 +270,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                 })}
               </div>
             )}
-            <button className="overview-summary-link" type="button" aria-label={copy("Open routing", "打开路由", "開啟路由", "ルーティングを開く")} onClick={() => onNavigate("home")}>
+            <button className="overview-summary-link" type="button" aria-label={copy("Open routing", "打开路由", "開啟路由", "ルーティングを開く")} onClick={() => onNavigate(activeEnterpriseProvider ? "providers" : "home")}>
               <ArrowUpRight aria-hidden="true" />
             </button>
           </CardContent>

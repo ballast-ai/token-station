@@ -53,6 +53,22 @@ const MAX_PENDING_PLANS: usize = 64;
 const MAX_SESSION_LABEL_BYTES: usize = 128;
 const CONFIRMATION_TOKEN_BYTES: usize = 32;
 
+#[tauri::command]
+pub(crate) fn get_agent_backup_directory(paths: State<'_, AgentIntegrationPaths>) -> String {
+    paths.snapshot_root.display().to_string()
+}
+
+#[tauri::command]
+pub(crate) fn open_agent_backup_directory(
+    paths: State<'_, AgentIntegrationPaths>,
+) -> Result<String, String> {
+    super::safe_fs::ensure_private_dir(&paths.snapshot_root)
+        .map_err(|error| format!("创建 Agent 备份目录失败：{error}"))?;
+    tauri_plugin_opener::open_path(&paths.snapshot_root, None::<&str>)
+        .map_err(|error| format!("打开 Agent 备份目录失败：{error}"))?;
+    Ok(paths.snapshot_root.display().to_string())
+}
+
 #[derive(Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstallationView {

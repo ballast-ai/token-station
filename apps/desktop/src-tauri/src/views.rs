@@ -22,6 +22,8 @@ pub(crate) struct ProviderView {
     pub(crate) south_header_auth_v1_unavailable_reason: Option<&'static str>,
     /// This upstream runs on the local machine; `local_only` routing keeps to it.
     pub(crate) local: bool,
+    /// This upstream was created through the managed enterprise connection flow.
+    pub(crate) managed_route: bool,
     pub(crate) access_tier: String,
     /// The declared quota plan (window + limit + unit) used for local estimation
     /// in quota-first mode, if the user set one. `None` ⇒ non-windowed / metered.

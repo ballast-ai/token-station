@@ -546,6 +546,10 @@ pub struct UpstreamConfig {
     /// upstream is unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local: bool,
+    /// This upstream was created through the managed enterprise connection flow.
+    /// Legacy configurations that used the `auto` alias are promoted on load.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed_route: bool,
     /// Commercial identity of this Provider instance. Free and paid instances
     /// use different upstream names and keyring slots; routing order is unchanged.
     #[serde(default, skip_serializing_if = "AccessTier::is_paid")]
@@ -687,6 +691,20 @@ impl ClientConfig {
         }
         if self.concurrency.per_provider == 0 {
             self.concurrency.per_provider = defaults.per_provider;
+        }
+        for upstream in self.upstreams.values_mut() {
+            if upstream.managed_route || upstream.models.len() != 1 {
+                continue;
+            }
+            let model = &upstream.models[0];
+            let legacy_managed_route = model.model == "auto"
+                && model.tool_state() == token_station_protocol::CapabilityState::Declared
+                && model.vision_state() == token_station_protocol::CapabilityState::Declared
+                && model.json_schema_state() == token_station_protocol::CapabilityState::Declared
+                && model.supported_parameters.contains("reasoning_effort");
+            if legacy_managed_route {
+                upstream.managed_route = true;
+            }
         }
     }
 
@@ -1386,6 +1404,37 @@ mod tests {
             serialized["upstreams"]["openai_personal"]["access_tier"],
             "free"
         );
+    }
+
+    #[test]
+    fn managed_route_identity_round_trips_and_promotes_the_legacy_signature() {
+        let explicit: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "base_url": "https://enterprise.example.com/v1",
+            "managed_route": true,
+            "models": [{ "model": "auto" }]
+        }))
+        .expect("the managed route marker parses");
+        assert!(explicit.managed_route);
+        assert_eq!(
+            serde_json::to_value(&explicit).expect("managed route serializes")["managed_route"],
+            serde_json::json!(true)
+        );
+
+        let mut legacy = example();
+        legacy["upstreams"]["openai_personal"]["models"] = serde_json::json!([{
+            "model": "auto",
+            "tool": true,
+            "vision": true,
+            "json_schema": true,
+            "tool_state": "declared",
+            "vision_state": "declared",
+            "json_schema_state": "declared",
+            "supported_parameters": ["reasoning_effort"]
+        }]);
+        let promoted = ClientConfig::parse_with_load_migrations(&legacy.to_string())
+            .expect("the legacy managed route loads");
+        assert!(promoted.upstreams["openai_personal"].managed_route);
     }
 
     #[test]

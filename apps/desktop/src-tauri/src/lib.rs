@@ -69,8 +69,9 @@ use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, Prov
 use token_station_router_core::{UpstreamModel, UpstreamRef};
 
 use agent_integration::commands::{
-    apply_agent_plan, apply_snapshot_restore, discard_agent_plan, force_forget_agent, get_agent_drift,
-    get_cached_agent_views, list_agent_registry, list_agent_snapshots, plan_agent_connection,
+    apply_agent_plan, apply_snapshot_restore, discard_agent_plan, force_forget_agent,
+    get_agent_backup_directory, get_agent_drift, get_cached_agent_views, list_agent_registry,
+    list_agent_snapshots, open_agent_backup_directory, plan_agent_connection,
     plan_agent_disconnect, plan_snapshot_restore, reveal_agent_plan_sensitive_values,
     runtime_from_app, scan_agents, AgentCommandState,
 };
@@ -504,6 +505,8 @@ pub fn run() {
             list_agent_registry,
             scan_agents,
             get_cached_agent_views,
+            get_agent_backup_directory,
+            open_agent_backup_directory,
             plan_agent_connection,
             get_cursor_provider_status,
             configure_cursor_provider,

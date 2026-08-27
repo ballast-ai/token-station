@@ -748,15 +748,19 @@ pub(crate) fn add_provider_with_credential(
 #[tauri::command]
 pub(crate) fn add_managed_enterprise_route(
     state: State<'_, AppStateManaged>,
-    name: String,
     base_url: String,
     api_key: String,
+    model: String,
 ) -> Result<StateView, String> {
+    let model = model.trim().to_owned();
+    if model.is_empty() {
+        return Err("企业路由模型不能为空".to_owned());
+    }
     add_provider_impl(
         state,
-        name,
+        "Token-station".to_owned(),
         base_url,
-        vec!["auto".to_owned()],
+        vec![model],
         Some(api_key),
         false,
         "store",
@@ -821,9 +825,7 @@ pub(crate) fn add_provider_impl(
     }
 
     let models = normalize_provider_model_ids(models)?;
-    if managed_route && models.as_slice() != ["auto"] {
-        return Err("Enterprise managed route must use only the `auto` alias".to_owned());
-    }
+    let managed_model = managed_route.then(|| models[0].clone());
     let model_objs: Vec<Value> = models
         .iter()
         .map(|m| {
@@ -873,6 +875,9 @@ pub(crate) fn add_provider_impl(
     if local {
         up["local"] = json!(true);
     }
+    if managed_route {
+        up["managed_route"] = json!(true);
+    }
     // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
     let api_key = api_key
         .as_deref()
@@ -902,7 +907,10 @@ pub(crate) fn add_provider_impl(
             inner.draft["routing"] = json!({});
         }
         inner.draft["routing"]["mode"] = json!("direct");
-        inner.draft["routing"]["direct_target"] = json!({ "upstream": name, "model": "auto" });
+        inner.draft["routing"]["direct_target"] = json!({
+            "upstream": name,
+            "model": managed_model.expect("managed routes have one normalized model")
+        });
         inner.draft["router"]["routing_mode"] = json!("tiered");
     }
     if let Err(error) = inner.observe_draft() {

@@ -26,6 +26,8 @@ export interface ProviderView {
   south_header_auth_v1_unavailable_reason?: SouthUnavailableReason | null;
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
+  /** Enterprise route created through the fixed Token-station provider flow. */
+  managed_route?: boolean;
   access_tier?: "free" | "paid";
   /** Declared quota plan for local estimates; absent means non-windowed or usage-based. */
   quota_plan?: QuotaPlanView | null;
@@ -887,14 +889,20 @@ export const addProvider = (
   });
 
 export const addManagedEnterpriseRoute = (
-  name: string,
   base_url: string,
   api_key: string,
+  model: string,
 ) => invoke<StateView>("add_managed_enterprise_route", {
-  name,
   baseUrl: base_url,
   apiKey: api_key,
+  model,
 });
+
+export const getAgentBackupDirectory = () =>
+  invoke<string>("get_agent_backup_directory");
+
+export const openAgentBackupDirectory = () =>
+  invoke<string>("open_agent_backup_directory");
 
 export const listFreeProviderPresets = () =>
   invoke<FreeProviderPresetView[]>("list_free_provider_presets");

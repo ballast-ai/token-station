@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Building2, ChevronDown, GitBranch, RefreshCw, Route } from "lucide-react";
+import { ChevronDown, GitBranch, RefreshCw, Route } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
@@ -16,10 +16,8 @@ interface AgentsPageProps {
   revealingAgentIds: ReadonlySet<string>;
   selectedAgentId?: string;
   homeSelected: boolean;
-  enterpriseSelected?: boolean;
   scanBusy: boolean;
   onOpenHome: () => void;
-  onOpenEnterprise?: () => void;
   onOpenAgent: (agentId: string) => void;
   onRescan: () => void;
   children: ReactNode;
@@ -50,10 +48,8 @@ export default function AgentsPage({
   revealingAgentIds,
   selectedAgentId,
   homeSelected,
-  enterpriseSelected = false,
   scanBusy,
   onOpenHome,
-  onOpenEnterprise = onOpenHome,
   onOpenAgent,
   onRescan,
   children,
@@ -225,31 +221,6 @@ export default function AgentsPage({
                     </Button>
                   );
                 })}
-                {!connections && (
-                  <Button
-                    className="agent-master-item agent-master-enterprise routing-scope-item"
-                    variant="ghost"
-                    type="button"
-                    aria-label={copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}
-                    title={copy(
-                      "Connect and use a server-managed routing endpoint",
-                      "接入并使用由企业服务管理模型与策略的路由端点",
-                      "接入並使用由企業服務管理模型與策略的路由端點",
-                      "企業サービスがモデルとポリシーを管理するルーティングエンドポイントに接続して使用します",
-                    )}
-                    aria-current={enterpriseSelected ? "page" : undefined}
-                    onClick={onOpenEnterprise}
-                  >
-                    <span className="agent-master-icon enterprise-route-mark" aria-hidden="true">
-                      <Building2 />
-                    </span>
-                    <span className="agent-master-copy routing-scope-copy">
-                      <strong>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</strong>
-                      <small>{copy("Models and policy managed by your service", "由企业服务管理模型与策略", "由企業服務管理模型與策略", "モデルとポリシーを企業サービスで管理")}</small>
-                    </span>
-                    {enterpriseSelected && <Badge variant="secondary">{copy("Current", "当前", "當前", "表示中")}</Badge>}
-                  </Button>
-                )}
               </nav>
             </ScrollArea>
           </CardContent>

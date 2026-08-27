@@ -45,6 +45,13 @@ function mockInvokeImplementation(implementation: InvokeMockImplementation) {
       ) {
         return fallbackRuntime as never;
       }
+      if (
+        args[0] === "get_agent_backup_directory"
+        && error instanceof Error
+        && error.message.startsWith("unexpected IPC command:")
+      ) {
+        return "/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots" as never;
+      }
       throw error;
     }
   });
@@ -1701,6 +1708,21 @@ describe("desktop station navigation", () => {
     expect(within(modeTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("merges keyword routing into the three smart-routing rows", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await openRouting(user);
+
+    expect(screen.queryByRole("heading", { name: "关键词路由" })).toBeNull();
+    for (const tier of ["上档", "中档", "下档"]) {
+      expect(screen.getByRole("button", { name: new RegExp(`编辑${tier}关键词`) })).toBeInTheDocument();
+    }
+    expect(screen.queryByText("强模型")).toBeNull();
+    expect(screen.queryByText("中模型")).toBeNull();
+    expect(screen.queryByText("弱模型")).toBeNull();
+  });
+
   it("connects and applies a server-managed enterprise route in one action", async () => {
     const user = userEvent.setup();
     const account = { upstream: "kimi", model: "kimi-k3" };
@@ -1716,11 +1738,12 @@ describe("desktop station navigation", () => {
       quota_accounts: [account],
     });
     const enterpriseProvider = {
-      name: "enterprise_main",
+      name: "Token-station",
       provider: "openai-compatible",
       base_url: "https://enterprise.example.com/v1",
-      models: ["auto"],
+      models: ["enterprise-reasoner"],
       has_auth: true,
+      managed_route: true,
     };
     const added = stateFixture({
       ...initial,
@@ -1729,7 +1752,7 @@ describe("desktop station navigation", () => {
     const routed = stateFixture({
       ...added,
       routing_mode: "direct",
-      direct_target: { upstream: "enterprise_main", model: "auto" },
+      direct_target: { upstream: "Token-station", model: "enterprise-reasoner" },
     });
     const applying = stateFixture({
       ...routed,
@@ -1755,24 +1778,21 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await openRouting(user);
-    const scopes = screen.getByRole("region", { name: "路由范围" });
-    await user.click(within(scopes).getByRole("button", { name: "企业路由" }));
+    await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="模型"]')!);
+    await user.click(await screen.findByRole("button", { name: "企业路由" }));
 
-    expect(await screen.findByRole("heading", { name: "企业路由" })).toBeInTheDocument();
-    expect(screen.queryByRole("tablist", { name: "路由模式" })).toBeNull();
-    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeInTheDocument();
-    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "添加企业路由" });
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), enterpriseProvider.base_url);
     await user.type(screen.getByLabelText("API Key"), "secret-key");
-    await user.type(screen.getByRole("textbox", { name: "账户名称" }), enterpriseProvider.name);
-    await user.click(screen.getByRole("button", { name: "接入并使用" }));
+    await user.click(within(dialog).getByRole("button", { name: "验证并获取模型" }));
+    await user.selectOptions(await within(dialog).findByRole("combobox", { name: "模型" }), "enterprise-reasoner");
+    await user.click(within(dialog).getByRole("button", { name: "添加并使用" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
     expect(invokeMock).toHaveBeenCalledWith("add_managed_enterprise_route", {
-      name: enterpriseProvider.name,
       baseUrl: enterpriseProvider.base_url,
       apiKey: "secret-key",
+      model: "enterprise-reasoner",
     });
     expect(invokeMock).toHaveBeenCalledWith("verify_enterprise_route", {
       name: enterpriseProvider.name,
@@ -1781,14 +1801,20 @@ describe("desktop station navigation", () => {
     });
     expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("set_direct_route", expect.anything());
-    expect(screen.getByText("企业路由已接入，正在应用配置…")).toBeInTheDocument();
-    expect(screen.queryByText("额度优先")).toBeNull();
-    expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加企业路由" })).toBeNull();
   });
 
   it("rejects cached enterprise verification and reloads authoritative state", async () => {
     const user = userEvent.setup();
-    const initial = stateFixture();
+    const initial = stateFixture({
+      providers: [{
+        name: "kimi",
+        provider: "openai-compatible",
+        base_url: "https://api.moonshot.cn/v1",
+        models: ["kimi-k3"],
+        has_auth: true,
+      }],
+    });
     let stateReads = 0;
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") {
@@ -1809,17 +1835,16 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await openRouting(user);
-    const scopes = screen.getByRole("region", { name: "路由范围" });
-    await user.click(within(scopes).getByRole("button", { name: "企业路由" }));
+    await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="模型"]')!);
+    await user.click(await screen.findByRole("button", { name: "企业路由" }));
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://enterprise.example.com/v1");
     await user.type(screen.getByLabelText("API Key"), "invalid-key");
-    await user.click(screen.getByRole("button", { name: "接入并使用" }));
+    await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
 
-    await waitFor(() => expect(stateReads).toBe(2));
+    await waitFor(() => expect(stateReads).toBe(1));
     expect(invokeMock).not.toHaveBeenCalledWith("add_managed_enterprise_route", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
-    expect(screen.getByText("接入未完成，请查看错误后重试。")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Provider rejected the API key");
     expect(screen.getByLabelText("API Key")).toHaveValue("invalid-key");
   });
 

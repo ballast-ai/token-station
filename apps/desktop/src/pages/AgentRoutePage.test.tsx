@@ -9,9 +9,11 @@ import {
   discardAgentPlan,
   ensureServeRunning,
   forceForgetAgent,
+  getAgentBackupDirectory,
   getAgentDrift,
   getCursorProviderStatus,
   mountAgentProfile,
+  openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
   revealAgentPlanSensitiveValues,
@@ -29,9 +31,11 @@ vi.mock("../api", () => ({
   discardAgentPlan: vi.fn(),
   ensureServeRunning: vi.fn(),
   forceForgetAgent: vi.fn(),
+  getAgentBackupDirectory: vi.fn(),
   getAgentDrift: vi.fn(),
   getCursorProviderStatus: vi.fn(),
   mountAgentProfile: vi.fn(),
+  openAgentBackupDirectory: vi.fn(),
   planAgentConnection: vi.fn(),
   planAgentDisconnect: vi.fn(),
   revealAgentPlanSensitiveValues: vi.fn(),
@@ -100,7 +104,9 @@ describe("AgentRoutePage multi-install admission", () => {
     vi.mocked(planAgentDisconnect).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(revealAgentPlanSensitiveValues).mockReset().mockResolvedValue([]);
     vi.mocked(forceForgetAgent).mockReset().mockReturnValue(new Promise(() => undefined));
+    vi.mocked(getAgentBackupDirectory).mockReset().mockResolvedValue("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots");
     vi.mocked(mountAgentProfile).mockReset().mockResolvedValue({} as never);
+    vi.mocked(openAgentBackupDirectory).mockReset().mockResolvedValue("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots");
     vi.mocked(restartAgentRoute).mockReset().mockResolvedValue({} as never);
     vi.mocked(restoreCursorProvider).mockReset().mockResolvedValue({
       state: "disconnected",
@@ -147,6 +153,47 @@ describe("AgentRoutePage multi-install admission", () => {
 
     const heading = screen.getByRole("heading", { name: "Claude Code" }).closest("header");
     expect(heading?.querySelector('[data-agent-brand="claude-code"]')).toBeInTheDocument();
+  });
+
+  it("shows the exact encrypted backup directory and can open it without sending a renderer path", async () => {
+    const user = userEvent.setup();
+    render(
+      <AgentRoutePage
+        metadata={{
+          agent_id: "claude-code",
+          legacy_kind: "cc",
+          display_name: "Claude Code",
+          icon_key: "claude",
+          admission: "supported",
+        }}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "direct",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning={false}
+        applying={false}
+        onStateChange={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+        pageMode="connection"
+      />,
+    );
+
+    expect(await screen.findByText("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "打开备份文件夹" }));
+    expect(openAgentBackupDirectory).toHaveBeenCalledWith();
   });
 
   it("接入前展示字段级前后预览，确认后才按 ensure → plan → apply → cached 执行", async () => {

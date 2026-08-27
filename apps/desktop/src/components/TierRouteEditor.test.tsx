@@ -83,7 +83,13 @@ describe("TierRouteEditor", () => {
 
   it("renders the existing three-tier structure with accessible controls", () => {
     render(
-      <TierRouteEditor tiers={tiers} providers={providers} onTierChange={vi.fn()} />,
+      <TierRouteEditor
+        tiers={tiers}
+        providers={providers}
+        keywordCounts={{ high: 2, mid: 0, low: 1 }}
+        onEditKeywords={vi.fn()}
+        onTierChange={vi.fn()}
+      />,
     );
 
     expect(screen.getByText("上档")).toBeInTheDocument();
@@ -94,7 +100,27 @@ describe("TierRouteEditor", () => {
     expect(screen.getByLabelText("上档供应商")).toHaveTextContent("deepseek");
     expect(screen.getByLabelText("上档模型")).toHaveTextContent("deepseek-v4-pro");
     expect(screen.getByLabelText("下档模型")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "编辑上档关键词，当前 2 个" })).toHaveTextContent("关键词 2");
+    expect(screen.getByRole("button", { name: "编辑中档关键词，当前 0 个" })).toHaveTextContent("关键词");
+    expect(screen.getByRole("button", { name: "编辑下档关键词，当前 1 个" })).toHaveTextContent("关键词 1");
     expect(screen.queryByRole("button", { name: "同步三档" })).not.toBeInTheDocument();
+  });
+
+  it("opens keyword editing for the matching tier", async () => {
+    const user = userEvent.setup();
+    const onEditKeywords = vi.fn();
+    render(
+      <TierRouteEditor
+        tiers={tiers}
+        providers={providers}
+        keywordCounts={{ high: 0, mid: 3, low: 0 }}
+        onEditKeywords={onEditKeywords}
+        onTierChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "编辑中档关键词，当前 3 个" }));
+    expect(onEditKeywords).toHaveBeenCalledWith("mid");
   });
 
   it("selects the provider's first model when the provider changes", async () => {
