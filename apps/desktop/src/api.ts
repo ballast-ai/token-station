@@ -397,6 +397,7 @@ export interface SettingsView {
   egress_no_proxy: string[];
   egress_auth_username: string;
   egress_auth_slot: string;
+  egress_extra_ca_file: string;
 }
 
 export interface EgressView {
@@ -1115,7 +1116,7 @@ export const applySnapshotRestore = (operationId: string, confirmationToken: str
 export const setSettings = (
   auth: boolean,
   metrics: boolean,
-  egress: Pick<SettingsView, "egress_mode" | "egress_proxy_url" | "egress_no_proxy" | "egress_auth_username" | "egress_auth_slot">,
+  egress: Pick<SettingsView, "egress_mode" | "egress_proxy_url" | "egress_no_proxy" | "egress_auth_username" | "egress_auth_slot" | "egress_extra_ca_file">,
 ) => invoke<StateView>("set_settings", {
   auth,
   metrics,
@@ -1124,6 +1125,7 @@ export const setSettings = (
   egressNoProxy: egress.egress_no_proxy,
   egressAuthUsername: egress.egress_auth_username,
   egressAuthSlot: egress.egress_auth_slot,
+  egressExtraCaFile: egress.egress_extra_ca_file,
 });
 
 // ---------------------------------------------------------------------------

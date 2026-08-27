@@ -172,11 +172,23 @@ fn map_transport_error(error: ureq::Error) -> ErrorEnvelope {
             504,
             format!("upstream attempt timed out: {timeout}"),
         ),
-        error => ErrorEnvelope::new(
-            ErrorCode::UpstreamUnavailable,
-            502,
-            format!("upstream transport: {error}"),
-        ),
+        error => {
+            // Certificate-verification failures get an actionable hint; a
+            // bare rustls code ("invalid peer certificate: UnknownIssuer")
+            // reads as a network problem and sends users down the wrong path.
+            if let Some(failure) = crate::tls_trust::classify_tls_failure(&error) {
+                return ErrorEnvelope::new(
+                    ErrorCode::UpstreamUnavailable,
+                    502,
+                    format!("upstream tls: {}: {error}", failure.hint()),
+                );
+            }
+            ErrorEnvelope::new(
+                ErrorCode::UpstreamUnavailable,
+                502,
+                format!("upstream transport: {error}"),
+            )
+        }
     }
 }
 
@@ -632,14 +644,20 @@ impl EgressPolicy {
         secrets: &SecretStore,
     ) -> Result<ureq::config::Config, String> {
         let proxy = self.proxy(secrets)?;
-        Ok(ureq::Agent::config_builder()
+        let mut builder = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             // The pipeline maps upstream errors itself; a non-2xx is an
             // answer, not a transport failure.
             .http_status_as_error(false)
             .max_redirects(0)
-            .proxy(proxy)
-            .build())
+            .proxy(proxy);
+        // Operator-supplied extra CAs (merged with the webpki roots). The
+        // cancel-aware agent picks this up too: its DefaultConnector chain
+        // ends in RustlsConnector, which reads `Config.tls_config`.
+        if let Some(tls) = self.policy.extra_tls_config()? {
+            builder = builder.tls_config(tls);
+        }
+        Ok(builder.build())
     }
 
     fn proxy(&self, secrets: &SecretStore) -> Result<Option<ureq::Proxy>, String> {
@@ -5046,7 +5064,8 @@ mod egress_policy_tests {
                 proxy_url: Some(url.to_string()),
                 no_proxy: vec!["localhost".to_string(), "*.corp.internal".to_string()],
                 auth: None,
-            });
+                extra_ca_file: None,
+        });
             let agent = policy
                 .agent(Duration::from_secs(1), &SecretStore::default())
                 .unwrap();
@@ -5122,6 +5141,7 @@ mod egress_policy_tests {
             proxy_url: Some(format!("http://{address}")),
             no_proxy: Vec::new(),
             auth: None,
+            extra_ca_file: None,
         });
         let response = policy
             .agent(Duration::from_secs(2), &SecretStore::default())

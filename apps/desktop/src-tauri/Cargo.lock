@@ -5371,6 +5371,7 @@ dependencies = [
  "libc",
  "pdf-extract",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5385,6 +5386,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "ureq",
+ "webpki-root-certs",
 ]
 
 [[package]]
@@ -5417,6 +5419,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rusqlite",
+ "rustls",
  "semver",
  "serde",
  "serde_json",

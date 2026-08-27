@@ -138,6 +138,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
       egress_no_proxy: [],
       egress_auth_username: "",
       egress_auth_slot: "",
+      egress_extra_ca_file: "",
     },
     ...overrides,
   };

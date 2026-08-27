@@ -369,14 +369,17 @@ fn fetch_models_with_egress(
     } else {
         None
     };
-    let http = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .timeout_global(Some(DISCOVERY_TIMEOUT))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .proxy(proxy)
-            .build(),
-    );
+    let mut builder = ureq::Agent::config_builder()
+        .timeout_global(Some(DISCOVERY_TIMEOUT))
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .proxy(proxy);
+    // Same trust policy as the gateway's egress agents: webpki roots plus the
+    // operator's extra CAs (self-signed enterprise deployments).
+    if let Some(tls) = egress.extra_tls_config()? {
+        builder = builder.tls_config(tls);
+    }
+    let http = ureq::Agent::new_with_config(builder.build());
     let mut request = http
         .get(&url)
         .header("accept", "application/json")
@@ -385,9 +388,7 @@ fn fetch_models_with_egress(
         request = request.header("authorization", &format!("Bearer {key}"));
     }
 
-    let response = request
-        .call()
-        .map_err(|error| format!("模型目录请求失败：{error}"))?;
+    let response = request.call().map_err(describe_request_error)?;
     let status = response.status().as_u16();
     if (300..400).contains(&status) {
         return Err(format!("模型目录拒绝上游重定向：HTTP {status}"));
@@ -539,6 +540,28 @@ fn explicit_image_input_state(model: &Value) -> CapabilityState {
         })
     })
     .unwrap_or(CapabilityState::Unknown)
+}
+
+/// Transport failures with the TLS certificate cases spelled out in
+/// actionable terms; everything else keeps the raw error appended.
+fn describe_request_error(error: ureq::Error) -> String {
+    use token_station_cli::tls_trust::{classify_tls_failure, TlsTrustFailure};
+    match classify_tls_failure(&error) {
+        Some(TlsTrustFailure::UntrustedIssuer) => {
+            "服务端证书不在信任链中。若是自签名部署，请在「设置 → 出站策略」填入部署方提供的 CA 证书文件；已配置的，请核对该 CA 是否签发了服务端证书".to_owned()
+        }
+        Some(TlsTrustFailure::NameMismatch) => {
+            "服务端证书与访问地址不匹配（证书未包含当前主机名或 IP）。请改用证书覆盖的地址访问，或请部署方重新签发".to_owned()
+        }
+        Some(TlsTrustFailure::Expired) => "服务端证书已过期，请联系部署方重新签发".to_owned(),
+        Some(TlsTrustFailure::NotYetValid) => {
+            "服务端证书尚未生效，请检查本机时间或联系部署方".to_owned()
+        }
+        Some(TlsTrustFailure::WrongPurpose) => {
+            "服务端证书用途不符（可能把 CA 证书直接当服务器证书使用），请联系部署方重新签发".to_owned()
+        }
+        None => format!("模型目录请求失败：{error}"),
+    }
 }
 
 fn status_message(status: u16) -> String {
@@ -817,13 +840,28 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        catalog_for_provider, discover_with_cache, fetch_models, parse_models, read_cached_entry,
-        remove_provider, status_message, unknown_catalog_model, write_cache, CacheEntry,
-        CatalogSource, CatalogState, MAX_MODELS_PER_PROVIDER, MAX_MODEL_ID_BYTES,
+        catalog_for_provider, describe_request_error, discover_with_cache, fetch_models,
+        parse_models, read_cached_entry, remove_provider, status_message, unknown_catalog_model,
+        write_cache, CacheEntry, CatalogSource, CatalogState, MAX_MODELS_PER_PROVIDER,
+        MAX_MODEL_ID_BYTES,
     };
     use serde_json::json;
     use std::io::{Read, Write};
     use token_station_protocol::{CapabilityState, ModelCapability};
+
+    #[test]
+    fn tls_trust_failures_map_to_actionable_chinese_messages() {
+        let untrusted = ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+        ));
+        assert!(describe_request_error(untrusted).contains("不在信任链"));
+        let refused = ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        assert!(describe_request_error(refused).starts_with("模型目录请求失败"));
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()

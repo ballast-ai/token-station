@@ -48,10 +48,12 @@ function SettingsContent({
   const [noProxy, setNoProxy] = useState(settings.egress_no_proxy.join(", "));
   const [proxyUsername, setProxyUsername] = useState(settings.egress_auth_username);
   const [proxySlot, setProxySlot] = useState(settings.egress_auth_slot);
+  const [extraCaFile, setExtraCaFile] = useState(settings.egress_extra_ca_file);
   const [err, setErr] = useState("");
   const [errorField, setErrorField] = useState("");
   const [egressView, setEgressView] = useState<EgressView | null>(null);
   const proxyUrlRef = useRef<HTMLInputElement>(null);
+  const extraCaFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void getEgress().then(setEgressView).catch(() => setEgressView(null));
@@ -64,7 +66,8 @@ function SettingsContent({
     || proxyUrl !== settings.egress_proxy_url
     || noProxyEntries.join(",") !== settings.egress_no_proxy.join(",")
     || proxyUsername !== settings.egress_auth_username
-    || proxySlot !== settings.egress_auth_slot;
+    || proxySlot !== settings.egress_auth_slot
+    || extraCaFile !== settings.egress_extra_ca_file;
 
   const save = async () => {
     setErr("");
@@ -76,6 +79,7 @@ function SettingsContent({
         egress_no_proxy: noProxyEntries,
         egress_auth_username: proxyUsername.trim(),
         egress_auth_slot: proxySlot.trim(),
+        egress_extra_ca_file: extraCaFile.trim(),
       });
       onSaved(s);
       showSuccess(
@@ -88,6 +92,10 @@ function SettingsContent({
         setErr(failure.message);
         setErrorField(failure.field);
         requestAnimationFrame(() => proxyUrlRef.current?.focus());
+      } else if (failure.field === "egress_extra_ca_file") {
+        setErr(failure.message);
+        setErrorField(failure.field);
+        requestAnimationFrame(() => extraCaFileRef.current?.focus());
       } else {
         showError(failure.message, "settings-save");
       }
@@ -157,6 +165,29 @@ function SettingsContent({
             {proxySlot && <div className="inline-note mono">{t("general.credentialCommand", { slot: proxySlot })}</div>}
           </>
         )}
+        <label>
+          {t("general.extraCaFile")}
+          <Input
+            ref={extraCaFileRef}
+            className="mono"
+            aria-label={t("general.extraCaFile")}
+            aria-invalid={errorField === "egress_extra_ca_file"}
+            aria-describedby={errorField === "egress_extra_ca_file" ? "egress-extra-ca-file-error" : undefined}
+            value={extraCaFile}
+            onChange={(event) => {
+              setExtraCaFile(event.target.value);
+              if (errorField === "egress_extra_ca_file") {
+                setErrorField("");
+                setErr("");
+              }
+            }}
+            placeholder="/absolute/path/ca.pem"
+          />
+          {errorField === "egress_extra_ca_file" && (
+            <small id="egress-extra-ca-file-error" className="error-text" role="alert">{err}</small>
+          )}
+        </label>
+        <div className="inline-note">{t("general.extraCaFileDescription")}</div>
         <div className="inline-note">
           {t("general.routeSummary", {
             route: egressMode === "direct"

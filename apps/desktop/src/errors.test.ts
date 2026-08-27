@@ -19,6 +19,21 @@ describe("humanizeAppError", () => {
     );
   });
 
+  it("keeps TLS certificate-trust failures out of the generic network fallback", () => {
+    const untrusted =
+      "服务端证书不在信任链中。若是自签名部署，请在「设置 → 出站策略」填入部署方提供的 CA 证书文件；已配置的，请核对该 CA 是否签发了服务端证书";
+
+    expect(humanizeAppError(untrusted, "zh-CN")).toContain("不在信任链");
+    expect(humanizeAppError(untrusted, "en")).toContain("Settings → Egress");
+    const nameMismatch = "服务端证书与访问地址不匹配（证书未包含当前主机名或 IP）。请改用证书覆盖的地址访问，或请部署方重新签发";
+    expect(humanizeAppError(nameMismatch, "en")).toContain("does not match the requested address");
+    // A raw handshake string a backend without the mapping would emit still
+    // routes to the specific entry, not "check the network".
+    expect(humanizeAppError("io: invalid peer certificate: UnknownIssuer", "zh-CN")).toContain(
+      "不在信任链",
+    );
+  });
+
   it("explains Cursor tunnel failures without falling back to a generic error", () => {
     const raw = "读取 cloudflared 下载包失败：the response body is larger than request limit";
 

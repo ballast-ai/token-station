@@ -68,6 +68,7 @@ const settings: SettingsView = {
   egress_no_proxy: [],
   egress_auth_username: "",
   egress_auth_slot: "",
+  egress_extra_ca_file: "",
 };
 
 const state: StateView = {
@@ -333,6 +334,7 @@ describe("settings and update actions", () => {
       egress_no_proxy: [],
       egress_auth_username: "",
       egress_auth_slot: "",
+      egress_extra_ca_file: "",
     }));
     expect(onSaved).toHaveBeenCalledWith(state);
     const viewport = screen.getByTestId("error-toast-viewport");
@@ -359,6 +361,7 @@ describe("settings and update actions", () => {
       egress_no_proxy: ["localhost", "*.corp.internal"],
       egress_auth_username: "x",
       egress_auth_slot: "proxy_password",
+      egress_extra_ca_file: "",
     }));
   });
 

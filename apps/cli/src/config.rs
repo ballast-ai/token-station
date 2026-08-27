@@ -152,6 +152,12 @@ pub struct EgressConfig {
     pub no_proxy: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProxyAuthConfig>,
+    /// Absolute path to a PEM file with one or more additional trusted CA
+    /// certificates (self-signed / private-CA deployments). The certificates
+    /// are **appended** to the Mozilla webpki roots — never a replacement —
+    /// and apply in every egress mode, including `direct`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_ca_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +292,76 @@ impl EgressConfig {
             .parse::<ureq::http::Uri>()
             .map_err(|_| "egress target URL is invalid".to_string())?;
         Ok(proxy.is_no_proxy(&uri))
+    }
+
+    /// The additional trusted CA certificates from `extra_ca_file`.
+    ///
+    /// Empty when the field is unset. An unreadable file, invalid PEM, or a
+    /// PEM with zero certificates is an error, never a silent no-op: ureq's
+    /// own store-building skips unparsable certificates silently, which would
+    /// surface much later as an undiagnosable `UnknownIssuer`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or holds no certificate.
+    pub fn load_extra_cas(&self) -> Result<Vec<ureq::tls::Certificate<'static>>, String> {
+        let Some(path) = self
+            .extra_ca_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            return Ok(Vec::new());
+        };
+        let pem = std::fs::read(path)
+            .map_err(|error| format!("egress extra_ca_file `{path}`: {error}"))?;
+        let mut certs = Vec::new();
+        for item in ureq::tls::parse_pem(&pem) {
+            match item {
+                Ok(ureq::tls::PemItem::Certificate(cert)) => certs.push(cert),
+                // Non-certificate PEM sections (e.g. a stray key) are ignored;
+                // trust only ever grows by certificates.
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "egress extra_ca_file `{path}` is not valid PEM: {error}"
+                    ));
+                }
+            }
+        }
+        if certs.is_empty() {
+            return Err(format!(
+                "egress extra_ca_file `{path}` contains no certificate"
+            ));
+        }
+        Ok(certs)
+    }
+
+    /// TLS trust configuration for outbound agents: the Mozilla webpki roots
+    /// plus the operator's extra CAs. `None` when no extra CA is configured,
+    /// keeping ureq's stock defaults. ureq's `RootCerts::Specific` replaces
+    /// the store wholesale, so the webpki roots are re-added explicitly —
+    /// a configured private CA must never cut off public providers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `extra_ca_file` is set but unusable.
+    pub fn extra_tls_config(&self) -> Result<Option<ureq::tls::TlsConfig>, String> {
+        let extra = self.load_extra_cas()?;
+        if extra.is_empty() {
+            return Ok(None);
+        }
+        let mut roots: Vec<ureq::tls::Certificate<'static>> =
+            webpki_root_certs::TLS_SERVER_ROOT_CERTS
+                .iter()
+                .map(|der| ureq::tls::Certificate::from_der(der.as_ref()).to_owned())
+                .collect();
+        roots.extend(extra);
+        Ok(Some(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&roots))
+                .build(),
+        ))
     }
 }
 
@@ -993,6 +1069,9 @@ impl ClientConfig {
         }
 
         self.egress.proxy_parts()?;
+        // Fail at save/startup, not on the first request: an extra CA file
+        // that is missing or holds no certificate is a configuration error.
+        self.egress.load_extra_cas()?;
 
         for (agent_id, budget) in &self.agent_budgets {
             if !Self::is_valid_agent_id(agent_id) {
@@ -1174,6 +1253,7 @@ mod tests {
             proxy_url: Some("http://proxy.internal:8080".to_string()),
             no_proxy: vec!["localhost".to_string(), "*.corp.internal".to_string()],
             auth: None,
+            extra_ca_file: None,
         };
         assert_eq!(
             http.proxy_parts().unwrap(),
@@ -1184,6 +1264,7 @@ mod tests {
             proxy_url: Some("socks5h://proxy.internal:1080".to_string()),
             no_proxy: Vec::new(),
             auth: None,
+            extra_ca_file: None,
         };
         assert_eq!(socks.proxy_parts().unwrap().unwrap().0, "socks5h");
         let inline = EgressConfig {
@@ -1191,11 +1272,48 @@ mod tests {
             proxy_url: Some("http://user:secret@proxy.internal:8080".to_string()),
             no_proxy: Vec::new(),
             auth: None,
+            extra_ca_file: None,
         };
         assert!(inline.proxy_parts().unwrap_err().contains("credentials"));
         let mut invalid_direct = EgressConfig::default();
         invalid_direct.no_proxy.push("localhost".to_string());
         assert!(invalid_direct.proxy_parts().is_err());
+    }
+
+    #[test]
+    fn extra_ca_file_loads_every_certificate_and_rejects_unusable_files() {
+        let ca = include_bytes!("../tests/fixtures/tls/ca_cert.pem");
+        let dir = std::env::temp_dir();
+        let single = dir.join(format!("ts-extra-ca-single-{}.pem", std::process::id()));
+        let bundle = dir.join(format!("ts-extra-ca-bundle-{}.pem", std::process::id()));
+        let empty = dir.join(format!("ts-extra-ca-empty-{}.pem", std::process::id()));
+        std::fs::write(&single, ca).unwrap();
+        std::fs::write(&bundle, [ca.as_slice(), ca.as_slice()].concat()).unwrap();
+        std::fs::write(&empty, b"not a certificate\n").unwrap();
+
+        let with_path = |path: &std::path::Path| EgressConfig {
+            extra_ca_file: Some(path.display().to_string()),
+            ..EgressConfig::default()
+        };
+        // Unset field: no certificates, no error, no TLS override.
+        assert!(EgressConfig::default().load_extra_cas().unwrap().is_empty());
+        assert!(EgressConfig::default().extra_tls_config().unwrap().is_none());
+        // A bundle loads every certificate, not just the first PEM block.
+        assert_eq!(with_path(&single).load_extra_cas().unwrap().len(), 1);
+        assert_eq!(with_path(&bundle).load_extra_cas().unwrap().len(), 2);
+        assert!(with_path(&single).extra_tls_config().unwrap().is_some());
+        // Zero-certificate and missing files are loud errors, never a silent
+        // fallback to the stock roots.
+        assert!(with_path(&empty)
+            .load_extra_cas()
+            .unwrap_err()
+            .contains("no certificate"));
+        let missing = dir.join("ts-extra-ca-never-written.pem");
+        assert!(with_path(&missing).load_extra_cas().is_err());
+
+        for path in [single, bundle, empty] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

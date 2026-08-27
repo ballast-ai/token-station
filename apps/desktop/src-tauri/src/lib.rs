@@ -1185,6 +1185,7 @@ struct SettingsView {
     egress_no_proxy: Vec<String>,
     egress_auth_username: String,
     egress_auth_slot: String,
+    egress_extra_ca_file: String,
 }
 
 // ---- Subpage view types for full-capability subpages (#5) ------------------
@@ -2076,6 +2077,10 @@ impl AppInner {
                 .unwrap_or_default()
                 .to_string(),
             egress_auth_slot: d["egress"]["auth"]["credential"]["slot"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            egress_extra_ca_file: d["egress"]["extra_ca_file"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
@@ -5334,6 +5339,13 @@ fn agents_display(plugins: &Value) -> String {
 
 fn classify_settings_error(message: String) -> SettingsCommandError {
     let normalized = message.to_ascii_lowercase();
+    if normalized.contains("extra_ca_file") {
+        return settings_error(
+            "egress_extra_ca_file",
+            "invalid_extra_ca",
+            format!("CA 证书文件无效；需要一个存在、可读、至少包含一张 PEM 证书的文件（{message}）"),
+        );
+    }
     if normalized.contains("proxy")
         || normalized.contains("egress")
         || normalized.contains("socks")
@@ -5366,6 +5378,7 @@ fn set_settings(
     egress_no_proxy: Vec<String>,
     egress_auth_username: String,
     egress_auth_slot: String,
+    egress_extra_ca_file: String,
 ) -> Result<StateView, SettingsCommandError> {
     let mut inner = state.0.lock().unwrap();
     inner
@@ -5376,7 +5389,7 @@ fn set_settings(
     let edit_result = inner.edit_validated_draft(|candidate| {
         candidate.draft["server"]["auth"] = json!(auth);
         candidate.draft["data"]["metrics"] = json!(metrics);
-        candidate.draft["egress"] = if egress_mode == "direct" {
+        let mut egress = if egress_mode == "direct" {
             json!({ "mode": "direct" })
         } else {
             let mut egress = json!({
@@ -5392,6 +5405,15 @@ fn set_settings(
             }
             egress
         };
+        // The extra CA is orthogonal to the proxy mode (direct is the primary
+        // intranet case) and must ride along every egress rewrite — dropping
+        // it here would silently un-trust the enterprise CA on the next
+        // proxy-settings save.
+        let extra_ca = egress_extra_ca_file.trim();
+        if !extra_ca.is_empty() {
+            egress["extra_ca_file"] = json!(extra_ca);
+        }
+        candidate.draft["egress"] = egress;
         candidate.materialize()?.validate()?;
         Ok(())
     });
@@ -10202,6 +10224,7 @@ mod tests {
             vec!["localhost".to_owned()],
             String::new(),
             String::new(),
+            String::new(),
         ) {
             Err(error) => error,
             Ok(_) => panic!("an unsupported proxy scheme is rejected"),
@@ -10424,6 +10447,56 @@ mod tests {
     }
 
     #[test]
+    fn set_settings_round_trips_and_validates_the_extra_ca_file() {
+        let root = scratch_home("extra-ca-settings");
+        let mut draft = gateway_template_for_test(&root);
+        draft["data"]["dir"] = json!(root.join("data"));
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        let app = tauri::test::mock_app();
+        manage_test_agent_state(&app, &root);
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let direct = |ca: String| {
+            set_settings(
+                app.state(),
+                false,
+                false,
+                "direct".to_owned(),
+                String::new(),
+                Vec::new(),
+                String::new(),
+                String::new(),
+                ca,
+            )
+        };
+
+        // A missing CA file is a field-level error, not a saved config.
+        let error = match direct(root.join("no-such-ca.pem").display().to_string()) {
+            Err(error) => error,
+            Ok(_) => panic!("a missing CA file is rejected"),
+        };
+        assert_eq!(error.field, "egress_extra_ca_file", "{}", error.message);
+        assert_eq!(error.reason_code, "invalid_extra_ca");
+
+        // A real CA file saves and clears again.
+        let ca_path = root.join("ca.pem");
+        std::fs::write(
+            &ca_path,
+            include_bytes!("../../../cli/tests/fixtures/tls/ca_cert.pem"),
+        )
+        .unwrap();
+        let ca = ca_path.display().to_string();
+        let view = direct(ca.clone()).unwrap();
+        assert_eq!(view.settings.egress_extra_ca_file, ca);
+        let cleared = direct(String::new()).unwrap();
+        assert!(cleared.settings.egress_extra_ca_file.is_empty());
+    }
+
+    #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
         let mut draft = gateway_template_for_test(&root);
@@ -10576,6 +10649,7 @@ mod tests {
             "direct".to_string(),
             String::new(),
             Vec::new(),
+            String::new(),
             String::new(),
             String::new(),
         )

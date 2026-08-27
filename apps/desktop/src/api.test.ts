@@ -333,6 +333,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       egress_no_proxy: ["localhost"],
       egress_auth_username: "x",
       egress_auth_slot: "proxy_password",
+      egress_extra_ca_file: "/etc/ts/ca.pem",
     }), "set_settings", {
       auth: false,
       metrics: true,
@@ -341,6 +342,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       egressNoProxy: ["localhost"],
       egressAuthUsername: "x",
       egressAuthSlot: "proxy_password",
+      egressExtraCaFile: "/etc/ts/ca.pem",
     }],
     ["desktop update check", () => checkDesktopUpdate(), "check_desktop_update", undefined],
     ["desktop update install", () => installDesktopUpdateAndRestart("1.1.3"), "install_desktop_update_and_restart", { expectedVersion: "1.1.3" }],

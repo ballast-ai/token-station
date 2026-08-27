@@ -41,6 +41,7 @@ pub mod server;
 mod sse;
 pub mod stats;
 pub mod store;
+pub mod tls_trust;
 pub mod upgrade;
 pub mod virtual_key;
 

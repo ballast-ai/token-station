@@ -28,6 +28,12 @@ token-station-router-core = { path = "../../crates/router-core" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "signal"] }
 tokio-stream = "0.1.18"
 ureq = { version = "=3.3.0", features = ["socks-proxy"] }
+# Explicit handle on ureq's TLS stack: rustls for downcasting certificate
+# verification failures into actionable errors, webpki-root-certs for the
+# full-DER Mozilla roots merged with operator-supplied extra CAs (ureq's
+# RootCerts::Specific replaces the store, so the defaults must be re-added).
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+webpki-root-certs = "1.0"
 
 # Unix file-permission primitives (0600 on the local secrets store, etc.).
 # Credentials live in a local file across all platforms — no OS keychain — so

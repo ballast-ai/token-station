@@ -282,6 +282,31 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "操作等待时间过长，已停止。请检查网络连接，然后重试。",
   },
   {
+    matches: /不在信任链|certificate is not trusted|UnknownIssuer/i,
+    en: "The server certificate is not trusted. For self-signed deployments, set the CA certificate file under Settings → Egress; if it is already set, verify that CA actually issued the server certificate.",
+    zh: "服务端证书不在信任链中。若是自签名部署，请在「设置 → 出站策略」填入部署方提供的 CA 证书文件；已配置的，请核对该 CA 是否签发了服务端证书。",
+  },
+  {
+    matches: /与访问地址不匹配|certificate does not match the requested host|NotValidForName/i,
+    en: "The server certificate does not match the requested address (its SAN does not cover this host or IP). Use an address the certificate covers, or ask the deployment owner to re-issue it.",
+    zh: "服务端证书与访问地址不匹配（证书未包含当前主机名或 IP）。请改用证书覆盖的地址访问，或请部署方重新签发。",
+  },
+  {
+    matches: /服务端证书已过期|certificate has expired/i,
+    en: "The server certificate has expired. Ask the deployment owner to re-issue it.",
+    zh: "服务端证书已过期，请联系部署方重新签发。",
+  },
+  {
+    matches: /证书尚未生效|certificate is not yet valid/i,
+    en: "The server certificate is not yet valid. Check this device's clock, or contact the deployment owner.",
+    zh: "服务端证书尚未生效，请检查本机时间或联系部署方。",
+  },
+  {
+    matches: /证书用途不符|not valid for TLS server authentication|InvalidPurpose/i,
+    en: "The server certificate is not valid for TLS server authentication (possibly a CA certificate used as the server certificate). Ask the deployment owner to re-issue it.",
+    zh: "服务端证书用途不符（可能把 CA 证书直接当服务器证书使用），请联系部署方重新签发。",
+  },
+  {
     matches: /network|\bconnect(?:ion)?\b|dns|tls|certificate|request failed|网络|连接失败|证书/i,
     en: "Token Station could not reach the service. Check the network, Base URL, and proxy settings, then try again.",
     zh: "Token Station 无法连接到服务。请检查网络、Base URL 和代理设置，然后重试。",
