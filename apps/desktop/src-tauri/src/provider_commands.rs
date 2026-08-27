@@ -785,6 +785,12 @@ pub(crate) fn restore_managed_route_mutation(
     }
 }
 
+fn restore_legacy_managed_upstreams(draft: &mut Value, legacy: &[(String, Value)]) {
+    for (name, upstream) in legacy {
+        draft["upstreams"][name] = upstream.clone();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_provider_impl(
     state: State<'_, AppStateManaged>,
@@ -826,6 +832,29 @@ pub(crate) fn add_provider_impl(
         ));
     }
 
+    let legacy_managed_upstreams = if managed_route {
+        inner.draft["upstreams"]
+            .as_object()
+            .into_iter()
+            .flat_map(|upstreams| upstreams.iter())
+            .filter(|(legacy_name, upstream)| {
+                legacy_name.as_str() != name && upstream["managed_route"].as_bool() == Some(true)
+            })
+            .map(|(legacy_name, upstream)| (legacy_name.clone(), upstream.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let legacy_credentials = legacy_managed_upstreams
+        .iter()
+        .map(|(legacy_name, _)| {
+            (
+                legacy_name.clone(),
+                secrets::store_get(&data_dir, legacy_name, "provider_api_key").ok(),
+            )
+        })
+        .collect::<Vec<_>>();
+
     let models = normalize_provider_model_ids(models)?;
     let managed_model = managed_route.then(|| models[0].clone());
     let model_objs: Vec<Value> = models
@@ -865,6 +894,9 @@ pub(crate) fn add_provider_impl(
     // A previous interrupted removal may have left only derived catalog data.
     // New Provider identity must never inherit it, even with the same name/URL.
     model_catalog::remove_provider(&data_dir, &name)?;
+    for (legacy_name, _) in &legacy_managed_upstreams {
+        model_catalog::remove_provider(&data_dir, legacy_name)?;
+    }
 
     let mut up = json!({
         "provider": provider_dialect,
@@ -903,6 +935,12 @@ pub(crate) fn add_provider_impl(
         None
     };
     let previous_router = inner.draft["router"].clone();
+    for (legacy_name, _) in &legacy_managed_upstreams {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(legacy_name);
+    }
     inner.draft["upstreams"][&name] = up;
     if managed_route {
         if !inner.draft["routing"].is_object() {
@@ -921,6 +959,7 @@ pub(crate) fn add_provider_impl(
             .expect("upstreams is an object")
             .remove(&name);
         if managed_route {
+            restore_legacy_managed_upstreams(&mut inner.draft, &legacy_managed_upstreams);
             restore_managed_route_mutation(&mut inner.draft, &previous_routing, &previous_router);
         }
         return Err(error);
@@ -929,6 +968,7 @@ pub(crate) fn add_provider_impl(
         let Some(key) = api_key else {
             unreachable!("store source was validated above");
         };
+        let previous_key = secrets::store_get(&inner.data_dir(), &name, "provider_api_key").ok();
         if let Err(key_error) =
             secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key)
         {
@@ -937,6 +977,7 @@ pub(crate) fn add_provider_impl(
                 .expect("upstreams is an object")
                 .remove(&name);
             if managed_route {
+                restore_legacy_managed_upstreams(&mut inner.draft, &legacy_managed_upstreams);
                 restore_managed_route_mutation(
                     &mut inner.draft,
                     &previous_routing,
@@ -949,6 +990,44 @@ pub(crate) fn add_provider_impl(
                     "{key_error}；同时回滚新增 Provider 草稿失败：{rollback_error}"
                 )),
             };
+        }
+        for (legacy_name, _) in &legacy_credentials {
+            if let Err(remove_error) =
+                secrets::store_remove(&inner.data_dir(), legacy_name, "provider_api_key")
+            {
+                restore_provider_key(
+                    &inner.data_dir(),
+                    &name,
+                    "provider_api_key",
+                    previous_key.as_deref(),
+                )
+                .ok();
+                for (restore_name, previous) in &legacy_credentials {
+                    restore_provider_key(
+                        &inner.data_dir(),
+                        restore_name,
+                        "provider_api_key",
+                        previous.as_deref(),
+                    )
+                    .ok();
+                }
+                inner.draft["upstreams"]
+                    .as_object_mut()
+                    .expect("upstreams is an object")
+                    .remove(&name);
+                restore_legacy_managed_upstreams(&mut inner.draft, &legacy_managed_upstreams);
+                restore_managed_route_mutation(
+                    &mut inner.draft,
+                    &previous_routing,
+                    &previous_router,
+                );
+                return match inner.observe_draft() {
+                    Ok(()) => Err(remove_error),
+                    Err(rollback_error) => Err(format!(
+                        "{remove_error}；同时回滚旧企业路由失败：{rollback_error}"
+                    )),
+                };
+            }
         }
     }
     Ok(inner.snapshot())

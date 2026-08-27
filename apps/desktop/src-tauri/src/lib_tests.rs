@@ -4525,6 +4525,64 @@ fn managed_enterprise_command_uses_the_valid_tokenstation_reference() {
 }
 
 #[test]
+fn managed_enterprise_command_replaces_a_legacy_managed_route() {
+    let root = scratch_home("managed-enterprise-legacy-migration");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let data_dir = {
+        let managed = app.state::<AppStateManaged>();
+        let mut inner = managed.0.lock().unwrap();
+        inner.draft["upstreams"]["q"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.tokenstation.link/v1",
+            "auth": { "slot": "provider_api_key", "store": true },
+            "managed_route": true,
+            "models": [{ "model": "auto", "tool": true }]
+        });
+        inner.draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "q", "model": "auto" }
+        });
+        inner.observe_draft().expect("the legacy route is valid");
+        inner.data_dir()
+    };
+    secrets::store_set(&data_dir, "q", "provider_api_key", "legacy-key")
+        .expect("the legacy credential is stored");
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://api.tokenstation.link/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "deepseek-v4-pro-0813".to_owned(),
+    )
+    .expect("the explicit enterprise model replaces the legacy route");
+
+    assert!(view.providers.iter().all(|provider| provider.name != "q"));
+    let provider = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation")
+        .expect("the replacement provider is visible");
+    assert_eq!(provider.models, ["deepseek-v4-pro-0813"]);
+    let target = view.direct_target.expect("the replacement route is direct");
+    assert_eq!(target.upstream, "tokenstation");
+    assert_eq!(target.model.as_deref(), Some("deepseek-v4-pro-0813"));
+    assert!(secrets::store_get(&data_dir, "q", "provider_api_key").is_err());
+    assert_eq!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key")
+            .expect("the replacement credential is stored"),
+        "replacement-key"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn managed_enterprise_route_rollback_restores_present_and_absent_routing() {
     let previous_router = json!({ "routing_mode": "quota-first" });
     let expected_routing = json!({
