@@ -116,7 +116,7 @@ Use the assets listed on the selected [release](https://github.com/ballast-ai/to
 
 - The gateway rejects non-loopback listen addresses. Local authentication is on by default.
 - Provider credentials default to an owner-only `secrets.json`. They do not appear in logs or plugins.
-- Desktop request logs store prompt and response bodies as owner-only plaintext. Receipts and metrics do not.
+- Desktop request logs store prompt and response bodies plus a bounded redacted HTTP trace as owner-only plaintext. Receipts and metrics do not.
 - A cloud provider still receives any request you route to it.
 
 The full boundary table is in the [reference](docs/reference.md#security).

@@ -4,6 +4,9 @@ import {
   getRequestReceipts,
   type ReceiptCostKind,
   type ReceiptPageView,
+  type HttpHeaderView,
+  type HttpRequestView,
+  type HttpResponseView,
   type RequestPlaintextView,
   type ReceiptView,
 } from "../api";
@@ -113,6 +116,253 @@ function formatJsonSource(source: string): string {
   } catch {
     return source;
   }
+}
+
+type HttpChangeKind = "kept" | "modified" | "added" | "removed" | "redacted";
+
+interface HttpChange {
+  kind: HttpChangeKind;
+  path: string;
+  before?: string;
+  after?: string;
+}
+
+function shortValue(value: unknown): string {
+  let rendered: string;
+  try {
+    rendered = typeof value === "string" ? value : prettyValue(value);
+  } catch {
+    rendered = "<complex value>";
+  }
+  return rendered.length > 140 ? `${rendered.slice(0, 137)}…` : rendered;
+}
+
+export function diffJson(beforeText: string, afterText: string): HttpChange[] {
+  let before: unknown;
+  let after: unknown;
+  try {
+    before = JSON.parse(beforeText);
+    after = JSON.parse(afterText);
+  } catch {
+    return beforeText === afterText ? [] : [{ kind: "modified", path: "body", before: shortValue(beforeText), after: shortValue(afterText) }];
+  }
+  const changes: HttpChange[] = [];
+  const pending: Array<{ left: unknown; right: unknown; path: string; depth: number }> = [
+    { left: before, right: after, path: "body", depth: 0 },
+  ];
+  let visited = 0;
+  while (pending.length > 0 && changes.length < 100) {
+    const current = pending.pop();
+    if (!current || Object.is(current.left, current.right)) continue;
+    visited += 1;
+    if (current.depth > 256 || visited > 10_000) {
+      return [{ kind: "modified", path: "body", before: "<comparison limit reached>", after: "<comparison limit reached>" }];
+    }
+    const { left, right, path, depth } = current;
+    if (Array.isArray(left) && Array.isArray(right)) {
+      const length = Math.max(left.length, right.length);
+      for (let index = length - 1; index >= 0; index -= 1) {
+        const child = `${path}[${index}]`;
+        if (index >= left.length) changes.push({ kind: "added", path: child, after: shortValue(right[index]) });
+        else if (index >= right.length) changes.push({ kind: "removed", path: child, before: shortValue(left[index]) });
+        else pending.push({ left: left[index], right: right[index], path: child, depth: depth + 1 });
+      }
+      continue;
+    }
+    if (isObject(left) && isObject(right)) {
+      const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])];
+      for (let index = keys.length - 1; index >= 0; index -= 1) {
+        const key = keys[index];
+        const child = path ? `${path}.${key}` : key;
+        if (!(key in left)) changes.push({ kind: "added", path: child, after: shortValue(right[key]) });
+        else if (!(key in right)) changes.push({ kind: "removed", path: child, before: shortValue(left[key]) });
+        else pending.push({ left: left[key], right: right[key], path: child, depth: depth + 1 });
+      }
+      continue;
+    }
+    changes.push({ kind: "modified", path: path || "body", before: shortValue(left), after: shortValue(right) });
+  }
+  return changes;
+}
+
+function headerMap(headers: HttpHeaderView[]): Map<string, HttpHeaderView> {
+  return new Map(headers.map((header) => [header.name.toLowerCase(), header]));
+}
+
+function requestChanges(source: HttpRequestView, target: HttpRequestView): HttpChange[] {
+  const changes: HttpChange[] = [];
+  if (source.method !== target.method) {
+    changes.push({ kind: "modified", path: "method", before: source.method, after: target.method });
+  }
+  if (source.url !== target.url) {
+    changes.push({ kind: "modified", path: "url", before: source.url, after: target.url });
+  }
+  const beforeHeaders = headerMap(source.headers);
+  const afterHeaders = headerMap(target.headers);
+  for (const [name, header] of beforeHeaders) {
+    const next = afterHeaders.get(name);
+    if (!next) changes.push({ kind: "removed", path: `header.${name}`, before: header.value });
+    else if (next.redacted) changes.push({ kind: "redacted", path: `header.${name}`, before: "<redacted>", after: "<redacted>" });
+    else if (header.value !== next.value) changes.push({ kind: "modified", path: `header.${name}`, before: header.value, after: next.value });
+  }
+  for (const [name, header] of afterHeaders) {
+    if (!beforeHeaders.has(name)) {
+      changes.push({ kind: header.redacted ? "redacted" : "added", path: `header.${name}`, after: header.value });
+    }
+  }
+  changes.push(...diffJson(source.body, target.body));
+  return changes;
+}
+
+function HttpPacket({
+  label,
+  request,
+  response,
+  headerKinds = new Map<string, HttpChangeKind>(),
+}: {
+  label: string;
+  request?: HttpRequestView;
+  response?: HttpResponseView;
+  headerKinds?: Map<string, HttpChangeKind>;
+}) {
+  const { copy } = useLocalizedCopy();
+  const headers = request?.headers ?? response?.headers ?? [];
+  const body = request?.body ?? response?.body ?? "";
+  const truncated = request?.body_truncated ?? response?.body_truncated ?? false;
+  const startLine = request
+    ? `${request.method} ${request.url} HTTP`
+    : `HTTP ${response?.status ?? 0}`;
+  return (
+    <article className="http-packet">
+      <header>
+        <span>{label}</span>
+        {truncated && <em>{copy("Truncated", "已截断", "已截斷", "切り捨て")}</em>}
+      </header>
+      <code className="http-start-line">{startLine}</code>
+      <section className="http-packet-section">
+        <div className="http-packet-section-title">
+          <strong>HEADERS</strong>
+          <span>{headers.length}</span>
+        </div>
+        <div className="http-header-list">
+          {headers.length ? headers.map((header, index) => {
+            const kind = header.redacted ? "redacted" : headerKinds.get(header.name.toLowerCase()) ?? "kept";
+            return (
+              <div className={`http-header-row ${kind}`} key={`${header.name}-${index}`}>
+                <code>{header.name}</code>
+                <code>{header.value}</code>
+                <small>{copy(
+                  kind === "redacted" ? "Redacted" : kind === "added" ? "Added" : kind === "modified" ? "Modified" : "Kept",
+                  kind === "redacted" ? "已脱敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
+                  kind === "redacted" ? "已脫敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
+                  kind === "redacted" ? "編集済み" : kind === "added" ? "追加" : kind === "modified" ? "変更" : "保持",
+                )}</small>
+              </div>
+            );
+          }) : <span className="http-empty">{copy("No captured headers", "没有采集到 Header", "沒有擷取到 Header", "取得したヘッダーはありません")}</span>}
+        </div>
+      </section>
+      <section className="http-packet-section body">
+        <div className="http-packet-section-title"><strong>BODY</strong></div>
+        <pre>{body ? formatJsonSource(body) : copy("Empty body", "空包体", "空本體", "空の本文")}</pre>
+      </section>
+    </article>
+  );
+}
+
+function HttpChangeList({ changes }: { changes: HttpChange[] }) {
+  const { copy } = useLocalizedCopy();
+  if (!changes.length) {
+    return <div className="http-change-empty">{copy("No semantic changes detected", "未检测到语义改动", "未偵測到語義變更", "意味上の変更は検出されませんでした")}</div>;
+  }
+  return (
+    <section className="http-change-list" aria-label={copy("HTTP changes", "HTTP 改动", "HTTP 變更", "HTTP の変更")}>
+      <header>
+        <strong>{copy("Changes made by Token Station", "Token Station 改动", "Token Station 變更", "Token Station による変更")}</strong>
+        <span>{changes.length}</span>
+      </header>
+      <div>
+        {changes.map((change, index) => (
+          <div className={`http-change-row ${change.kind}`} key={`${change.path}-${index}`}>
+            <span>{copy(
+              change.kind === "added" ? "Added" : change.kind === "removed" ? "Removed" : change.kind === "redacted" ? "Redacted" : "Modified",
+              change.kind === "added" ? "新增" : change.kind === "removed" ? "删除" : change.kind === "redacted" ? "脱敏" : "修改",
+              change.kind === "added" ? "新增" : change.kind === "removed" ? "刪除" : change.kind === "redacted" ? "脫敏" : "修改",
+              change.kind === "added" ? "追加" : change.kind === "removed" ? "削除" : change.kind === "redacted" ? "編集" : "変更",
+            )}</span>
+            <code>{change.path}</code>
+            <p>
+              {change.before != null && <del>{change.before}</del>}
+              {change.after != null && <ins>{change.after}</ins>}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function HttpTraceInspector({ plaintext }: { plaintext: RequestPlaintextView }) {
+  const { copy } = useLocalizedCopy();
+  const trace = plaintext.http_trace;
+  const source = trace?.agent_request;
+  if (!trace || !source) return null;
+  return (
+    <div className="http-trace-inspector">
+      <div className="http-trace-legend">
+        <span className="modified">{copy("Modified", "修改", "修改", "変更")}</span>
+        <span className="added">{copy("Added", "新增", "新增", "追加")}</span>
+        <span className="removed">{copy("Removed", "删除", "刪除", "削除")}</span>
+        <span className="kept">{copy("Kept", "保留", "保留", "保持")}</span>
+        <span className="redacted">{copy("Secret redacted", "密钥已脱敏", "密鑰已脫敏", "秘密情報は編集済み")}</span>
+      </div>
+      <div className="http-trace-stage">
+        <div className="http-trace-stage-marker">01</div>
+        <HttpPacket label={copy("Agent → Token Station", "Agent → Token Station", "Agent → Token Station", "Agent → Token Station")} request={source} />
+      </div>
+      {trace.upstream_exchanges.map((exchange, index) => {
+        const changes = requestChanges(source, exchange.request);
+        const headerKinds = new Map<string, HttpChangeKind>();
+        for (const change of changes) {
+          if (change.path.startsWith("header.") && change.kind !== "removed") {
+            headerKinds.set(change.path.slice(7), change.kind);
+          }
+        }
+        return (
+          <div className="http-trace-attempt" key={exchange.ordinal}>
+            <HttpChangeList changes={changes} />
+            <div className="http-trace-stage">
+              <div className="http-trace-stage-marker">{String(index + 2).padStart(2, "0")}</div>
+              <div className="http-trace-stage-content">
+                <HttpPacket
+                  label={copy(
+                    `Attempt ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
+                    `尝试 ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
+                    `嘗試 ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
+                    `試行 ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
+                  )}
+                  request={exchange.request}
+                  headerKinds={headerKinds}
+                />
+                {exchange.response && (
+                  <HttpPacket
+                    label={copy(`${exchange.upstream} → Token Station`, `${exchange.upstream} → Token Station`, `${exchange.upstream} → Token Station`, `${exchange.upstream} → Token Station`)}
+                    response={exchange.response}
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      {trace.agent_response && (
+        <div className="http-trace-stage">
+          <div className="http-trace-stage-marker">{String(trace.upstream_exchanges.length + 2).padStart(2, "0")}</div>
+          <HttpPacket label={copy("Token Station → Agent", "Token Station → Agent", "Token Station → Agent", "Token Station → Agent")} response={trace.agent_response} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function textParts(value: unknown): Array<{ kind: "text" | "thinking" | "tool-call" | "tool-result"; content: string; detail?: string }> {
@@ -395,7 +645,13 @@ function RequestPlaintext({
   error?: string;
 }) {
   const { copy } = useLocalizedCopy();
-  const [viewMode, setViewMode] = useState<"parsed" | "source">("parsed");
+  const hasHttpTrace = Boolean(plaintext?.http_trace?.agent_request);
+  const [viewMode, setViewMode] = useState<"http" | "parsed" | "source">(
+    hasHttpTrace ? "http" : "parsed",
+  );
+  useEffect(() => {
+    setViewMode(plaintext?.http_trace?.agent_request ? "http" : "parsed");
+  }, [plaintext?.request_id, plaintext?.http_trace?.agent_request]);
   if (error) {
     return (
       <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}>
@@ -455,7 +711,7 @@ function RequestPlaintext({
     <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}>
       <header>
         <div className="request-plaintext-title">
-          <strong>{copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}</strong>
+          <strong>{copy("HTTP packets and plaintext", "HTTP 包与明文", "HTTP 封包與明文", "HTTP パケットとプレーンテキスト")}</strong>
           <span>{copy("Retained for 7 days by default", "默认保留 7 天", "預設保留 7 天", "デフォルトで7日間保持")}</span>
         </div>
         <div
@@ -463,6 +719,15 @@ function RequestPlaintext({
           role="group"
           aria-label={copy("Body display mode", "正文显示方式", "正文顯示方式", "本文表示モード")}
         >
+          {hasHttpTrace && (
+            <button
+              type="button"
+              aria-pressed={viewMode === "http"}
+              onClick={() => setViewMode("http")}
+            >
+              {copy("HTTP trace", "HTTP 链路", "HTTP 鏈路", "HTTP トレース")}
+            </button>
+          )}
           <button
             type="button"
             aria-pressed={viewMode === "parsed"}
@@ -479,7 +744,9 @@ function RequestPlaintext({
           </button>
         </div>
       </header>
-      <div className="request-plaintext-grid">
+      {viewMode === "http" && hasHttpTrace ? (
+        <HttpTraceInspector plaintext={plaintext} />
+      ) : <div className="request-plaintext-grid">
         {panels.map((panel) => (
           <div className="request-plaintext-panel" key={panel.key}>
             <div className="request-plaintext-label">
@@ -515,7 +782,7 @@ function RequestPlaintext({
             )}
           </div>
         ))}
-      </div>
+      </div>}
     </section>
   );
 }
@@ -755,7 +1022,7 @@ export default function UsageRequestLog({
                     {formatTime(receipt.started_at_ms, language)}
                   </time>
                   <span className="usage-log-route">
-                    <small>{receipt.agent_id ?? copy("Unknown Agent", "未知 Agent", "未知 Agent", "不明な Agent")}</small>
+                    <small>{receipt.agent_id ?? copy("Home", "主页", "主頁", "ホーム")}</small>
                     <strong>{routeOf(receipt, copy("No route", "未产生路由", "未產生路由", "ルーティングが生成されませんでした"))}</strong>
                   </span>
                   <span className={`usage-log-status ${success ? "success" : cancelled ? "" : "error"}`}>

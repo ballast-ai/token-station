@@ -50,4 +50,29 @@ describe("ProvidersPage enterprise entry", () => {
       model: "enterprise-reasoner",
     });
   });
+
+  it("blocks verification when any provider already owns the reserved id", async () => {
+    const user = userEvent.setup();
+    const onVerifyEnterprise = vi.fn();
+    render(
+      <ProvidersPage
+        {...baseProps}
+        providers={[{
+          name: "tokenstation",
+          provider: "openai-compatible",
+          base_url: "https://ordinary.example/v1",
+          models: ["ordinary-model"],
+          has_auth: true,
+          managed_route: false,
+        }]}
+        onVerifyEnterprise={onVerifyEnterprise}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "添加企业模型" }));
+    const dialog = screen.getByRole("dialog", { name: "添加企业模型" });
+    expect(within(dialog).getByText("https://ordinary.example/v1")).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("API Key")).toBeNull();
+    expect(onVerifyEnterprise).not.toHaveBeenCalled();
+  });
 });

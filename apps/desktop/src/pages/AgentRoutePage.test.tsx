@@ -18,7 +18,6 @@ import {
   planAgentDisconnect,
   restartAgentRoute,
   restoreCursorProvider,
-  saveAgentRoutes,
   setAgentRouteMode,
   type AgentInstallationView,
   type AgentView,
@@ -39,7 +38,6 @@ vi.mock("../api", () => ({
   planAgentDisconnect: vi.fn(),
   restartAgentRoute: vi.fn(),
   restoreCursorProvider: vi.fn(),
-  saveAgentRoutes: vi.fn(),
   setAgentRouteMode: vi.fn(),
   setAgentTier: vi.fn(),
 }));
@@ -109,7 +107,6 @@ describe("AgentRoutePage multi-install admission", () => {
       state: "disconnected",
       message: "已恢复 Cursor 官方配置并断开",
     });
-    vi.mocked(saveAgentRoutes).mockReset().mockResolvedValue({} as never);
     vi.mocked(setAgentRouteMode).mockReset().mockResolvedValue({} as never);
   });
 
@@ -381,6 +378,66 @@ describe("AgentRoutePage multi-install admission", () => {
       .toBeLessThan(vi.mocked(applyAgentPlan).mock.invocationCallOrder[0]);
     expect(vi.mocked(applyAgentPlan).mock.invocationCallOrder[0])
       .toBeLessThan(onRefreshAgents.mock.invocationCallOrder[0]);
+  });
+
+  it("一次性接入计划失败后关闭旧预览并要求重新生成", async () => {
+    const user = userEvent.setup();
+    const found = installation("/opt/homebrew/bin/claude", "2.1.211");
+    found.discovery.is_path_default = true;
+    found.discovery.conflict_group = null;
+    found.discovery.diagnostics = [];
+    found.compatibility = {
+      ...found.compatibility,
+      status: "DETECTED_VERIFIED",
+      reason_code: "DEFAULT_ADMISSION",
+      connector_id: "claude-code-v1",
+    };
+    const agent: AgentView = {
+      metadata: { agent_id: "claude-code", legacy_kind: "cc", display_name: "Claude Code", icon_key: "claude", admission: "supported" },
+      installations: [found],
+      status: "DETECTED_VERIFIED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+    vi.mocked(planAgentConnection).mockResolvedValue({
+      operation_id: "consumed-operation",
+      confirmation_token: "consumed-confirmation",
+      changes: [],
+      human_diff: "endpoint changed",
+    } as never);
+    vi.mocked(applyAgentPlan).mockRejectedValueOnce(new Error("计划已过期，请重新预览"));
+    const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          metadata={agent.metadata}
+          agent={agent}
+          route={{ mode: "inherit", tiers: { high: { upstream: null, model: null }, mid: { upstream: null, model: null }, low: { upstream: null, model: null } }, config_error: null, profile: null, routing_mode: "tiered" }}
+          providers={[]}
+          profiles={[]}
+          quotaAccounts={[]}
+          serveRunning={false}
+          applying={false}
+          onStateChange={vi.fn()}
+          onRefreshAgents={onRefreshAgents}
+          onSaveQuota={vi.fn()}
+          onSaveQuotaPlan={vi.fn()}
+          onViewQuotaUsage={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "预览并接入" }));
+    const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+    await user.click(within(preview).getByRole("button", { name: "确认接入" }));
+
+    await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog", { name: "确认接入改动" })).toBeNull();
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
+    expect(applyAgentPlan).toHaveBeenCalledOnce();
   });
 
   it("接入后可以只读回看当时的修改并在关闭时丢弃计划", async () => {
@@ -987,7 +1044,8 @@ describe("AgentRoutePage multi-install admission", () => {
     );
     await user.click(screen.getByRole("button", { name: "恢复主页路由" }));
     toastViewport = screen.getByTestId("error-toast-viewport");
-    expect(await within(toastViewport).findByRole("status")).toHaveTextContent("已恢复跟随主页");
+    expect(await within(toastViewport).findByRole("status")).toHaveTextContent("已恢复并应用主页路由");
+    expect(restartAgentRoute).toHaveBeenLastCalledWith("claude-code");
     expect(document.querySelector(".agent-route-page .banner")).toBeNull();
   });
 

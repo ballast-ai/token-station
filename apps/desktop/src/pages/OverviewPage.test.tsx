@@ -305,7 +305,7 @@ describe("OverviewPage summaries", () => {
     await user.click(testButton);
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
-    expect(screen.getByText("草稿全局路由")).toBeInTheDocument();
+    expect(screen.getByText("测试路由")).toBeInTheDocument();
   });
 
   it("uses the backend Home-Gateway identity for the model test route label", async () => {
@@ -326,7 +326,7 @@ describe("OverviewPage summaries", () => {
 
     await user.click(screen.getByRole("button", { name: "验证模型连接" }));
 
-    expect(screen.getByText("运行中的全局路由")).toBeInTheDocument();
+    expect(screen.getByText("测试路由")).toBeInTheDocument();
   });
 
   it("keeps the model test action visible but disabled without configured models", () => {

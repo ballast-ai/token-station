@@ -404,14 +404,14 @@ it("serve lifecycle events keep the model-test route label in the same generatio
   })));
 
   await user.click(screen.getByRole("button", { name: "验证模型连接" }));
-  expect(await screen.findByText("运行中的全局路由")).toBeInTheDocument();
+  expect(await screen.findByText("测试路由")).toBeInTheDocument();
 
   act(() => emitServe?.(serveFixture({
     phase: "error",
     error: "serve_task_exited",
     model_test_uses_running_gateway: false,
   })));
-  expect(await screen.findByText("草稿全局路由")).toBeInTheDocument();
+  expect(await screen.findByText("测试路由")).toBeInTheDocument();
 });
 
 it("新用户首次打开先询问是否需要教程，暂不需要后不再自动询问", async () => {

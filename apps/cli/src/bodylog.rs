@@ -15,6 +15,52 @@ pub const DEFAULT_RETENTION_DAYS: u64 = 7;
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_BODY_FILES: usize = 1_000;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpHeaderSnapshot {
+    pub name: String,
+    pub value: String,
+    pub redacted: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpRequestSnapshot {
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<HttpHeaderSnapshot>,
+    pub body: String,
+    pub body_truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpResponseSnapshot {
+    pub status: u16,
+    #[serde(default)]
+    pub headers: Vec<HttpHeaderSnapshot>,
+    pub body: String,
+    pub body_truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamHttpExchange {
+    pub ordinal: u32,
+    pub upstream: String,
+    pub model: String,
+    pub request: HttpRequestSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<HttpResponseSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpTraceSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_request: Option<HttpRequestSnapshot>,
+    #[serde(default)]
+    pub upstream_exchanges: Vec<UpstreamHttpExchange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_response: Option<HttpResponseSnapshot>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaintextExchange {
     pub request_id: String,
@@ -23,6 +69,8 @@ pub struct PlaintextExchange {
     pub output: String,
     pub input_truncated: bool,
     pub output_truncated: bool,
+    #[serde(default)]
+    pub http_trace: HttpTraceSnapshot,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -113,6 +161,28 @@ impl BodyLog {
         input: BoundedBody,
         output: BoundedBody,
     ) -> Result<(), String> {
+        self.record_with_http_trace(
+            request_id,
+            captured_at_ms,
+            input,
+            output,
+            HttpTraceSnapshot::default(),
+        )
+    }
+
+    /// Persists one bounded exchange together with its redacted HTTP trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::record`].
+    pub fn record_with_http_trace(
+        &self,
+        request_id: &str,
+        captured_at_ms: u64,
+        input: BoundedBody,
+        output: BoundedBody,
+        http_trace: HttpTraceSnapshot,
+    ) -> Result<(), String> {
         let path = self.path_for(request_id)?;
         let (input, input_truncated) = input.into_parts();
         let (output, output_truncated) = output.into_parts();
@@ -123,6 +193,7 @@ impl BodyLog {
             output,
             input_truncated,
             output_truncated,
+            http_trace,
         };
         let bytes = serde_json::to_vec(&exchange)
             .map_err(|error| format!("serialize request body snapshot: {error}"))?;
@@ -246,7 +317,7 @@ mod tests {
     use std::fs;
     use std::time::Duration;
 
-    use super::{BodyLog, BoundedBody, MAX_BODY_BYTES, PlaintextExchange};
+    use super::{BodyLog, BoundedBody, HttpTraceSnapshot, MAX_BODY_BYTES, PlaintextExchange};
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -306,6 +377,7 @@ mod tests {
             output: String::new(),
             input_truncated: false,
             output_truncated: false,
+            http_trace: HttpTraceSnapshot::default(),
         };
         crate::private_fs::write_atomic_private(
             &log.directory().join(format!("{request_id}.json")),

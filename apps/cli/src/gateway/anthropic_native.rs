@@ -588,6 +588,7 @@ impl Gateway {
             true,
             None,
         );
+        ctx.capture_upstream_request(target.upstream.as_str(), &target.model, &descriptor);
 
         let response = match self.send_provider_call(
             ctx,
@@ -629,6 +630,7 @@ impl Gateway {
         // upstream status — which is how a request that plainly went out could
         // be filed as `(unrouted)`.
         *upstream_http_status = Some(response.status);
+        ctx.capture_upstream_response_head(response.status, &response.headers);
 
         if let Err(error) = EgressPolicy::reject_redirect(response.status) {
             record_conversion(
@@ -658,6 +660,7 @@ impl Gateway {
         if response.status >= 400 {
             let code = passthrough_error_code(response.status);
             let parts = response.into_parts()?;
+            ctx.append_upstream_response_body(parts.body.as_bytes());
             record_conversion(
                 record,
                 ConversionStage::ProviderResponse,
@@ -716,6 +719,7 @@ impl Gateway {
             Self::relay_raw_sse(ctx, attempt_deadline, response, emit, record)
         } else {
             let parts = response.into_parts()?;
+            ctx.append_upstream_response_body(parts.body.as_bytes());
             // Read the provider's own usage report off the body we are about
             // to relay. Nothing is rewritten: the client still gets the exact
             // bytes, the host just stops pretending the turn was free.
@@ -783,6 +787,7 @@ impl Gateway {
         Some(Ok(StreamOutcome::ClientCancelled))
     }
 
+    #[allow(clippy::too_many_lines)] // Raw relay owns one streaming lifecycle and its cleanup paths.
     fn relay_raw_sse_frames(
         ctx: &RequestContext,
         attempt_deadline: std::time::Instant,
@@ -835,6 +840,7 @@ impl Gateway {
                     return Err(error);
                 }
                 Ok(read) => {
+                    ctx.append_upstream_response_body(&buffer[..read]);
                     pending.extend_from_slice(&buffer[..read]);
                     let boundary = match std::str::from_utf8(&pending) {
                         Ok(_) => pending.len(),

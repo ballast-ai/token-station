@@ -141,9 +141,7 @@ export default function ModelTestConsole({
     : routingMode === "quota_first"
       ? copy("Quota-first", "额度优先", "額度優先", "クォータ優先")
       : copy("Smart routing", "智能路由", "智慧路由", "スマートルーティング");
-  const routeStateLabel = routeState === "running"
-    ? copy("Running global route", "运行中的全局路由", "執行中的全域路由", "実行中のグローバルルート")
-    : copy("Draft global route", "草稿全局路由", "草稿全域路由", "下書きのグローバルルート");
+  const routeStateLabel = copy("Test route", "测试路由", "測試路由", "テストルート");
 
   const takePendingDelta = (request: ActiveRequest) => {
     if (request.flushTimer != null) window.clearTimeout(request.flushTimer);
@@ -396,6 +394,7 @@ export default function ModelTestConsole({
           </div>
           <div
             className="model-test-route-status"
+            data-route-source={routeState}
             aria-label={copy(
               `${routeStateLabel}: ${routeModeLabel}`,
               `${routeStateLabel}：${routeModeLabel}`,

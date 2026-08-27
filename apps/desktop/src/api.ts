@@ -325,6 +325,42 @@ export interface RequestPlaintextView {
   output: string;
   input_truncated: boolean;
   output_truncated: boolean;
+  http_trace?: HttpTraceView;
+}
+
+export interface HttpHeaderView {
+  name: string;
+  value: string;
+  redacted: boolean;
+}
+
+export interface HttpRequestView {
+  method: string;
+  url: string;
+  headers: HttpHeaderView[];
+  body: string;
+  body_truncated: boolean;
+}
+
+export interface HttpResponseView {
+  status: number;
+  headers: HttpHeaderView[];
+  body: string;
+  body_truncated: boolean;
+}
+
+export interface UpstreamHttpExchangeView {
+  ordinal: number;
+  upstream: string;
+  model: string;
+  request: HttpRequestView;
+  response?: HttpResponseView | null;
+}
+
+export interface HttpTraceView {
+  agent_request?: HttpRequestView | null;
+  upstream_exchanges: UpstreamHttpExchangeView[];
+  agent_response?: HttpResponseView | null;
 }
 
 export interface ReceiptPageView {

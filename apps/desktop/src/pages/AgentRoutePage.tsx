@@ -22,7 +22,6 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
-  saveAgentRoutes,
   restartAgentRoute,
   restoreCursorProvider,
   setAgentRouteMode,
@@ -611,7 +610,13 @@ export default function AgentRoutePage({
         showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
       }
     } catch (caught) {
+      setPendingPlan(null);
       showError(errorText(caught), `agent-${intent}:${metadata.agent_id}`);
+      try {
+        await onRefreshAgents();
+      } catch (refreshError) {
+        showError(errorText(refreshError), `agent-refresh:${metadata.agent_id}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -788,12 +793,12 @@ export default function AgentRoutePage({
     setBusy(true);
     try {
       await setAgentRouteMode(metadata.agent_id, "inherit");
-      const next = await saveAgentRoutes();
+      const next = await restartAgentRoute(metadata.agent_id);
       onStateChange(next);
       setIndependentEditorOpen(false);
       showSuccess(
         serveRunning
-          ? copy("Restored home routing · Restart the proxy to apply", "已恢复跟随主页 · 重启代理后生效", "已恢復隨跟首頁 · 重啟代理後生效", "ホームルーティングを復元しました · プロキシを再起動後に有効になります")
+          ? copy("Restored and applied home routing", "已恢复并应用主页路由", "已恢復並套用首頁路由", "ホームルーティングを復元して適用しました")
           : copy("Restored home routing", "已恢复跟随主页", "已恢復隨跟首頁", "ホームルーティングを復元しました"),
         `agent-restore-home:${metadata.agent_id}`,
       );
@@ -837,8 +842,11 @@ export default function AgentRoutePage({
           </div>
         </div>
         <div className="agent-connect-box">
-          <span className={`status-chip ${status.tone}`}>{status.label}</span>
-          <small>{status.detail}</small>
+          <div className="agent-connect-status">
+            <span className={`status-chip ${status.tone}`}>{status.label}</span>
+            <small title={status.detail}>{status.detail}</small>
+          </div>
+          <div className="agent-connect-actions">
           <InstallationPicker
             agentName={metadata.display_name}
             installations={agent?.installations ?? []}
@@ -891,6 +899,7 @@ export default function AgentRoutePage({
               {copy("Restore official configuration & disconnect", "恢复官方配置并断开", "恢復官方配置並斷開", "公式設定を復元し、接続を解除")}
             </button>
           ) : null}
+          </div>
         </div>
       </header>
 

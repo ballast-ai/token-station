@@ -1378,7 +1378,7 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
 
     let result = tauri::async_runtime::block_on(verify_enterprise_route(
         app.state(),
-        "enterprise_main".to_owned(),
+        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
         base_url,
         "secret-key".to_owned(),
     ))
@@ -1389,6 +1389,34 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
     assert!(!data_dir.join("model-catalog-cache.json").exists());
     assert!(get_state(app.state()).providers.is_empty());
     server.join().expect("model catalog fixture exits");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn enterprise_verification_rejects_the_reserved_provider_collision_before_network_io() {
+    let root = scratch_home("enterprise-verification-name-collision");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://ordinary.example/v1",
+        "models": [{"model": "ordinary-model"}]
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let error = tauri::async_runtime::block_on(verify_enterprise_route(
+        app.state(),
+        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
+        "not a valid URL".to_owned(),
+        "must-not-leave-process".to_owned(),
+    ))
+    .expect_err("the local provider collision must stop verification");
+
+    assert!(error.contains("已存在"), "{error}");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -3369,6 +3397,62 @@ fn restarting_one_agent_route_commits_and_installs_one_prevalidated_plan() {
             .and_then(|target| target.model.as_deref()),
         Some("small")
     );
+    let lifecycle = std::mem::replace(
+        &mut inner.server,
+        ServerLifecycle::Stopped { generation: 8 },
+    );
+    drop(inner);
+    let ServerLifecycle::Running { server, .. } = lifecycle else {
+        unreachable!()
+    };
+    server.drain_and_shutdown();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn restarting_one_agent_preserves_every_other_agents_pending_draft() {
+    let root = scratch_home("agent-route-scoped-draft");
+    let config_path = root.join("token-station.json");
+    let (draft, running) = published_agent_route_fixture(&root);
+    let mut inner = AppInner::new(config_path.clone(), draft, None);
+    inner.server = ServerLifecycle::Running {
+        generation: 7,
+        server: running,
+        apply_error: None,
+    };
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+    manage_test_agent_state(&app, &root);
+
+    for agent_id in ["codex", "opencode"] {
+        set_agent_route_mode(app.state(), agent_id.to_owned(), "custom".to_owned()).unwrap();
+        for slot in ["high", "mid", "low"] {
+            set_agent_tier(
+                app.state(),
+                agent_id.to_owned(),
+                slot.to_owned(),
+                Some("local".to_owned()),
+                Some("small".to_owned()),
+            )
+            .unwrap();
+        }
+    }
+
+    restart_agent_route(app.state(), app.state(), "opencode".to_owned()).unwrap();
+
+    let state = app.state::<AppStateManaged>();
+    let mut inner = state.0.lock().unwrap();
+    assert!(inner.agent_route_drafts.contains_key("codex"));
+    assert!(!inner.agent_route_drafts.contains_key("opencode"));
+    let persisted = ClientConfig::load(&config_path).unwrap();
+    assert!(!persisted.agent_routes.contains_key("codex"));
+    assert!(persisted.agent_routes["opencode"].custom_route.is_some());
+    let running = match &inner.server {
+        ServerLifecycle::Running { server, .. } => server,
+        _ => panic!("scoped reload must leave the proxy running"),
+    };
+    assert!(running.agent_router_override("codex").is_none());
+    assert!(running.agent_router_override("opencode").is_some());
     let lifecycle = std::mem::replace(
         &mut inner.server,
         ServerLifecycle::Stopped { generation: 8 },
@@ -7269,6 +7353,8 @@ fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
     };
 
     assert_eq!(send("model-test-command-1").content, "model-test-ok");
+    assert!(!root.join("token-station-data/request-bodies").exists());
+    assert!(root.join("token-station-data/metrics.sqlite").exists());
     let first_gateway = Arc::clone(
         &app.state::<ModelTestStreamState>()
             .1
@@ -7400,7 +7486,7 @@ fn model_test_command_reuses_the_running_gateway_without_body_logging() {
     let mut draft = gateway_template_for_test(&root);
     draft["server"]["listen"] = json!("127.0.0.1:0");
     draft["server"]["auth"] = json!(false);
-    draft["data"]["metrics"] = json!(false);
+    draft["data"]["metrics"] = json!(true);
     draft["upstreams"]["fixture"] = json!({
         "provider": "openai-compatible",
         "base_url": upstream,
@@ -7453,12 +7539,12 @@ fn model_test_command_reuses_the_running_gateway_without_body_logging() {
     .unwrap();
 
     assert_eq!(reply.content, "model-test-live");
-    assert_eq!(
-        std::fs::read_dir(root.join("token-station-data/request-bodies"))
-            .unwrap()
-            .count(),
-        0
-    );
+    let body_log_dir = root.join("token-station-data/request-bodies");
+    let body_logs = std::fs::read_dir(&body_log_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(body_logs.is_empty());
     {
         let state = app.state::<AppStateManaged>();
         let mut inner = state.0.lock().unwrap();

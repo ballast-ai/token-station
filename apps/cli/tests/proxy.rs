@@ -598,6 +598,40 @@ fn start_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
     start_proxy_with(upstream, key_file, true)
 }
 
+fn start_proxy_recording_bodies(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-proxy-body-data-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai"],
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+        },
+        "upstreams": {
+            "mock_primary": {
+                "provider": "openai-compatible",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [{ "model": "gpt-5.5", "context_window": 400_000 }]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [{ "upstream": "mock_primary", "model": "gpt-5.5" }] },
+            "default_pool": "main"
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("body-log config parses");
+    spawn_proxy_with_body_log(&config)
+}
+
 fn start_proxy_with(upstream: &MockUpstream, key_file: &Path, metrics: bool) -> Proxy {
     start_proxy_with_agent(upstream, key_file, metrics, "agent-openai")
 }
@@ -744,6 +778,14 @@ fn start_proxy_with_agents_budgets_catalog_price_and_parameters(
 /// The shared server-spawn tail: recorders, gateway, virtual key, and a
 /// background server bound to a loopback port.
 fn spawn_proxy(config: &ClientConfig) -> Proxy {
+    spawn_proxy_inner(config, false)
+}
+
+fn spawn_proxy_with_body_log(config: &ClientConfig) -> Proxy {
+    spawn_proxy_inner(config, true)
+}
+
+fn spawn_proxy_inner(config: &ClientConfig, body_log: bool) -> Proxy {
     // Fixtures deserialize straight into `ClientConfig`, which skips the
     // validation `ClientConfig::load` runs. Without this a test can prove
     // behaviour for a shape the product refuses to start on — one already did,
@@ -768,10 +810,15 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
         ));
     }
     let recorder = Arc::new(token_station_cli::filelog::Recorders(sinks));
-    let gateway = Arc::new(
+    let mut gateway =
         Gateway::new_with_provider_runtime(config, recorder, runtime.handle().clone())
-            .expect("gateway assembles"),
-    );
+            .expect("gateway assembles");
+    if body_log {
+        gateway = gateway.with_body_log(Arc::new(
+            token_station_cli::bodylog::BodyLog::open(&config.data.dir).expect("body log opens"),
+        ));
+    }
+    let gateway = Arc::new(gateway);
 
     // Auth on, exactly as a real first start would set it up.
     let (virtual_key, created) =
@@ -1922,6 +1969,46 @@ fn redirects_to_other_hosts_loopback_and_metadata_never_receive_a_second_hop() {
 
         std::fs::remove_file(key).ok();
     }
+}
+
+#[test]
+fn refused_redirect_keeps_its_response_head_in_the_http_trace() {
+    let source = MockUpstream::start(vec![vec![http_redirect("https://elsewhere.example/v1")]]);
+    let key = key_file("redirect-http-trace", "sk-redirect-http-trace");
+    let proxy = start_proxy_recording_bodies(&source, &key);
+
+    let (status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+
+    assert_eq!(status, 502);
+    settle();
+    let directory = proxy
+        .data_dir
+        .join(token_station_cli::bodylog::BODY_DIR_NAME);
+    let path = std::fs::read_dir(&directory)
+        .expect("body directory exists")
+        .find_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension().and_then(|value| value.to_str()) == Some("json")).then_some(path)
+        })
+        .expect("request trace exists");
+    let exchange: token_station_cli::bodylog::PlaintextExchange =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let response = exchange.http_trace.upstream_exchanges[0]
+        .response
+        .as_ref()
+        .expect("the observed redirect response is retained");
+    assert_eq!(response.status, 302);
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|header| header.name == "location" && header.value == "<redacted>")
+    );
+    std::fs::remove_file(key).ok();
 }
 
 #[test]

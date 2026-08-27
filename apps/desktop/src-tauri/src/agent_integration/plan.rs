@@ -1,5 +1,6 @@
 use std::path::{Component, Path};
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -1275,7 +1276,8 @@ fn operation_preview(operation: &PatchOperation) -> Option<String> {
     if operation.operation == PatchKind::Remove {
         return None;
     }
-    let serialized = serde_json::to_string(operation.value.as_ref()?).ok()?;
+    let value = sanitize_preview_value(operation.value.as_ref()?);
+    let serialized = serde_json::to_string(&value).ok()?;
     const MAX_PREVIEW_CHARS: usize = 512;
     if serialized.chars().count() <= MAX_PREVIEW_CHARS {
         return Some(serialized);
@@ -1286,6 +1288,37 @@ fn operation_preview(operation: &PatchOperation) -> Option<String> {
         .collect::<String>();
     preview.push('…');
     Some(preview)
+}
+
+fn sanitize_preview_value(value: &Value) -> Value {
+    let Value::String(text) = value else {
+        return value.clone();
+    };
+    let Ok(mut url) = reqwest::Url::parse(text) else {
+        return value.clone();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return value.clone();
+    }
+    if !url.username().is_empty() {
+        let _ = url.set_username("<redacted>");
+    }
+    if url.password().is_some() {
+        let _ = url.set_password(Some("<redacted>"));
+    }
+    if url.query().is_some() {
+        let keys = url
+            .query_pairs()
+            .map(|(name, _)| name.into_owned())
+            .collect::<Vec<_>>();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(keys.iter().map(|name| (name.as_str(), "<redacted>")));
+    }
+    if url.fragment().is_some() {
+        url.set_fragment(Some("<redacted>"));
+    }
+    Value::String(url.into())
 }
 
 fn credential_bindings(
@@ -1493,6 +1526,35 @@ mod tests {
                 AllowedAction::ViewDetails,
                 AllowedAction::PreviewConnect,
             ]),
+        }
+    }
+
+    #[test]
+    fn operation_preview_redacts_url_credentials_and_query_values() {
+        let operation = PatchOperation {
+            operation: PatchKind::Replace,
+            path: ConfigPath {
+                segments: vec!["env".to_owned(), "ANTHROPIC_BASE_URL".to_owned()],
+            },
+            value: Some(json!(
+                "https://alice:password@example.test/v1?api_key=query-secret&region=private#fragment-secret"
+            )),
+        };
+
+        let preview = operation_preview(&operation).expect("URL preview");
+        assert!(preview.contains("example.test/v1"));
+        assert!(preview.contains("api_key="));
+        for secret in [
+            "alice",
+            "password",
+            "query-secret",
+            "private",
+            "fragment-secret",
+        ] {
+            assert!(
+                !preview.contains(secret),
+                "preview leaked {secret}: {preview}"
+            );
         }
     }
 

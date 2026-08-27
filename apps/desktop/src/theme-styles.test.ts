@@ -479,4 +479,20 @@ describe("retained page theme styles", () => {
     expect(routeRowRule).toMatch(/grid-template-columns:\s*max-content minmax\(0, 1fr\)/);
     expect(routeRowRule).toMatch(/column-gap:/);
   });
+
+  it("keeps Agent installation and connection controls on one row", () => {
+    const connectBoxRule = appCss.match(/\.agent-connect-box\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const connectActionsRule = appCss.match(/\.agent-connect-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const statusDetailRule = appCss.match(/\.agent-connect-status small\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(connectBoxRule).toMatch(/min-width:\s*0/);
+    expect(connectBoxRule).toMatch(/flex:\s*1 1 auto/);
+    expect(connectActionsRule).toMatch(/display:\s*flex/);
+    expect(connectActionsRule).toMatch(/flex:\s*0 0 auto/);
+    expect(connectActionsRule).toMatch(/white-space:\s*nowrap/);
+    expect(statusDetailRule).toMatch(/text-overflow:\s*ellipsis/);
+    expect(appCss).not.toMatch(
+      /\.agent-connect-box\s*\{[^}]*flex-direction:\s*column/s,
+    );
+  });
 });

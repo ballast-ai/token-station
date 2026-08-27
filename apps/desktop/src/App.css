@@ -1725,14 +1725,38 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
 /* Crop bitmap avatars such as Hermes to match colored lobehub avatars. */
 .agent-large-mark .brand-image { width: 50px; height: 50px; border-radius: 50%; }
 .agent-connect-box {
-  max-width: 440px;
+  min-width: 0;
+  max-width: none;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: wrap;
+  flex: 1 1 auto;
+  gap: 18px;
+}
+.agent-connect-status {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 1 1 auto;
   gap: 9px;
 }
-.agent-connect-box small { max-width: 150px; color: var(--muted); font-size: 10px; }
+.agent-connect-status small {
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-connect-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 9px;
+  white-space: nowrap;
+}
 .agent-primary-action {
   min-width: 92px;
   flex: 0 0 auto;
@@ -2451,7 +2475,7 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
   .agent-link .agent-status-dot { position: absolute; right: 8px; bottom: 7px; }
   .signal-track { left: 29px; top: 61px; }
   .station-content { padding-inline: 20px; }
-  .agent-connect-box { flex-wrap: wrap; }
+  .agent-connect-status small { max-width: 180px; }
   .profile-manager { grid-template-columns: 1fr; }
   .profile-list,
   .profile-manager > .error-text { grid-column: 1; }
@@ -4646,6 +4670,176 @@ pre.block {
   font-size: 10px;
   text-align: center;
 }
+.http-trace-inspector {
+  padding: 12px;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, transparent 25px, color-mix(in srgb, var(--line) 72%, transparent) 25px, color-mix(in srgb, var(--line) 72%, transparent) 26px, transparent 26px);
+}
+.http-trace-legend {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px 38px;
+}
+.http-trace-legend span,
+.http-change-row > span,
+.http-header-row small {
+  padding: 3px 6px;
+  border-radius: 999px;
+  font: 700 8px/1 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+.http-trace-legend .modified,
+.http-change-row.modified > span,
+.http-header-row.modified small { color: var(--signal); background: var(--signal-soft); }
+.http-trace-legend .added,
+.http-change-row.added > span,
+.http-header-row.added small { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.http-trace-legend .removed,
+.http-change-row.removed > span { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.http-trace-legend .kept,
+.http-header-row.kept small { color: var(--muted); background: var(--surface-3); }
+.http-trace-legend .redacted,
+.http-change-row.redacted > span,
+.http-header-row.redacted small { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
+.http-trace-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+.http-trace-stage-marker {
+  position: relative;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--signal) 44%, var(--line));
+  border-radius: 50%;
+  color: var(--signal);
+  background: var(--surface-2);
+  font: 700 8px/1 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+.http-trace-stage-content {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.http-packet {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--canvas);
+}
+.http-packet > header {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  background: var(--surface);
+  font: 700 9px/1.3 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+.http-packet > header em { color: var(--warning); font-style: normal; }
+.http-start-line {
+  display: block;
+  overflow-x: auto;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--signal);
+  font: 700 9px/1.4 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  white-space: nowrap;
+}
+.http-packet-section { border-bottom: 1px solid var(--line); }
+.http-packet-section:last-child { border-bottom: 0; }
+.http-packet-section-title {
+  min-height: 25px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  font: 700 7.5px/1 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  letter-spacing: .12em;
+}
+.http-packet-section-title span { letter-spacing: 0; }
+.http-header-list { max-height: 180px; overflow: auto; }
+.http-header-row {
+  display: grid;
+  grid-template-columns: minmax(105px, .38fr) minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.http-header-row:first-child { border-top: 0; }
+.http-header-row > code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font: 8.5px/1.45 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+.http-header-row > code:first-child { color: color-mix(in srgb, var(--signal) 72%, var(--ink)); }
+.http-packet-section.body pre {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  color: var(--ink);
+  font: 9px/1.55 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  white-space: pre;
+}
+.http-empty { display: block; padding: 10px; color: var(--muted); font-size: 9px; }
+.http-change-list,
+.http-change-empty {
+  margin: 12px 0 0 38px;
+  border: 1px solid color-mix(in srgb, var(--signal) 25%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--signal-soft) 20%, var(--surface));
+}
+.http-change-list > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 9px;
+}
+.http-change-list > header span { color: var(--signal); font: 8px/1 "IBM Plex Mono", monospace; }
+.http-change-list > div { max-height: 220px; overflow: auto; }
+.http-change-row {
+  display: grid;
+  grid-template-columns: auto minmax(130px, .35fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 7px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.http-change-row:first-child { border-top: 0; }
+.http-change-row code { color: var(--ink); font: 8.5px/1.45 "IBM Plex Mono", monospace; overflow-wrap: anywhere; }
+.http-change-row p { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; min-width: 0; }
+.http-change-row del,
+.http-change-row ins {
+  max-width: 100%;
+  padding: 2px 4px;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+  font: 8px/1.45 "IBM Plex Mono", monospace;
+}
+.http-change-row del { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, transparent); }
+.http-change-row ins { color: var(--success); background: color-mix(in srgb, var(--success) 9%, transparent); }
+.http-change-empty { padding: 10px; color: var(--muted); font-size: 9px; }
 .usage-log-state {
   min-height: 90px;
   display: grid;
@@ -4713,6 +4907,9 @@ pre.block {
     border-left: 0;
   }
   .request-plaintext-scroll { height: 210px; }
+  .http-trace-stage-content { grid-template-columns: 1fr; }
+  .http-change-row { grid-template-columns: auto minmax(0, 1fr); }
+  .http-change-row p { grid-column: 1 / -1; }
 }
 @media (max-width: 560px) {
   .usage-toolbar { grid-template-columns: 1fr; }
@@ -8117,7 +8314,9 @@ pre.block {
   }
 
   .agent-connection-facts { grid-template-columns: 1fr; }
-  .agent-connect-box { align-items: flex-end; flex-direction: column; }
+  .agent-route-hero { align-items: stretch; flex-direction: column; }
+  .agent-connect-box { width: 100%; }
+  .agent-connect-status { justify-content: flex-start; }
 }
 @media (max-width: 560px) {
   .provider-catalog-grid { grid-template-columns: 1fr; }
@@ -10297,8 +10496,8 @@ samp {
 }
 
 .request-detail-dialog[data-slot="dialog-content"] {
-  width: min(1040px, calc(100vw - 40px));
-  max-width: 1040px;
+  width: min(1280px, calc(100vw - 40px));
+  max-width: 1280px;
   max-height: min(820px, calc(100vh - 32px));
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;

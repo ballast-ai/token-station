@@ -1501,6 +1501,27 @@ impl AppInner {
         })
     }
 
+    pub(crate) fn promote_agent_route_draft(&mut self, agent_id: &str) -> Result<(), String> {
+        let Some(tiers) = self.agent_route_drafts.get(agent_id) else {
+            return Ok(());
+        };
+        let route = Self::complete_agent_route_draft(agent_id, tiers)?;
+        self.edit_validated_draft(|inner| {
+            if !inner.draft["agent_routes"].is_object() {
+                inner.draft["agent_routes"] = json!({});
+            }
+            if !inner.draft["agent_routes"][agent_id].is_object() {
+                inner.draft["agent_routes"][agent_id] = json!({});
+            }
+            if let Some(agent_route) = inner.draft["agent_routes"][agent_id].as_object_mut() {
+                agent_route.remove("profile");
+            }
+            inner.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+            inner.draft["agent_routes"][agent_id]["custom_route"] = route;
+            Ok(())
+        })
+    }
+
     pub(crate) fn set_agent_inherit_value(&mut self, agent_id: &str) {
         if !self.draft["agent_routes"].is_object() {
             self.draft["agent_routes"] = json!({});

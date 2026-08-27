@@ -34,7 +34,7 @@ export default function ProvidersPage(props: ProvidersPageProps) {
   const { copy } = useLocalizedCopy();
   const [enterpriseOpen, setEnterpriseOpen] = useState(false);
   const existingEnterprise = props.providers.find((provider) => (
-    provider.managed_route && provider.name === ENTERPRISE_PROVIDER_ID
+    provider.name === ENTERPRISE_PROVIDER_ID
   )) ?? null;
   return (
     <div className="page-stack providers-page">

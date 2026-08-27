@@ -47,16 +47,17 @@ describe("ModelTestConsole", () => {
     renderConsole();
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
-    expect(screen.getByLabelText("运行中的全局路由：简单路由")).toBeInTheDocument();
+    expect(screen.getByLabelText("测试路由：简单路由")).toHaveAttribute("data-route-source", "running");
     expect(screen.queryByRole("button", { name: /选择模型/ })).toBeNull();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "消息" })).toHaveFocus());
     expect(screen.getByText("每次发送都会产生一次真实的模型请求，可能计入供应商用量。")).toBeInTheDocument();
   });
 
-  it("identifies an unapplied global route as a draft", () => {
+  it("keeps the internal draft source without exposing draft terminology", () => {
     renderConsole(vi.fn(), true, "draft");
 
-    expect(screen.getByLabelText("草稿全局路由：简单路由")).toBeInTheDocument();
+    expect(screen.getByLabelText("测试路由：简单路由")).toHaveAttribute("data-route-source", "draft");
+    expect(screen.queryByText("草稿全局路由")).toBeNull();
   });
 
   it("labels a managed direct target as enterprise routing", () => {
@@ -72,7 +73,7 @@ describe("ModelTestConsole", () => {
       </LanguageProvider>,
     );
 
-    expect(screen.getByLabelText("草稿全局路由：企业路由")).toBeInTheDocument();
+    expect(screen.getByLabelText("测试路由：企业路由")).toBeInTheDocument();
     expect(screen.queryByText("简单路由")).toBeNull();
   });
 
