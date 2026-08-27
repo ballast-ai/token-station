@@ -1,5 +1,7 @@
 use crate::*;
 
+pub(crate) const MANAGED_ENTERPRISE_PROVIDER_ID: &str = "tokenstation";
+
 pub(crate) const PROVIDER_BRANDS_BY_BASE_URL: &[(&str, &str)] = &[
     ("https://api.openai.com/v1", "openai"),
     ("https://api.anthropic.com/v1", "anthropic"),
@@ -758,7 +760,7 @@ pub(crate) fn add_managed_enterprise_route(
     }
     add_provider_impl(
         state,
-        "Token-station".to_owned(),
+        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
         base_url,
         vec![model],
         Some(api_key),

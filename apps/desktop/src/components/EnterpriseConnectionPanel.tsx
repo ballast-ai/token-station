@@ -1,12 +1,16 @@
 import { useState } from "react";
 import type { ModelDiscoveryView, ProviderView } from "../api";
+import {
+  ENTERPRISE_PROVIDER_ID,
+  ENTERPRISE_PROVIDER_NAME,
+} from "../providerPresentation";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Input } from "./ui/input";
 
-export const ENTERPRISE_PROVIDER_NAME = "Token-station";
+export { ENTERPRISE_PROVIDER_ID, ENTERPRISE_PROVIDER_NAME } from "../providerPresentation";
 
 export interface EnterpriseConnectionInput {
-  name: typeof ENTERPRISE_PROVIDER_NAME;
+  name: typeof ENTERPRISE_PROVIDER_ID;
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -49,7 +53,7 @@ export default function EnterpriseConnectionPanel({
     setMessage("");
     try {
       const discovery = await onVerify({
-        name: ENTERPRISE_PROVIDER_NAME,
+        name: ENTERPRISE_PROVIDER_ID,
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
       });
@@ -82,7 +86,7 @@ export default function EnterpriseConnectionPanel({
     setMessage("");
     try {
       const started = await onConnect({
-        name: ENTERPRISE_PROVIDER_NAME,
+        name: ENTERPRISE_PROVIDER_ID,
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
         model,
@@ -103,7 +107,7 @@ export default function EnterpriseConnectionPanel({
     return (
       <div className="enterprise-connected-summary">
         <span className="enterprise-active-status">{copy("Configured provider", "已配置供应商", "已設定供應商", "設定済みプロバイダー")}</span>
-        <strong>{existingProvider.name}</strong>
+        <strong>{ENTERPRISE_PROVIDER_NAME}</strong>
         <code>{existingProvider.base_url}</code>
         <span>{existingProvider.models.join(" · ")}</span>
         <p className="enterprise-secret-note">{copy(

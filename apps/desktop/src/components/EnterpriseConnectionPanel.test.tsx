@@ -5,7 +5,7 @@ import type { ProviderView } from "../api";
 import EnterpriseConnectionPanel from "./EnterpriseConnectionPanel";
 
 const connectedProvider: ProviderView = {
-  name: "Token-station",
+  name: "tokenstation",
   provider: "openai-compatible",
   base_url: "https://api.example.com/v1",
   models: ["enterprise-reasoner"],
@@ -53,7 +53,7 @@ describe("EnterpriseConnectionPanel", () => {
     await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
     await waitFor(() => expect(onVerify).toHaveBeenCalledWith({
-      name: "Token-station",
+      name: "tokenstation",
       baseUrl: "https://api.example.com/v1",
       apiKey: "secret-key",
     }));
@@ -63,7 +63,7 @@ describe("EnterpriseConnectionPanel", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "模型" }), "enterprise-reasoner");
     await user.click(screen.getByRole("button", { name: "添加并使用" }));
     await waitFor(() => expect(onConnect).toHaveBeenCalledWith({
-      name: "Token-station",
+      name: "tokenstation",
       baseUrl: "https://api.example.com/v1",
       apiKey: "secret-key",
       model: "enterprise-reasoner",

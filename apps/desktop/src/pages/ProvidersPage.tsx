@@ -3,7 +3,7 @@ import type { ModelDiscoveryView, ProviderView, StateView } from "../api";
 import { Building2, Plus } from "lucide-react";
 import ProviderList from "../components/ProviderList";
 import EnterpriseConnectionPanel, {
-  ENTERPRISE_PROVIDER_NAME,
+  ENTERPRISE_PROVIDER_ID,
   type EnterpriseConnectionInput,
 } from "../components/EnterpriseConnectionPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
@@ -33,7 +33,9 @@ interface ProvidersPageProps {
 export default function ProvidersPage(props: ProvidersPageProps) {
   const { copy } = useLocalizedCopy();
   const [enterpriseOpen, setEnterpriseOpen] = useState(false);
-  const existingEnterprise = props.providers.find((provider) => provider.name === ENTERPRISE_PROVIDER_NAME) ?? null;
+  const existingEnterprise = props.providers.find((provider) => (
+    provider.managed_route && provider.name === ENTERPRISE_PROVIDER_ID
+  )) ?? null;
   return (
     <div className="page-stack providers-page">
       <header className="overview-heading page-heading-with-action">

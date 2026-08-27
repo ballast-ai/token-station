@@ -1741,7 +1741,7 @@ describe("desktop station navigation", () => {
       quota_accounts: [account],
     });
     const enterpriseProvider = {
-      name: "Token-station",
+      name: "tokenstation",
       provider: "openai-compatible",
       base_url: "https://enterprise.example.com/v1",
       models: ["enterprise-reasoner"],
@@ -1755,7 +1755,7 @@ describe("desktop station navigation", () => {
     const routed = stateFixture({
       ...added,
       routing_mode: "direct",
-      direct_target: { upstream: "Token-station", model: "enterprise-reasoner" },
+      direct_target: { upstream: "tokenstation", model: "enterprise-reasoner" },
     });
     const applying = stateFixture({
       ...routed,
@@ -1798,13 +1798,14 @@ describe("desktop station navigation", () => {
       model: "enterprise-reasoner",
     });
     expect(invokeMock).toHaveBeenCalledWith("verify_enterprise_route", {
-      name: enterpriseProvider.name,
+      name: "tokenstation",
       baseUrl: enterpriseProvider.base_url,
       apiKey: "secret-key",
     });
     expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("set_direct_route", expect.anything());
     expect(screen.queryByRole("dialog", { name: "添加企业路由" })).toBeNull();
+    expect(await screen.findByRole("group", { name: "Token-station 供应商" })).toBeInTheDocument();
   });
 
   it("rejects cached enterprise verification and reloads authoritative state", async () => {

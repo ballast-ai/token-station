@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
+import { providerDisplayName } from "../providerPresentation";
 import ProviderModelManager from "./ProviderModelManager";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
@@ -102,22 +103,24 @@ export default function ProviderList({
             )}</span>
           </div>
         )}
-        {providers.map((provider) => (
-          <article
-            className="provider-card"
-            key={provider.name}
-            role="group"
-            aria-label={copy(`${provider.name} provider`, `${provider.name} 供应商`, `${provider.name} 供應商`, `${provider.name} プロバイダー`)}
-          >
-            <div className="provider-card-head provider-identity-bar">
-              <div className="provider-monogram" aria-hidden="true">
-                <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
-              </div>
-              <div className="provider-main provider-identity">
-                <small>{copy("Provider", "供应商", "供應商", "プロバイダー")}</small>
-                <strong className="provider-identity-name">{provider.name}</strong>
-                <div className="provider-url">{provider.base_url}</div>
-              </div>
+        {providers.map((provider) => {
+          const displayName = providerDisplayName(provider);
+          return (
+            <article
+              className="provider-card"
+              key={provider.name}
+              role="group"
+              aria-label={copy(`${displayName} provider`, `${displayName} 供应商`, `${displayName} 供應商`, `${displayName} プロバイダー`)}
+            >
+              <div className="provider-card-head provider-identity-bar">
+                <div className="provider-monogram" aria-hidden="true">
+                  <ProviderIcon id={provider.brand_id} label={displayName} size={34} />
+                </div>
+                <div className="provider-main provider-identity">
+                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")}</small>
+                  <strong className="provider-identity-name">{displayName}</strong>
+                  <div className="provider-url">{provider.base_url}</div>
+                </div>
               <span className="provider-model-count">
                 {copy(`${provider.models.length} models`, `${provider.models.length} 个模型`, `${provider.models.length} 個模型`, `${provider.models.length} 個モデル`)}
               </span>
@@ -164,23 +167,24 @@ export default function ProviderList({
             <div
               className="provider-primary-models"
               role="list"
-              aria-label={copy(`${provider.name} models`, `${provider.name} 模型`, `${provider.name} 模型`, `${provider.name} モデル`)}
+              aria-label={copy(`${displayName} models`, `${displayName} 模型`, `${displayName} 模型`, `${displayName} モデル`)}
               data-layout="compact-three-column"
             >
               {provider.models.length > 0 ? provider.models.map((model) => (
-                <div role="listitem" key={model} title={`${model} · ${provider.name}`}>
+                <div role="listitem" key={model} title={`${model} · ${displayName}`}>
                   <strong>{model}</strong>
-                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")} · {provider.name}</small>
+                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")} · {displayName}</small>
                 </div>
               )) : (
                 <div role="listitem">
                   <strong>{copy("No managed models", "暂无已管理模型", "目前無已管理模型", "現在管理されていないモデルがあります")}</strong>
-                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")} · {provider.name}</small>
+                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")} · {displayName}</small>
                 </div>
               )}
-            </div>
-          </article>
-        ))}
+              </div>
+            </article>
+          );
+        })}
       </div>
 
       <Dialog open={Boolean(activeProvider)} onOpenChange={(open) => !open && setManagedProvider(null)}>

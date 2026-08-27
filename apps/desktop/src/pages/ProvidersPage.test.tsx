@@ -44,7 +44,7 @@ describe("ProvidersPage enterprise entry", () => {
     await user.selectOptions(within(dialog).getByRole("combobox", { name: "模型" }), "enterprise-reasoner");
     await user.click(within(dialog).getByRole("button", { name: "添加并使用" }));
     expect(onConnectEnterprise).toHaveBeenCalledWith({
-      name: "Token-station",
+      name: "tokenstation",
       baseUrl: "https://enterprise.example.com/v1",
       apiKey: "secret-key",
       model: "enterprise-reasoner",

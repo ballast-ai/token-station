@@ -4493,6 +4493,38 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
 }
 
 #[test]
+fn managed_enterprise_command_uses_the_valid_tokenstation_reference() {
+    let root = scratch_home("managed-enterprise-command-reference");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://enterprise.example.com/v1".to_owned(),
+        "test-key".to_owned(),
+        "enterprise-reasoner".to_owned(),
+    )
+    .expect("the fixed enterprise command uses a valid upstream reference");
+
+    let provider = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation")
+        .expect("the managed provider uses the tokenstation reference");
+    assert!(provider.managed_route);
+    assert_eq!(provider.models, ["enterprise-reasoner"]);
+    let target = view.direct_target.expect("the managed route is selected");
+    assert_eq!(target.upstream, "tokenstation");
+    assert_eq!(target.model.as_deref(), Some("enterprise-reasoner"));
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn managed_enterprise_route_rollback_restores_present_and_absent_routing() {
     let previous_router = json!({ "routing_mode": "quota-first" });
     let expected_routing = json!({
