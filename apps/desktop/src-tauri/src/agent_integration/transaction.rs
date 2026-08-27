@@ -1098,6 +1098,7 @@ impl<'a> TransactionEngine<'a> {
                         before_hash: companion.before_hash.clone(),
                         managed_after_hash: managed_after_hash.clone(),
                         owned_paths: companion.owned_paths.clone(),
+                        sensitive_paths: Some(companion.sensitive_paths.clone()),
                         owned_value_macs: macs,
                     }
                 })

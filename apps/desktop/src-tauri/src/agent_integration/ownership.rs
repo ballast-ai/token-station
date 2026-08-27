@@ -49,6 +49,8 @@ pub struct CompanionOwnership {
     pub before_hash: String,
     pub managed_after_hash: String,
     pub owned_paths: Vec<ConfigPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitive_paths: Option<Vec<ConfigPath>>,
     pub owned_value_macs: BTreeMap<String, String>,
 }
 

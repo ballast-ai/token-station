@@ -110,8 +110,11 @@ if (!macos.includes(required)) {
     throw new Error(`macOS release path lost required updater setting: ${required}`);
   }
 }
-if (!windows.includes("if: needs.release-mode.outputs.enabled == 'true'")) {
-  throw new Error("Windows desktop release job must run in formal mode");
+if (!/needs:\s*\[[^\]]*release-mode[^\]]*windows-preflight[^\]]*\]/.test(windows)) {
+  throw new Error("Windows desktop release job must depend on release and platform preflight gates");
+}
+if (!/if:\s*>-[\s\S]{0,160}needs\.release-mode\.outputs\.enabled == 'true'[\s\S]{0,160}inputs\.platform == 'windows'/.test(windows)) {
+  throw new Error("Windows desktop release job must require formal mode and the selected platform");
 }
 if (!windows.includes("token-station_${version}_x86_64.msi")) {
   throw new Error("Windows desktop release must stage the normalized MSI name");

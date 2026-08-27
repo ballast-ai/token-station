@@ -4923,6 +4923,7 @@ mod tests {
                             before_hash: "c".repeat(64),
                             managed_after_hash: "d".repeat(64),
                             owned_paths: vec![applied_id, entries],
+                            sensitive_paths: None,
                             owned_value_macs: companion_macs,
                         },
                     ],
@@ -5261,6 +5262,55 @@ mod tests {
         assert!(!settings.contains(fixture_runtime.virtual_key()));
         let credentials = std::fs::read_to_string(&case.companions[0].path).unwrap();
         assert!(credentials.contains(fixture_runtime.virtual_key()));
+        let disconnect = state
+            .plan_disconnect(
+                case.agent_id,
+                &case.installation_path,
+                "dsh-disconnect-review",
+            )
+            .unwrap();
+        let public_disconnect = serde_json::to_string(&disconnect.plan).unwrap();
+        assert!(
+            !public_disconnect.contains(fixture_runtime.virtual_key()),
+            "companion credentials must not enter the IPC-safe disconnect plan"
+        );
+        let credential_projection = disconnect
+            .plan
+            .projection
+            .files
+            .iter()
+            .find(|file| file.target_config_path == case.companions[0].path.to_string_lossy())
+            .expect("DeepSeek credentials companion must be present in the disconnect review");
+        assert!(
+            credential_projection
+                .forward_changes
+                .iter()
+                .any(|change| change.sensitive),
+            "legacy and current companion credentials must fail closed as sensitive"
+        );
+        assert!(credential_projection
+            .credential_bindings
+            .iter()
+            .any(|binding| {
+                binding.source
+                    == crate::agent_integration::types::CredentialSource::EncryptedSnapshot
+            }));
+        let baseline = state
+            .snapshots
+            .list_agent(case.agent_id)
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.target_config_path == case.primary.path.to_string_lossy())
+            .expect("DeepSeek primary baseline snapshot must exist");
+        let restore = state
+            .plan_restore(&baseline.snapshot_id, "dsh-restore-review")
+            .unwrap();
+        assert!(
+            !serde_json::to_string(&restore.plan)
+                .unwrap()
+                .contains(fixture_runtime.virtual_key()),
+            "companion credentials must not enter the IPC-safe restore plan"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -5518,6 +5568,7 @@ mod tests {
                             before_hash: "d".repeat(64),
                             managed_after_hash: "e".repeat(64),
                             owned_paths: vec![companion_path.clone()],
+                            sensitive_paths: None,
                             owned_value_macs: BTreeMap::from([(
                                 companion_path.to_string(),
                                 "f".repeat(64),
@@ -5604,6 +5655,7 @@ mod tests {
                             before_hash: "d".repeat(64),
                             managed_after_hash: "e".repeat(64),
                             owned_paths: vec![companion_path.clone()],
+                            sensitive_paths: None,
                             owned_value_macs: BTreeMap::from([(
                                 companion_path.to_string(),
                                 "f".repeat(64),

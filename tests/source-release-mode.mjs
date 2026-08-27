@@ -43,6 +43,96 @@ for (const workflow of [
   );
 }
 
+const desktopWorkflow = read(".github/workflows/desktop-release.yml");
+assert.match(
+  desktopWorkflow,
+  /platform:\n(?: {8}.*\n)*? {8}default: macos\n {8}options: \[macos, windows, all\]/,
+  "desktop release dispatch must default to the configured macOS lane",
+);
+assert.match(
+  desktopWorkflow,
+  /inputs\.platform == 'macos' \|\| inputs\.platform == 'all'/,
+);
+assert.match(
+  desktopWorkflow,
+  /inputs\.platform == 'windows' \|\| inputs\.platform == 'all'/,
+);
+
+// Platform credentials belong to the selected platform job. Keeping them in
+// the shared release-mode gate would make a macOS-only run require Windows
+// credentials (and vice versa).
+const releaseModeBlock = desktopWorkflow.slice(
+  desktopWorkflow.indexOf("  release-mode:"),
+  desktopWorkflow.indexOf("  macos-preflight:"),
+);
+for (const platformCredential of [
+  "TOKEN_STATION_UPDATER_PUBKEY",
+  "APPLE_CERTIFICATE",
+  "APPLE_CERTIFICATE_PASSWORD",
+  "APPLE_SIGNING_IDENTITY",
+  "APPLE_KEYCHAIN_PASSWORD",
+  "APPLE_API_ISSUER",
+  "APPLE_API_KEY",
+  "APPLE_API_KEY_CONTENT",
+  "WINDOWS_CERTIFICATE",
+  "WINDOWS_CERTIFICATE_PASSWORD",
+  "WINDOWS_TIMESTAMP_URL",
+]) {
+  assert.doesNotMatch(
+    releaseModeBlock,
+    new RegExp(`(?:TS_HAS_)?${platformCredential}`),
+    `shared release-mode gate must not require ${platformCredential}`,
+  );
+}
+assert.doesNotMatch(releaseModeBlock, /\$\{\{\s*secrets\./);
+
+const macosPreflightBlock = desktopWorkflow.slice(
+  desktopWorkflow.indexOf("  macos-preflight:"),
+  desktopWorkflow.indexOf("  windows-preflight:"),
+);
+for (const required of [
+  "TOKEN_STATION_UPDATER_PUBKEY",
+  "APPLE_CERTIFICATE",
+  "APPLE_CERTIFICATE_PASSWORD",
+  "APPLE_SIGNING_IDENTITY",
+  "APPLE_KEYCHAIN_PASSWORD",
+  "APPLE_API_ISSUER",
+  "APPLE_API_KEY",
+  "APPLE_API_KEY_CONTENT",
+]) {
+  assert.match(
+    macosPreflightBlock,
+    new RegExp(`TS_HAS_${required}: \\$\\{\\{ (?:vars|secrets)\\.${required} != '' \\}\\}`),
+    `macOS preflight must check ${required} by presence only`,
+  );
+}
+
+const windowsPreflightBlock = desktopWorkflow.slice(
+  desktopWorkflow.indexOf("  windows-preflight:"),
+  desktopWorkflow.indexOf("  macos:"),
+);
+for (const required of [
+  "WINDOWS_CERTIFICATE",
+  "WINDOWS_CERTIFICATE_PASSWORD",
+  "WINDOWS_TIMESTAMP_URL",
+]) {
+  assert.match(
+    windowsPreflightBlock,
+    new RegExp(`TS_HAS_${required}: \\$\\{\\{ secrets\\.${required} != '' \\}\\}`),
+    `Windows preflight must check ${required} by presence only`,
+  );
+}
+
+const macosJobBlock = desktopWorkflow.slice(
+  desktopWorkflow.indexOf("  macos:"),
+  desktopWorkflow.indexOf("  windows:"),
+);
+const windowsJobBlock = desktopWorkflow.slice(desktopWorkflow.indexOf("  windows:"));
+assert.doesNotMatch(macosJobBlock.slice(0, macosJobBlock.indexOf("    steps:")), /\n    env:/);
+assert.doesNotMatch(windowsJobBlock.slice(0, windowsJobBlock.indexOf("    steps:")), /\n    env:/);
+assert.match(macosJobBlock, /name: Remove temporary signing material\n {8}if: always\(\)/);
+assert.match(windowsJobBlock, /name: Remove temporary signing material\n {8}if: always\(\)/);
+
 // A manual run has to say which mode it wants, in every workflow a human can
 // start by hand.
 for (const workflow of [

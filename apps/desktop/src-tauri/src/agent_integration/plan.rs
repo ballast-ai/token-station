@@ -112,6 +112,7 @@ pub(crate) struct PreparedFileProjection {
     pub format: DocumentFormat,
     pub label: &'static str,
     pub owned_paths: Vec<ConfigPath>,
+    pub sensitive_paths: Vec<ConfigPath>,
 }
 
 pub(crate) struct PlanOwnershipBinding {
@@ -457,6 +458,7 @@ fn build_connection_or_refresh_plan(
             format: companion.format,
             label: companion.label,
             owned_paths: companion.owned_paths,
+            sensitive_paths: companion.sensitive_paths,
         });
     }
     let mut human_diff = changes
@@ -680,7 +682,14 @@ pub fn attach_disconnect_companions(
             "~ {} :: <恢复受管字段>",
             companion.target_config_path
         ));
-        let sensitive_paths = connector.sensitive_paths();
+        // Ownership created before companion sensitivity was persisted cannot
+        // prove which companion fields are non-secret. Fail closed by hiding
+        // every owned companion field instead of falling back to the primary
+        // connector's unrelated sensitive-path contract.
+        let sensitive_paths = companion
+            .sensitive_paths
+            .clone()
+            .unwrap_or_else(|| companion.owned_paths.clone());
         plan.view.projection.files.push(ConnectorFileProjection {
             target_config_path: companion.target_config_path.clone(),
             format: format_name(document_format).to_string(),
@@ -704,6 +713,7 @@ pub fn attach_disconnect_companions(
             format: document_format,
             label: connector.label(),
             owned_paths: companion.owned_paths.clone(),
+            sensitive_paths,
         });
     }
     Ok(())
@@ -803,7 +813,10 @@ pub fn attach_restore_companions(
         ));
         let before_hash = file_revision_hash(target, &current)?;
         let expected_after_hash = file_revision_hash(target, &projected)?;
-        let sensitive_paths = connector.sensitive_paths();
+        let sensitive_paths = companion
+            .sensitive_paths
+            .clone()
+            .unwrap_or_else(|| companion.owned_paths.clone());
         plan.view.projection.files.push(ConnectorFileProjection {
             target_config_path: companion.target_config_path.clone(),
             format: format_name(document_format).to_string(),
@@ -827,6 +840,7 @@ pub fn attach_restore_companions(
             format: document_format,
             label: connector.label(),
             owned_paths: companion.owned_paths.clone(),
+            sensitive_paths,
         });
     }
     Ok(())

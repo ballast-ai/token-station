@@ -692,13 +692,23 @@ impl ClientConfig {
         if self.concurrency.per_provider == 0 {
             self.concurrency.per_provider = defaults.per_provider;
         }
-        for upstream in self.upstreams.values_mut() {
+        let legacy_direct_target = self
+            .routing
+            .as_ref()
+            .filter(|routing| routing.mode == RoutingMode::Direct)
+            .and_then(|routing| routing.direct_target.as_ref())
+            .cloned();
+        for (name, upstream) in &mut self.upstreams {
             if upstream.managed_route || upstream.models.len() != 1 {
                 continue;
             }
             let model = &upstream.models[0];
-            let legacy_managed_route = model.model == "auto"
-                && model.tool_state() == token_station_protocol::CapabilityState::Declared
+            let legacy_managed_route = legacy_direct_target.as_ref().is_some_and(|target| {
+                target.upstream.as_str() == name
+                    && target.model == model.model
+                    && target.model == "auto"
+            }) && model.tool_state()
+                == token_station_protocol::CapabilityState::Declared
                 && model.vision_state() == token_station_protocol::CapabilityState::Declared
                 && model.json_schema_state() == token_station_protocol::CapabilityState::Declared
                 && model.supported_parameters.contains("reasoning_effort");
@@ -1432,9 +1442,25 @@ mod tests {
             "json_schema_state": "declared",
             "supported_parameters": ["reasoning_effort"]
         }]);
+        legacy["routing"] = serde_json::json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "openai_personal", "model": "auto" }
+        });
         let promoted = ClientConfig::parse_with_load_migrations(&legacy.to_string())
             .expect("the legacy managed route loads");
         assert!(promoted.upstreams["openai_personal"].managed_route);
+
+        let mut ordinary = legacy;
+        ordinary["upstreams"]["openai_enterprise"] =
+            ordinary["upstreams"]["openai_personal"].clone();
+        ordinary["routing"]["direct_target"]["upstream"] = serde_json::json!("openai_enterprise");
+        let parsed = ClientConfig::parse_with_load_migrations(&ordinary.to_string())
+            .expect("a matching ordinary provider remains valid");
+        assert!(parsed.upstreams["openai_enterprise"].managed_route);
+        assert!(
+            !parsed.upstreams["openai_personal"].managed_route,
+            "a capability signature alone must never establish managed ownership"
+        );
     }
 
     #[test]

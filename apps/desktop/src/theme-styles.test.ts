@@ -45,12 +45,21 @@ describe("retained page theme styles", () => {
     const summaryListRule = appCss.match(
       /\.station-content-overview \.overview-summary-list\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const routeSummaryListRule = appCss.match(
+      /\.station-content-overview \.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const routeSummaryRowRule = appCss.match(
+      /\.station-content-overview \.overview-route-summary \.overview-route-list > div\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
     expect(summaryHeaderRule).toMatch(/padding:\s*16px 52px 8px 16px/);
     expect(summaryLinkRule).toMatch(/top:\s*14px/);
     expect(summaryLinkRule).toMatch(/right:\s*14px/);
     expect(summaryLinkRule).toMatch(/bottom:\s*auto/);
     expect(summaryListRule).toMatch(/flex:\s*1/);
-    expect(summaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
+    expect(summaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, 44px\)/);
+    expect(routeSummaryListRule).toMatch(/display:\s*block/);
+    expect(routeSummaryRowRule).toMatch(/height:\s*44px/);
+    expect(routeSummaryRowRule).toMatch(/min-height:\s*0/);
   });
 
   it("keeps a one-row global route snapshot at the top of its summary card", () => {
