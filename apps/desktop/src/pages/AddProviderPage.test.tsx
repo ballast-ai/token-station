@@ -571,7 +571,7 @@ describe("AddProviderPage", () => {
 
     await pickPreset(user, "DeepSeek");
 
-    const local = screen.getByRole("checkbox", { name: /这是本机运行的本地模型/ });
+    const local = screen.getByRole("checkbox", { name: /该模型在本机运行/ });
     expect(local).not.toBeChecked();
     expect(local).toBeDisabled();
     expect(await screen.findByText(/云端地址不能标记为本地模型/)).toBeInTheDocument();
@@ -607,7 +607,7 @@ describe("AddProviderPage", () => {
 
     await pickPreset(user, "本地 Ollama");
 
-    const local = screen.getByRole("checkbox", { name: /这是本机运行的本地模型/ });
+    const local = screen.getByRole("checkbox", { name: /该模型在本机运行/ });
     expect(local).toBeChecked();
     expect(local).toBeEnabled();
     expect(await screen.findByText(/已检测到本机回环地址/)).toBeInTheDocument();

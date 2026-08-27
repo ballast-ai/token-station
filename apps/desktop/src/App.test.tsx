@@ -1721,6 +1721,9 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText("强模型")).toBeNull();
     expect(screen.queryByText("中模型")).toBeNull();
     expect(screen.queryByText("弱模型")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "只走本地" })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /只走本地模型/ })).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("set_local_routing", expect.anything());
   });
 
   it("connects and applies a server-managed enterprise route in one action", async () => {

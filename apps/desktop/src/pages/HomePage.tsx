@@ -36,9 +36,6 @@ interface HomePageProps {
   applying: boolean;
   configError: string | null;
   saveStatus: string;
-  localOnly: boolean;
-  allowCloudFallback: boolean;
-  onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
   onSaveProfile: (name: string) => Promise<boolean>;
   onDeleteProfile: (name: string) => Promise<boolean>;
@@ -66,9 +63,6 @@ export default function HomePage({
   applying,
   configError,
   saveStatus,
-  localOnly,
-  allowCloudFallback,
-  onSetLocalRouting,
   onTierChange,
   onSaveProfile,
   onDeleteProfile,
@@ -84,7 +78,6 @@ export default function HomePage({
     mid: Boolean(tiers.mid?.upstream && tiers.mid?.model),
     low: Boolean(tiers.low?.upstream && tiers.low?.model),
   };
-  const hasLocalProvider = providers.some((provider) => provider.local);
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -283,57 +276,6 @@ export default function HomePage({
         onRemove={onRemoveKeyword}
       />
 
-      <section className="panel local-routing-panel">
-        <div className="panel-head split-heading">
-          <div>
-            <h2>{copy("Local only", "只走本地", "只走本地", "ローカルのみ")}</h2>
-            <p className="sub">
-              {hasLocalProvider
-                ? copy(
-                    "Only providers marked as local will be used, so requests stay on this Mac. Save and apply when finished.",
-                    "打开后，路由只使用标为“本地”的供应商，请求不会离开本机。改完按上方“保存并应用”生效。", "開啟後，路由只使用標為「本地」的供應商，請求不會離開本機。改完按上方「儲存並應用」生效。", "開くと、ルーティングは「ローカル」にマークされたプロバイダーのみを使用し、リクエストがこのマシンの外に漏れません。変更が完了したら上記の「保存して適用」をクリックしてください。"
-                  )
-                : copy(
-                    "No local provider is configured. Add a provider and mark it as a local model first.",
-                    "还没有本地供应商。请先添加供应商并勾选“本地模型”。", "尚未設定任何本機供應商。請先新增供應商並勾選「本機模型」。", "ローカルプロバイダーが設定されていません。まずプロバイダーを追加し、「ローカルモデル」にチェックしてください。"
-                  )}
-            </p>
-          </div>
-          <span className="default-route-chip">{copy("Privacy first", "隐私优先", "隱私優先", "プライバシー優先")}</span>
-        </div>
-
-        <label className="switch-row">
-          <input
-            type="checkbox"
-            checked={localOnly}
-            disabled={busy || !hasLocalProvider}
-            onChange={(event) =>
-              onSetLocalRouting(event.target.checked, event.target.checked && allowCloudFallback)
-            }
-          />
-          <span>{copy("Use local models only", "只走本地模型（请求不出本机）", "僅使用本機模型（請求不會離開本機）", "ローカルモデルのみを使用（リクエストはローカルにのみ発生）")}</span>
-        </label>
-        {localOnly && (
-          <label className="switch-row switch-row-sub">
-            <input
-              type="checkbox"
-              checked={allowCloudFallback}
-              disabled={busy}
-              onChange={(event) => onSetLocalRouting(true, event.target.checked)}
-            />
-            <span>
-              {copy(
-                "Allow cloud fallback when local models are unavailable",
-                "本地不可用时，允许使用云模型兜底", "本地不可用時，允許使用雲模型作為備用", "ローカルモデルが利用不可な場合、クラウドモデルをバックアップとして使用を許可"
-              )}
-              <em>{copy(
-                "(Off means strict local mode; requests fail instead of leaving this Mac.)",
-                "（关闭后为严格本地模式，本地不可用时请求会失败，不会外发。）", "（關閉後為嚴格本地模式，本地不可用時請求會失敗，不會外發。）", "（オフにすると厳格なローカルモードになります。ローカルモデルが利用不可な場合、リクエストは失敗し、外部に送信されません。）"
-              )}</em>
-            </span>
-          </label>
-        )}
-      </section>
       </>
       )}
 
