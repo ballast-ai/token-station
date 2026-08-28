@@ -1179,7 +1179,7 @@ describe("provider deletion lifecycle", () => {
     const manageButton = within(providerGroup).getByRole("button", { name: "管理" });
     expect(manageButton).toBeInTheDocument();
     const modelList = screen.getByRole("list", { name: "team-openai 模型" });
-    expect(modelList).toHaveAttribute("data-layout", "compact-three-column");
+    expect(modelList).toHaveAttribute("data-layout", "compact-model-index");
     expect(modelList).toHaveAttribute("data-surface", "plain-model-grid");
     expect(within(modelList).getByRole("listitem"))
       .toHaveTextContent("gpt-5.6");

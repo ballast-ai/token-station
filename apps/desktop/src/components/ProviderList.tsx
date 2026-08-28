@@ -172,7 +172,7 @@ export default function ProviderList({
               className="provider-primary-models"
               role="list"
               aria-label={copy(`${displayName} models`, `${displayName} 模型`, `${displayName} 模型`, `${displayName} モデル`)}
-              data-layout="compact-three-column"
+              data-layout="compact-model-index"
               data-surface="plain-model-grid"
             >
               {provider.models.length > 0 ? provider.models.map((model) => (
