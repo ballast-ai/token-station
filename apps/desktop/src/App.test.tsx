@@ -550,6 +550,9 @@ it("walks through provider configuration and advances only after a real save", a
   const modelCoachmark = await screen.findByRole("dialog", { name: "选择至少一个模型" });
   expect(screen.getByRole("group", { name: "供应商模型" }))
     .toHaveAttribute("data-onboarding-active", "true");
+  await user.click(screen.getByRole("button", {
+    name: (accessibleName) => accessibleName.endsWith("gpt-5.5"),
+  }));
   await user.click(within(modelCoachmark).getByRole("button", { name: "配置好了，去保存" }));
 
   const saveCoachmark = await screen.findByRole("dialog", { name: "保存供应商" });
@@ -3078,6 +3081,9 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("API Key"), "secret-test");
+    await user.click(screen.getByRole("button", {
+      name: (accessibleName) => accessibleName.endsWith("gpt-5.5"),
+    }));
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
     expect(within(screen.getByTestId("error-toast-viewport")).getByText("供应商已添加"))

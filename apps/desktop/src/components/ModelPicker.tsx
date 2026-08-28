@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { Input } from "./ui/input";
 
 export type CatalogTone = "idle" | "loading" | "live" | "cache" | "error";
 
@@ -33,35 +34,21 @@ export default function ModelPicker({
   const { copy } = useLocalizedCopy();
   const [query, setQuery] = useState("");
   const [customModel, setCustomModel] = useState("");
-  // Move models selected or added during this opening to the end in action order
-  // so users can review them. This is local view state and resets to alphabetical
-  // order when the component remounts.
-  const [recent, setRecent] = useState<string[]>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
-
-  const promoteRecent = (model: string) =>
-    setRecent((current) => [...current.filter((item) => item !== model), model]);
 
   const visible = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    // Sort alphabetically by default, then append current selections in selection order so new additions stay visible.
-    const sorted = [...new Set(models)].sort((left, right) => left.localeCompare(right));
-    const recentTail = recent.filter((model) => models.includes(model));
-    const tailSet = new Set(recentTail);
-    return [...sorted.filter((model) => !tailSet.has(model)), ...recentTail]
+    return [...new Set(models)]
+      .sort((left, right) => left.localeCompare(right))
       .filter((model) => !normalizedQuery || model.toLocaleLowerCase().includes(normalizedQuery));
-  }, [models, query, recent]);
+  }, [models, query]);
 
-  const toggle = (model: string) => {
-    if (!selectedSet.has(model)) promoteRecent(model);
-    onToggle(model);
-  };
+  const toggle = (model: string) => onToggle(model);
 
   const addCustom = () => {
     const model = customModel.trim();
     if (!model || disabled) return;
     onAdd(model);
-    promoteRecent(model);
     setCustomModel("");
   };
 
@@ -87,7 +74,7 @@ export default function ModelPicker({
       {models.length > 12 && (
         <div className="model-search-wrap">
           <span className="search-mark">⌕</span>
-          <input
+          <Input
             className="model-search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -118,7 +105,7 @@ export default function ModelPicker({
       </div>
 
       <div className="custom-model-row">
-        <input
+        <Input
           className="input grow"
           value={customModel}
           onChange={(event) => setCustomModel(event.target.value)}

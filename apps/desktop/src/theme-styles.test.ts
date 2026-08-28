@@ -131,6 +131,58 @@ describe("retained page theme styles", () => {
     expect(overviewInternalDividerRule).not.toMatch(/border-left\s*:/);
   });
 
+  it("uses the flat directory language for model-first search results", () => {
+    const catalogRule = appCss.match(/\.model-first-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const resultRule = appCss.match(/\.model-first-results button\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const hoverRule = appCss.match(
+      /\.model-first-results button:hover\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const focusRule = appCss.match(
+      /\.model-first-results button:focus-visible\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const inlineNoteRule = appCss.match(/\.inline-note\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const modelChipRule = appCss.match(/\.model-chip\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const selectedModelChipRule = appCss.match(/\.model-chip\.on\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(catalogRule).toMatch(/padding:\s*0/);
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*transparent/);
+    expect(catalogRule).toMatch(/box-shadow:\s*none/);
+    expect(resultRule).toMatch(/border:\s*0/);
+    expect(resultRule).toMatch(/background:\s*transparent/);
+    expect(resultRule).toMatch(/min-height:\s*64px/);
+    expect(hoverRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(focusRule).toMatch(/outline:\s*2px solid var\(--signal\)/);
+    expect(inlineNoteRule).toMatch(/color:\s*var\(--muted\)/);
+    expect(inlineNoteRule).toMatch(/background:\s*transparent/);
+    expect(inlineNoteRule).not.toMatch(/var\(--warning\)/);
+    expect(modelChipRule).toMatch(/font-weight:\s*500/);
+    expect(selectedModelChipRule).toMatch(/font-weight:\s*500/);
+  });
+
+  it("keeps provider configuration on one flat surface", () => {
+    const wizardRule = appCss.match(/\.provider-wizard\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const stepRule = appCss.match(/\.wizard-step\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const indexRule = appCss.match(/\.step-index\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const previewRule = appCss.match(/\.endpoint-preview\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const catalogRule = appCss.match(/\.provider-wizard \.model-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const chipRule = appCss.match(/\.provider-wizard \.model-chip\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const actionsRule = appCss.match(/\.wizard-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(wizardRule).toMatch(/border:\s*0/);
+    expect(wizardRule).toMatch(/background:\s*transparent/);
+    expect(wizardRule).toMatch(/box-shadow:\s*none/);
+    expect(stepRule).not.toMatch(/border-(?:top|right|bottom|left):/);
+    expect(indexRule).toMatch(/background:\s*transparent/);
+    expect(previewRule).toMatch(/border:\s*0/);
+    expect(previewRule).toMatch(/background:\s*transparent/);
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*transparent/);
+    expect(chipRule).toMatch(/border-color:\s*transparent/);
+    expect(chipRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(actionsRule).toMatch(/background:\s*transparent/);
+  });
+
   it("keeps a one-row global route snapshot at the top of its summary card", () => {
     const routeSnapshotRule = appCss.match(
       /\.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,

@@ -540,7 +540,7 @@ describe("settings and update actions", () => {
 });
 
 describe("model selection and provider model management", () => {
-  it("moves a newly selected model to the recent tail", async () => {
+  it("keeps a newly selected model in its stable alphabetical position", async () => {
     const user = userEvent.setup();
     const onToggle = vi.fn();
     const { rerender } = render(
@@ -577,8 +577,8 @@ describe("model selection and provider model management", () => {
     );
     expect(getModelOrder()).toEqual([
       "+deepseek-r1",
-      "+qwen3:4b-fast",
       "✓gemma4:latest",
+      "+qwen3:4b-fast",
     ]);
   });
 
