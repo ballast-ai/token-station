@@ -11308,6 +11308,12 @@ samp {
   isolation: isolate;
 }
 
+:root.dark .launch-screen {
+  --launch-canvas: #111620;
+  --launch-ink: #eef2f8;
+  --launch-signal: #ff6041;
+}
+
 .launch-screen[data-phase="exiting"] {
   animation: launch-screen-exit 420ms cubic-bezier(.68, 0, .34, 1) both;
 }
