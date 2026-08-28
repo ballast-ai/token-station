@@ -1314,6 +1314,27 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
   });
 
+  it("reports startup settlement only after initial Agent discovery finishes", async () => {
+    let resolveScan!: (agents: AgentView[]) => void;
+    const startupScan = new Promise<AgentView[]>((resolve) => {
+      resolveScan = resolve;
+    });
+    const onStartupSettled = vi.fn();
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return startupScan;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App onStartupSettled={onStartupSettled} />);
+    await screen.findByRole("status", { name: "正在检查本机 Agent" });
+    expect(onStartupSettled).not.toHaveBeenCalled();
+
+    await act(async () => resolveScan([scannedClaude]));
+    await waitFor(() => expect(onStartupSettled).toHaveBeenCalledTimes(1));
+  });
+
   it("serve 事件早于 get_state 返回时保留最新运行代次并只扫描一次", async () => {
     const user = userEvent.setup();
     let emitServe: ((serve: ServeView) => void) | undefined;
@@ -1393,6 +1414,21 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
     expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("reports startup settlement when discovery exposes an actionable failure", async () => {
+    const onStartupSettled = vi.fn();
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") throw new Error("agent discovery failed");
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App onStartupSettled={onStartupSettled} />);
+
+    await screen.findByRole("status", { name: "无法检查本机 Agent" });
+    expect(onStartupSettled).toHaveBeenCalledTimes(1);
   });
 
   it("启动扫描成功为空时进入正常主页而不是失败状态", async () => {
