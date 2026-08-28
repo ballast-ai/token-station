@@ -6070,6 +6070,7 @@ pre.block {
 
 .overview-page [data-slot="card"] {
   border: 0;
+  border-radius: 0;
   background: transparent;
   box-shadow: none;
 }
@@ -12611,7 +12612,7 @@ samp {
 
 .provider-recovery {
   border: 0;
-  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+  background: var(--content-block-surface);
 }
 
 .provider-card .provider-primary-models[data-layout="compact-three-column"] {

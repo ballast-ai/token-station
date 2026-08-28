@@ -86,6 +86,10 @@ describe("retained page theme styles", () => {
     const providerModelRule = appCss.match(
       /\.provider-primary-models\[data-surface="plain-model-grid"\] > li\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const providerRecoveryRules = Array.from(
+      appCss.matchAll(/\.provider-recovery\s*\{([^}]*)\}/gs),
+    );
+    const providerRecoveryRule = providerRecoveryRules[providerRecoveryRules.length - 1]?.[1] ?? "";
     const overviewCardRule = appCss.match(
       /\.overview-page \[data-slot="card"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -101,7 +105,10 @@ describe("retained page theme styles", () => {
     expect(providerCardRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(providerModelRule).toMatch(/border:\s*0/);
     expect(providerModelRule).toMatch(/background:\s*transparent/);
+    expect(providerRecoveryRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(providerRecoveryRule).not.toMatch(/var\(--warning\)/);
     expect(overviewCardRule).toMatch(/border:\s*0/);
+    expect(overviewCardRule).toMatch(/border-radius:\s*0/);
     expect(overviewCardRule).toMatch(/box-shadow:\s*none/);
     expect(overviewCardRule).toMatch(/background:\s*transparent/);
     expect(overviewGroupRule).toMatch(/background:\s*var\(--content-block-surface\)/);
