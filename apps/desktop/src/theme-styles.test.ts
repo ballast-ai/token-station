@@ -86,6 +86,12 @@ describe("retained page theme styles", () => {
     const providerModelRule = appCss.match(
       /\.provider-primary-models\[data-surface="plain-model-grid"\] > li\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const providerModelIndexRule = appCss.match(
+      /\.provider-card \.provider-primary-models\[data-layout="compact-model-index"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerModelNameRule = appCss.match(
+      /\.provider-card \.provider-primary-models strong\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
     const providerRecoveryRules = Array.from(
       appCss.matchAll(/\.provider-recovery\s*\{([^}]*)\}/gs),
     );
@@ -108,6 +114,13 @@ describe("retained page theme styles", () => {
     expect(providerCardRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(providerModelRule).toMatch(/border:\s*0/);
     expect(providerModelRule).toMatch(/background:\s*transparent/);
+    expect(providerModelRule).toMatch(/min-height:\s*30px/);
+    expect(providerModelIndexRule).toMatch(/grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+    expect(providerModelIndexRule).toMatch(/column-gap:\s*24px/);
+    expect(providerModelIndexRule).toMatch(/row-gap:\s*0/);
+    expect(providerModelNameRule).toMatch(/font-weight:\s*500/);
+    expect(providerModelNameRule).toMatch(/font-size:\s*10\.5px/);
+    expect(appCss).toMatch(/@media \(min-width:\s*1400px\)[\s\S]*?compact-model-index[\s\S]*?repeat\(4, minmax\(0, 1fr\)\)/);
     expect(providerRecoveryRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(providerRecoveryRule).not.toMatch(/var\(--warning\)/);
     expect(overviewCardRule).toMatch(/border:\s*0/);

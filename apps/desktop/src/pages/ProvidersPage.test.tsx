@@ -23,6 +23,26 @@ const baseProps = {
 };
 
 describe("ProvidersPage enterprise entry", () => {
+  it("renders provider models as a compact responsive index", () => {
+    render(
+      <ProvidersPage
+        {...baseProps}
+        providers={[{
+          name: "deepseek",
+          provider: "openai-compatible",
+          base_url: "https://api.deepseek.com/v1",
+          models: ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"],
+          has_auth: true,
+          managed_route: false,
+        }]}
+      />,
+    );
+
+    const models = screen.getByRole("list", { name: "deepseek 模型" });
+    expect(models).toHaveAttribute("data-layout", "compact-model-index");
+    expect(within(models).getAllByRole("listitem")).toHaveLength(3);
+  });
+
   it("places Enterprise routing before Add model and requires explicit model selection", async () => {
     const user = userEvent.setup();
     const onConnectEnterprise = vi.fn().mockResolvedValue(true);
