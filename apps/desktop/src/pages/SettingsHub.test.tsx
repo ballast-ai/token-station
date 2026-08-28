@@ -356,7 +356,7 @@ describe("SettingsHub clipboard feedback", () => {
     expect(workspace).toHaveProperty("scrollTop", 0);
   });
 
-  it("switches Settings categories without entrance motion", async () => {
+  it("animates the content surface when the Settings category changes", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();
     const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
@@ -385,7 +385,7 @@ describe("SettingsHub clipboard feedback", () => {
       await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
 
       expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
-      expect(animate).not.toHaveBeenCalled();
+      expect(animate).toHaveBeenCalledTimes(1);
     } finally {
       if (originalAnimate) {
         Object.defineProperty(HTMLElement.prototype, "animate", {

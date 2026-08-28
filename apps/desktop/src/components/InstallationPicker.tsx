@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "motion/react";
 import type { AgentInstallationView } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
+import {
+  AnimatedDropdownSurface,
+  DROPDOWN_CHEVRON_TRANSITION,
+  DROPDOWN_ITEM_VARIANTS,
+  REDUCED_DROPDOWN_ITEM_VARIANTS,
+  useDropdownReducedMotion,
+} from "./ui/dropdown-motion";
 
 interface InstallationPickerProps {
   agentName: string;
@@ -70,6 +78,7 @@ export default function InstallationPicker({
   onSelect,
 }: InstallationPickerProps) {
   const { language, copy } = useLocalizedCopy();
+  const reduceMotion = useDropdownReducedMotion();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const options = useMemo(
@@ -130,26 +139,41 @@ export default function InstallationPicker({
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
       >
-        {copy("Select version", "选择版本", "選擇版本", "バージョンを選択")} <span aria-hidden="true">⌄</span>
-      </button>
-      {open && (
-        <div
-          className="installation-picker-menu"
-          role="listbox"
-          data-onboarding-floating="true"
-          aria-label={copy(`${agentName} installations`, `${agentName} 安装列表`, `${agentName} 安裝列表`, `${agentName} のインストールリスト`)}
+        {copy("Select version", "选择版本", "選擇版本", "バージョンを選択")}{" "}
+        <motion.span
+          aria-hidden="true"
+          data-motion-dropdown-chevron="true"
+          animate={{ rotate: open ? 180 : 0 }}
+          transition={reduceMotion ? { duration: 0 } : DROPDOWN_CHEVRON_TRANSITION}
         >
+          ⌄
+        </motion.span>
+      </button>
+      <AnimatedDropdownSurface
+        open={open}
+        kind="select"
+        className="installation-picker-menu"
+        role="listbox"
+        data-onboarding-floating="true"
+        aria-label={copy(`${agentName} installations`, `${agentName} 安装列表`, `${agentName} 安裝列表`, `${agentName} のインストールリスト`)}
+      >
           {options.map((option, index) => {
             const selected = option.path === selectedPath;
             const discovery = installations[index].discovery;
             return (
-              <button
+              <motion.button
                 key={option.path}
                 className={selected ? "selected" : ""}
                 type="button"
                 role="option"
                 aria-label={option.label}
                 aria-selected={selected}
+                variants={reduceMotion ? REDUCED_DROPDOWN_ITEM_VARIANTS : DROPDOWN_ITEM_VARIANTS}
+                transition={reduceMotion ? { duration: 0 } : {
+                  duration: 0.24,
+                  delay: 0.04 + Math.min(index, 8) * 0.035,
+                  ease: [0.16, 1, 0.3, 1],
+                }}
                 onClick={() => {
                   onSelect(option.path);
                   setOpen(false);
@@ -163,11 +187,10 @@ export default function InstallationPicker({
                   {` · ${modifiedLabel(discovery.modified_at_ms)} · ${hashLabel(discovery.binary_sha256)}`}
                 </span>
                 {selected && <span className="installation-check" aria-hidden="true">✓</span>}
-              </button>
+              </motion.button>
             );
           })}
-        </div>
-      )}
+      </AnimatedDropdownSurface>
     </div>
   );
 }

@@ -1,0 +1,32 @@
+@keyframes token-station-dropdown-option-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+    filter: blur(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+[data-motion-dropdown-list="true"] .motion-dropdown-item {
+  animation: token-station-dropdown-option-in 240ms cubic-bezier(.16, 1, .3, 1) both;
+}
+
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(1) { animation-delay: 50ms; }
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(2) { animation-delay: 85ms; }
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(3) { animation-delay: 120ms; }
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(4) { animation-delay: 155ms; }
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(5) { animation-delay: 190ms; }
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(6) { animation-delay: 225ms; }
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(7) { animation-delay: 260ms; }
+[data-motion-dropdown-list="true"] .motion-dropdown-item:nth-child(n + 8) { animation-delay: 295ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  [data-motion-dropdown-list="true"] .motion-dropdown-item {
+    animation: none;
+  }
+}

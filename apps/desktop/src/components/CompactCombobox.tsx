@@ -8,7 +8,15 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { motion } from "motion/react";
 import { useLocalizedCopy } from "./LanguageProvider";
+import {
+  AnimatedDropdownSurface,
+  DROPDOWN_CHEVRON_TRANSITION,
+  DROPDOWN_ITEM_VARIANTS,
+  REDUCED_DROPDOWN_ITEM_VARIANTS,
+  useDropdownReducedMotion,
+} from "./ui/dropdown-motion";
 
 export interface CompactComboboxOption {
   value: string;
@@ -43,6 +51,7 @@ export default function CompactCombobox({
   onChange,
 }: CompactComboboxProps) {
   const { copy } = useLocalizedCopy();
+  const reduceMotion = useDropdownReducedMotion();
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [query, setQuery] = useState("");
@@ -215,17 +224,25 @@ export default function CompactCombobox({
           {selected?.icon && <span className="compact-combobox-icon" aria-hidden="true">{selected.icon}</span>}
           <span>{selected?.label ?? placeholder ?? copy("Select", "请选择", "請選擇", "選択してください")}</span>
         </span>
-        <svg className="compact-combobox-chevron" viewBox="0 0 16 16" aria-hidden="true">
+        <motion.svg
+          className="compact-combobox-chevron"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+          data-motion-dropdown-chevron="true"
+          animate={{ rotate: open ? 180 : 0 }}
+          transition={reduceMotion ? { duration: 0 } : DROPDOWN_CHEVRON_TRANSITION}
+        >
           <path d="m4 6 4 4 4-4" />
-        </svg>
+        </motion.svg>
       </button>
 
-      {open && (
-        <div
-          className="compact-combobox-popover"
-          data-onboarding-floating="true"
-          style={popoverStyle}
-        >
+      <AnimatedDropdownSurface
+        open={open}
+        kind="combobox"
+        className="compact-combobox-popover"
+        data-onboarding-floating="true"
+        style={popoverStyle}
+      >
           {searchable && (
             <label className="compact-combobox-search">
               <span aria-hidden="true">⌕</span>
@@ -253,7 +270,7 @@ export default function CompactCombobox({
           )}
           <div className="compact-combobox-options" id={listboxId} role="listbox">
             {visibleOptions.map((option, index) => (
-              <button
+              <motion.button
                 key={option.value || "__empty__"}
                 className={`compact-combobox-option ${option.value === value ? "selected" : ""}`}
                 type="button"
@@ -269,6 +286,12 @@ export default function CompactCombobox({
                   close(true);
                 }}
                 onFocus={() => setActiveIndex(index)}
+                variants={reduceMotion ? REDUCED_DROPDOWN_ITEM_VARIANTS : DROPDOWN_ITEM_VARIANTS}
+                transition={reduceMotion ? { duration: 0 } : {
+                  duration: 0.24,
+                  delay: 0.04 + Math.min(index, 8) * 0.035,
+                  ease: [0.16, 1, 0.3, 1],
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "ArrowDown") {
                     event.preventDefault();
@@ -309,7 +332,7 @@ export default function CompactCombobox({
                     <path d="m3.5 9.25 3.25 3.25 7.75-7.75" />
                   </svg>
                 )}
-              </button>
+              </motion.button>
             ))}
             {visibleOptions.length === 0 && (
               <div className="compact-combobox-empty">
@@ -322,8 +345,7 @@ export default function CompactCombobox({
               </div>
             )}
           </div>
-        </div>
-      )}
+      </AnimatedDropdownSurface>
     </div>
   );
 }

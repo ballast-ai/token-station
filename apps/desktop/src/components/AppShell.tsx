@@ -3,6 +3,7 @@ import { Activity, Boxes, Search, Settings, X } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
 import TokenStationMark from "./TokenStationMark";
+import { usePageTransition } from "./use-page-transition";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -94,6 +95,8 @@ export default function AppShell({
               ? t("serve.retry")
               : t("serve.startProxy");
   const connectedAgents = agents.filter((agent) => agent.status === "CONNECTED").length;
+  const shellTransitionKey = activePrimary === "settings" ? "settings" : view;
+  const contentRef = usePageTransition<HTMLElement>(shellTransitionKey);
 
   return (
     <div className="station-shell station-shell-topnav">
@@ -177,7 +180,7 @@ export default function AppShell({
         </div>
       </header>
 
-      <main className={`station-content station-content-topnav${activePrimary === "home" || activePrimary === "agents" ? " station-content-agent" : ""}${activePrimary === "overview" ? " station-content-overview" : ""}${activePrimary === "settings" ? " station-content-settings" : ""}`}>
+      <main ref={contentRef} className={`station-content station-content-topnav${activePrimary === "home" || activePrimary === "agents" ? " station-content-agent" : ""}${activePrimary === "overview" ? " station-content-overview" : ""}${activePrimary === "settings" ? " station-content-settings" : ""}`}>
         {children}
       </main>
 
