@@ -250,7 +250,11 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(await screen.findByText("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "打开备份文件夹" }));
+    expect(screen.queryByText(/受管字段：/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制备份目录" })).toHaveAttribute("data-size", "icon-sm");
+    const openButton = screen.getByRole("button", { name: "打开备份文件夹" });
+    expect(openButton).toHaveAttribute("data-size", "icon-sm");
+    await user.click(openButton);
     expect(openAgentBackupDirectory).toHaveBeenCalledWith();
   });
 
