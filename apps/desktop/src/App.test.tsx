@@ -1185,7 +1185,7 @@ describe("desktop station navigation", () => {
     expect(within(dialog).getByRole("button", { name: "先搜模型" })).toBeInTheDocument();
   });
 
-  it("keeps destination content and the fixed shell stable without entrance motion", async () => {
+  it("animates destination content while the fixed shell stays stable", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();
     const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
@@ -1205,7 +1205,7 @@ describe("desktop station navigation", () => {
       await user.keyboard("{Escape}");
       expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
 
-      expect(animate).not.toHaveBeenCalled();
+      expect(animate).toHaveBeenCalledTimes(1);
       expect(document.querySelector(".station-header")).toBeInTheDocument();
     } finally {
       if (originalAnimate) {

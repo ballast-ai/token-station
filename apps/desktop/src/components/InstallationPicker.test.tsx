@@ -114,12 +114,17 @@ describe("InstallationPicker", () => {
     await user.click(screen.getByRole("button", { name: /选择版本/ }));
     expect(screen.getByRole("listbox"))
       .toHaveAttribute("data-onboarding-floating", "true");
+    expect(screen.getByRole("listbox"))
+      .toHaveAttribute("data-motion-dropdown", "select");
+    expect(screen.getByRole("button", { name: /选择版本/ }).querySelector("span"))
+      .toHaveAttribute("data-motion-dropdown-chevron", "true");
     expect(screen.getByRole("option", { name: "claude · v1.2.3" }))
       .toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("C:\\Tools\\claude.exe")).toBeInTheDocument();
     await user.click(screen.getByRole("option", { name: "claude.exe · v2.0.0" }));
     expect(onSelect).toHaveBeenCalledWith("C:\\Tools\\claude.exe");
     expect(screen.queryByRole("listbox")).toBeNull();
+    expect(document.querySelector('[data-motion-dropdown="select"]')).toBeNull();
   });
 
   it("lists the exact source and immutable binary facts for every installation", async () => {

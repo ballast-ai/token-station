@@ -41,6 +41,7 @@ import {
 import { Switch } from "../components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { useErrorToast } from "../components/ErrorToast";
+import { usePageTransition } from "../components/use-page-transition";
 import About from "./About";
 import Settings from "./Settings";
 import RequestLogsPage from "./RequestLogsPage";
@@ -477,7 +478,7 @@ function SettingsHubContent({
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [navigationInputMode, setNavigationInputMode] = useState<"pointer" | "keyboard">("pointer");
   const navigationRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const contentRef = useRef<HTMLElement | null>(null);
+  const contentRef = usePageTransition<HTMLElement>(section);
   const { t, copy } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const resetScroll = () => {
