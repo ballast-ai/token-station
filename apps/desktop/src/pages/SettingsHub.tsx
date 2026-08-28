@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import type {
   AgentUiMetadataView,
+  ProviderView,
   ServeView,
   SettingsView,
   StateView,
@@ -361,6 +362,95 @@ function LanguagePanel() {
   );
 }
 
+function LocalRoutingSettings({
+  providers,
+  localOnly,
+  allowCloudFallback,
+  busy,
+  onSetLocalRouting,
+}: {
+  providers: ProviderView[];
+  localOnly: boolean;
+  allowCloudFallback: boolean;
+  busy: boolean;
+  onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
+}) {
+  const { copy } = useLanguage();
+  const hasLocalProvider = providers.some((provider) => provider.local);
+  const localDescription = hasLocalProvider
+    ? copy(
+        "Route model requests only to Providers marked as local.",
+        "模型请求只发送给标记为本地的供应商。",
+        "模型請求只傳送給標記為本地的供應商。",
+        "モデルリクエストをローカルとして設定されたプロバイダーだけに送信します。",
+      )
+    : localOnly
+      ? copy(
+          "Strict local routing is active, but no local Provider exists. Disable it here or add a local Provider.",
+          "严格本地路由已启用，但当前没有本地供应商。请在此关闭，或添加本地供应商。",
+          "嚴格本地路由已啟用，但目前沒有本地供應商。請在此關閉，或新增本地供應商。",
+          "厳格なローカルルーティングは有効ですが、ローカルプロバイダーがありません。ここで無効にするか追加してください。",
+        )
+      : copy(
+          "Add a local Provider before enabling this boundary.",
+          "请先添加本地供应商，再启用此边界。",
+          "請先新增本地供應商，再啟用此邊界。",
+          "この境界を有効にする前にローカルプロバイダーを追加してください。",
+        );
+
+  return (
+    <Card className="settings-card local-routing-settings">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{copy("Local only", "只走本地", "只走本地", "ローカルのみ")}</h2></CardTitle>
+        <p className="sub">{localDescription}</p>
+      </CardHeader>
+      <CardContent className="settings-card-content">
+        <div className="setting-row setting-toggle-row local-routing-setting-row">
+          <span className="setting-toggle-copy">
+            <b id="local-routing-label">{copy("Use local models only", "只使用本地模型", "只使用本地模型", "ローカルモデルのみ使用")}</b>
+            <em id="local-routing-description">{copy(
+              "When cloud fallback is off, requests fail instead of leaving this device.",
+              "云端兜底关闭时，请求会失败，不会离开本机。",
+              "雲端備援關閉時，請求會失敗，不會離開本機。",
+              "クラウドフォールバックがオフの場合、リクエストは外部へ送信されず失敗します。",
+            )}</em>
+          </span>
+          <Switch
+            aria-labelledby="local-routing-label"
+            aria-describedby="local-routing-description"
+            checked={localOnly}
+            disabled={busy || (!hasLocalProvider && !localOnly)}
+            onCheckedChange={(checked) => onSetLocalRouting(
+              checked,
+              checked && allowCloudFallback,
+            )}
+          />
+        </div>
+        {localOnly && (
+          <div className="setting-row setting-toggle-row local-routing-setting-row">
+            <span className="setting-toggle-copy">
+              <b id="cloud-fallback-label">{copy("Allow cloud fallback", "允许云模型兜底", "允許雲端模型備援", "クラウドフォールバックを許可")}</b>
+              <em id="cloud-fallback-description">{copy(
+                "Use a cloud model only when local models are unavailable.",
+                "仅在本地模型不可用时使用云模型。",
+                "僅在本地模型不可用時使用雲端模型。",
+                "ローカルモデルが利用できない場合だけクラウドモデルを使用します。",
+              )}</em>
+            </span>
+            <Switch
+              aria-labelledby="cloud-fallback-label"
+              aria-describedby="cloud-fallback-description"
+              checked={allowCloudFallback}
+              disabled={busy}
+              onCheckedChange={(checked) => onSetLocalRouting(true, checked)}
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 interface SettingsHubProps {
   settings: SettingsView;
   serve: ServeView;
@@ -369,6 +459,11 @@ interface SettingsHubProps {
   onAgentVisibilityChange: (agentId: string, visible: boolean) => void;
   onOpenFirstRunGuide: () => void;
   onSaved: (state: StateView) => void;
+  providers?: ProviderView[];
+  localOnly?: boolean;
+  allowCloudFallback?: boolean;
+  routingBusy?: boolean;
+  onSetLocalRouting?: (localOnly: boolean, allowCloudFallback: boolean) => void;
   initialSection?: SettingsSection;
 }
 
@@ -380,6 +475,11 @@ function SettingsHubContent({
   onAgentVisibilityChange,
   onOpenFirstRunGuide,
   onSaved,
+  providers = [],
+  localOnly = false,
+  allowCloudFallback = false,
+  routingBusy = false,
+  onSetLocalRouting = () => undefined,
   initialSection = "about",
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -484,7 +584,16 @@ function SettingsHubContent({
       </aside>
       <main ref={contentRef} className="settings-content">
         {section === "general" && (
-          <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="general" />
+          <>
+            <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="general" />
+            <LocalRoutingSettings
+              providers={providers}
+              localOnly={localOnly}
+              allowCloudFallback={allowCloudFallback}
+              busy={routingBusy}
+              onSetLocalRouting={onSetLocalRouting}
+            />
+          </>
         )}
         {section === "api-key" && (
           <>

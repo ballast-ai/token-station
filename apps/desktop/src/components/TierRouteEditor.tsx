@@ -2,6 +2,7 @@ import type { ProviderView, TierSlot, TierView } from "../api";
 import { ProviderIcon } from "../brandIcons";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
 import { useLocalizedCopy } from "./LanguageProvider";
+import TierKeywords from "./TierKeywords";
 
 export interface TierRouteEditorProps {
   tiers: Record<TierSlot, TierView>;
@@ -9,7 +10,7 @@ export interface TierRouteEditorProps {
   disabled?: boolean;
   readOnly?: boolean;
   keywords?: Record<TierSlot, string[]>;
-  onEditKeywords?: (slot: TierSlot) => void;
+  onAddKeyword?: (slot: TierSlot, keyword: string) => boolean | void | Promise<boolean | void>;
   onRemoveKeyword?: (slot: TierSlot, keyword: string) => void | Promise<void>;
   onTierChange: (
     slot: TierSlot,
@@ -24,7 +25,7 @@ export default function TierRouteEditor({
   disabled = false,
   readOnly = false,
   keywords,
-  onEditKeywords,
+  onAddKeyword,
   onRemoveKeyword,
   onTierChange,
 }: TierRouteEditorProps) {
@@ -37,7 +38,7 @@ export default function TierRouteEditor({
   ];
 
   return (
-    <div className={`tier-grid${onEditKeywords ? " tier-grid-with-keywords" : ""}`}>
+    <div className={`tier-grid${onAddKeyword ? " tier-grid-with-keywords" : ""}`}>
       <div className="tier-table-head">
         <div className="tier-col-head">{copy("Tier", "档位", "檔位", "グレード")}</div>
         <div className="tier-col-head">{copy("Provider", "供应商", "供應商", "プロバイダー")}</div>
@@ -130,56 +131,15 @@ export default function TierRouteEditor({
                 void onTierChange(slot, tier.upstream, model || null);
               }}
             />
-            {onEditKeywords && (
-              <div className="tier-keyword-summary">
-                {tierKeywords.length > 0 && (
-                  <div className="tier-keyword-values" aria-label={copy(
-                    `${label} configured keywords`,
-                    `${label}已设置关键词`,
-                    `${label}已設定關鍵詞`,
-                    `${label}の設定済みキーワード`,
-                  )}>
-                    <span className="tier-keyword-label">{copy("Keywords", "关键词", "關鍵詞", "キーワード")}</span>
-                    {tierKeywords.map((keyword) => (
-                      <span className="tier-keyword-value" key={keyword}>
-                        <span>{keyword}</span>
-                        {onRemoveKeyword && (
-                          <button
-                            className="tier-keyword-remove"
-                            type="button"
-                            disabled={controlsDisabled}
-                            aria-label={copy(
-                              `Delete ${label} keyword ${keyword}`,
-                              `删除${label}关键词 ${keyword}`,
-                              `刪除${label}關鍵詞 ${keyword}`,
-                              `${label}キーワード ${keyword} を削除`,
-                            )}
-                            onClick={() => void onRemoveKeyword(slot, keyword)}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                <button
-                  className="tier-keyword-trigger"
-                  type="button"
-                  disabled={controlsDisabled}
-                  aria-label={copy(
-                    `Add ${label} keywords, ${tierKeywords.length} current`,
-                    `添加${label}关键词，当前 ${tierKeywords.length} 个`,
-                    `新增${label}關鍵詞，目前 ${tierKeywords.length} 個`,
-                    `${label}キーワードを追加、現在 ${tierKeywords.length} 件`,
-                  )}
-                  onClick={() => onEditKeywords(slot)}
-                >
-                  {tierKeywords.length > 0
-                    ? copy("+ Add", "+ 添加", "+ 新增", "+ 追加")
-                    : copy("+ Add keywords", "+ 添加关键词", "+ 新增關鍵詞", "+ キーワードを追加")}
-                </button>
-              </div>
+            {onAddKeyword && onRemoveKeyword && (
+              <TierKeywords
+                slot={slot}
+                keywords={tierKeywords}
+                configured={Boolean(tier.upstream && tier.model)}
+                disabled={controlsDisabled}
+                onAdd={onAddKeyword}
+                onRemove={onRemoveKeyword}
+              />
             )}
           </div>
         );

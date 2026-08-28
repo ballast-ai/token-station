@@ -27,6 +27,7 @@ import { ProviderIcon } from "../brandIcons";
 import CompactCombobox from "./CompactCombobox";
 import { useErrorToast } from "./ErrorToast";
 import { localizedCopy, useLocalizedCopy } from "./LanguageProvider";
+import { Button } from "./ui/button";
 
 export const DIRECT_PROVIDER_ORDER_STORAGE_KEY = "token-station-direct-provider-order-v1";
 
@@ -395,15 +396,14 @@ export default function DirectRoutePanel({
               )}
             </>
           )}
-          <button
-            className="btn primary"
+          <Button
             type="button"
             data-onboarding-target="route-apply"
             disabled={busy || applying || !selectedTargetValid}
             onClick={() => void onApply(selectedProvider, selectedModel)}
           >
             {applying ? copy("Applying…", "应用中…", "應用中…", "適用中…") : copy("Apply", "应用", "應用", "適用")}
-          </button>
+          </Button>
         </div>
       </div>
 

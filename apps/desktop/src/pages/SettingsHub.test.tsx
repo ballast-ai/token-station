@@ -51,6 +51,55 @@ const serve: ServeView = {
 const registry: AgentUiMetadataView[] = [];
 
 describe("SettingsHub clipboard feedback", () => {
+  it("keeps Local-only recovery in Proxy settings without enabling an unusable boundary", async () => {
+    const user = userEvent.setup();
+    const onSetLocalRouting = vi.fn();
+    const view = render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+          localOnly={false}
+          allowCloudFallback={false}
+          onSetLocalRouting={onSetLocalRouting}
+          initialSection="general"
+        />
+      </ErrorToastProvider>,
+    );
+
+    expect(screen.getByRole("switch", { name: /只使用本地模型/ })).toBeDisabled();
+    expect(screen.queryByRole("switch", { name: /允许云模型兜底/ })).toBeNull();
+
+    view.rerender(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+          localOnly
+          allowCloudFallback={false}
+          onSetLocalRouting={onSetLocalRouting}
+          initialSection="general"
+        />
+      </ErrorToastProvider>,
+    );
+
+    const recoverySwitch = screen.getByRole("switch", { name: /只使用本地模型/ });
+    expect(recoverySwitch).toBeEnabled();
+    expect(screen.getByRole("switch", { name: /允许云模型兜底/ })).toBeInTheDocument();
+    await user.click(recoverySwitch);
+    expect(onSetLocalRouting).toHaveBeenCalledWith(false, false);
+  });
+
   it("moves and activates Settings sections with vertical navigation keys", async () => {
     const user = userEvent.setup();
     render(

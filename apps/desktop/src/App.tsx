@@ -1049,9 +1049,6 @@ function StationApp({ onStartupSettled }: AppProps) {
               configError={state.config_error ? humanizeAppError(state.config_error, language) : null}
               keywords={state.keywords}
               saveStatus={saveStatus}
-              localOnly={state.local_only}
-              allowCloudFallback={state.allow_cloud_fallback}
-              onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
               onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
               onSaveProfile={(name) => run(
                 () => saveHomeRouteAsProfile(name),
@@ -1067,7 +1064,7 @@ function StationApp({ onStartupSettled }: AppProps) {
                   `策略组“${name}”已从草稿删除，请保存并应用。`, `策略組「${name}」已從草稿刪除。請儲存並應用。`, `プロファイル「${name}」が下書きから削除されました。保存して適用してください。`
                 ),
               )}
-              onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
+              onAddKeyword={(slot, keyword) => run(() => addKeyword(slot, keyword))}
               onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
               onSave={() => void run(serveStart, undefined, true)}
               onApplyAll={() => void run(
@@ -1202,6 +1199,13 @@ function StationApp({ onStartupSettled }: AppProps) {
             setFirstRunGuideOpen(true);
           }}
           onSaved={showState}
+          providers={state.providers}
+          localOnly={state.local_only}
+          allowCloudFallback={state.allow_cloud_fallback}
+          routingBusy={busy}
+          onSetLocalRouting={(localOnly, allowCloudFallback) => void run(
+            () => setLocalRouting(localOnly, allowCloudFallback),
+          )}
           initialSection={view === "logs" ? "request-logs" : "about"}
         />
       )}

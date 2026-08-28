@@ -3,69 +3,120 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import TierKeywords from "./TierKeywords";
 
-const allConfigured = { high: true, mid: true, low: true };
-const emptyKeywords = { high: [], mid: [], low: [] };
-
 describe("TierKeywords", () => {
-  it("opens one tier editor with the same high-mid-low vocabulary as smart routing", () => {
+  it("renders one continuous inline editor for every smart-routing tier", () => {
     render(
-      <TierKeywords
-        keywords={emptyKeywords}
-        configured={allConfigured}
-        activeSlot="high"
-        onOpenChange={vi.fn()}
-        onAdd={vi.fn()}
-        onRemove={vi.fn()}
-      />,
+      <>
+        <TierKeywords slot="high" keywords={["架构"]} configured onAdd={vi.fn()} onRemove={vi.fn()} />
+        <TierKeywords slot="mid" keywords={[]} configured onAdd={vi.fn()} onRemove={vi.fn()} />
+        <TierKeywords slot="low" keywords={["摘要"]} configured onAdd={vi.fn()} onRemove={vi.fn()} />
+      </>,
     );
 
-    const dialog = screen.getByRole("dialog", { name: "上档关键词" });
-    expect(dialog).toHaveTextContent("命中后固定走上档，优先于自动判断");
-    expect(screen.queryByText("强模型")).toBeNull();
-    expect(screen.queryByText("中模型")).toBeNull();
-    expect(screen.queryByText("弱模型")).toBeNull();
-    expect(within(dialog).getByRole("textbox")).toHaveAttribute("placeholder", "输入关键词，回车加入");
-    expect(within(dialog).getByRole("button", { name: "添加" })).toBeDisabled();
+    const highTier = screen.getByRole("group", { name: "上档关键词" });
+    expect(within(highTier).getByText("架构")).toBeInTheDocument();
+    expect(within(highTier).getByRole("textbox", { name: "上档关键词" }))
+      .toHaveAttribute("placeholder", "输入关键词后按回车");
+    expect(screen.getByRole("group", { name: "中档关键词" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "下档关键词" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "添加" })).toBeNull();
   });
 
-  it("keeps each tier input independent and submits to the matching tier", async () => {
+  it("submits on Return, clears the draft, and keeps the input focused for repeated entry", async () => {
     const user = userEvent.setup();
     const onAdd = vi.fn();
     render(
       <TierKeywords
-        keywords={emptyKeywords}
-        configured={allConfigured}
-        activeSlot="high"
-        onOpenChange={vi.fn()}
+        slot="high"
+        keywords={[]}
+        configured
         onAdd={onAdd}
         onRemove={vi.fn()}
       />,
     );
 
-    const highTier = screen.getByRole("dialog", { name: "上档关键词" });
-    await user.type(within(highTier).getByRole("textbox"), "架构设计");
-    await user.click(within(highTier).getByRole("button", { name: "添加" }));
+    const input = screen.getByRole("textbox", { name: "上档关键词" });
+    await user.type(input, "架构设计{Enter}");
 
     expect(onAdd).toHaveBeenCalledWith("high", "架构设计");
-    expect(within(highTier).getByRole("textbox")).toHaveValue("");
+    expect(input).toHaveValue("");
+    expect(input).toHaveFocus();
   });
 
-  it("keeps an unconfigured tier unavailable without adding another empty-state sentence", () => {
+  it("keeps configured keywords removable without highlighting them", async () => {
+    const user = userEvent.setup();
+    const onRemove = vi.fn();
     render(
       <TierKeywords
-        keywords={emptyKeywords}
-        configured={{ high: true, mid: false, low: true }}
-        activeSlot="mid"
-        onOpenChange={vi.fn()}
+        slot="high"
+        keywords={["代码", "推理"]}
+        configured
+        onAdd={vi.fn()}
+        onRemove={onRemove}
+      />,
+    );
+
+    const highTier = screen.getByRole("group", { name: "上档关键词" });
+    expect(within(highTier).getByRole("list")).toHaveAttribute("data-presentation", "plain-text");
+    await user.click(within(highTier).getByRole("button", { name: "删除关键词 代码" }));
+
+    expect(onRemove).toHaveBeenCalledWith("high", "代码");
+  });
+
+  it("reports a duplicate inline without calling the backend or clearing the draft", async () => {
+    const user = userEvent.setup();
+    const onAdd = vi.fn();
+    render(
+      <TierKeywords
+        slot="high"
+        keywords={["Architecture"]}
+        configured
+        onAdd={onAdd}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox", { name: "上档关键词" });
+    await user.type(input, "architecture{Enter}");
+
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(input).toHaveValue("architecture");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("alert")).toHaveTextContent("关键词“architecture”已存在");
+  });
+
+  it("keeps the draft when the add operation is rejected", async () => {
+    const user = userEvent.setup();
+    render(
+      <TierKeywords
+        slot="high"
+        keywords={[]}
+        configured
+        onAdd={vi.fn().mockResolvedValue(false)}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByRole("textbox", { name: "上档关键词" });
+    await user.type(input, "待重试{Enter}");
+
+    expect(input).toHaveValue("待重试");
+  });
+
+  it("disables only the input for an unconfigured tier", () => {
+    render(
+      <TierKeywords
+        slot="mid"
+        keywords={[]}
+        configured={false}
         onAdd={vi.fn()}
         onRemove={vi.fn()}
       />,
     );
 
-    const midTier = screen.getByRole("dialog", { name: "中档关键词" });
-    expect(within(midTier).getByRole("textbox")).toBeDisabled();
-    expect(within(midTier).getByRole("textbox")).toHaveAttribute("placeholder", "该档未配置模型");
-    expect(within(midTier).getByRole("button", { name: "添加" })).toBeDisabled();
-    expect(screen.queryByText("先在上方为该档选好供应商和模型。")).toBeNull();
+    expect(screen.getByRole("textbox", { name: "中档关键词" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "中档关键词" }))
+      .toHaveAttribute("placeholder", "请先选择供应商和模型");
   });
 });
