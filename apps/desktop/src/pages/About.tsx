@@ -15,8 +15,14 @@ import {
   installDesktopUpdateAndRestart,
   listenDesktopUpdateProgress,
 } from "../api";
-import type { DesktopUpdateProgress, DesktopUpdateView } from "../api";
+import type { DesktopUpdateProgress, DesktopUpdateView, SettingsView } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "../components/ui/accordion";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -70,11 +76,13 @@ function AboutContent({
   desktopVersion,
   coreVersion,
   commitHash = BUILD_COMMIT_HASH,
+  runtimeSettings,
   onOpenFirstRunGuide,
 }: {
   desktopVersion: string;
   coreVersion: string;
   commitHash?: string;
+  runtimeSettings?: Pick<SettingsView, "listen" | "data_dir" | "plugins_dir" | "agent">;
   onOpenFirstRunGuide?: () => void;
 }) {
   const { copy, language, t } = useLanguage();
@@ -226,11 +234,11 @@ function AboutContent({
 
           <div className="about-product-actions">
             <Button variant="outline" type="button" onClick={() => void openExternal(PROJECT_URL)}>
-              <Github size={16} aria-hidden="true" />
+              <Github data-icon="inline-start" aria-hidden="true" />
               {t("about.source")}
             </Button>
             <Button variant="outline" type="button" onClick={() => void openExternal(RELEASES_URL)}>
-              <ExternalLink aria-hidden="true" />
+              <ExternalLink data-icon="inline-start" aria-hidden="true" />
               {t("about.releases")}
             </Button>
             <Button
@@ -238,9 +246,9 @@ function AboutContent({
               onClick={update?.status === "update_available" ? () => setConfirmOpen(true) : check}
             >
               {busy === "checking" || busy === "installing" ? (
-                <Loader2 className="about-spin" aria-hidden="true" />
+                <Loader2 className="about-spin" data-icon="inline-start" aria-hidden="true" />
               ) : (
-                <RefreshCw aria-hidden="true" />
+                <RefreshCw data-icon="inline-start" aria-hidden="true" />
               )}
               {busy === "checking"
                 ? t("about.checking")
@@ -311,6 +319,39 @@ function AboutContent({
         )}
       </Card>
 
+      {runtimeSettings && (
+        <Accordion className="about-runtime-accordion" type="single" collapsible>
+          <AccordionItem value="runtime">
+            <AccordionTrigger>
+              <span className="about-runtime-trigger-copy">
+                <strong>{t("runtime.title")}</strong>
+                <small>{t("runtime.description")}</small>
+              </span>
+            </AccordionTrigger>
+            <AccordionContent className="about-runtime-details">
+              <dl>
+                <div>
+                  <dt>{t("general.listen")}</dt>
+                  <dd className="mono">{runtimeSettings.listen}</dd>
+                </div>
+                <div>
+                  <dt>{t("general.dataDir")}</dt>
+                  <dd className="mono">{runtimeSettings.data_dir || "—"}</dd>
+                </div>
+                <div>
+                  <dt>{t("general.pluginsDir")}</dt>
+                  <dd className="mono">{runtimeSettings.plugins_dir || "—"}</dd>
+                </div>
+                <div>
+                  <dt>{t("general.adapter")}</dt>
+                  <dd className="mono">{runtimeSettings.agent || "—"}</dd>
+                </div>
+              </dl>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+      )}
+
       <Card className="about-trust-card">
         <CardHeader className="about-trust-head">
           <div>
@@ -319,7 +360,7 @@ function AboutContent({
           </div>
           {onOpenFirstRunGuide && (
             <Button variant="outline" type="button" onClick={onOpenFirstRunGuide}>
-              <BookOpen aria-hidden="true" />
+              <BookOpen data-icon="inline-start" aria-hidden="true" />
               {copy("Review getting started guide", "重新查看新手引导", "重新檢視新手引導", "ガイドを再確認")}
             </Button>
           )}

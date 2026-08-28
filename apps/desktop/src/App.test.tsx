@@ -2757,16 +2757,19 @@ describe("desktop station navigation", () => {
     expect(languageButton.querySelector(".lucide-languages")).toBeNull();
     await user.click(languageButton);
     expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
-    expect(screen.getAllByRole("radio")).toHaveLength(4);
-    expect(screen.getByRole("radio", { name: /繁體中文/ })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /日本語/ })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
+    const languageSelect = screen.getByRole("combobox", { name: "Interface language" });
+    expect(languageSelect).toHaveTextContent("English");
+    await user.click(languageSelect);
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(screen.getByRole("option", { name: /繁體中文/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /日本語/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /English/ })).toHaveAttribute("aria-selected", "true");
 
-    await user.click(screen.getByRole("radio", { name: /简体中文/ }));
+    await user.click(screen.getByRole("option", { name: /简体中文/ }));
 
     expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /简体中文/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("combobox", { name: "界面语言" })).toHaveTextContent("简体中文");
     await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
     expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
     expect(screen.getByText(

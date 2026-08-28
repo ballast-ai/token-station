@@ -4,10 +4,12 @@ import {
   Globe,
   Info,
   KeyRound,
+  Monitor,
+  Moon,
   Palette,
   ScrollText,
-  ServerCog,
   Settings2,
+  Sun,
   type LucideIcon,
 } from "lucide-react";
 import type {
@@ -24,10 +26,20 @@ import {
   type Language,
   type TranslationKey,
 } from "../components/LanguageProvider";
-import { useTheme, type Theme } from "../components/ThemeProvider";
+import { ThemeBoundary, useTheme, type Theme } from "../components/ThemeProvider";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Field, FieldDescription, FieldLabel } from "../components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { useErrorToast } from "../components/ErrorToast";
 import About from "./About";
 import Settings from "./Settings";
@@ -36,7 +48,6 @@ import RequestLogsPage from "./RequestLogsPage";
 type SettingsSection =
   | "general"
   | "api-key"
-  | "runtime"
   | "agent-visibility"
   | "appearance"
   | "language"
@@ -68,12 +79,6 @@ const SECTIONS: Array<{
     label: "settings.apiKey",
     description: "settings.apiKeyHint",
     icon: KeyRound,
-  },
-  {
-    id: "runtime",
-    label: "settings.runtime",
-    description: "settings.runtimeHint",
-    icon: ServerCog,
   },
   {
     id: "agent-visibility",
@@ -179,44 +184,19 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
   );
 }
 
-function RuntimeInformationCard({ settings }: { settings: SettingsView }) {
-  const { t } = useLanguage();
-  return (
-    <Card className="settings-card runtime-information-card">
-      <CardHeader className="panel-head">
-        <CardTitle><h2>{t("runtime.title")}</h2></CardTitle>
-        <p className="sub">{t("runtime.description")}</p>
-      </CardHeader>
-      <CardContent>
-        <div className="kv-grid">
-          <div className="kv-k">{t("general.listen")}</div>
-          <div className="kv-v mono">{settings.listen}</div>
-          <div className="kv-k">{t("general.dataDir")}</div>
-          <div className="kv-v mono">{settings.data_dir || "—"}</div>
-          <div className="kv-k">{t("general.pluginsDir")}</div>
-          <div className="kv-v mono">{settings.plugins_dir || "—"}</div>
-          <div className="kv-k">{t("general.adapter")}</div>
-          <div className="kv-v mono">{settings.agent || "—"}</div>
-          <div className="kv-k">{t("general.coreVersion")}</div>
-          <div className="kv-v mono">{settings.version}</div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function AppearancePanel() {
   const { theme, resolvedTheme, setTheme } = useTheme();
   const { t } = useLanguage();
-  const choices: Array<{ value: Theme; label: string; hint: string }> = [
-    { value: "light", label: t("appearance.light"), hint: t("appearance.lightHint") },
-    { value: "dark", label: t("appearance.dark"), hint: t("appearance.darkHint") },
+  const choices: Array<{ value: Theme; label: string; hint: string; icon: LucideIcon }> = [
+    { value: "light", label: t("appearance.light"), hint: t("appearance.lightHint"), icon: Sun },
+    { value: "dark", label: t("appearance.dark"), hint: t("appearance.darkHint"), icon: Moon },
     {
       value: "system",
       label: t("appearance.system"),
       hint: t("appearance.systemHint", {
         theme: t(resolvedTheme === "dark" ? "appearance.systemDark" : "appearance.systemLight"),
       }),
+      icon: Monitor,
     },
   ];
   return (
@@ -225,22 +205,35 @@ function AppearancePanel() {
         <CardTitle><h2>{t("appearance.title")}</h2></CardTitle>
         <p className="sub">{t("appearance.description")}</p>
       </CardHeader>
-      <CardContent className="theme-options" role="radiogroup" aria-label={t("appearance.groupLabel")}>
-        {choices.map((choice) => (
-          <Button
-            key={choice.value}
-            className={`theme-option ${theme === choice.value ? "selected" : ""}`}
-            variant="ghost"
-            type="button"
-            role="radio"
-            aria-checked={theme === choice.value}
-            onClick={() => setTheme(choice.value)}
+      <CardContent className="appearance-control-row">
+        <Field orientation="horizontal">
+          <FieldLabel id="appearance-theme-label">{t("appearance.groupLabel")}</FieldLabel>
+          <ToggleGroup
+            className="appearance-toggle-group"
+            type="single"
+            value={theme}
+            aria-labelledby="appearance-theme-label"
+            onValueChange={(value) => {
+              if (value) setTheme(value as Theme);
+            }}
           >
-            <span className={`theme-preview ${choice.value}`} aria-hidden="true"><i /><i /></span>
-            <strong>{choice.label}</strong>
-            <small>{choice.hint}</small>
-          </Button>
-        ))}
+            {choices.map((choice) => {
+              const Icon = choice.icon;
+              return (
+                <ToggleGroupItem
+                  key={choice.value}
+                  value={choice.value}
+                  aria-label={choice.label}
+                  title={choice.hint}
+                >
+                  <Icon aria-hidden="true" />
+                  <span>{choice.label}</span>
+                </ToggleGroupItem>
+              );
+            })}
+          </ToggleGroup>
+          <FieldDescription className="sr-only">{t("appearance.description")}</FieldDescription>
+        </Field>
       </CardContent>
     </Card>
   );
@@ -321,13 +314,12 @@ function AgentVisibilityPanel({
 const LANGUAGE_OPTIONS: Array<{
   value: Language;
   label: string;
-  mark: string;
   hint: TranslationKey;
 }> = [
-  { value: "en", label: "English", mark: "EN", hint: "language.enHint" },
-  { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
-  { value: "zh-TW", label: "繁體中文", mark: "繁", hint: "language.zhTWHint" },
-  { value: "ja", label: "日本語", mark: "日", hint: "language.jaHint" },
+  { value: "en", label: "English", hint: "language.enHint" },
+  { value: "zh-CN", label: "简体中文", hint: "language.zhCNHint" },
+  { value: "zh-TW", label: "繁體中文", hint: "language.zhTWHint" },
+  { value: "ja", label: "日本語", hint: "language.jaHint" },
 ];
 
 function LanguagePanel() {
@@ -338,25 +330,25 @@ function LanguagePanel() {
         <CardTitle><h2>{t("language.title")}</h2></CardTitle>
         <p className="sub">{t("language.description")}</p>
       </CardHeader>
-      <CardContent className="language-options" role="radiogroup" aria-label={t("language.groupLabel")}>
-        {LANGUAGE_OPTIONS.map((option) => (
-          <Button
-            key={option.value}
-            className={`language-option ${language === option.value ? "selected" : ""}`}
-            variant="ghost"
-            type="button"
-            role="radio"
-            aria-checked={language === option.value}
-            onClick={() => setLanguage(option.value)}
-          >
-            <span className="language-mark" aria-hidden="true">{option.mark}</span>
-            <span>
-              <strong>{option.label}</strong>
-              <small>{t(option.hint)}</small>
-            </span>
-            <i className="language-selected-dot" aria-hidden="true" />
-          </Button>
-        ))}
+      <CardContent className="language-control-row">
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="interface-language">{t("language.groupLabel")}</FieldLabel>
+          <Select value={language} onValueChange={(value) => setLanguage(value as Language)}>
+            <SelectTrigger id="interface-language" aria-label={t("language.groupLabel")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper" align="end">
+              <SelectGroup>
+                {LANGUAGE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value} textValue={option.label}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <FieldDescription className="sr-only">{t("language.description")}</FieldDescription>
+        </Field>
       </CardContent>
     </Card>
   );
@@ -562,7 +554,7 @@ function SettingsHubContent({
                   }
                 }}
               >
-                <Icon className="settings-subnav-icon" aria-hidden="true" />
+                <Icon data-icon="inline-start" aria-hidden="true" />
                 <span>
                   <strong>{item.englishLabel ? copy(
                     item.englishLabel,
@@ -601,7 +593,6 @@ function SettingsHubContent({
             <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="api-key" />
           </>
         )}
-        {section === "runtime" && <RuntimeInformationCard settings={settings} />}
         {section === "agent-visibility" && (
           <AgentVisibilityPanel
             registry={registry}
@@ -629,6 +620,7 @@ function SettingsHubContent({
           <About
             desktopVersion={settings.desktop_version ?? settings.version}
             coreVersion={settings.core_version ?? settings.version}
+            runtimeSettings={settings}
             onOpenFirstRunGuide={onOpenFirstRunGuide}
           />
         )}
@@ -640,7 +632,9 @@ function SettingsHubContent({
 export default function SettingsHub(props: SettingsHubProps) {
   return (
     <LanguageBoundary>
-      <SettingsHubContent {...props} />
+      <ThemeBoundary>
+        <SettingsHubContent {...props} />
+      </ThemeBoundary>
     </LanguageBoundary>
   );
 }
