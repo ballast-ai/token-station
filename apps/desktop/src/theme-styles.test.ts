@@ -399,6 +399,27 @@ describe("retained page theme styles", () => {
     expect(credentialGridRule).not.toMatch(/1\.25fr/);
   });
 
+  it("uses flat provider catalog and enterprise selection surfaces", () => {
+    const catalogRule = appCss.match(/\.unified-provider-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const providerItemRule = appCss.match(/\.provider-catalog-card\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const providerHoverRule = appCss.match(/\.provider-catalog-card:hover\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const dialogRule = appCss.match(/\.enterprise-route-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const identityRule = appCss.match(/\.enterprise-provider-identity\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const modelOptionRule = appCss.match(/\.enterprise-model-option\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*transparent/);
+    expect(providerItemRule).toMatch(/border:\s*0/);
+    expect(providerItemRule).toMatch(/background:\s*transparent/);
+    expect(providerHoverRule).not.toMatch(/transform:|box-shadow:/);
+    expect(dialogRule).toMatch(/border:\s*0/);
+    expect(dialogRule).toMatch(/box-shadow:\s*none/);
+    expect(identityRule).toMatch(/border:\s*0/);
+    expect(identityRule).toMatch(/background:\s*transparent/);
+    expect(modelOptionRule).toMatch(/border:\s*0/);
+    expect(modelOptionRule).toMatch(/background:\s*transparent/);
+  });
+
   it("keeps the proxy control width stable across runtime states", () => {
     const baseRuntimeRules = Array.from(
       appCss.matchAll(/\.station-runtime-pill\[data-slot="button"\]\s*\{([^}]*)\}/g),
