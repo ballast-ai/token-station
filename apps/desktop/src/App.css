@@ -2290,11 +2290,11 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
 .provider-wizard {
   display: grid;
   gap: 34px;
-  padding: 4px 0 0;
+  padding: 24px;
   overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
   box-shadow: none;
 }
 .wizard-step {
@@ -11775,6 +11775,8 @@ samp {
 }
 
 @media (max-width: 620px) {
+  .provider-wizard { padding: 18px; }
+  .wizard-step { grid-template-columns: 28px minmax(0, 1fr); column-gap: 12px; }
   .model-first-results { grid-template-columns: minmax(0, 1fr); }
   .model-entry-options { grid-template-columns: minmax(0, 1fr); }
   .overview-runtime-metrics { grid-template-columns: minmax(0, 1fr); }
