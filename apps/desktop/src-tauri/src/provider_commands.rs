@@ -385,7 +385,10 @@ pub(crate) fn ensure_credential_transport(
     egress: &EgressConfig,
 ) -> Result<(), String> {
     if !endpoint.uses_https() && !endpoint.is_loopback() {
-        return Err("Remote Provider endpoints must use HTTPS".to_owned());
+        return Err(
+            "Remote Provider endpoints must use HTTPS. A loopback endpoint can use HTTP."
+                .to_owned(),
+        );
     }
     if !endpoint.uses_https() && !egress.bypasses_proxy(&endpoint.as_str())? {
         return Err(
