@@ -179,6 +179,7 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
     const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
+    expect(agentSummary).toHaveAttribute("data-surface", "plain-section");
     const rowNames = () => within(agentSummary).getAllByRole("listitem")
       .map((row) => row.querySelector("strong")?.textContent);
 
@@ -205,12 +206,19 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
 
+    expect(screen.getByRole("region", { name: "系统摘要" }))
+      .toHaveAttribute("data-surface", "flat-color-block");
+    expect(screen.getByRole("region", { name: "工作区摘要" }))
+      .toHaveAttribute("data-surface", "flat-color-block");
+
     const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
+    expect(agentSummary).toHaveAttribute("data-surface", "plain-section");
     expect(within(agentSummary).getByText("已接入 2 个 Agent")).toBeInTheDocument();
     expect(within(agentSummary).queryByText("2 个已接管")).toBeNull();
     expect(within(agentSummary).getAllByRole("listitem")).toHaveLength(5);
 
     const routeSummary = screen.getByRole("region", { name: "路由概览" });
+    expect(routeSummary).toHaveAttribute("data-surface", "plain-section");
     expect(within(routeSummary).queryByTestId("revision-chain")).toBeNull();
     expect(within(routeSummary).getAllByRole("listitem")).toHaveLength(2);
     const globalRoute = within(routeSummary).getByText("Claude Code", { selector: "strong" }).closest("li");
@@ -221,15 +229,16 @@ describe("OverviewPage summaries", () => {
     expect(customRoute).not.toHaveTextContent("deepseek-v4");
 
     const modelSummary = screen.getByRole("region", { name: "模型概览" });
+    expect(modelSummary).toHaveAttribute("data-surface", "plain-section");
     expect(within(modelSummary).getByText("6 个模型")).toBeInTheDocument();
     expect(within(modelSummary).getAllByRole("listitem")).toHaveLength(5);
     const firstModel = within(modelSummary).getAllByRole("listitem")[0];
     expect(firstModel.textContent?.indexOf("gpt-5.6-sol"))
       .toBeLessThan(firstModel.textContent?.indexOf("openai-main") ?? -1);
 
-    expect(screen.getByRole("button", { name: "打开 Agent" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开路由" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开模型" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开 Agent" })).toHaveAttribute("data-slot", "button");
+    expect(screen.getByRole("button", { name: "打开路由" })).toHaveAttribute("data-slot", "button");
+    expect(screen.getByRole("button", { name: "打开模型" })).toHaveAttribute("data-slot", "button");
   });
 
   it("shows only the global route snapshot when no Agent is connected", () => {

@@ -51,8 +51,8 @@ describe("retained page theme styles", () => {
     const summaryHeaderRule = appCss.match(
       /\.station-content-overview \.overview-summary-card > \[data-slot="card-header"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    const summaryLinkRule = appCss.match(
-      /\.station-content-overview \.overview-summary-link\s*\{([^}]*)\}/s,
+    const summaryActionRule = appCss.match(
+      /\.station-content-overview \.overview-summary-card \[data-slot="card-action"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const alignedSummaryRowsRule = appCss.match(
       /\.station-content-overview \.overview-summary-list,\s*\.station-content-overview \.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,
@@ -63,10 +63,9 @@ describe("retained page theme styles", () => {
     const routeSummaryRowRule = appCss.match(
       /\.station-content-overview \.overview-route-summary \.overview-route-list > div\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    expect(summaryHeaderRule).toMatch(/padding:\s*16px 52px 8px 16px/);
-    expect(summaryLinkRule).toMatch(/top:\s*14px/);
-    expect(summaryLinkRule).toMatch(/right:\s*14px/);
-    expect(summaryLinkRule).toMatch(/bottom:\s*auto/);
+    expect(summaryHeaderRule).toMatch(/padding:\s*16px 16px 8px/);
+    expect(summaryActionRule).toMatch(/align-self:\s*start/);
+    expect(summaryActionRule).toMatch(/justify-self:\s*end/);
     expect(alignedSummaryRowsRule).toMatch(/flex:\s*1/);
     expect(alignedSummaryRowsRule).toMatch(/display:\s*grid/);
     expect(alignedSummaryRowsRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
@@ -74,6 +73,38 @@ describe("retained page theme styles", () => {
     expect(routeSummaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
     expect(routeSummaryRowRule).toMatch(/height:\s*auto/);
     expect(routeSummaryRowRule).toMatch(/min-height:\s*0/);
+  });
+
+  it("uses semantic color surfaces instead of decorative frames on Models and Overview", () => {
+    const rootRule = appCss.match(/:root\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const providerPanelRule = appCss.match(
+      /\.providers-page > \.provider-panel\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerCardRule = appCss.match(
+      /\.provider-card\[data-surface="flat-color-block"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerModelRule = appCss.match(
+      /\.provider-primary-models\[data-surface="plain-model-grid"\] > li\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const overviewCardRule = appCss.match(
+      /\.overview-page \[data-slot="card"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const overviewGroupRule = appCss.match(
+      /\.overview-runtime-metrics\[data-surface="flat-color-block"\],\s*\.overview-summary-grid\[data-surface="flat-color-block"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(rootRule).toMatch(/--content-block-surface:\s*color-mix\(/);
+    expect(rootRule).not.toMatch(/--content-row-surface/);
+    expect(rootRule).not.toMatch(/--overview-(?:agent|route|model)-surface/);
+    expect(providerPanelRule).toMatch(/border:\s*0/);
+    expect(providerCardRule).toMatch(/border:\s*0/);
+    expect(providerCardRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(providerModelRule).toMatch(/border:\s*0/);
+    expect(providerModelRule).toMatch(/background:\s*transparent/);
+    expect(overviewCardRule).toMatch(/border:\s*0/);
+    expect(overviewCardRule).toMatch(/box-shadow:\s*none/);
+    expect(overviewCardRule).toMatch(/background:\s*transparent/);
+    expect(overviewGroupRule).toMatch(/background:\s*var\(--content-block-surface\)/);
   });
 
   it("keeps a one-row global route snapshot at the top of its summary card", () => {
@@ -111,13 +142,16 @@ describe("retained page theme styles", () => {
     expect(appCss).not.toMatch(/\.routing-scope-item\[data-slot="button"\]\[aria-current="page"\]::before/);
   });
 
-  it("keeps the Agent actions compact in the card's top-right corner", () => {
+  it("keeps the Agent actions compact in the shadcn Card action slot", () => {
     const actionRule = appCss.match(/\.overview-agent-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const cardActionRule = appCss.match(
+      /\.overview-summary-card \[data-slot="card-action"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
-    expect(actionRule).toMatch(/position:\s*absolute/);
-    expect(actionRule).toMatch(/top:\s*14px/);
-    expect(actionRule).toMatch(/right:\s*14px/);
     expect(actionRule).toMatch(/display:\s*flex/);
+    expect(actionRule).toMatch(/gap:\s*6px/);
+    expect(cardActionRule).toMatch(/display:\s*flex/);
+    expect(actionRule).not.toMatch(/position:\s*absolute/);
     expect(appCss).not.toMatch(/\.overview-agent-summary[^}]*padding-bottom:\s*58px/s);
     expect(appCss).not.toMatch(/\.model-test-(?:target|picker|model-name)/);
   });
