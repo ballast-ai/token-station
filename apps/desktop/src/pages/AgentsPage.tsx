@@ -91,6 +91,7 @@ export default function AgentsPage({
                 <>
                   <Badge variant="outline">{registry.length}</Badge>
                   <Button
+                    className="agent-rescan-action"
                     variant="outline"
                     size="sm"
                     type="button"

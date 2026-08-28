@@ -6783,6 +6783,10 @@ pre.block {
   gap: 8px;
 }
 
+.agent-backup-location-actions {
+  gap: 4px;
+}
+
 .agent-backup-location span {
   color: var(--muted);
   font-size: 10px;
@@ -7427,6 +7431,18 @@ pre.block {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.agent-rescan-action[data-slot="button"] {
+  border-color: color-mix(in srgb, var(--line) 52%, transparent);
+  color: var(--muted);
+  background: transparent;
+}
+
+.agent-rescan-action[data-slot="button"]:hover {
+  border-color: var(--line);
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface) 68%, transparent);
 }
 
 .agent-master-list-card > [data-slot="card-content"] {

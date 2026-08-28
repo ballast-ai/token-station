@@ -482,7 +482,6 @@ export default function AgentRoutePage({
   const connectionTarget = installation?.discovery.config_candidates[0]
     ?? metadata.connector_capabilities?.[0]?.config_path_template
     ?? copy("Resolved during connection", "接入时确定", "接入時確定", "接続時に解決");
-  const ownedFields = metadata.connector_capabilities?.[0]?.owned_fields ?? [];
   const routeNeedsAttention = Boolean(route.config_error || !route.direct_target?.model);
   const discoveredPath = installation?.discovery.canonical_path;
   const discoveredPathCopied = copiedDiscoveryPath?.path === discoveredPath;
@@ -978,9 +977,6 @@ export default function AgentRoutePage({
           </div>
           <div className="agent-connection-file">
             <code>{connectionTarget}</code>
-            <small>{ownedFields.length > 0
-              ? copy(`Managed fields: ${ownedFields.join(", ")}`, `受管字段：${ownedFields.join("、")}`, `受管欄位：${ownedFields.join(", ")}`, `管理フィールド：${ownedFields.join(", ")}`)
-              : copy("The exact non-sensitive changes appear after the connection plan is created.", "生成接入计划后会显示确切的非敏感改动。", "生成接入計劃後會顯示確切的非敏感修改。", "接続計画が作成されると、正確な非敏感な変更が表示されます。")}</small>
           </div>
           <div className="agent-backup-location">
             <div>
@@ -994,16 +990,31 @@ export default function AgentRoutePage({
               )}</small>
             </div>
             <div className="agent-backup-location-actions">
-              <Button variant="ghost" size="icon-sm" type="button" disabled={!backupDirectory} aria-label={backupDirectoryCopied
-                ? copy("Backup directory copied", "备份目录已复制", "備份目錄已複製", "バックアップディレクトリをコピーしました")
-                : copy("Copy backup directory", "复制备份目录", "複製備份目錄", "バックアップディレクトリをコピー")}
-                onClick={() => void copyBackupDirectory()}>
-                {backupDirectoryCopied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
-              </Button>
-              <Button variant="secondary" size="sm" type="button" disabled={!backupDirectory} onClick={() => void openBackupDirectory()}>
-                <FolderOpen data-icon="inline-start" aria-hidden="true" />
-                {copy("Open backup folder", "打开备份文件夹", "開啟備份資料夾", "バックアップフォルダを開く")}
-              </Button>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon-sm" type="button" disabled={!backupDirectory} aria-label={backupDirectoryCopied
+                      ? copy("Backup directory copied", "备份目录已复制", "備份目錄已複製", "バックアップディレクトリをコピーしました")
+                      : copy("Copy backup directory", "复制备份目录", "複製備份目錄", "バックアップディレクトリをコピー")}
+                      onClick={() => void copyBackupDirectory()}>
+                      {backupDirectoryCopied
+                        ? <CheckIcon data-icon="inline-start" aria-hidden="true" />
+                        : <CopyIcon data-icon="inline-start" aria-hidden="true" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{copy("Copy backup directory", "复制备份目录", "複製備份目錄", "バックアップディレクトリをコピー")}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon-sm" type="button" disabled={!backupDirectory}
+                      aria-label={copy("Open backup folder", "打开备份文件夹", "開啟備份資料夾", "バックアップフォルダを開く")}
+                      onClick={() => void openBackupDirectory()}>
+                      <FolderOpen data-icon="inline-start" aria-hidden="true" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{copy("Open backup folder", "打开备份文件夹", "開啟備份資料夾", "バックアップフォルダを開く")}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
           </div>
           <details className="agent-backup-policy">

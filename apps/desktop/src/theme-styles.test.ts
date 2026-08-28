@@ -530,6 +530,9 @@ describe("retained page theme styles", () => {
     const backupPathRule = appCss.match(
       /\.agent-backup-location code\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const rescanRule = appCss.match(
+      /\.agent-rescan-action\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(identitySurfaceRule).toMatch(/flex:\s*0 0 auto/);
     expect(detailSurfaceRule).toMatch(/gap:\s*8px/);
@@ -540,6 +543,9 @@ describe("retained page theme styles", () => {
     expect(backupPolicyRule).toMatch(/margin-top:\s*12px/);
     expect(backupPolicyRule).toMatch(/line-height:\s*1\.6/);
     expect(backupPathRule).toMatch(/line-height:\s*1\.65/);
+    expect(rescanRule).toMatch(/border-color:\s*color-mix/);
+    expect(rescanRule).toMatch(/color:\s*var\(--muted\)/);
+    expect(appCss).toMatch(/\.agent-backup-location-actions\s*\{[^}]*gap:\s*4px/s);
     expect(appCss).not.toContain("agent-backup-policy-separator");
   });
 });
