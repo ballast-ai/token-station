@@ -349,13 +349,56 @@ describe("retained page theme styles", () => {
     const subnavRule = appCss.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
     expect(subnavRule).toMatch(/overflow-y:\s*auto/);
     expect(pressedNavigationRule).toMatch(/transform:\s*none/);
-    expect(pointerHoverRule).toMatch(/background:\s*var\(--surface\)/);
+    expect(pointerHoverRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(appCss).not.toMatch(
       /(?:^|\n)\.settings-subnav \[data-slot="button"\]\.settings-subnav-item:hover\s*\{/,
     );
     expect(appCss).not.toMatch(
-      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]::before/,
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]::(?:before|after)/,
     );
+  });
+
+  it("uses flat semantic Settings surfaces without selected-item frames", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const settingsCardRule = lastRule(/\.settings-card\s*\{([^}]*)\}/gs);
+    const selectedNavigationRule = lastRule(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]\s*\{([^}]*)\}/gs,
+    );
+    const productSurfaceRule = lastRule(/\.about-product-card\s*\{([^}]*)\}/gs);
+    const appearanceRowRule = lastRule(
+      /\.settings-card > \[data-slot="card-content"\]\.appearance-control-row\s*\{([^}]*)\}/gs,
+    );
+    const themeGroupRule = lastRule(/\.appearance-toggle-group\s*\{([^}]*)\}/gs);
+    const themeItemRule = lastRule(
+      /\.appearance-toggle-group \[data-slot="toggle-group-item"\]\s*\{([^}]*)\}/gs,
+    );
+    const selectedThemeItemRule = lastRule(
+      /\.appearance-toggle-group \[data-slot="toggle-group-item"\]\[data-state="on"\]\s*\{([^}]*)\}/gs,
+    );
+    const languageRowRule = lastRule(
+      /\.settings-card > \[data-slot="card-content"\]\.language-control-row\s*\{([^}]*)\}/gs,
+    );
+    const runtimeHintRule = lastRule(/\.about-runtime-trigger-copy small\s*\{([^}]*)\}/gs);
+    const runtimeLabelRule = lastRule(/\.about-runtime-details dt\s*\{([^}]*)\}/gs);
+
+    expect(settingsCardRule).toMatch(/border:\s*0/);
+    expect(settingsCardRule).toMatch(/background:\s*transparent/);
+    expect(selectedNavigationRule).toMatch(/border:\s*0/);
+    expect(selectedNavigationRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(productSurfaceRule).toMatch(/border:\s*0/);
+    expect(productSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(appearanceRowRule).toMatch(/background:\s*transparent/);
+    expect(themeGroupRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(themeItemRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
+    expect(selectedThemeItemRule).toMatch(/color:\s*var\(--ink\)/);
+    expect(languageRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(runtimeHintRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
+    expect(runtimeLabelRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
+    expect(appCss).not.toMatch(/\.theme-preview\s*\{/);
+    expect(appCss).not.toMatch(/\.language-option\s*\{/);
   });
 
   it("returns Settings scrolling to the outer workspace on narrow windows", () => {
@@ -369,6 +412,7 @@ describe("retained page theme styles", () => {
     const contentRule = narrowRules.match(
       /\.settings-page \.settings-content\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const subnavRule = narrowRules.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
 
     expect(workspaceRule).toMatch(/overflow:\s*auto/);
     expect(pageRule).toMatch(/height:\s*auto/);
@@ -376,6 +420,8 @@ describe("retained page theme styles", () => {
     expect(contentRule).toMatch(/overflow-y:\s*visible/);
     expect(contentRule).toMatch(/overscroll-behavior:\s*auto/);
     expect(contentRule).toMatch(/scrollbar-gutter:\s*auto/);
+    expect(subnavRule).toMatch(/border:\s*0/);
+    expect(subnavRule).toMatch(/background:\s*transparent/);
   });
 
   it("uses theme tokens for router JSON code blocks", () => {
