@@ -255,7 +255,11 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
   );
 }
 
-function StationApp() {
+interface AppProps {
+  onStartupSettled?: () => void;
+}
+
+function StationApp({ onStartupSettled }: AppProps) {
   const { language, copy } = useLanguage();
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
@@ -311,6 +315,7 @@ function StationApp() {
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
   const firstRunGuideCheckedRef = useRef(false);
   const startupLoadStartedRef = useRef(false);
+  const startupSettledRef = useRef(false);
   const agentRevealTimerRef = useRef<number | null>(null);
 
   const revealAgents = useCallback((agentIds: string[]) => {
@@ -330,6 +335,12 @@ function StationApp() {
       window.clearTimeout(agentRevealTimerRef.current);
     }
   }, []);
+
+  useEffect(() => {
+    if (startupSettledRef.current || (!scanSucceeded && !error)) return;
+    startupSettledRef.current = true;
+    onStartupSettled?.();
+  }, [error, onStartupSettled, scanSucceeded]);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -1354,12 +1365,12 @@ function StationApp() {
   );
 }
 
-export default function App() {
+export default function App({ onStartupSettled }: AppProps = {}) {
   return (
     <ErrorToastBoundary>
       <LanguageBoundary>
         <ThemeBoundary>
-          <StationApp />
+          <StationApp onStartupSettled={onStartupSettled} />
         </ThemeBoundary>
       </LanguageBoundary>
     </ErrorToastBoundary>
