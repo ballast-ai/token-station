@@ -433,6 +433,18 @@ it("新用户首次打开先询问是否需要教程，暂不需要后不再自�
   expect(screen.queryByRole("dialog", { name: "需要新手教程吗？" })).toBeNull();
 });
 
+it("does not open the first-run prompt before launch interaction is enabled", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  window.localStorage.removeItem(FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY);
+  const view = render(<App launchComplete={false} />);
+
+  await screen.findByRole("heading", { name: "概览" });
+  expect(screen.queryByRole("dialog", { name: "需要新手教程吗？" })).toBeNull();
+
+  view.rerender(<App launchComplete />);
+  expect(await screen.findByRole("dialog", { name: "需要新手教程吗？" })).toBeInTheDocument();
+});
+
 it("新用户选择开始教程后高亮主页菜单", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   window.localStorage.removeItem(FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY);

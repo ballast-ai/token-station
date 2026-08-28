@@ -8112,15 +8112,6 @@ pre.block {
   gap: 7px;
 }
 
-.agent-sensitive-toggle {
-  height: 24px;
-  padding-inline: 7px;
-  color: var(--muted);
-  font-size: 8.5px;
-}
-
-.agent-sensitive-toggle svg { width: 12px; height: 12px; }
-
 .agent-change-states {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr);

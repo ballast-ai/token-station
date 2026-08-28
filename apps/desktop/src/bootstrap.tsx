@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import App from "./App";
+import App, { type StartupOutcome } from "./App";
 import { getRecoveryState, type RecoveryState } from "./api";
 import LaunchScreen, { type LaunchPhase } from "./components/LaunchScreen";
 import RecoveryShell from "./components/RecoveryShell";
@@ -15,10 +15,10 @@ function reducedMotionRequested(): boolean {
 export function AppBootstrap() {
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [error, setError] = useState<Error | null>(null);
-  const [startupSettled, setStartupSettled] = useState(false);
+  const [startupOutcome, setStartupOutcome] = useState<StartupOutcome | null>(null);
   const [minimumElapsed, setMinimumElapsed] = useState(reducedMotionRequested);
   const [launchPhase, setLaunchPhase] = useState<LaunchPhase | "hidden">("presenting");
-  const onStartupSettled = useCallback(() => setStartupSettled(true), []);
+  const onStartupSettled = useCallback((outcome: StartupOutcome) => setStartupOutcome(outcome), []);
 
   useEffect(() => {
     let disposed = false;
@@ -42,7 +42,12 @@ export function AppBootstrap() {
       setLaunchPhase("hidden");
       return undefined;
     }
-    if (recovery?.mode !== "normal" || !startupSettled || !minimumElapsed) return undefined;
+    if (recovery?.mode !== "normal" || startupOutcome === null) return undefined;
+    if (startupOutcome === "actionable-error") {
+      setLaunchPhase("hidden");
+      return undefined;
+    }
+    if (!minimumElapsed) return undefined;
     if (reducedMotionRequested()) {
       setLaunchPhase("hidden");
       return undefined;
@@ -50,7 +55,7 @@ export function AppBootstrap() {
     setLaunchPhase("exiting");
     const timer = window.setTimeout(() => setLaunchPhase("hidden"), LAUNCH_EXIT_MS);
     return () => window.clearTimeout(timer);
-  }, [error, launchPhase, minimumElapsed, recovery?.mode, startupSettled]);
+  }, [error, launchPhase, minimumElapsed, recovery?.mode, startupOutcome]);
 
   if (error) return <RecoveryShell initialError={error} />;
   if (recovery?.mode === "safe") return <RecoveryShell initialState={recovery} />;
@@ -59,8 +64,12 @@ export function AppBootstrap() {
   return (
     <>
       {recovery?.mode === "normal" && (
-        <div className="launch-app-stage" aria-hidden={launchVisible || undefined}>
-          <App onStartupSettled={onStartupSettled} />
+        <div
+          className="launch-app-stage"
+          aria-hidden={launchVisible || undefined}
+          inert={launchVisible || undefined}
+        >
+          <App onStartupSettled={onStartupSettled} launchComplete={!launchVisible} />
         </div>
       )}
       {launchVisible && <LaunchScreen phase={launchPhase} />}

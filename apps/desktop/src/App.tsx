@@ -255,11 +255,14 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
   );
 }
 
+export type StartupOutcome = "ready" | "actionable-error";
+
 interface AppProps {
-  onStartupSettled?: () => void;
+  onStartupSettled?: (outcome: StartupOutcome) => void;
+  launchComplete?: boolean;
 }
 
-function StationApp({ onStartupSettled }: AppProps) {
+function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const { language, copy } = useLanguage();
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
@@ -339,7 +342,7 @@ function StationApp({ onStartupSettled }: AppProps) {
   useEffect(() => {
     if (startupSettledRef.current || (!scanSucceeded && !error)) return;
     startupSettledRef.current = true;
-    onStartupSettled?.();
+    onStartupSettled?.(error ? "actionable-error" : "ready");
   }, [error, onStartupSettled, scanSucceeded]);
 
   const orderedRegistry = useMemo(
@@ -632,7 +635,7 @@ function StationApp({ onStartupSettled }: AppProps) {
   }, [copy, showSuccess, state?.serve.app_runtime, state?.serve.error, state?.serve.listener_reachable, state?.serve.phase]);
 
   useEffect(() => {
-    if (!state || !scanSucceeded || firstRunGuideCheckedRef.current) return;
+    if (!launchComplete || !state || !scanSucceeded || firstRunGuideCheckedRef.current) return;
     firstRunGuideCheckedRef.current = true;
     if (shouldShowFirstRunTutorialPrompt()) {
       viewHistoryRef.current = [];
@@ -648,7 +651,7 @@ function StationApp({ onStartupSettled }: AppProps) {
       setFirstRunMicroStep("overview");
       setFirstRunGuideOpen(true);
     }
-  }, [scanSucceeded, state]);
+  }, [launchComplete, scanSucceeded, state]);
 
   useEffect(() => {
     if (firstRunSetupStep !== "agent" || !hasConnectedAgent(agents)) return;
@@ -1369,12 +1372,12 @@ function StationApp({ onStartupSettled }: AppProps) {
   );
 }
 
-export default function App({ onStartupSettled }: AppProps = {}) {
+export default function App({ onStartupSettled, launchComplete = true }: AppProps = {}) {
   return (
     <ErrorToastBoundary>
       <LanguageBoundary>
         <ThemeBoundary>
-          <StationApp onStartupSettled={onStartupSettled} />
+          <StationApp onStartupSettled={onStartupSettled} launchComplete={launchComplete} />
         </ThemeBoundary>
       </LanguageBoundary>
     </ErrorToastBoundary>

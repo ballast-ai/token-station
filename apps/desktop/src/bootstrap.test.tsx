@@ -10,10 +10,11 @@ import { getRecoveryState } from "./api";
 
 vi.mock("./api", () => ({ getRecoveryState: vi.fn() }));
 vi.mock("./App", () => ({
-  default: ({ onStartupSettled }: { onStartupSettled?: () => void }) => (
+  default: ({ onStartupSettled }: { onStartupSettled?: (outcome: "ready" | "actionable-error") => void }) => (
     <div>
       normal application
-      <button type="button" onClick={onStartupSettled}>settle application</button>
+      <button type="button" onClick={() => onStartupSettled?.("ready")}>settle application</button>
+      <button type="button" onClick={() => onStartupSettled?.("actionable-error")}>fail application</button>
     </div>
   ),
 }));
@@ -62,6 +63,32 @@ describe("recovery bootstrap", () => {
     expect(screen.getByTestId("launch-screen")).toHaveAttribute("data-phase", "exiting");
 
     act(() => vi.advanceTimersByTime(LAUNCH_EXIT_MS));
+    expect(screen.queryByTestId("launch-screen")).toBeNull();
+  });
+
+  it("makes the staged application inert until the launch screen leaves", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getRecoveryState).mockResolvedValue(normal);
+    const { container } = render(<AppBootstrap />);
+
+    await act(async () => Promise.resolve());
+    const stage = container.querySelector(".launch-app-stage");
+    expect(stage).toHaveAttribute("inert");
+
+    fireEvent.click(screen.getByText("settle application"));
+    act(() => vi.advanceTimersByTime(LAUNCH_MINIMUM_MS));
+    act(() => vi.advanceTimersByTime(LAUNCH_EXIT_MS));
+    expect(stage).not.toHaveAttribute("inert");
+  });
+
+  it("exposes an actionable startup error without decorative timing", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getRecoveryState).mockResolvedValue(normal);
+    render(<AppBootstrap />);
+
+    await act(async () => Promise.resolve());
+    fireEvent.click(screen.getByText("fail application"));
+
     expect(screen.queryByTestId("launch-screen")).toBeNull();
   });
 

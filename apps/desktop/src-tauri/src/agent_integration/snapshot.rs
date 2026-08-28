@@ -135,6 +135,18 @@ pub struct DecryptedSnapshot {
     pub exact_bytes: Zeroizing<Vec<u8>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacySnapshotMigrationWarning {
+    pub snapshot_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LegacySnapshotMigrationReport {
+    pub migrated: usize,
+    pub warnings: Vec<LegacySnapshotMigrationWarning>,
+}
+
 pub trait SnapshotStore: Send + Sync {
     fn create(&self, request: SnapshotRequest<'_>) -> Result<SnapshotCreateResult, String>;
     fn load(&self, snapshot_id: &str) -> Result<DecryptedSnapshot, String>;
@@ -448,58 +460,71 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
 }
 
 impl<K: MasterKeyStore> FileSnapshotStore<K> {
-    pub fn organize_legacy_layout(&self) -> Result<usize, String> {
+    pub fn organize_legacy_layout(&self) -> Result<LegacySnapshotMigrationReport, String> {
         let _guard = self
             .lock
             .lock()
             .map_err(|_| "快照存储写锁已损坏".to_string())?;
         if !self.root.exists() {
-            return Ok(0);
+            return Ok(LegacySnapshotMigrationReport::default());
         }
         let index = self.read_index()?;
         self.migrate_legacy_envelopes(&index)
     }
 
-    fn migrate_legacy_envelopes(&self, index: &SnapshotIndex) -> Result<usize, String> {
-        let mut migrated = 0;
+    fn migrate_legacy_envelopes(
+        &self,
+        index: &SnapshotIndex,
+    ) -> Result<LegacySnapshotMigrationReport, String> {
+        let mut report = LegacySnapshotMigrationReport::default();
         for record in &index.records {
-            let legacy = self.legacy_envelope_path(&record.snapshot_id);
-            let legacy_metadata = match std::fs::symlink_metadata(&legacy) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return Err("读取旧快照元数据失败".to_string()),
-            };
-            verify_private_file(&legacy).map_err(|_| "旧快照文件权限或类型无效".to_string())?;
-            if legacy_metadata.len() > MAX_ENVELOPE_BYTES {
-                return Err("旧快照 envelope 超过安全上限".to_string());
+            match self.migrate_legacy_envelope(record) {
+                Ok(true) => report.migrated += 1,
+                Ok(false) => {}
+                Err(message) => report.warnings.push(LegacySnapshotMigrationWarning {
+                    snapshot_id: record.snapshot_id.clone(),
+                    message,
+                }),
             }
-            let legacy_bytes =
-                std::fs::read(&legacy).map_err(|_| "读取旧快照 envelope 失败".to_string())?;
-            if sha256_hex(&legacy_bytes) != record.envelope_hash {
-                return Err("旧快照 envelope 哈希不匹配".to_string());
-            }
-
-            let agent_dir = self.root.join(&record.agent_id);
-            ensure_private_dir(&agent_dir).map_err(|_| "创建 Agent 私有快照目录失败".to_string())?;
-            let current = self.current_envelope_path(record);
-            if current.exists() {
-                verify_private_file(&current)
-                    .map_err(|_| "目标快照文件权限或类型无效".to_string())?;
-                let current_bytes =
-                    std::fs::read(&current).map_err(|_| "读取目标快照 envelope 失败".to_string())?;
-                if sha256_hex(&current_bytes) != record.envelope_hash {
-                    return Err("目标快照 envelope 哈希不匹配，拒绝覆盖".to_string());
-                }
-                std::fs::remove_file(&legacy).map_err(|_| "清理重复旧快照失败".to_string())?;
-            } else {
-                std::fs::rename(&legacy, &current)
-                    .map_err(|_| "迁移旧快照到 Agent 目录失败".to_string())?;
-            }
-            sync_parent(&agent_dir).map_err(|_| "同步 Agent 快照目录失败".to_string())?;
-            sync_parent(&self.root).map_err(|_| "同步快照根目录失败".to_string())?;
-            migrated += 1;
         }
-        Ok(migrated)
+        Ok(report)
+    }
+
+    fn migrate_legacy_envelope(&self, record: &SnapshotRecord) -> Result<bool, String> {
+        let legacy = self.legacy_envelope_path(&record.snapshot_id);
+        let legacy_metadata = match std::fs::symlink_metadata(&legacy) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err("读取旧快照元数据失败".to_string()),
+        };
+        verify_private_file(&legacy).map_err(|_| "旧快照文件权限或类型无效".to_string())?;
+        if legacy_metadata.len() > MAX_ENVELOPE_BYTES {
+            return Err("旧快照 envelope 超过安全上限".to_string());
+        }
+        let legacy_bytes =
+            std::fs::read(&legacy).map_err(|_| "读取旧快照 envelope 失败".to_string())?;
+        if sha256_hex(&legacy_bytes) != record.envelope_hash {
+            return Err("旧快照 envelope 哈希不匹配".to_string());
+        }
+
+        let agent_dir = self.root.join(&record.agent_id);
+        ensure_private_dir(&agent_dir).map_err(|_| "创建 Agent 私有快照目录失败".to_string())?;
+        let current = self.current_envelope_path(record);
+        if current.exists() {
+            verify_private_file(&current).map_err(|_| "目标快照文件权限或类型无效".to_string())?;
+            let current_bytes =
+                std::fs::read(&current).map_err(|_| "读取目标快照 envelope 失败".to_string())?;
+            if sha256_hex(&current_bytes) != record.envelope_hash {
+                return Err("目标快照 envelope 哈希不匹配，拒绝覆盖".to_string());
+            }
+            std::fs::remove_file(&legacy).map_err(|_| "清理重复旧快照失败".to_string())?;
+        } else {
+            std::fs::rename(&legacy, &current)
+                .map_err(|_| "迁移旧快照到 Agent 目录失败".to_string())?;
+        }
+        sync_parent(&agent_dir).map_err(|_| "同步 Agent 快照目录失败".to_string())?;
+        sync_parent(&self.root).map_err(|_| "同步快照根目录失败".to_string())?;
+        Ok(true)
     }
 
     fn read_index(&self) -> Result<SnapshotIndex, String> {
@@ -982,7 +1007,7 @@ mod tests {
         let legacy_path = store.legacy_envelope_path(&legacy.snapshot_id);
         std::fs::rename(&current_path, &legacy_path).unwrap();
 
-        assert_eq!(store.organize_legacy_layout().unwrap(), 1);
+        assert_eq!(store.organize_legacy_layout().unwrap().migrated, 1);
         assert!(!legacy_path.exists());
         assert!(current_path.exists());
 
@@ -999,6 +1024,34 @@ mod tests {
         }
         assert!(!current_path.exists());
         assert!(store.load(&legacy.snapshot_id).is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn corrupt_legacy_envelope_is_reported_without_blocking_later_migration() {
+        let root = scratch("legacy-envelope-warning");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"legacy".to_vec(), Some(0o600), None);
+        let corrupt = store.create(request(&source, 1, false)).unwrap().record;
+        let valid = store.create(request(&source, 2, false)).unwrap().record;
+        let corrupt_legacy = store.legacy_envelope_path(&corrupt.snapshot_id);
+        let valid_legacy = store.legacy_envelope_path(&valid.snapshot_id);
+        std::fs::rename(store.current_envelope_path(&corrupt), &corrupt_legacy).unwrap();
+        std::fs::rename(store.current_envelope_path(&valid), &valid_legacy).unwrap();
+        let mut damaged = std::fs::read(&corrupt_legacy).unwrap();
+        let damaged_index = damaged.len() / 2;
+        damaged[damaged_index] ^= 1;
+        write_atomic_private(&corrupt_legacy, &damaged).unwrap();
+
+        let report = store.organize_legacy_layout().unwrap();
+
+        assert_eq!(report.migrated, 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].snapshot_id, corrupt.snapshot_id);
+        assert!(report.warnings[0].message.contains("哈希不匹配"));
+        assert!(corrupt_legacy.exists());
+        assert!(!valid_legacy.exists());
+        assert!(store.current_envelope_path(&valid).exists());
         std::fs::remove_dir_all(root).ok();
     }
 

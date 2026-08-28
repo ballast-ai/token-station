@@ -374,8 +374,7 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(preview).toHaveTextContent("已加密备份");
     expect(applyAgentPlan).not.toHaveBeenCalled();
 
-    expect(within(preview).queryByRole("button", { name: "显示完整值" })).toBeNull();
-    expect(screen.queryByRole("alertdialog", { name: "显示敏感配置完整值？" })).toBeNull();
+    expect(within(preview).queryByRole("button", { name: /完整值/ })).not.toBeInTheDocument();
 
     await user.click(within(preview).getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());

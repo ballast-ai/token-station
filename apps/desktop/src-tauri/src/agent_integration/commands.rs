@@ -128,6 +128,7 @@ pub struct SnapshotView {
     pub pinned: bool,
     pub source: SnapshotSourceView,
     pub restorable: bool,
+    pub maintenance_warning: Option<String>,
 }
 
 impl From<SnapshotRecord> for SnapshotView {
@@ -143,6 +144,7 @@ impl From<SnapshotRecord> for SnapshotView {
             pinned: record.pinned,
             source: SnapshotSourceView::Encrypted,
             restorable: true,
+            maintenance_warning: None,
         }
     }
 }
@@ -185,6 +187,7 @@ fn legacy_snapshot_view(agent_id: &str, target: &Path) -> Option<SnapshotView> {
         pinned: false,
         source: SnapshotSourceView::LegacyBackup,
         restorable: false,
+        maintenance_warning: None,
     })
 }
 
@@ -746,6 +749,7 @@ pub struct AgentCommandState {
     paths: AgentIntegrationPaths,
     keys: Arc<dyn MasterKeyStore>,
     snapshots: FileSnapshotStore<Arc<dyn MasterKeyStore>>,
+    snapshot_migration_warnings: BTreeMap<String, String>,
     ownership: FileOwnershipStore,
     transaction_coordinator: Arc<TransactionCoordinator>,
     token_key: hmac::Key,
@@ -1003,7 +1007,12 @@ impl AgentCommandState {
         getrandom::fill(&mut process_key)
             .map_err(|_| "初始化 Agent IPC 会话密钥失败".to_string())?;
         let snapshots = FileSnapshotStore::new(paths.snapshot_root.clone(), keys.clone());
-        snapshots.organize_legacy_layout()?;
+        let snapshot_migration_warnings = snapshots
+            .organize_legacy_layout()?
+            .warnings
+            .into_iter()
+            .map(|warning| (warning.snapshot_id, warning.message))
+            .collect();
         let ownership = FileOwnershipStore::new(paths.ownership_root.clone());
         Ok(Self {
             registry,
@@ -1011,6 +1020,7 @@ impl AgentCommandState {
             paths,
             keys,
             snapshots,
+            snapshot_migration_warnings,
             ownership,
             transaction_coordinator: Arc::new(TransactionCoordinator::default()),
             token_key: hmac::Key::new(hmac::HMAC_SHA256, &process_key),
@@ -1655,6 +1665,12 @@ impl AgentCommandState {
                     .collect::<Vec<_>>()
             })
             .map_err(AgentCommandError::internal)?;
+        for view in &mut views {
+            if let Some(warning) = self.snapshot_migration_warnings.get(&view.snapshot_id) {
+                view.restorable = false;
+                view.maintenance_warning = Some(warning.clone());
+            }
+        }
         let legacy_targets = {
             let session = self.session.lock().map_err(|_| {
                 AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用")
@@ -1818,6 +1834,12 @@ impl AgentCommandState {
         session_label: &str,
     ) -> Result<ConfigPlanView, AgentCommandError> {
         validate_session_label(session_label)?;
+        if let Some(warning) = self.snapshot_migration_warnings.get(snapshot_id) {
+            return Err(AgentCommandError::boundary(
+                "snapshot_migration_failed",
+                format!("The snapshot needs maintenance before restore: {warning}"),
+            ));
+        }
         let snapshot = self
             .snapshots
             .load(snapshot_id)
@@ -2749,6 +2771,70 @@ mod tests {
             Arc::new(MemoryMasterKey),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn command_state_starts_and_disables_restore_for_failed_legacy_migration() {
+        let root = scratch("legacy-migration-startup");
+        let paths = AgentIntegrationPaths {
+            snapshot_root: root.join("snapshots"),
+            ownership_root: root.join("ownership"),
+        };
+        let keys: Arc<dyn MasterKeyStore> = Arc::new(MemoryMasterKey);
+        let store = FileSnapshotStore::new(paths.snapshot_root.clone(), keys.clone());
+        let source = ConfigSource::existing(b"legacy".to_vec(), Some(0o600), None);
+        let record = store
+            .create(crate::agent_integration::snapshot::SnapshotRequest {
+                operation_id: "legacy-migration-operation",
+                agent_id: "claude-code",
+                target_config_path: "/tmp/.claude/settings.json",
+                before_hash: crate::agent_integration::plan::file_revision_hash(
+                    Path::new("/tmp/.claude/settings.json"),
+                    &source,
+                )
+                .unwrap(),
+                source: &source,
+                created_at_ms: 1,
+                connector_id: "claude-code-v1",
+                app_version: "test",
+                pinned: true,
+            })
+            .unwrap()
+            .record;
+        let current = std::fs::read_dir(paths.snapshot_root.join("claude-code"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let legacy = paths
+            .snapshot_root
+            .join(format!("{}.snapshot.json", record.snapshot_id));
+        std::fs::rename(&current, &legacy).unwrap();
+        let mut damaged = std::fs::read(&legacy).unwrap();
+        let damaged_index = damaged.len() / 2;
+        damaged[damaged_index] ^= 1;
+        crate::agent_integration::safe_fs::write_atomic_private(&legacy, &damaged).unwrap();
+
+        let state = AgentCommandState::new_with_master_key(paths, keys)
+            .expect("one damaged legacy snapshot must not abort desktop setup");
+        let snapshots = state.list_snapshots("claude-code").unwrap();
+        let damaged_view = snapshots
+            .iter()
+            .find(|view| view.snapshot_id == record.snapshot_id)
+            .unwrap();
+        assert!(!damaged_view.restorable);
+        assert!(damaged_view
+            .maintenance_warning
+            .as_deref()
+            .unwrap()
+            .contains("哈希不匹配"));
+        let error = match state.plan_restore(&record.snapshot_id, "main") {
+            Ok(_) => panic!("a failed legacy migration must disable restore"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "snapshot_migration_failed");
+        std::fs::remove_dir_all(root).ok();
     }
 
     fn record(target: &Path, conflict: bool) -> DiscoveryRecord {
