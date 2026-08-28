@@ -320,7 +320,7 @@ describe("retained page theme styles", () => {
     expect(agentImageRule).toMatch(/width:\s*36px/);
     expect(agentImageRule).toMatch(/height:\s*36px/);
     expect(routeLabelRule).toMatch(/font-size:\s*13px/);
-    expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(selectedAgentRule).toMatch(/background:\s*var\(--surface\)/);
     expect(selectedAgentRule).not.toMatch(/box-shadow:/);
   });
 
@@ -355,13 +355,13 @@ describe("retained page theme styles", () => {
     expect(stateRuntimeRules).not.toMatch(/(?:^|;)\s*width:/);
   });
 
-  it("styles the pre-connection route card as a neutral preview", () => {
+  it("styles the pre-connection route preview as a neutral filled surface", () => {
     const previewRule = appCss.match(/\.agent-default-route-state\s*\{([^}]*)\}/s)?.[1] ?? "";
     const previewIconRule = appCss.match(/\.agent-default-route-state\s*>\s*span\s*\{([^}]*)\}/s)?.[1] ?? "";
 
-    expect(previewRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(previewRule).toMatch(/border:\s*0/);
     expect(previewRule).toMatch(/color:\s*var\(--muted\)/);
-    expect(previewRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(previewRule).toMatch(/background:\s*var\(--surface\)/);
     expect(previewIconRule).toMatch(/color:\s*var\(--muted\)/);
     expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--signal\)|var\(--success\)/);
   });
@@ -498,13 +498,48 @@ describe("retained page theme styles", () => {
     const statusDetailRule = appCss.match(/\.agent-connect-status small\s*\{([^}]*)\}/s)?.[1] ?? "";
 
     expect(connectBoxRule).toMatch(/min-width:\s*0/);
-    expect(connectBoxRule).toMatch(/flex:\s*1 1 auto/);
+    expect(connectBoxRule).toMatch(/flex:\s*1 1 420px/);
     expect(connectActionsRule).toMatch(/display:\s*flex/);
     expect(connectActionsRule).toMatch(/flex:\s*0 0 auto/);
     expect(connectActionsRule).toMatch(/white-space:\s*nowrap/);
-    expect(statusDetailRule).toMatch(/text-overflow:\s*ellipsis/);
+    expect(statusDetailRule).toMatch(/min-width:\s*0/);
+    expect(statusDetailRule).toMatch(/white-space:\s*normal/);
+    expect(statusDetailRule).toMatch(/text-overflow:\s*clip/);
+    expect(statusDetailRule).not.toMatch(/overflow:\s*hidden/);
     expect(appCss).not.toMatch(
       /\.agent-connect-box\s*\{[^}]*flex-direction:\s*column/s,
     );
+  });
+
+  it("keeps the Agent identity visible and the detail surface rhythm compact", () => {
+    const identitySurfaceRule = appCss.match(
+      /\.agent-route-hero\.agent-flat-surface\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const detailSurfaceRule = appCss.match(
+      /\.agent-connection-detail\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const identityRule = appCss.match(
+      /\.agent-route-hero \.agent-identity\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const identityHeadingRule = appCss.match(
+      /\.agent-identity-copy h1,[^{]*\.agent-identity-copy h2\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const backupPolicyRule = appCss.match(
+      /\.agent-backup-policy\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const backupPathRule = appCss.match(
+      /\.agent-backup-location code\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(identitySurfaceRule).toMatch(/flex:\s*0 0 auto/);
+    expect(detailSurfaceRule).toMatch(/gap:\s*8px/);
+    expect(detailSurfaceRule).toMatch(/flex:\s*0 0 auto/);
+    expect(identityRule).toMatch(/flex:\s*0 0 auto/);
+    expect(identityRule).toMatch(/min-width:\s*max-content/);
+    expect(identityHeadingRule).toMatch(/white-space:\s*nowrap/);
+    expect(backupPolicyRule).toMatch(/margin-top:\s*12px/);
+    expect(backupPolicyRule).toMatch(/line-height:\s*1\.6/);
+    expect(backupPathRule).toMatch(/line-height:\s*1\.65/);
+    expect(appCss).not.toContain("agent-backup-policy-separator");
   });
 });

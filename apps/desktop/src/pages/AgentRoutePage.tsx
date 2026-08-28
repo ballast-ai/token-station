@@ -192,10 +192,10 @@ function connectedRouteDetail(route: AgentRouteView, copy: LocalizedCopy): strin
     const model = route.direct_target?.model;
     if (upstream && model) {
       return copy(
-        `Connected to the local gateway. Active route: ${upstream} / ${model}.`,
-        `已连接本机网关。当前路由：${upstream} / ${model}。`,
-        `已連接本機閨道。目前路由：${upstream} / ${model}。`,
-        `ローカルゲートウェイに接続済みです。現在のルート：${upstream} / ${model}。`,
+        `Gateway ready · ${upstream} / ${model}`,
+        `网关正常 · ${upstream} / ${model}`,
+        `閘道正常 · ${upstream} / ${model}`,
+        `ゲートウェイ正常 · ${upstream} / ${model}`,
       );
     }
     return copy(
@@ -243,8 +243,8 @@ function statusCopy(
       tone: "idle",
       label: copy("Select one", "待选择", "請選擇一個", "1つ選択してください"),
       detail: copy(
-        "Multiple installations were detected. Select the exact path to manage.",
-        "检测到多份安装，请先选择要接管的精确路径。", "檢測到多份安裝，請先選擇要接管的精確路徑。", "複数のインストールが検出されました。管理するための正確なパスを選択してください。"
+        "Multiple installations found. Select a version.",
+        "检测到多份安装，请选择版本。", "檢測到多份安裝，請選擇版本。", "複数のインストールがあります。バージョンを選択してください。"
       ),
     };
   }
@@ -486,6 +486,11 @@ export default function AgentRoutePage({
   const routeNeedsAttention = Boolean(route.config_error || !route.direct_target?.model);
   const discoveredPath = installation?.discovery.canonical_path;
   const discoveredPathCopied = copiedDiscoveryPath?.path === discoveredPath;
+  const installationVersion = installation?.discovery.version_normalized
+    ?? installation?.discovery.version_raw
+    ?? ((agent?.installations.length ?? 0) > 1
+      ? copy("Not selected", "未选择", "未選擇", "選択されていません")
+      : copy("Unknown", "未知", "未知", "不明"));
   const inheritedStrategyName = route.routing_mode === "direct"
     ? copy("Simple routing", "简单路由", "簡單路由", "シンプルルーティング")
     : route.routing_mode === "quota_first"
@@ -828,7 +833,7 @@ export default function AgentRoutePage({
       )}
       {pageMode !== "routing" && (
         <>
-      <header className="agent-route-hero panel">
+      <header className="agent-route-hero agent-flat-surface">
         <div className="agent-identity">
           <span className="agent-large-mark" aria-hidden="true">
             <AgentIcon
@@ -837,8 +842,9 @@ export default function AgentRoutePage({
               size={50}
             />
           </span>
-          <div>
+          <div className="agent-identity-copy">
             {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
+            <span className="agent-identity-version">{installationVersion}</span>
           </div>
         </div>
         <div className="agent-connect-box">
@@ -862,8 +868,10 @@ export default function AgentRoutePage({
               onInstallationSelected?.();
             }}
           />
-          <button
-            className={`btn agent-primary-action ${managed ? "" : "primary"}`}
+          <Button
+            className="agent-primary-action"
+            variant={managed ? "secondary" : "default"}
+            size="lg"
             type="button"
             data-onboarding-target={!managed ? "agent-connect" : undefined}
             disabled={busy || !canOperate}
@@ -884,10 +892,11 @@ export default function AgentRoutePage({
                   : metadata.agent_id === "cursor"
                     ? copy("Connect & launch", "一键接入并启动", "連線並啟動", "接続して起動")
                     : copy("Preview & connect", "预览并接入", "預覽並連線", "プレビューして接続")}
-          </button>
+          </Button>
           {pageMode !== "connection" && cursorRepairRequired ? (
-            <button
-              className="btn agent-secondary-action"
+            <Button
+              className="agent-secondary-action"
+              variant="secondary"
               type="button"
               disabled={busy || !installation}
               onClick={() => void restoreOfficial()}
@@ -897,13 +906,13 @@ export default function AgentRoutePage({
               )}
             >
               {copy("Restore official configuration & disconnect", "恢复官方配置并断开", "恢復官方配置並斷開", "公式設定を復元し、接続を解除")}
-            </button>
+            </Button>
           ) : null}
           </div>
         </div>
       </header>
 
-      <section className="panel agent-connection-detail" aria-label={copy("Agent connection details", "Agent 接入详情", "Agent 連線詳情", "Agent 接続詳細")}>
+      <section className="agent-connection-detail agent-flat-surface" aria-label={copy("Agent connection details", "Agent 接入详情", "Agent 連線詳情", "Agent 接続詳細")}>
         <dl className="agent-connection-facts">
           <div className="agent-discovered-path-fact">
             <dt>{copy("Discovered path", "发现路径", "發現路徑", "発見されたパス")}</dt>
@@ -947,7 +956,6 @@ export default function AgentRoutePage({
               )}
             </dd>
           </div>
-          <div><dt>{copy("Version", "版本", "版本", "バージョン")}</dt><dd><strong>{installation?.discovery.version_normalized ?? installation?.discovery.version_raw ?? ((agent?.installations.length ?? 0) > 1 ? copy("Not selected", "未选择", "未選擇", "選択されていません") : copy("Unknown", "未知", "未知", "不明"))}</strong></dd></div>
         </dl>
         <div className="agent-connection-change">
           <div>
@@ -978,6 +986,12 @@ export default function AgentRoutePage({
             <div>
               <span>{copy("Encrypted backup directory", "加密备份目录", "加密備份目錄", "暗号化バックアップディレクトリ")}</span>
               <code>{backupDirectory || copy("Loading…", "正在获取…", "正在取得…", "読み込み中…")}</code>
+              <small className="agent-backup-layout-note">{copy(
+                "Each Agent has its own folder. File names include the time and Agent ID.",
+                "每个 Agent 一个文件夹，文件名包含时间和 Agent 名称。",
+                "每個 Agent 一個資料夾，檔名包含時間和 Agent 名稱。",
+                "Agent ごとにフォルダを分け、ファイル名に時刻と Agent 名を含めます。",
+              )}</small>
             </div>
             <div className="agent-backup-location-actions">
               <Button variant="ghost" size="icon-sm" type="button" disabled={!backupDirectory} aria-label={backupDirectoryCopied
@@ -986,8 +1000,8 @@ export default function AgentRoutePage({
                 onClick={() => void copyBackupDirectory()}>
                 {backupDirectoryCopied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
               </Button>
-              <Button variant="outline" size="sm" type="button" disabled={!backupDirectory} onClick={() => void openBackupDirectory()}>
-                <FolderOpen aria-hidden="true" />
+              <Button variant="secondary" size="sm" type="button" disabled={!backupDirectory} onClick={() => void openBackupDirectory()}>
+                <FolderOpen data-icon="inline-start" aria-hidden="true" />
                 {copy("Open backup folder", "打开备份文件夹", "開啟備份資料夾", "バックアップフォルダを開く")}
               </Button>
             </div>

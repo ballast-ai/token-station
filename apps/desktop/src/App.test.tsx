@@ -3435,7 +3435,7 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openAgent(user, "Claude Code");
     expect(await screen.findByRole("button", { name: "预览并接入" })).toBeDisabled();
-    expect(screen.getByText("检测到多份安装，请先选择要接管的精确路径。")).toBeInTheDocument();
+    expect(screen.getByText("检测到多份安装，请选择版本。")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: /选择版本/ }));
     await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
     expect(screen.queryByRole("listbox")).toBeNull();

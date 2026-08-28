@@ -1003,6 +1003,7 @@ impl AgentCommandState {
         getrandom::fill(&mut process_key)
             .map_err(|_| "初始化 Agent IPC 会话密钥失败".to_string())?;
         let snapshots = FileSnapshotStore::new(paths.snapshot_root.clone(), keys.clone());
+        snapshots.organize_legacy_layout()?;
         let ownership = FileOwnershipStore::new(paths.ownership_root.clone());
         Ok(Self {
             registry,
