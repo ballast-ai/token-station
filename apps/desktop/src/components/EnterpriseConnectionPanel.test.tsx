@@ -21,19 +21,37 @@ const liveDiscovery = {
 };
 
 describe("EnterpriseConnectionPanel", () => {
-  it("shows the existing fixed provider without asking for its credential again", () => {
+  it("extends an existing managed provider with another verified model", async () => {
+    const user = userEvent.setup();
+    const onVerify = vi.fn().mockResolvedValue(liveDiscovery);
+    const onConnect = vi.fn().mockResolvedValue(true);
     render(
       <EnterpriseConnectionPanel
         existingProvider={connectedProvider}
         busy={false}
-        onVerify={vi.fn()}
-        onConnect={vi.fn()}
+        onVerify={onVerify}
+        onConnect={onConnect}
       />,
     );
 
     expect(screen.getByText("Token-station")).toBeInTheDocument();
-    expect(screen.getByText("https://api.example.com/v1")).toBeInTheDocument();
-    expect(screen.queryByLabelText("API Key")).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Base URL" }))
+      .toHaveValue("https://api.example.com/v1");
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeDisabled();
+    await user.type(screen.getByLabelText("API Key"), "replacement-key");
+    await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
+
+    expect(await screen.findByRole("radio", { name: "enterprise-reasoner, 已添加" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "enterprise-chat" })).toBeEnabled();
+    await user.click(screen.getByRole("radio", { name: "enterprise-chat" }));
+    await user.click(screen.getByRole("button", { name: "添加并使用" }));
+
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith({
+      name: "tokenstation",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "replacement-key",
+      model: "enterprise-chat",
+    }));
   });
 
   it("requires endpoint verification and explicit model selection", async () => {

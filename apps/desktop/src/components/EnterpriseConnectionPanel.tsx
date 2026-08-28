@@ -5,6 +5,8 @@ import {
   ENTERPRISE_PROVIDER_NAME,
 } from "../providerPresentation";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { Button } from "./ui/button";
+import { Field, FieldGroup, FieldLabel } from "./ui/field";
 import { Input } from "./ui/input";
 
 export { ENTERPRISE_PROVIDER_ID, ENTERPRISE_PROVIDER_NAME } from "../providerPresentation";
@@ -30,7 +32,9 @@ export default function EnterpriseConnectionPanel({
   onConnect,
 }: EnterpriseConnectionPanelProps) {
   const { copy } = useLocalizedCopy();
-  const [baseUrl, setBaseUrl] = useState("");
+  const extendingProvider = existingProvider?.managed_route === true;
+  const configuredModels = new Set(extendingProvider ? existingProvider.models : []);
+  const [baseUrl, setBaseUrl] = useState(extendingProvider ? existingProvider.base_url : "");
   const [apiKey, setApiKey] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState("");
@@ -96,25 +100,26 @@ export default function EnterpriseConnectionPanel({
         return;
       }
       setApiKey("");
-      setMessage(copy("Enterprise route added and is being applied.", "企业路由已添加，正在应用配置。", "企業路由已新增，正在套用設定。", "企業ルートを追加し、設定を適用しています。"));
+      setMessage(extendingProvider
+        ? copy("Model added and selected.", "模型已添加并切换使用。", "模型已新增並切換使用。", "モデルを追加して選択しました。")
+        : copy("Enterprise route added and is being applied.", "企业路由已添加，正在应用配置。", "企業路由已新增，正在套用設定。", "企業ルートを追加し、設定を適用しています。"));
     } finally {
       setWorking(false);
     }
   };
 
   const disabled = busy || verifying || working;
-  if (existingProvider) {
+  if (existingProvider && !extendingProvider) {
     return (
-      <div className="enterprise-connected-summary">
-        <span className="enterprise-active-status">{copy("Configured provider", "已配置供应商", "已設定供應商", "設定済みプロバイダー")}</span>
+      <div className="enterprise-provider-collision" role="status">
+        <span>{copy("Reserved provider name is already in use", "保留的供应商名称已被占用", "保留的供應商名稱已被使用", "予約済みプロバイダー名は既に使用されています")}</span>
         <strong>{ENTERPRISE_PROVIDER_NAME}</strong>
         <code>{existingProvider.base_url}</code>
-        <span>{existingProvider.models.join(" · ")}</span>
         <p className="enterprise-secret-note">{copy(
-          "Manage or remove it from the model list before adding it again.",
-          "请在模型列表中管理或删除它，再重新添加。",
-          "請在模型清單中管理或刪除後再重新新增。",
-          "モデル一覧で管理または削除してから再追加してください。",
+          "Rename or remove this ordinary provider before using the managed enterprise flow.",
+          "请先重命名或删除这个普通供应商，再使用企业托管流程。",
+          "請先重新命名或刪除此一般供應商，再使用企業託管流程。",
+          "この通常プロバイダーの名前を変更するか削除してから、企業管理フローを使用してください。",
         )}</p>
       </div>
     );
@@ -123,27 +128,39 @@ export default function EnterpriseConnectionPanel({
   return (
     <div className="enterprise-connection-panel">
       <div className="enterprise-provider-identity">
-        <span>{copy("Provider", "供应商", "供應商", "プロバイダー")}</span>
-        <strong>{ENTERPRISE_PROVIDER_NAME}</strong>
+        <div>
+          <span>{copy("Provider", "供应商", "供應商", "プロバイダー")}</span>
+          <strong>{ENTERPRISE_PROVIDER_NAME}</strong>
+        </div>
+        {extendingProvider && (
+          <span className="enterprise-existing-count">{copy(
+            `${existingProvider.models.length} models configured`,
+            `已配置 ${existingProvider.models.length} 个模型`,
+            `已設定 ${existingProvider.models.length} 個模型`,
+            `${existingProvider.models.length} 個のモデルを設定済み`,
+          )}</span>
+        )}
       </div>
-      <div className="enterprise-credential-grid">
-        <label>
-          <span>Base URL</span>
+      <FieldGroup className="enterprise-credential-grid">
+        <Field>
+          <FieldLabel htmlFor="enterprise-base-url">Base URL</FieldLabel>
           <Input
+            id="enterprise-base-url"
             aria-label="Base URL"
             type="url"
             placeholder="https://api.example.com/v1"
             value={baseUrl}
-            disabled={disabled}
+            disabled={disabled || extendingProvider}
             onChange={(event) => {
               setBaseUrl(event.target.value);
               invalidateVerification();
             }}
           />
-        </label>
-        <label>
-          <span>{copy("API key", "API Key", "API Key", "APIキー")}</span>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="enterprise-api-key">{copy("API key", "API Key", "API Key", "APIキー")}</FieldLabel>
           <Input
+            id="enterprise-api-key"
             aria-label="API Key"
             type="password"
             autoComplete="off"
@@ -155,12 +172,12 @@ export default function EnterpriseConnectionPanel({
               invalidateVerification();
             }}
           />
-        </label>
-      </div>
+        </Field>
+      </FieldGroup>
       <div className="enterprise-verify-actions">
-        <button className="btn" type="button" disabled={disabled} onClick={() => void verify()}>
+        <Button variant="secondary" type="button" disabled={disabled} onClick={() => void verify()}>
           {verifying ? copy("Verifying…", "验证中…", "驗證中…", "検証中…") : copy("Verify and load models", "验证并获取模型", "驗證並取得模型", "検証してモデルを取得")}
-        </button>
+        </Button>
       </div>
       {message && <p className="enterprise-connection-status" role="status" aria-live="polite">{message}</p>}
       {models.length > 0 && (
@@ -169,28 +186,43 @@ export default function EnterpriseConnectionPanel({
             <strong id="enterprise-model-picker-label">{copy("Model", "模型", "模型", "モデル")}</strong>
             <span>{copy("Select one", "选择一个", "選擇一個", "1つ選択")}</span>
           </div>
-          <div className="enterprise-model-pills" role="radiogroup" aria-labelledby="enterprise-model-picker-label">
-            {models.map((item) => (
-              <label className="enterprise-model-pill" key={item}>
-                <input
-                  type="radio"
-                  name="enterprise-model"
-                  value={item}
-                  checked={model === item}
-                  disabled={disabled}
-                  onChange={() => setModel(item)}
-                />
-                <span className="enterprise-model-mark" aria-hidden="true">{model === item ? "✓" : "+"}</span>
-                <span className="enterprise-model-name">{item}</span>
-              </label>
-            ))}
+          <div className="enterprise-model-options" role="radiogroup" aria-labelledby="enterprise-model-picker-label">
+            {models.map((item) => {
+              const configured = configuredModels.has(item);
+              const configuredLabel = copy("Configured", "已添加", "已新增", "追加済み");
+              return (
+                <label
+                  className="enterprise-model-option"
+                  data-configured={configured || undefined}
+                  key={item}
+                >
+                  <input
+                    type="radio"
+                    name="enterprise-model"
+                    value={item}
+                    aria-label={configured ? `${item}, ${configuredLabel}` : item}
+                    checked={model === item}
+                    disabled={disabled || configured}
+                    onChange={() => setModel(item)}
+                  />
+                  <span className="enterprise-model-name">{item}</span>
+                  <span className="enterprise-model-option-status" aria-hidden="true">
+                    {configured
+                      ? configuredLabel
+                      : model === item
+                        ? copy("Selected", "已选择", "已選擇", "選択済み")
+                        : ""}
+                  </span>
+                </label>
+              );
+            })}
           </div>
         </section>
       )}
       <div className="enterprise-dialog-actions">
-        <button className="btn primary" type="button" disabled={disabled || !model} onClick={() => void connect()}>
+        <Button type="button" disabled={disabled || !model} onClick={() => void connect()}>
           {working ? copy("Adding…", "添加中…", "新增中…", "追加中…") : copy("Add and use", "添加并使用", "新增並使用", "追加して使用")}
-        </button>
+        </Button>
       </div>
       <p className="enterprise-secret-note">{copy(
         "The API key is stored in the local credential store and is not shown again.",
