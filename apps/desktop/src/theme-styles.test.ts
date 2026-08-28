@@ -5,6 +5,18 @@ import { describe, expect, it } from "vitest";
 const appCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
 
 describe("retained page theme styles", () => {
+  it("keeps the launch palette synchronized with the resolved App theme", () => {
+    const launchRule = appCss.match(/\.launch-screen\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const darkLaunchRule = appCss.match(
+      /:root\.dark \.launch-screen\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(launchRule).toMatch(/--launch-canvas:\s*#f3f0e9/);
+    expect(launchRule).toMatch(/--launch-ink:\s*#15181b/);
+    expect(darkLaunchRule).toMatch(/--launch-canvas:\s*#111620/);
+    expect(darkLaunchRule).toMatch(/--launch-ink:\s*#eef2f8/);
+  });
+
   it("prevents accidental static-text selection but keeps editable controls selectable", () => {
     const bodyRule = appCss.match(/(?:^|\n)body\s*\{([^}]*)\}/s)?.[1] ?? "";
     const editableRule = appCss.match(
