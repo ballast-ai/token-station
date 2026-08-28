@@ -12726,10 +12726,10 @@ samp {
 }
 
 .routing-mode-section {
-  padding: 4px;
+  padding: 0;
   border: 0;
-  border-radius: 12px;
-  background: var(--surface-2);
+  border-radius: 0;
+  background: transparent;
 }
 
 .routing-mode-tabs,
@@ -12740,23 +12740,43 @@ samp {
 .routing-mode-tabs [data-slot="tabs-list"] {
   height: 48px;
   gap: 4px;
-  padding: 0;
+  padding: 4px;
   border: 0;
-  border-radius: 9px;
-  background: transparent;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.routing-mode-tabs .routing-mode-tabs-list[data-slot="tabs-list"] {
+  height: 48px;
+  gap: 4px;
+  padding: 4px;
+  border: 0;
+  border-bottom: 0;
+  border-radius: 999px;
+  background: var(--surface-2);
 }
 
 .routing-mode-tabs [data-slot="tabs-trigger"] {
-  height: 48px;
+  height: 40px;
   justify-content: center;
   border: 0;
-  border-radius: 9px;
+  border-radius: 999px;
   color: var(--muted);
   background: transparent;
   box-shadow: none;
 }
 
+.routing-mode-tabs .routing-mode-tab[data-slot="tabs-trigger"] {
+  height: 40px;
+  border: 0;
+  border-radius: 999px;
+}
+
 .routing-mode-tabs [data-slot="tabs-trigger"]::after {
+  display: none;
+}
+
+.routing-mode-tabs .routing-mode-tab[data-slot="tabs-trigger"]::after {
   display: none;
 }
 
@@ -12771,6 +12791,11 @@ samp {
   color: var(--signal);
   background: var(--signal-soft);
   box-shadow: none;
+}
+
+.routing-mode-tabs .routing-mode-tab[data-slot="tabs-trigger"][data-state="active"],
+.routing-mode-tabs .routing-mode-tab[data-slot="tabs-trigger"][data-active] {
+  border-radius: 999px;
 }
 
 .home-page > :is(.route-panel, .direct-route-panel, .quota-panel) {

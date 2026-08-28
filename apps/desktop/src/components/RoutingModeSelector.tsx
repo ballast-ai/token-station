@@ -32,7 +32,7 @@ export default function RoutingModeSelector({
         value={value}
         onValueChange={(next) => onValueChange(next as RoutingMode)}
       >
-        <TabsList className="routing-mode-tabs-list" variant="line" aria-label={label}>
+        <TabsList className="routing-mode-tabs-list" aria-label={label}>
           <TabsTrigger className="routing-mode-tab" value="direct" aria-label={copy("Direct routing", "简单路由", "簡單路由", "シンプルルーティング")} title={copy("One exact provider and model", "固定一个供应商和模型", "固定一個供應商和模型", "固定されたプロバイダーとモデル")} disabled={disabled}>
             <Target />
             <span>{copy("Direct routing", "简单路由", "簡單路由", "シンプルルーティング")}</span>
