@@ -169,8 +169,9 @@ describe("retained page theme styles", () => {
     const chipRule = appCss.match(/\.provider-wizard \.model-chip\s*\{([^}]*)\}/s)?.[1] ?? "";
     const actionsRule = appCss.match(/\.wizard-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
 
-    expect(wizardRule).toMatch(/border:\s*0/);
-    expect(wizardRule).toMatch(/background:\s*transparent/);
+    expect(wizardRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(wizardRule).toMatch(/border-radius:\s*12px/);
+    expect(wizardRule).toMatch(/background:\s*var\(--surface\)/);
     expect(wizardRule).toMatch(/box-shadow:\s*none/);
     expect(stepRule).not.toMatch(/border-(?:top|right|bottom|left):/);
     expect(indexRule).toMatch(/background:\s*transparent/);
