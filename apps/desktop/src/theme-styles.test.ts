@@ -142,6 +142,18 @@ describe("retained page theme styles", () => {
       return rules.reverse().find((rule: string) => rule.includes("background:")) ?? "";
     };
     const routingSectionRule = lastRule(/\.routing-mode-section\s*\{([^}]*)\}/gs);
+    const routingListRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tabs-list\[data-slot="tabs-list"\]\s*\{([^}]*)\}/gs,
+    );
+    const routingIndicatorRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tab\[data-slot="tabs-trigger"\]::after\s*\{([^}]*)\}/gs,
+    );
+    const routingTriggerRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tab\[data-slot="tabs-trigger"\]\s*\{([^}]*)\}/gs,
+    );
+    const activeRoutingTriggerRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tab\[data-slot="tabs-trigger"\]\[data-state="active"\],[^{]*\{([^}]*)\}/gs,
+    );
     const routePanelRule = lastRule(
       /\.home-page > :is\(\.route-panel, \.direct-route-panel, \.quota-panel\)\s*\{([^}]*)\}/gs,
     );
@@ -152,7 +164,17 @@ describe("retained page theme styles", () => {
     const keywordValueRule = lastRule(/\.tier-keyword-value\s*\{([^}]*)\}/gs);
 
     expect(routingSectionRule).toMatch(/border:\s*0/);
-    expect(routingSectionRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(routingSectionRule).toMatch(/background:\s*transparent/);
+    expect(routingListRule).toMatch(/border:\s*0/);
+    expect(routingListRule).toMatch(/border-bottom:\s*0/);
+    expect(routingListRule).toMatch(/border-radius:\s*999px/);
+    expect(routingListRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(routingListRule).toMatch(/height:\s*48px/);
+    expect(routingListRule).toMatch(/padding:\s*4px/);
+    expect(routingTriggerRule).toMatch(/height:\s*40px/);
+    expect(routingTriggerRule).toMatch(/border-radius:\s*999px/);
+    expect(activeRoutingTriggerRule).toMatch(/border-radius:\s*999px/);
+    expect(routingIndicatorRule).toMatch(/display:\s*none/);
     expect(routePanelRule).toMatch(/border:\s*0/);
     expect(routePanelRule).toMatch(/background:\s*transparent/);
     expect(directRowRule).toMatch(/border:\s*0/);
