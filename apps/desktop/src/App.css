@@ -1707,12 +1707,19 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
 /* Agent detail */
 .agent-route-hero {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
   padding: 20px 22px;
 }
-.agent-identity { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.agent-identity {
+  min-width: max-content;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 14px;
+}
 .agent-large-mark {
   width: 50px;
   height: 50px;
@@ -1730,12 +1737,13 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  flex: 1 1 auto;
+  flex: 1 1 420px;
   gap: 18px;
 }
 .agent-connect-status {
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   flex: 1 1 auto;
@@ -1743,12 +1751,14 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
 }
 .agent-connect-status small {
   min-width: 0;
-  max-width: 260px;
-  overflow: hidden;
+  max-width: 360px;
+  overflow: visible;
   color: var(--muted);
   font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  text-align: right;
+  text-overflow: clip;
+  white-space: normal;
 }
 .agent-connect-actions {
   display: flex;
@@ -6761,16 +6771,16 @@ pre.block {
   justify-content: space-between;
   gap: 14px;
   padding: 12px 14px;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 10px;
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-2) 82%, var(--surface));
   margin-top: 10px;
 }
 
 .agent-backup-location > div:first-child {
   min-width: 0;
   display: grid;
-  gap: 5px;
+  gap: 8px;
 }
 
 .agent-backup-location span {
@@ -6781,6 +6791,13 @@ pre.block {
 .agent-backup-location code {
   overflow-wrap: anywhere;
   font-size: 11px;
+  line-height: 1.65;
+}
+
+.agent-backup-layout-note {
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.65;
 }
 
 .tier-keyword-trigger {
@@ -7386,9 +7403,9 @@ pre.block {
   flex-direction: column;
   gap: 0;
   padding: 0;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 12px;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface-2) 78%, var(--surface));
   box-shadow: none;
 }
 
@@ -7397,7 +7414,7 @@ pre.block {
   align-items: center;
   min-height: 48px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 0;
 }
 
 .agent-master-list-card [data-slot="card-title"] h2 {
@@ -7508,7 +7525,7 @@ pre.block {
 
 .agent-master-item[data-slot="button"][aria-current="page"] {
   color: var(--ink);
-  background: var(--surface-2);
+  background: var(--surface);
 }
 
 .agent-master-copy {
@@ -7725,6 +7742,45 @@ pre.block {
   letter-spacing: -.035em;
 }
 
+.agent-route-hero.agent-flat-surface {
+  flex: 0 0 auto;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.agent-route-hero .agent-identity {
+  min-width: max-content;
+  flex: 0 0 auto;
+  gap: 14px;
+}
+
+.agent-route-hero .status-chip {
+  border: 0;
+}
+
+.agent-identity-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.agent-identity-copy h1,
+.agent-identity-copy h2 {
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
+.agent-identity-version {
+  color: var(--muted);
+  font: 500 10.5px/1.2 "IBM Plex Mono", monospace;
+}
+
+.agent-primary-action[data-slot="button"] {
+  min-width: 112px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .agent-master-empty {
   min-height: 300px;
   display: grid;
@@ -7827,13 +7883,16 @@ pre.block {
 
 .agent-connection-detail {
   display: grid;
-  gap: 14px;
+  gap: 8px;
+  flex: 0 0 auto;
   padding: 20px 22px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-2) 76%, var(--surface));
 }
 
 .agent-connection-facts {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 160px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   margin: 0;
 }
@@ -7841,9 +7900,9 @@ pre.block {
 .agent-connection-facts > div {
   min-width: 0;
   padding: 13px 14px;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 9px;
-  background: var(--surface-2);
+  background: var(--surface);
 }
 
 .agent-connection-facts dt {
@@ -7912,8 +7971,9 @@ pre.block {
 
 .agent-connection-change {
   padding: 16px;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 10px;
+  background: var(--surface);
 }
 
 .agent-connection-change > div:first-child {
@@ -7937,17 +7997,17 @@ pre.block {
   margin-top: 12px;
   padding: 12px;
   border-radius: 8px;
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-2) 82%, var(--surface));
 }
 .agent-connection-file code { overflow-wrap: anywhere; color: var(--ink); font-size: 11px; }
 .agent-connection-file small { color: var(--muted); font-size: 9.5px; }
 
 .agent-backup-policy {
-  margin-top: 10px;
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
+  margin-top: 12px;
+  padding: 4px 2px 2px;
   color: var(--muted);
   font-size: 10px;
+  line-height: 1.6;
 }
 
 .agent-backup-policy summary {
@@ -8221,10 +8281,10 @@ pre.block {
   align-items: center;
   gap: 11px;
   padding: 12px 14px;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 9px;
   color: var(--muted);
-  background: var(--surface-2);
+  background: var(--surface);
 }
 .agent-default-route-state > span {
   width: 24px;
@@ -8242,9 +8302,8 @@ pre.block {
 .agent-default-route-state strong { color: var(--ink); font-size: 11px; }
 .agent-default-route-state code { color: inherit; font-size: 9.5px; }
 .agent-default-route-state.warning {
-  border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
   color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
 }
 .agent-default-route-state.warning > span { color: #fff; background: var(--warning); }
 

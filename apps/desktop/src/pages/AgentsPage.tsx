@@ -76,7 +76,7 @@ export default function AgentsPage({
 
       <div className="agent-master-detail">
         <Card
-          className="agent-master-list-card"
+          className="agent-master-list-card agent-flat-surface"
           size="sm"
           role="region"
           aria-label={connections ? copy("Agent selector", "Agent 选择列表", "Agent 選擇清單", "Agent 選択リスト") : copy("Routing scopes", "路由范围", "路由範圍", "ルーティングスコープ")}

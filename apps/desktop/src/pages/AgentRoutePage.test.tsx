@@ -205,8 +205,12 @@ describe("AgentRoutePage multi-install admission", () => {
       />,
     );
 
-    expect(screen.getByText("已连接本机网关。当前路由：kimi / kimi-k2.6。")).toBeInTheDocument();
+    expect(screen.getByText("网关正常 · kimi / kimi-k2.6")).toBeInTheDocument();
     expect(screen.queryByText("请求已通过 Token Station。")).not.toBeInTheDocument();
+    const identity = screen.getByRole("heading", { name: "Claude Code" }).closest(".agent-identity");
+    expect(identity).not.toBeNull();
+    expect(within(identity as HTMLElement).getByText("2.1.247")).toHaveClass("agent-identity-version");
+    expect(screen.queryByRole("term", { name: "版本" })).not.toBeInTheDocument();
   });
 
   it("shows the exact encrypted backup directory and can open it without sending a renderer path", async () => {
@@ -1808,6 +1812,30 @@ describe("AgentRoutePage split page modes", () => {
     rerender(view(secondPath));
     expect(screen.getByRole("button", { name: "复制发现路径" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "发现路径已复制" })).toBeNull();
+  });
+
+  it("shows the complete concise prompt when an Agent has multiple installations", () => {
+    const multiAgent = {
+      ...agent,
+      installations: [
+        installation("/Users/x/.local/share/claude/versions/one/bin/claude", "1.0.0"),
+        installation("/Users/x/.local/share/claude/versions/two/bin/claude", "2.0.0"),
+      ],
+    };
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          {...props}
+          agent={multiAgent}
+          selectedInstallationPath=""
+          pageMode="connection"
+          embedded
+        />
+      </ErrorToastProvider>,
+    );
+
+    expect(screen.getByText("检测到多份安装，请选择版本。")).toBeInTheDocument();
   });
 
   it("restarts copied feedback after repeating the same copy", async () => {
