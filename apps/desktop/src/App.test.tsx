@@ -1755,8 +1755,10 @@ describe("desktop station navigation", () => {
 
     expect(screen.queryByRole("heading", { name: "关键词路由" })).toBeNull();
     for (const tier of ["上档", "中档", "下档"]) {
-      expect(screen.getByRole("button", { name: new RegExp(`添加${tier}关键词`) })).toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: `${tier}关键词` })).toBeInTheDocument();
     }
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: /添加.*关键词/ })).toBeNull();
     expect(screen.queryByText("强模型")).toBeNull();
     expect(screen.queryByText("中模型")).toBeNull();
     expect(screen.queryByText("弱模型")).toBeNull();
@@ -1778,8 +1780,13 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openRouting(user);
 
+    expect(screen.queryByRole("heading", { name: "只走本地" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await user.click(within(screen.getByRole("navigation", { name: "设置分类" }))
+      .getByRole("button", { name: /代理/ }));
+
     expect(screen.getByRole("heading", { name: "只走本地" })).toBeInTheDocument();
-    const localOnly = screen.getByRole("checkbox", { name: /只走本地模型/ });
+    const localOnly = screen.getByRole("switch", { name: /只使用本地模型/ });
     expect(localOnly).toBeChecked();
     expect(localOnly).toBeEnabled();
     await user.click(localOnly);

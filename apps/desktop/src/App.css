@@ -12719,3 +12719,262 @@ samp {
     column-gap: 20px;
   }
 }
+
+/* Flat routing workspace: color and spacing carry hierarchy instead of nested frames. */
+.home-page {
+  gap: 14px;
+}
+
+.routing-mode-section {
+  padding: 4px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.routing-mode-tabs,
+.routing-mode-tabs [data-slot="tabs-list"] {
+  width: 100%;
+}
+
+.routing-mode-tabs [data-slot="tabs-list"] {
+  height: 48px;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+}
+
+.routing-mode-tabs [data-slot="tabs-trigger"] {
+  height: 48px;
+  justify-content: center;
+  border: 0;
+  border-radius: 9px;
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+}
+
+.routing-mode-tabs [data-slot="tabs-trigger"]::after {
+  display: none;
+}
+
+.routing-mode-tabs [data-slot="tabs-trigger"]:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+
+.routing-mode-tabs [data-slot="tabs-trigger"][data-state="active"],
+.routing-mode-tabs [data-slot="tabs-trigger"][data-active] {
+  border: 0;
+  color: var(--signal);
+  background: var(--signal-soft);
+  box-shadow: none;
+}
+
+.home-page > :is(.route-panel, .direct-route-panel, .quota-panel) {
+  padding: 10px 2px 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.home-page > :is(.route-panel, .direct-route-panel, .quota-panel) > .panel-head {
+  padding-inline: 2px;
+}
+
+.direct-provider-list,
+.quota-entry-grid {
+  gap: 8px;
+}
+
+.direct-provider-row {
+  border: 0;
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+.direct-provider-row:hover:not(.unavailable) {
+  border: 0;
+  background: color-mix(in srgb, var(--signal) 7%, var(--surface-2));
+}
+
+.direct-provider-row.selected {
+  border: 0;
+  background: var(--signal-soft);
+  box-shadow: none;
+}
+
+.direct-provider-row.dragging {
+  border: 0;
+}
+
+.direct-applied-target {
+  border: 0;
+}
+
+.route-panel .tier-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.tier-table-head {
+  padding: 0 14px 2px;
+}
+
+.route-panel .tier-row {
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.route-panel .tier-row::before {
+  display: none;
+}
+
+.tier-node {
+  background: var(--surface-2);
+}
+
+.tier-keyword-row {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: 34px;
+}
+
+.tier-keyword-label {
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.tier-keyword-values {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.tier-keyword-values:empty {
+  display: none;
+}
+
+.tier-keyword-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--ink);
+  background: transparent;
+  font: 500 10px/1.4 "IBM Plex Mono", monospace;
+}
+
+.tier-keyword-remove[data-slot="button"] {
+  color: var(--muted);
+  background: transparent;
+}
+
+.tier-keyword-remove[data-slot="button"]:hover,
+.tier-keyword-remove[data-slot="button"]:focus-visible {
+  color: var(--danger);
+  background: transparent;
+}
+
+.tier-keyword-input[data-slot="input"] {
+  min-width: 150px;
+  flex: 1 1 190px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.tier-keyword-input[data-slot="input"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--surface) 64%, transparent);
+}
+
+.tier-keyword-input[data-slot="input"]:focus-visible {
+  border: 0;
+  outline: 2px solid var(--line-strong);
+  outline-offset: 0;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.tier-keyword-error {
+  flex: 0 1 auto;
+  color: var(--danger);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.quota-hint {
+  border: 0;
+  background: var(--surface-2);
+}
+
+.quota-entry-row {
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.quota-provider-order {
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.quota-entry-remove[data-slot="button"] {
+  border: 0;
+  background: transparent;
+}
+
+.quota-plan-section {
+  border: 0;
+}
+
+.profile-list-visible {
+  border: 0;
+  background: var(--surface-2);
+}
+
+.settings-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.local-routing-settings .local-routing-setting-row {
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.local-routing-settings .local-routing-setting-row + .local-routing-setting-row {
+  margin-top: 8px;
+}
+
+@media (max-width: 720px) {
+  .route-panel .tier-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tier-keyword-row {
+    padding-left: 0;
+  }
+}

@@ -131,6 +131,43 @@ describe("retained page theme styles", () => {
     expect(overviewInternalDividerRule).not.toMatch(/border-left\s*:/);
   });
 
+  it("uses flat semantic surfaces instead of nested routing frames", () => {
+    const flatRoutingStyles = appCss.slice(appCss.indexOf("/* Flat routing workspace:"));
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const surfaceRule = (pattern: RegExp) => {
+      const rules = Array.from(appCss.matchAll(pattern), (match) => match[1]);
+      return rules.reverse().find((rule: string) => rule.includes("background:")) ?? "";
+    };
+    const routingSectionRule = lastRule(/\.routing-mode-section\s*\{([^}]*)\}/gs);
+    const routePanelRule = lastRule(
+      /\.home-page > :is\(\.route-panel, \.direct-route-panel, \.quota-panel\)\s*\{([^}]*)\}/gs,
+    );
+    const directRowRule = lastRule(/\.direct-provider-row\s*\{([^}]*)\}/gs);
+    const tierGridRule = lastRule(/\.route-panel \.tier-grid\s*\{([^}]*)\}/gs);
+    const tierRowRule = surfaceRule(/\.route-panel \.tier-row\s*\{([^}]*)\}/gs);
+    const quotaRowRule = lastRule(/\.quota-entry-row\s*\{([^}]*)\}/gs);
+    const keywordValueRule = lastRule(/\.tier-keyword-value\s*\{([^}]*)\}/gs);
+
+    expect(routingSectionRule).toMatch(/border:\s*0/);
+    expect(routingSectionRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(routePanelRule).toMatch(/border:\s*0/);
+    expect(routePanelRule).toMatch(/background:\s*transparent/);
+    expect(directRowRule).toMatch(/border:\s*0/);
+    expect(directRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(tierGridRule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
+    expect(tierRowRule).toMatch(/border:\s*0/);
+    expect(tierRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(quotaRowRule).toMatch(/border:\s*0/);
+    expect(quotaRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(keywordValueRule).toMatch(/border:\s*0/);
+    expect(keywordValueRule).toMatch(/background:\s*transparent/);
+    expect(flatRoutingStyles).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
+    expect(flatRoutingStyles).toMatch(/var\(--surface-2\)/);
+  });
+
   it("uses the flat directory language for model-first search results", () => {
     const catalogRule = appCss.match(/\.model-first-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
     const resultRule = appCss.match(/\.model-first-results button\s*\{([^}]*)\}/s)?.[1] ?? "";
