@@ -44,8 +44,8 @@ export default function ProvidersPage(props: ProvidersPageProps) {
           <p>{copy("Manage models first, with each delivery provider shown beside it.", "以模型为主进行管理，并在模型后标明实际供应商。", "以模型為主進行管理，並在模型後標明實際供應商。", "モデルを主として管理し、モデルの後ろに実際のプロバイダーを記載します。")}</p>
         </div>
         <div className="providers-heading-actions">
-          <Button className="providers-enterprise-button" variant="outline" type="button" onClick={() => setEnterpriseOpen(true)}>
-            <Building2 aria-hidden="true" />
+          <Button className="providers-enterprise-button" variant="secondary" type="button" onClick={() => setEnterpriseOpen(true)}>
+            <Building2 data-icon="inline-start" aria-hidden="true" />
             {copy("Add enterprise model", "添加企业模型", "新增企業模型", "企業モデルを追加")}
           </Button>
           <Button
@@ -54,7 +54,7 @@ export default function ProvidersPage(props: ProvidersPageProps) {
             type="button"
             onClick={props.onAddProvider}
           >
-            <Plus aria-hidden="true" />
+            <Plus data-icon="inline-start" aria-hidden="true" />
             {copy("Add model", "添加模型", "新增模型", "モデルを追加")}
           </Button>
         </div>

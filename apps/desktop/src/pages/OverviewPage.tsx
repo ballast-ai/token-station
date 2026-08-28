@@ -4,7 +4,7 @@ import { getStats } from "../api";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { Badge } from "../components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { AgentIcon, ProviderIcon } from "../brandIcons";
 import ModelTestConsole from "../components/ModelTestConsole";
 import { Button } from "../components/ui/button";
@@ -151,15 +151,15 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         </div>
       </header>
 
-      <section className="overview-metrics overview-runtime-metrics" aria-label={copy("System summary", "系统摘要", "系統摘要", "システムサマリー")}>
-        <Card size="sm" className="overview-status-card">
+      <section className="overview-metrics overview-runtime-metrics" data-surface="flat-color-block" aria-label={copy("System summary", "系统摘要", "系統摘要", "システムサマリー")}>
+        <Card size="sm" className="overview-status-card" data-surface="plain-section">
           <CardHeader>
             <span><Activity />{copy("Proxy status", "代理状态", "代理狀態", "プロキシステータス")}</span>
             <CardTitle><Badge variant={runtimeHealthy ? "default" : "secondary"}><i className={runtimeHealthy ? "healthy" : ""} />{runtimeHealthy ? copy("Running", "运行中", "執行中", "実行中") : copy("Stopped", "未运行", "已停止", "停止中")}</Badge></CardTitle>
             <dl><div><dt>{copy("Revision", "版本", "版本", "リビジョン")}</dt><dd>{state.saved_revision}</dd></div><div><dt>{copy("Listen", "监听", "監聽", "リスニング")}</dt><dd>{state.serve.listen}</dd></div></dl>
           </CardHeader>
         </Card>
-        <Card size="sm" className="overview-request-card">
+        <Card size="sm" className="overview-request-card" data-surface="plain-section">
           <CardHeader>
             <span><WalletCards />{copy("Cost in the last 24 hours", "近 24 小时成本", "近 24 小時成本", "過去 24 時間のコスト")}</span>
             <CardTitle className="overview-cost-value">{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价", "成本未定價", "コストが未設定") : "—")}</CardTitle>
@@ -169,8 +169,8 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         </Card>
       </section>
 
-      <section className="overview-summary-grid" aria-label={copy("Workspace summaries", "工作区摘要", "工作區摘要", "ワークスペースサマリー")}>
-        <Card className="overview-summary-card overview-agent-summary" role="region" aria-label={copy("Agent overview", "Agent 概览", "Agent 總覽", "Agentの概要")}>
+      <section className="overview-summary-grid" data-surface="flat-color-block" aria-label={copy("Workspace summaries", "工作区摘要", "工作區摘要", "ワークスペースサマリー")}>
+        <Card className="overview-summary-card overview-agent-summary" data-surface="plain-section" role="region" aria-label={copy("Agent overview", "Agent 概览", "Agent 總覽", "Agentの概要")}>
           <CardHeader>
             <span><Bot aria-hidden="true" />Agent</span>
             <CardTitle>{copy(
@@ -179,6 +179,22 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
               `已連線 ${connectedAgents} 個 Agent`,
               `${connectedAgents} 個の Agent が接続済み`,
             )}</CardTitle>
+            <CardAction className="overview-agent-actions">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="overview-model-test-action"
+                disabled={modelCount === 0}
+                onClick={() => setModelTestOpen(true)}
+              >
+                <MessageSquareText data-icon="inline-start" aria-hidden="true" />
+                {copy("Verify model connection", "验证模型连接", "驗證模型連線", "モデル接続を確認")}
+              </Button>
+              <Button className="overview-summary-link" variant="ghost" size="icon-sm" type="button" aria-label={copy("Open Agents", "打开 Agent", "開啟 Agent", "Agentを開く")} onClick={() => onNavigate("agents")}>
+                <ArrowUpRight aria-hidden="true" />
+              </Button>
+            </CardAction>
           </CardHeader>
           <CardContent>
             <ul className="overview-summary-list" aria-label={copy("Top Agents", "Agent Top 5", "前 5 個 Agent", "Agent トップ5")}>
@@ -190,26 +206,10 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                 </li>
               ))}
             </ul>
-            <div className="overview-agent-actions">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="overview-model-test-action"
-                disabled={modelCount === 0}
-                onClick={() => setModelTestOpen(true)}
-              >
-                <MessageSquareText aria-hidden="true" />
-                {copy("Verify model connection", "验证模型连接", "驗證模型連線", "モデル接続を確認")}
-              </Button>
-              <button className="overview-summary-link" type="button" aria-label={copy("Open Agents", "打开 Agent", "開啟 Agent", "Agentを開く")} onClick={() => onNavigate("agents")}>
-                <ArrowUpRight aria-hidden="true" />
-              </button>
-            </div>
           </CardContent>
         </Card>
 
-        <Card className="overview-summary-card overview-route-summary" role="region" aria-label={copy("Routing overview", "路由概览", "路由總覽", "ルーティングの概要")}>
+        <Card className="overview-summary-card overview-route-summary" data-surface="plain-section" role="region" aria-label={copy("Routing overview", "路由概览", "路由總覽", "ルーティングの概要")}>
           <CardHeader>
             <span><Route aria-hidden="true" />{copy("Routing", "路由", "路由", "ルーティング")}</span>
             <CardTitle>{routeRows.length > 0
@@ -217,6 +217,11 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
               : activeEnterpriseProvider
                 ? copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")
                 : copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</CardTitle>
+            <CardAction>
+              <Button className="overview-summary-link" variant="ghost" size="icon-sm" type="button" aria-label={copy("Open routing", "打开路由", "開啟路由", "ルーティングを開く")} onClick={() => onNavigate(activeEnterpriseProvider ? "providers" : "home")}>
+                <ArrowUpRight aria-hidden="true" />
+              </Button>
+            </CardAction>
           </CardHeader>
           <CardContent>
             {routeRows.length > 0 ? (
@@ -234,7 +239,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             ) : state.routing_mode === "direct" ? (
               <div className="overview-route-list overview-global-route-list" data-routing-snapshot-mode="direct">
                 <div>
-                  <Badge variant="outline">{activeEnterpriseProvider
+                  <Badge variant="secondary">{activeEnterpriseProvider
                     ? copy("Managed route", "托管路由", "託管路由", "管理ルート")
                     : copy("Direct", "简单路由", "簡單路由", "シンプルルーティング")}</Badge>
                   <strong>{state.direct_target?.model ?? copy("Select a model", "待选择模型", "待選擇模型", "選択するモデル")}</strong>
@@ -244,7 +249,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             ) : state.routing_mode === "quota_first" ? (
               <div className="overview-route-list overview-global-route-list" data-routing-snapshot-mode="quota-first">
                 <div>
-                  <Badge variant="outline">{copy("Quota-first", "额度优先", "額度優先", "クォータ優先")}</Badge>
+                  <Badge variant="secondary">{copy("Quota-first", "额度优先", "額度優先", "クォータ優先")}</Badge>
                   <strong>{copy(
                     `${state.quota_accounts.length} accounts`,
                     `${state.quota_accounts.length} 个账户`, `${state.quota_accounts.length} 個帳號`, `${state.quota_accounts.length} 個のアカウント`
@@ -262,7 +267,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                   const tier = state.tiers[slot];
                   return (
                     <div key={slot}>
-                      <Badge variant="outline">{copy(...TIER_COPY[slot])}</Badge>
+                      <Badge variant="secondary">{copy(...TIER_COPY[slot])}</Badge>
                       <strong>{tier.model ?? copy("Not configured", "未配置", "未配置", "未設定")}</strong>
                       <code>{tier.upstream ?? "—"}</code>
                     </div>
@@ -270,17 +275,19 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                 })}
               </div>
             )}
-            <button className="overview-summary-link" type="button" aria-label={copy("Open routing", "打开路由", "開啟路由", "ルーティングを開く")} onClick={() => onNavigate(activeEnterpriseProvider ? "providers" : "home")}>
-              <ArrowUpRight aria-hidden="true" />
-            </button>
           </CardContent>
         </Card>
 
-        <Card className="overview-summary-card overview-model-summary" role="region" aria-label={copy("Model overview", "模型概览", "模型概覽", "モデル概要")}>
+        <Card className="overview-summary-card overview-model-summary" data-surface="plain-section" role="region" aria-label={copy("Model overview", "模型概览", "模型概覽", "モデル概要")}>
           <CardHeader>
             <span><Boxes aria-hidden="true" />{copy("Models", "模型", "模型", "モデル")}</span>
             <CardTitle>{copy(`${modelCount} models`, `${modelCount} 个模型`, `${modelCount} 個模型`, `${modelCount} 個モデル`)}</CardTitle>
             <p>{copy(`${state.providers.length} providers`, `${state.providers.length} 个供应商`, `${state.providers.length} 個供應商`, `${state.providers.length} 個のプロバイダー`)}</p>
+            <CardAction>
+              <Button className="overview-summary-link" variant="ghost" size="icon-sm" type="button" aria-label={copy("Open models", "打开模型", "開啟模型", "モデルを開く")} onClick={() => onNavigate("providers")}>
+                <ArrowUpRight aria-hidden="true" />
+              </Button>
+            </CardAction>
           </CardHeader>
           <CardContent>
             {modelRows.length > 0 ? (
@@ -296,9 +303,6 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             ) : (
               <p className="overview-summary-empty">{copy("No models are connected.", "尚未接入模型。", "尚未接入模型。", "モデルが接続されていません。")}</p>
             )}
-            <button className="overview-summary-link" type="button" aria-label={copy("Open models", "打开模型", "開啟模型", "モデルを開く")} onClick={() => onNavigate("providers")}>
-              <ArrowUpRight aria-hidden="true" />
-            </button>
           </CardContent>
         </Card>
       </section>

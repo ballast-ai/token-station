@@ -8,6 +8,7 @@ import { humanizeAppError } from "../errors";
 import { ProviderIcon } from "../brandIcons";
 import { useErrorToast } from "./ErrorToast";
 import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -70,14 +71,14 @@ export default function ProviderList({
   };
 
   return (
-    <section ref={providerListRef} className="panel provider-panel" tabIndex={-1}>
+    <section ref={providerListRef} className="panel provider-panel" data-surface="flat-model-collection" tabIndex={-1}>
       <div className="panel-head split-heading">
         <div>
           <h2>{copy("Managed models", "已接入模型", "已接入模型", "接続済みモデル")}</h2>
         </div>
-        <span className="count-badge">
+        <Badge variant="secondary" className="count-badge provider-total-badge">
           {copy(`${modelCount} models`, `${modelCount} 个模型`, `${modelCount} 個模型`, `${modelCount} 個モデル`)}
-        </span>
+        </Badge>
       </div>
 
       <div className="provider-list">
@@ -88,9 +89,9 @@ export default function ProviderList({
           <div className="provider-recovery" aria-label={copy("Provider recycle bin", "Provider 回收站", "供應商回收站", "プロバイダーごみ箱")}>
             <strong>{copy("Recoverable providers", "可恢复的 Provider", "可恢復的供應商", "復元可能なプロバイダー")}</strong>
             {deletedProviders.map((name) => (
-              <button className="btn tiny" type="button" disabled={busy} key={name} onClick={() => onRestore(name)}>
+              <Button variant="secondary" size="sm" type="button" disabled={busy} key={name} onClick={() => onRestore(name)}>
                 {copy(`Restore ${name}`, `恢复 ${name}`, `恢復 ${name}`, `${name} を復元`)}
-              </button>
+              </Button>
             ))}
           </div>
         )}
@@ -108,6 +109,7 @@ export default function ProviderList({
           return (
             <article
               className="provider-card"
+              data-surface="flat-color-block"
               key={provider.name}
               role="group"
               aria-label={copy(`${displayName} provider`, `${displayName} 供应商`, `${displayName} 供應商`, `${displayName} プロバイダー`)}
@@ -121,14 +123,14 @@ export default function ProviderList({
                   <strong className="provider-identity-name">{displayName}</strong>
                   <div className="provider-url">{provider.base_url}</div>
                 </div>
-              <span className="provider-model-count">
+              <Badge variant="secondary" className="provider-model-count">
                 {copy(`${provider.models.length} models`, `${provider.models.length} 个模型`, `${provider.models.length} 個模型`, `${provider.models.length} 個モデル`)}
-              </span>
+              </Badge>
               <div className="provider-side">
                 {provider.access_tier === "free" && (
-                  <span className="provider-access-badge">{copy("Free", "免费", "免費", "無料")}</span>
+                  <Badge variant="secondary" className="provider-access-badge">{copy("Free", "免费", "免費", "無料")}</Badge>
                 )}
-                <span className={`auth ${provider.has_auth ? "yes" : "no"}`}>
+                <Badge variant={provider.has_auth ? "secondary" : "ghost"} className={`auth ${provider.has_auth ? "yes" : "no"}`}>
                   {provider.has_auth
                     ? copy(
                       "Credential ready",
@@ -137,9 +139,10 @@ export default function ProviderList({
                     : provider.credential_source === "none"
                       ? copy("No credential required", "无需凭据", "無需憑據", "認証情報は不要")
                       : copy("Credential missing", "缺少凭据", "缺少憑據", "認証情報がありません")}
-                </span>
-                <button
-                  className="btn tiny"
+                </Badge>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   type="button"
                   disabled={busy}
                   onClick={(event) => {
@@ -150,9 +153,10 @@ export default function ProviderList({
                   }}
                 >
                   {copy("Manage", "管理", "管理", "管理")}
-                </button>
-                <button
-                  className="btn tiny danger"
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
                   type="button"
                   disabled={busy}
                   onClick={(event) => {
@@ -161,27 +165,26 @@ export default function ProviderList({
                   }}
                 >
                   {copy("Delete", "删除", "刪除", "削除")}
-                </button>
+                </Button>
               </div>
             </div>
-            <div
+            <ul
               className="provider-primary-models"
               role="list"
               aria-label={copy(`${displayName} models`, `${displayName} 模型`, `${displayName} 模型`, `${displayName} モデル`)}
               data-layout="compact-three-column"
+              data-surface="plain-model-grid"
             >
               {provider.models.length > 0 ? provider.models.map((model) => (
-                <div role="listitem" key={model} title={`${model} · ${displayName}`}>
+                <li role="listitem" key={model} title={`${model} · ${displayName}`}>
                   <strong>{model}</strong>
-                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")} · {displayName}</small>
-                </div>
+                </li>
               )) : (
-                <div role="listitem">
+                <li role="listitem">
                   <strong>{copy("No managed models", "暂无已管理模型", "目前無已管理模型", "現在管理されていないモデルがあります")}</strong>
-                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")} · {displayName}</small>
-                </div>
+                </li>
               )}
-              </div>
+              </ul>
             </article>
           );
         })}

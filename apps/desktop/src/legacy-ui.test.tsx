@@ -1170,6 +1170,7 @@ describe("provider deletion lifecycle", () => {
     expect(document.querySelector('[data-provider-brand="openai"]')).toBeInTheDocument();
     expect(document.querySelector(".provider-monogram")?.getAttribute("aria-hidden")).toBe("true");
     const providerGroup = screen.getByRole("group", { name: "team-openai 供应商" });
+    expect(providerGroup).toHaveAttribute("data-surface", "flat-color-block");
     expect(within(providerGroup).getByText("team-openai", { selector: ".provider-identity-name" }))
       .toBeInTheDocument();
     expect(within(providerGroup).getByText("1 个模型")).toBeInTheDocument();
@@ -1179,8 +1180,13 @@ describe("provider deletion lifecycle", () => {
     expect(manageButton).toBeInTheDocument();
     const modelList = screen.getByRole("list", { name: "team-openai 模型" });
     expect(modelList).toHaveAttribute("data-layout", "compact-three-column");
+    expect(modelList).toHaveAttribute("data-surface", "plain-model-grid");
     expect(within(modelList).getByRole("listitem"))
-      .toHaveTextContent("gpt-5.6供应商 · team-openai");
+      .toHaveTextContent("gpt-5.6");
+    expect(within(modelList).queryByText("供应商 · team-openai")).toBeNull();
+    expect(manageButton).toHaveAttribute("data-slot", "button");
+    expect(within(providerGroup).getByRole("button", { name: "删除" }))
+      .toHaveAttribute("data-slot", "button");
 
     await user.click(manageButton);
     const managerDialog = screen.getByRole("dialog", { name: "管理 team-openai" });
