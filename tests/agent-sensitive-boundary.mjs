@@ -9,17 +9,20 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 
 for (const [file, forbidden] of [
-  ["apps/desktop/src/api.ts", "revealAgentPlanSensitiveValues"],
-  ["apps/desktop/src/pages/AgentRoutePage.tsx", "Show full values"],
-  ["apps/desktop/src-tauri/src/lib.rs", "reveal_agent_plan_sensitive_values"],
+  ["apps/desktop/src/api.ts", /reveal|SensitivePlanValueView/i],
+  [
+    "apps/desktop/src/pages/AgentRoutePage.tsx",
+    /reveal|show.{0,24}(?:full|complete|exact).{0,24}(?:value|credential|secret)/i,
+  ],
+  ["apps/desktop/src-tauri/src/lib.rs", /reveal_agent_plan/i],
   [
     "apps/desktop/src-tauri/src/agent_integration/commands.rs",
-    "reveal_agent_plan_sensitive_values",
+    /reveal_plan|SensitivePlanValueView/i,
   ],
 ]) {
   assert.doesNotMatch(
     read(file),
-    new RegExp(forbidden),
+    forbidden,
     `${file} must not expose complete Agent credential values`,
   );
 }

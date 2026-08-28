@@ -28,6 +28,7 @@ import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProv
 import { englishProviderName } from "../providerCopy";
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "../components/ErrorToast";
+import { Input } from "../components/ui/input";
 import {
   Select,
   SelectContent,
@@ -350,10 +351,8 @@ export default function AddProviderPage({
     setProviderDialect("openai-compatible");
     setImportPublicPrices(shouldDefaultPublicPriceImport(selected));
     setCredentialReference("");
-    setPicked(selected
-      ? preferredModel && selected.models.includes(preferredModel)
-        ? [preferredModel]
-        : [...selected.models]
+    setPicked(selected && preferredModel && selected.models.includes(preferredModel)
+      ? [preferredModel]
       : []);
     setExtraModels([]);
     setDiscoveredModels([]);
@@ -568,12 +567,13 @@ export default function AddProviderPage({
           </div>
         </header>
 
-        <section className="panel model-first-catalog" aria-label={copy("Model search", "模型搜索", "模型搜尋", "モデル検索")}>
+        <section className="model-first-catalog" aria-label={copy("Model search", "模型搜索", "模型搜尋", "モデル検索")}>
           <label className="provider-catalog-search model-first-search">
             <span aria-hidden="true">⌕</span>
-            <input
+            <Input
               autoFocus
               type="search"
+              className="model-first-search-input"
               aria-label={copy("Search models", "搜索模型", "搜尋模型", "モデルを検索")}
               placeholder={copy("Enter a model name", "输入模型名称", "輸入模型名稱", "モデル名を入力")}
               value={modelFirstQuery}
@@ -913,20 +913,7 @@ export default function AddProviderPage({
         </div>
       )}
 
-      <section className="panel provider-wizard">
-        {preset && (
-          <div className="preset-note">
-            <span>{copy(
-              "Review the provider documentation before saving credentials and models.",
-              preset.note ?? `${preset.region} · ${preset.subscription}`,
-              "儲存憑證與模型前，請先檢視供應商檔案。",
-              "資格情報とモデルを保存する前に、プロバイダーのドキュメンテーションを確認してください。",
-            )}</span>
-            <a href={preset.officialDocs} target="_blank" rel="noreferrer">
-              {copy("Provider documentation", "官方接入文档", "官方檔案", "公式ドキュメント")}
-            </a>
-          </div>
-        )}
+      <section className="provider-wizard">
         <div
           className="wizard-step"
           role="group"
@@ -934,7 +921,7 @@ export default function AddProviderPage({
           data-onboarding-target="provider-credential"
         >
           <div className="step-index">01</div>
-          <div className="step-body form-grid">
+          <div className="step-body form-grid provider-credential-form">
             <label className="field-label">
               {copy("Name", "名称", "名稱", "名前")}
               <input className="input" value={name} disabled={disabled || !isCustom} onChange={(event) => setName(event.target.value)} />
@@ -988,7 +975,7 @@ export default function AddProviderPage({
               )}
             </div>
             {needsKey ? (
-              <div className="form-span">
+              <div className="form-span credential-fields">
                 {credentialSource === "store" && (
                   <label className="field-label">
                     API Key
@@ -1078,11 +1065,7 @@ export default function AddProviderPage({
                 "该模型在本机运行，例如通过 Ollama 或 LM Studio。", "該模型在本機執行，例如透過 Ollama 或 LM Studio。", "このモデルは Ollama や LM Studio などを介してこのマシン上で実行されます。"
               )}</span>
             </label>
-            <p
-              id="provider-local-eligibility"
-              className="inline-note form-span"
-              aria-live="polite"
-            >
+            <span id="provider-local-eligibility" hidden>
               {!endpointPreview
                 ? copy(
                     "Resolve the base URL before marking this provider as local.",
@@ -1097,7 +1080,7 @@ export default function AddProviderPage({
                       "Cloud endpoints cannot be marked as local. Only localhost or 127.0.0.1 endpoints qualify.",
                       "云端地址不能标记为本地模型；只有 localhost 或 127.0.0.1 等回环地址可以使用此选项。", "雲端地址不能標記為本地模型；只有 localhost 或 127.0.0.1 等回環地址可以使用此選項。", "クラウドアドレスはローカルプロバイダーとしてマークできません。ローカルホスト（localhost または 127.0.0.1）などのループバックアドレスのみがこのオプションを使用できます。"
                     )}
-            </p>
+            </span>
           </div>
         </div>
 
@@ -1108,7 +1091,7 @@ export default function AddProviderPage({
           data-onboarding-target="provider-models"
         >
           <div className="step-index">02</div>
-          <div className="step-body">
+          <div className="step-body provider-model-fields">
             <label className="field-label">{copy("Select models", "选择模型", "選擇模型", "モデルを選択")}</label>
             <ModelPicker
               models={allModels}
@@ -1135,17 +1118,6 @@ export default function AddProviderPage({
                 "批量填充匹配的公开价格", "填入匹配的公開價格", "一致する公開価格を一括で入力"
               )}</span>
             </label>
-            <p className="inline-note">
-              {publicPriceImportAvailable
-                ? copy(
-                    "Uses models.dev public USD list prices as estimates. Existing manual prices are never overwritten; unmatched models remain unknown.",
-                    "使用 models.dev 的公开美元标价作为估算。不会覆盖已有人工价格；未匹配模型保持未知价格。", "使用 models.dev 公開美元標價作為估算。已有人工價格不會被覆蓋；未匹配模型保持未知價格。", "models.dev の公開ドル価格を使用して推定します。既存の人為的価格は上書きされません。一致しないモデルは未知の価格のままです。"
-                  )
-                : copy(
-                    "Public price import is unavailable for local and Azure deployment entries.",
-                    "本地模型和 Azure 部署条目不使用公开价格导入。", "本機模型和 Azure 部署項目無法匯入公開價格。", "ローカルモデルと Azure デプロイの項目では公開価格を取り込めません。"
-                  )}
-            </p>
           </div>
         </div>
 

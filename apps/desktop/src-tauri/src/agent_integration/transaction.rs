@@ -3310,9 +3310,16 @@ mod tests {
         let snapshot_index_path = snapshots.root().join("index.json");
         let snapshot_index_before = std::fs::read(&snapshot_index_path).unwrap();
         let companion_snapshot_id = &ownership.companion_files[0].baseline_snapshot_id;
+        let companion_snapshot = snapshots.load(companion_snapshot_id).unwrap();
         let companion_envelope_path = snapshots
             .root()
-            .join(format!("{companion_snapshot_id}.snapshot.json"));
+            .join(&companion_snapshot.record.agent_id)
+            .join(format!(
+                "{}-{}-{}.json",
+                companion_snapshot.record.created_at_ms,
+                companion_snapshot.record.agent_id,
+                companion_snapshot.record.snapshot_id,
+            ));
         let companion_envelope_before = std::fs::read(&companion_envelope_path).unwrap();
 
         let error = crate::agent_integration::plan::attach_disconnect_companions(

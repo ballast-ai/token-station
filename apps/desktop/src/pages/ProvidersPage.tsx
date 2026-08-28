@@ -44,8 +44,8 @@ export default function ProvidersPage(props: ProvidersPageProps) {
           <p>{copy("Manage models first, with each delivery provider shown beside it.", "以模型为主进行管理，并在模型后标明实际供应商。", "以模型為主進行管理，並在模型後標明實際供應商。", "モデルを主として管理し、モデルの後ろに実際のプロバイダーを記載します。")}</p>
         </div>
         <div className="providers-heading-actions">
-          <Button className="providers-enterprise-button" variant="outline" type="button" onClick={() => setEnterpriseOpen(true)}>
-            <Building2 aria-hidden="true" />
+          <Button className="providers-enterprise-button" variant="secondary" type="button" onClick={() => setEnterpriseOpen(true)}>
+            <Building2 data-icon="inline-start" aria-hidden="true" />
             {copy("Add enterprise model", "添加企业模型", "新增企業模型", "企業モデルを追加")}
           </Button>
           <Button
@@ -54,7 +54,7 @@ export default function ProvidersPage(props: ProvidersPageProps) {
             type="button"
             onClick={props.onAddProvider}
           >
-            <Plus aria-hidden="true" />
+            <Plus data-icon="inline-start" aria-hidden="true" />
             {copy("Add model", "添加模型", "新增模型", "モデルを追加")}
           </Button>
         </div>
@@ -65,10 +65,18 @@ export default function ProvidersPage(props: ProvidersPageProps) {
           <DialogHeader>
             <DialogTitle>{copy("Add enterprise model", "添加企业模型", "新增企業模型", "企業モデルを追加")}</DialogTitle>
             <DialogDescription>{copy(
-              "Connect a Token-station endpoint, verify its credential, and select one model.",
-              "连接 Token-station 地址，验证凭据并选择一个模型。",
-              "連接 Token-station 端點，驗證憑據並選擇一個模型。",
-              "Token-station エンドポイントに接続し、認証情報を検証してモデルを1つ選択します。",
+              existingEnterprise?.managed_route
+                ? "Verify the configured Token-station endpoint and add another model."
+                : "Connect a Token-station endpoint, verify its credential, and select one model.",
+              existingEnterprise?.managed_route
+                ? "验证已配置的 Token-station 地址，并继续添加模型。"
+                : "连接 Token-station 地址，验证凭据并选择一个模型。",
+              existingEnterprise?.managed_route
+                ? "驗證已設定的 Token-station 端點，並繼續新增模型。"
+                : "連接 Token-station 端點，驗證憑據並選擇一個模型。",
+              existingEnterprise?.managed_route
+                ? "設定済みの Token-station エンドポイントを検証し、別のモデルを追加します。"
+                : "Token-station エンドポイントに接続し、認証情報を検証してモデルを1つ選択します。",
             )}</DialogDescription>
           </DialogHeader>
           <EnterpriseConnectionPanel

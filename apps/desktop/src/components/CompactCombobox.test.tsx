@@ -39,6 +39,10 @@ describe("CompactCombobox", () => {
 
     expect(screen.getByRole("listbox").parentElement)
       .toHaveAttribute("data-onboarding-floating", "true");
+    expect(screen.getByRole("listbox").parentElement)
+      .toHaveAttribute("data-motion-dropdown", "combobox");
+    expect(screen.getByRole("combobox", { name: "供应商" }).querySelector("svg"))
+      .toHaveAttribute("data-motion-dropdown-chevron", "true");
   });
 
   it("keeps the user's active option when its parent rerenders", async () => {
@@ -70,6 +74,7 @@ describe("CompactCombobox", () => {
 
     expect(trigger).toHaveFocus();
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(document.querySelector('[data-motion-dropdown="combobox"]')).toBeNull();
   });
 
   it("closes without emitting a change when the selected option is chosen again", async () => {
@@ -100,6 +105,7 @@ describe("CompactCombobox", () => {
     );
 
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(document.querySelector('[data-motion-dropdown="combobox"]')).toBeNull();
   });
 
   it("focuses a selected item that is beyond the initial large-list window", async () => {

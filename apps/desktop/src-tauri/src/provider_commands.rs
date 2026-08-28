@@ -761,6 +761,12 @@ pub(crate) fn add_managed_enterprise_route(
     if model.is_empty() {
         return Err("企业路由模型不能为空".to_owned());
     }
+    let provider_exists = state.0.lock().unwrap().draft["upstreams"]
+        .get(MANAGED_ENTERPRISE_PROVIDER_ID)
+        .is_some();
+    if provider_exists {
+        return extend_managed_enterprise_route(state, base_url, api_key, model);
+    }
     add_provider_impl(
         state,
         MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
@@ -775,6 +781,88 @@ pub(crate) fn add_managed_enterprise_route(
     )
 }
 
+fn extend_managed_enterprise_route(
+    state: State<'_, AppStateManaged>,
+    base_url: String,
+    api_key: String,
+    model: String,
+) -> Result<StateView, String> {
+    let endpoint = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let base_url = endpoint.as_str();
+    let api_key = api_key.trim().to_owned();
+    if api_key.is_empty() {
+        return Err("本地凭据存储需要填写 API Key".to_owned());
+    }
+    let model = normalize_provider_model_ids(vec![model])?
+        .into_iter()
+        .next()
+        .expect("one normalized enterprise model");
+
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let egress = draft_egress_config(&inner.draft)?;
+    ensure_credential_transport(&endpoint, &egress)?;
+
+    let previous_upstream = inner.draft["upstreams"]
+        .get(MANAGED_ENTERPRISE_PROVIDER_ID)
+        .cloned()
+        .ok_or_else(|| "托管企业供应商不存在".to_owned())?;
+    if previous_upstream["managed_route"].as_bool() != Some(true) {
+        return Err(format!(
+            "供应商 `{MANAGED_ENTERPRISE_PROVIDER_ID}` 已存在，但不是托管企业供应商"
+        ));
+    }
+    let configured_base_url = previous_upstream["base_url"]
+        .as_str()
+        .ok_or_else(|| "托管企业供应商缺少 Base URL".to_owned())?;
+    if configured_base_url != base_url {
+        return Err("企业供应商 Base URL 与已配置地址不一致".to_owned());
+    }
+
+    let mut models = previous_upstream["models"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "托管企业供应商的模型配置无效".to_owned())?;
+    let already_configured = models
+        .iter()
+        .any(|candidate| candidate["model"].as_str() == Some(model.as_str()));
+    if !already_configured {
+        models.push(provider_model_capability(&base_url, &model, true));
+    }
+
+    let previous_routing = inner.draft.get("routing").cloned();
+    let previous_router = inner.draft["router"].clone();
+    let previous_state = inner.config_state.clone();
+    inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID]["models"] = json!(models);
+    inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID]["auth"] =
+        json!({ "slot": "provider_api_key", "store": true });
+    if !inner.draft["routing"].is_object() {
+        inner.draft["routing"] = json!({});
+    }
+    inner.draft["routing"]["mode"] = json!("direct");
+    inner.draft["routing"]["direct_target"] = json!({
+        "upstream": MANAGED_ENTERPRISE_PROVIDER_ID,
+        "model": model
+    });
+    inner.draft["router"]["routing_mode"] = json!("tiered");
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = previous_upstream;
+        restore_managed_route_mutation(&mut inner.draft, &previous_routing, &previous_router);
+        inner.config_state = previous_state;
+        return Err(error);
+    }
+
+    inner.pending_provider_keys.insert(
+        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
+        Zeroizing::new(api_key),
+    );
+    inner
+        .pending_provider_key_removals
+        .remove(MANAGED_ENTERPRISE_PROVIDER_ID);
+    Ok(inner.snapshot())
+}
+
 pub(crate) fn restore_managed_route_mutation(
     draft: &mut Value,
     previous_routing: &Option<Value>,
@@ -786,6 +874,36 @@ pub(crate) fn restore_managed_route_mutation(
     } else if let Some(root) = draft.as_object_mut() {
         root.remove("routing");
     }
+}
+
+fn provider_model_capability(base_url: &str, model: &str, managed_route: bool) -> Value {
+    // OpenAI Chat Completions includes tools and structured output, and catalog
+    // entries are compatible chat providers, so declare support by default.
+    // Ordinary models keep vision unknown because support varies. A managed
+    // route declares pass-through support because the service selects the model.
+    let mut capability = json!({
+        "model": model,
+        "tool": true,
+        "vision": false,
+        "json_schema": true,
+        "tool_state": "declared",
+        "vision_state": "unknown",
+        "json_schema_state": "declared",
+        "context_window": known_context_window(model)
+    });
+    if managed_route {
+        capability["vision"] = json!(true);
+        capability["vision_state"] = json!("declared");
+        capability["supported_parameters"] = json!(["reasoning_effort"]);
+    }
+    capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_HEURISTIC);
+    if let Some(preset) = builtin_model_limits(base_url, model) {
+        capability["context_window"] = json!(preset.context_window);
+        capability["max_output_tokens"] = json!(preset.max_output_tokens);
+        capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+    }
+    capability
 }
 
 fn restore_legacy_managed_upstreams(draft: &mut Value, legacy: &[(String, Value)]) {
@@ -852,37 +970,7 @@ pub(crate) fn add_provider_impl(
     let managed_model = managed_route.then(|| models[0].clone());
     let model_objs: Vec<Value> = models
         .iter()
-        .map(|m| {
-            let mut capability = json!({
-                // OpenAI Chat Completions includes tools and structured output,
-                // and catalog entries are compatible chat providers, so declare
-                // support by default. Leaving these unknown would fail closed and
-                // reject every tool-using Agent. Ordinary models keep vision
-                // unknown because support varies. A managed alias declares
-                // pass-through support below because the service selects the model.
-                "model": m,
-                "tool": true,
-                "vision": false,
-                "json_schema": true,
-                "tool_state": "declared",
-                "vision_state": "unknown",
-                "json_schema_state": "declared",
-                "context_window": known_context_window(m)
-            });
-            if managed_route {
-                capability["vision"] = json!(true);
-                capability["vision_state"] = json!("declared");
-                capability["supported_parameters"] = json!(["reasoning_effort"]);
-            }
-            capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_HEURISTIC);
-            if let Some(preset) = builtin_model_limits(&base_url, m) {
-                capability["context_window"] = json!(preset.context_window);
-                capability["max_output_tokens"] = json!(preset.max_output_tokens);
-                capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
-                capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
-            }
-            capability
-        })
+        .map(|model| provider_model_capability(&base_url, model, managed_route))
         .collect();
     // A previous interrupted removal may have left only derived catalog data.
     // New Provider identity must never inherit it, even with the same name/URL.

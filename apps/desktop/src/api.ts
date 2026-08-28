@@ -715,6 +715,7 @@ export interface SnapshotView {
   pinned: boolean;
   source: "encrypted" | "legacy_backup";
   restorable: boolean;
+  maintenance_warning: string | null;
 }
 
 export interface AggView {

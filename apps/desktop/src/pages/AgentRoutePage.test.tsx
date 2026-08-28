@@ -205,8 +205,12 @@ describe("AgentRoutePage multi-install admission", () => {
       />,
     );
 
-    expect(screen.getByText("已连接本机网关。当前路由：kimi / kimi-k2.6。")).toBeInTheDocument();
+    expect(screen.getByText("网关正常 · kimi / kimi-k2.6")).toBeInTheDocument();
     expect(screen.queryByText("请求已通过 Token Station。")).not.toBeInTheDocument();
+    const identity = screen.getByRole("heading", { name: "Claude Code" }).closest(".agent-identity");
+    expect(identity).not.toBeNull();
+    expect(within(identity as HTMLElement).getByText("2.1.247")).toHaveClass("agent-identity-version");
+    expect(screen.queryByRole("term", { name: "版本" })).not.toBeInTheDocument();
   });
 
   it("shows the exact encrypted backup directory and can open it without sending a renderer path", async () => {
@@ -246,7 +250,11 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(await screen.findByText("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "打开备份文件夹" }));
+    expect(screen.queryByText(/受管字段：/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制备份目录" })).toHaveAttribute("data-size", "icon-sm");
+    const openButton = screen.getByRole("button", { name: "打开备份文件夹" });
+    expect(openButton).toHaveAttribute("data-size", "icon-sm");
+    await user.click(openButton);
     expect(openAgentBackupDirectory).toHaveBeenCalledWith();
   });
 
@@ -366,8 +374,7 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(preview).toHaveTextContent("已加密备份");
     expect(applyAgentPlan).not.toHaveBeenCalled();
 
-    expect(within(preview).queryByRole("button", { name: "显示完整值" })).toBeNull();
-    expect(screen.queryByRole("alertdialog", { name: "显示敏感配置完整值？" })).toBeNull();
+    expect(within(preview).queryByRole("button", { name: /完整值/ })).not.toBeInTheDocument();
 
     await user.click(within(preview).getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
@@ -1808,6 +1815,30 @@ describe("AgentRoutePage split page modes", () => {
     rerender(view(secondPath));
     expect(screen.getByRole("button", { name: "复制发现路径" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "发现路径已复制" })).toBeNull();
+  });
+
+  it("shows the complete concise prompt when an Agent has multiple installations", () => {
+    const multiAgent = {
+      ...agent,
+      installations: [
+        installation("/Users/x/.local/share/claude/versions/one/bin/claude", "1.0.0"),
+        installation("/Users/x/.local/share/claude/versions/two/bin/claude", "2.0.0"),
+      ],
+    };
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          {...props}
+          agent={multiAgent}
+          selectedInstallationPath=""
+          pageMode="connection"
+          embedded
+        />
+      </ErrorToastProvider>,
+    );
+
+    expect(screen.getByText("检测到多份安装，请选择版本。")).toBeInTheDocument();
   });
 
   it("restarts copied feedback after repeating the same copy", async () => {

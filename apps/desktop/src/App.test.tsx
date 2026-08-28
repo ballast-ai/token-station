@@ -433,6 +433,18 @@ it("新用户首次打开先询问是否需要教程，暂不需要后不再自�
   expect(screen.queryByRole("dialog", { name: "需要新手教程吗？" })).toBeNull();
 });
 
+it("does not open the first-run prompt before launch interaction is enabled", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  window.localStorage.removeItem(FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY);
+  const view = render(<App launchComplete={false} />);
+
+  await screen.findByRole("heading", { name: "概览" });
+  expect(screen.queryByRole("dialog", { name: "需要新手教程吗？" })).toBeNull();
+
+  view.rerender(<App launchComplete />);
+  expect(await screen.findByRole("dialog", { name: "需要新手教程吗？" })).toBeInTheDocument();
+});
+
 it("新用户选择开始教程后高亮主页菜单", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   window.localStorage.removeItem(FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY);
@@ -550,6 +562,9 @@ it("walks through provider configuration and advances only after a real save", a
   const modelCoachmark = await screen.findByRole("dialog", { name: "选择至少一个模型" });
   expect(screen.getByRole("group", { name: "供应商模型" }))
     .toHaveAttribute("data-onboarding-active", "true");
+  await user.click(screen.getByRole("button", {
+    name: (accessibleName) => accessibleName.endsWith("gpt-5.5"),
+  }));
   await user.click(within(modelCoachmark).getByRole("button", { name: "配置好了，去保存" }));
 
   const saveCoachmark = await screen.findByRole("dialog", { name: "保存供应商" });
@@ -1182,7 +1197,7 @@ describe("desktop station navigation", () => {
     expect(within(dialog).getByRole("button", { name: "先搜模型" })).toBeInTheDocument();
   });
 
-  it("keeps destination content and the fixed shell stable without entrance motion", async () => {
+  it("animates destination content while the fixed shell stays stable", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();
     const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
@@ -1202,7 +1217,7 @@ describe("desktop station navigation", () => {
       await user.keyboard("{Escape}");
       expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
 
-      expect(animate).not.toHaveBeenCalled();
+      expect(animate).toHaveBeenCalledTimes(1);
       expect(document.querySelector(".station-header")).toBeInTheDocument();
     } finally {
       if (originalAnimate) {
@@ -1314,6 +1329,27 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
   });
 
+  it("reports startup settlement only after initial Agent discovery finishes", async () => {
+    let resolveScan!: (agents: AgentView[]) => void;
+    const startupScan = new Promise<AgentView[]>((resolve) => {
+      resolveScan = resolve;
+    });
+    const onStartupSettled = vi.fn();
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return startupScan;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App onStartupSettled={onStartupSettled} />);
+    await screen.findByRole("status", { name: "正在检查本机 Agent" });
+    expect(onStartupSettled).not.toHaveBeenCalled();
+
+    await act(async () => resolveScan([scannedClaude]));
+    await waitFor(() => expect(onStartupSettled).toHaveBeenCalledTimes(1));
+  });
+
   it("serve 事件早于 get_state 返回时保留最新运行代次并只扫描一次", async () => {
     const user = userEvent.setup();
     let emitServe: ((serve: ServeView) => void) | undefined;
@@ -1393,6 +1429,21 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
     expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("reports startup settlement when discovery exposes an actionable failure", async () => {
+    const onStartupSettled = vi.fn();
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") throw new Error("agent discovery failed");
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App onStartupSettled={onStartupSettled} />);
+
+    await screen.findByRole("status", { name: "无法检查本机 Agent" });
+    expect(onStartupSettled).toHaveBeenCalledTimes(1);
   });
 
   it("启动扫描成功为空时进入正常主页而不是失败状态", async () => {
@@ -1716,8 +1767,10 @@ describe("desktop station navigation", () => {
 
     expect(screen.queryByRole("heading", { name: "关键词路由" })).toBeNull();
     for (const tier of ["上档", "中档", "下档"]) {
-      expect(screen.getByRole("button", { name: new RegExp(`添加${tier}关键词`) })).toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: `${tier}关键词` })).toBeInTheDocument();
     }
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: /添加.*关键词/ })).toBeNull();
     expect(screen.queryByText("强模型")).toBeNull();
     expect(screen.queryByText("中模型")).toBeNull();
     expect(screen.queryByText("弱模型")).toBeNull();
@@ -1739,8 +1792,13 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openRouting(user);
 
+    expect(screen.queryByRole("heading", { name: "只走本地" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await user.click(within(screen.getByRole("navigation", { name: "设置分类" }))
+      .getByRole("button", { name: /代理/ }));
+
     expect(screen.getByRole("heading", { name: "只走本地" })).toBeInTheDocument();
-    const localOnly = screen.getByRole("checkbox", { name: /只走本地模型/ });
+    const localOnly = screen.getByRole("switch", { name: /只使用本地模型/ });
     expect(localOnly).toBeChecked();
     expect(localOnly).toBeEnabled();
     await user.click(localOnly);
@@ -2711,16 +2769,19 @@ describe("desktop station navigation", () => {
     expect(languageButton.querySelector(".lucide-languages")).toBeNull();
     await user.click(languageButton);
     expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
-    expect(screen.getAllByRole("radio")).toHaveLength(4);
-    expect(screen.getByRole("radio", { name: /繁體中文/ })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /日本語/ })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
+    const languageSelect = screen.getByRole("combobox", { name: "Interface language" });
+    expect(languageSelect).toHaveTextContent("English");
+    await user.click(languageSelect);
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(screen.getByRole("option", { name: /繁體中文/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /日本語/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /English/ })).toHaveAttribute("aria-selected", "true");
 
-    await user.click(screen.getByRole("radio", { name: /简体中文/ }));
+    await user.click(screen.getByRole("option", { name: /简体中文/ }));
 
     expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /简体中文/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("combobox", { name: "界面语言" })).toHaveTextContent("简体中文");
     await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
     expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
     expect(screen.getByText(
@@ -3042,6 +3103,9 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("API Key"), "secret-test");
+    await user.click(screen.getByRole("button", {
+      name: (accessibleName) => accessibleName.endsWith("gpt-5.5"),
+    }));
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
     expect(within(screen.getByTestId("error-toast-viewport")).getByText("供应商已添加"))
@@ -3399,7 +3463,7 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openAgent(user, "Claude Code");
     expect(await screen.findByRole("button", { name: "预览并接入" })).toBeDisabled();
-    expect(screen.getByText("检测到多份安装，请先选择要接管的精确路径。")).toBeInTheDocument();
+    expect(screen.getByText("检测到多份安装，请选择版本。")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: /选择版本/ }));
     await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
     expect(screen.queryByRole("listbox")).toBeNull();

@@ -135,6 +135,18 @@ pub struct DecryptedSnapshot {
     pub exact_bytes: Zeroizing<Vec<u8>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacySnapshotMigrationWarning {
+    pub snapshot_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LegacySnapshotMigrationReport {
+    pub migrated: usize,
+    pub warnings: Vec<LegacySnapshotMigrationWarning>,
+}
+
 pub trait SnapshotStore: Send + Sync {
     fn create(&self, request: SnapshotRequest<'_>) -> Result<SnapshotCreateResult, String>;
     fn load(&self, snapshot_id: &str) -> Result<DecryptedSnapshot, String>;
@@ -235,11 +247,12 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
             .lock
             .lock()
             .map_err(|_| "快照存储写锁已损坏".to_string())?;
+        validate_agent_id(request.agent_id)?;
         ensure_private_dir(&self.root).map_err(|_| "创建私有快照目录失败".to_string())?;
         let mut index = self.read_index()?;
         let allow_key_creation = index.records.is_empty() && !self.has_envelope_files()?;
         let key = self.keys.load_or_create(allow_key_creation)?;
-        let snapshot_id = self.unique_snapshot_id()?;
+        let snapshot_id = self.unique_snapshot_id(&index)?;
         let mut nonce_bytes = [0_u8; 12];
         getrandom::fill(&mut nonce_bytes).map_err(|_| "生成快照随机 nonce 失败".to_string())?;
         let mut envelope = SnapshotEnvelope {
@@ -276,7 +289,13 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
         envelope.ciphertext_hex = lower_hex(&ciphertext);
         let rendered = render_json(&envelope, "序列化快照 envelope 失败")?;
         let envelope_hash = sha256_hex(&rendered);
-        let envelope_path = self.envelope_path(&snapshot_id);
+        let agent_dir = self.root.join(request.agent_id);
+        ensure_private_dir(&agent_dir).map_err(|_| "创建 Agent 私有快照目录失败".to_string())?;
+        let envelope_path = self.current_envelope_path_fields(
+            request.agent_id,
+            request.created_at_ms,
+            &snapshot_id,
+        );
         write_atomic_private(&envelope_path, &rendered)
             .map_err(|_| "持久化加密快照失败".to_string())?;
         let record = SnapshotRecord {
@@ -321,7 +340,7 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
             .find(|record| record.snapshot_id == snapshot_id)
             .cloned()
             .ok_or_else(|| "快照不存在".to_string())?;
-        let path = self.envelope_path(snapshot_id);
+        let path = self.resolve_envelope_path(&record);
         verify_private_file(&path).map_err(|_| "快照文件权限或类型无效".to_string())?;
         let metadata = std::fs::metadata(&path).map_err(|_| "读取快照元数据失败".to_string())?;
         if metadata.len() > MAX_ENVELOPE_BYTES {
@@ -441,6 +460,73 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
 }
 
 impl<K: MasterKeyStore> FileSnapshotStore<K> {
+    pub fn organize_legacy_layout(&self) -> Result<LegacySnapshotMigrationReport, String> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| "快照存储写锁已损坏".to_string())?;
+        if !self.root.exists() {
+            return Ok(LegacySnapshotMigrationReport::default());
+        }
+        let index = self.read_index()?;
+        self.migrate_legacy_envelopes(&index)
+    }
+
+    fn migrate_legacy_envelopes(
+        &self,
+        index: &SnapshotIndex,
+    ) -> Result<LegacySnapshotMigrationReport, String> {
+        let mut report = LegacySnapshotMigrationReport::default();
+        for record in &index.records {
+            match self.migrate_legacy_envelope(record) {
+                Ok(true) => report.migrated += 1,
+                Ok(false) => {}
+                Err(message) => report.warnings.push(LegacySnapshotMigrationWarning {
+                    snapshot_id: record.snapshot_id.clone(),
+                    message,
+                }),
+            }
+        }
+        Ok(report)
+    }
+
+    fn migrate_legacy_envelope(&self, record: &SnapshotRecord) -> Result<bool, String> {
+        let legacy = self.legacy_envelope_path(&record.snapshot_id);
+        let legacy_metadata = match std::fs::symlink_metadata(&legacy) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err("读取旧快照元数据失败".to_string()),
+        };
+        verify_private_file(&legacy).map_err(|_| "旧快照文件权限或类型无效".to_string())?;
+        if legacy_metadata.len() > MAX_ENVELOPE_BYTES {
+            return Err("旧快照 envelope 超过安全上限".to_string());
+        }
+        let legacy_bytes =
+            std::fs::read(&legacy).map_err(|_| "读取旧快照 envelope 失败".to_string())?;
+        if sha256_hex(&legacy_bytes) != record.envelope_hash {
+            return Err("旧快照 envelope 哈希不匹配".to_string());
+        }
+
+        let agent_dir = self.root.join(&record.agent_id);
+        ensure_private_dir(&agent_dir).map_err(|_| "创建 Agent 私有快照目录失败".to_string())?;
+        let current = self.current_envelope_path(record);
+        if current.exists() {
+            verify_private_file(&current).map_err(|_| "目标快照文件权限或类型无效".to_string())?;
+            let current_bytes =
+                std::fs::read(&current).map_err(|_| "读取目标快照 envelope 失败".to_string())?;
+            if sha256_hex(&current_bytes) != record.envelope_hash {
+                return Err("目标快照 envelope 哈希不匹配，拒绝覆盖".to_string());
+            }
+            std::fs::remove_file(&legacy).map_err(|_| "清理重复旧快照失败".to_string())?;
+        } else {
+            std::fs::rename(&legacy, &current)
+                .map_err(|_| "迁移旧快照到 Agent 目录失败".to_string())?;
+        }
+        sync_parent(&agent_dir).map_err(|_| "同步 Agent 快照目录失败".to_string())?;
+        sync_parent(&self.root).map_err(|_| "同步快照根目录失败".to_string())?;
+        Ok(true)
+    }
+
     fn read_index(&self) -> Result<SnapshotIndex, String> {
         let path = self.root.join(INDEX_FILE);
         match std::fs::symlink_metadata(&path) {
@@ -470,28 +556,85 @@ impl<K: MasterKeyStore> FileSnapshotStore<K> {
 
     fn has_envelope_files(&self) -> Result<bool, String> {
         let entries = std::fs::read_dir(&self.root).map_err(|_| "扫描快照目录失败".to_string())?;
-        Ok(entries.filter_map(Result::ok).any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.ends_with(".snapshot.json"))
-        }))
+        for entry in entries {
+            let entry = entry.map_err(|_| "读取快照目录项失败".to_string())?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "读取快照目录项类型失败".to_string())?;
+            if file_type.is_file()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".snapshot.json"))
+            {
+                return Ok(true);
+            }
+            if !file_type.is_dir() {
+                continue;
+            }
+            let agent_entries = std::fs::read_dir(entry.path())
+                .map_err(|_| "扫描 Agent 快照目录失败".to_string())?;
+            for agent_entry in agent_entries {
+                let agent_entry =
+                    agent_entry.map_err(|_| "读取 Agent 快照目录项失败".to_string())?;
+                if agent_entry
+                    .file_type()
+                    .map_err(|_| "读取 Agent 快照文件类型失败".to_string())?
+                    .is_file()
+                    && agent_entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(is_current_envelope_name)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
-    fn unique_snapshot_id(&self) -> Result<String, String> {
+    fn unique_snapshot_id(&self, index: &SnapshotIndex) -> Result<String, String> {
         for _ in 0..16 {
             let mut random = [0_u8; 16];
             getrandom::fill(&mut random).map_err(|_| "生成 snapshot ID 失败".to_string())?;
             let id = lower_hex(&random);
-            if !self.envelope_path(&id).exists() {
+            if !index.records.iter().any(|record| record.snapshot_id == id) {
                 return Ok(id);
             }
         }
         Err("无法生成唯一 snapshot ID".to_string())
     }
 
-    fn envelope_path(&self, snapshot_id: &str) -> PathBuf {
+    fn legacy_envelope_path(&self, snapshot_id: &str) -> PathBuf {
         self.root.join(format!("{snapshot_id}.snapshot.json"))
+    }
+
+    fn current_envelope_path_fields(
+        &self,
+        agent_id: &str,
+        created_at_ms: u64,
+        snapshot_id: &str,
+    ) -> PathBuf {
+        self.root
+            .join(agent_id)
+            .join(format!("{created_at_ms}-{agent_id}-{snapshot_id}.json"))
+    }
+
+    fn current_envelope_path(&self, record: &SnapshotRecord) -> PathBuf {
+        self.current_envelope_path_fields(
+            &record.agent_id,
+            record.created_at_ms,
+            &record.snapshot_id,
+        )
+    }
+
+    fn resolve_envelope_path(&self, record: &SnapshotRecord) -> PathBuf {
+        let current = self.current_envelope_path(record);
+        if current.exists() {
+            current
+        } else {
+            self.legacy_envelope_path(&record.snapshot_id)
+        }
     }
 
     fn prune(&self, index: &mut SnapshotIndex) -> Result<(), String> {
@@ -527,6 +670,12 @@ impl<K: MasterKeyStore> FileSnapshotStore<K> {
         if remove.is_empty() {
             return Ok(());
         }
+        let removed_records = index
+            .records
+            .iter()
+            .filter(|record| remove.contains(&record.snapshot_id))
+            .cloned()
+            .collect::<Vec<_>>();
         let original = index.records.clone();
         index
             .records
@@ -536,8 +685,8 @@ impl<K: MasterKeyStore> FileSnapshotStore<K> {
             return Err(format!("快照保留策略索引提交失败：{error}"));
         }
         let mut failed = false;
-        for snapshot_id in remove {
-            if std::fs::remove_file(self.envelope_path(&snapshot_id)).is_err() {
+        for record in removed_records {
+            if std::fs::remove_file(self.resolve_envelope_path(&record)).is_err() {
                 failed = true;
             }
         }
@@ -559,6 +708,7 @@ fn validate_index(index: SnapshotIndex) -> Result<SnapshotIndex, String> {
     let mut ids = BTreeSet::new();
     for record in &index.records {
         validate_id(&record.snapshot_id)?;
+        validate_agent_id(&record.agent_id)?;
         if record.schema_version != SNAPSHOT_SCHEMA_VERSION || !ids.insert(&record.snapshot_id) {
             return Err("快照索引包含无效或重复记录".to_string());
         }
@@ -568,6 +718,7 @@ fn validate_index(index: SnapshotIndex) -> Result<SnapshotIndex, String> {
 
 fn validate_request(envelope: &SnapshotEnvelope) -> Result<(), String> {
     validate_id(&envelope.snapshot_id)?;
+    validate_agent_id(&envelope.agent_id)?;
     if envelope.operation_id.is_empty()
         || envelope.agent_id.is_empty()
         || envelope.target_config_path.is_empty()
@@ -578,6 +729,25 @@ fn validate_request(envelope: &SnapshotEnvelope) -> Result<(), String> {
         return Err("快照请求元数据无效".to_string());
     }
     Ok(())
+}
+
+fn validate_agent_id(value: &str) -> Result<(), String> {
+    if !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err("Agent ID 无效".to_string())
+    }
+}
+
+fn is_current_envelope_name(name: &str) -> bool {
+    name.strip_suffix(".json")
+        .and_then(|stem| stem.rsplit_once('-'))
+        .is_some_and(|(_, snapshot_id)| validate_id(snapshot_id).is_ok())
 }
 
 fn validate_envelope(envelope: &SnapshotEnvelope, record: &SnapshotRecord) -> Result<(), String> {
@@ -744,8 +914,8 @@ mod tests {
         let first = store.create(request(&source, 1, false)).unwrap().record;
         let second = store.create(request(&source, 2, false)).unwrap().record;
         assert_ne!(first.snapshot_id, second.snapshot_id);
-        let first_file = std::fs::read(store.envelope_path(&first.snapshot_id)).unwrap();
-        let second_file = std::fs::read(store.envelope_path(&second.snapshot_id)).unwrap();
+        let first_file = std::fs::read(store.current_envelope_path(&first)).unwrap();
+        let second_file = std::fs::read(store.current_envelope_path(&second)).unwrap();
         assert!(!first_file
             .windows(marker.len())
             .any(|window| window == marker));
@@ -759,7 +929,7 @@ mod tests {
             marker
         );
 
-        let path = store.envelope_path(&first.snapshot_id);
+        let path = store.current_envelope_path(&first);
         let mut tampered = std::fs::read(&path).unwrap();
         let index = tampered.len() / 2;
         tampered[index] ^= 1;
@@ -781,6 +951,107 @@ mod tests {
                 0o600
             );
         }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn snapshot_files_are_grouped_by_agent_with_readable_collision_safe_names() {
+        let root = scratch("agent-directories");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"fixture".to_vec(), Some(0o600), None);
+        let first = store
+            .create(request(&source, 1_777_777_777_777, false))
+            .unwrap()
+            .record;
+        let second = store
+            .create(request(&source, 1_777_777_777_777, false))
+            .unwrap()
+            .record;
+
+        let agent_dir = root.join("claude-code");
+        let mut names = std::fs::read_dir(&agent_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().all(|name| {
+            name.starts_with("1777777777777-claude-code-") && name.ends_with(".json")
+        }));
+        assert!(names.iter().any(|name| name.contains(&first.snapshot_id)));
+        assert!(names.iter().any(|name| name.contains(&second.snapshot_id)));
+        assert_ne!(names[0], names[1]);
+        assert!(!root
+            .join(format!("{}.snapshot.json", first.snapshot_id))
+            .exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&agent_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_root_envelopes_are_migrated_then_remain_loadable_and_prunable() {
+        let root = scratch("legacy-envelope");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"legacy".to_vec(), Some(0o600), None);
+        let legacy = store.create(request(&source, 0, false)).unwrap().record;
+        let current_path = store.current_envelope_path(&legacy);
+        let legacy_path = store.legacy_envelope_path(&legacy.snapshot_id);
+        std::fs::rename(&current_path, &legacy_path).unwrap();
+
+        assert_eq!(store.organize_legacy_layout().unwrap().migrated, 1);
+        assert!(!legacy_path.exists());
+        assert!(current_path.exists());
+
+        assert_eq!(
+            store
+                .load(&legacy.snapshot_id)
+                .unwrap()
+                .exact_bytes
+                .as_slice(),
+            b"legacy"
+        );
+        for created in 1..=6 {
+            store.create(request(&source, created, false)).unwrap();
+        }
+        assert!(!current_path.exists());
+        assert!(store.load(&legacy.snapshot_id).is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn corrupt_legacy_envelope_is_reported_without_blocking_later_migration() {
+        let root = scratch("legacy-envelope-warning");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"legacy".to_vec(), Some(0o600), None);
+        let corrupt = store.create(request(&source, 1, false)).unwrap().record;
+        let valid = store.create(request(&source, 2, false)).unwrap().record;
+        let corrupt_legacy = store.legacy_envelope_path(&corrupt.snapshot_id);
+        let valid_legacy = store.legacy_envelope_path(&valid.snapshot_id);
+        std::fs::rename(store.current_envelope_path(&corrupt), &corrupt_legacy).unwrap();
+        std::fs::rename(store.current_envelope_path(&valid), &valid_legacy).unwrap();
+        let mut damaged = std::fs::read(&corrupt_legacy).unwrap();
+        let damaged_index = damaged.len() / 2;
+        damaged[damaged_index] ^= 1;
+        write_atomic_private(&corrupt_legacy, &damaged).unwrap();
+
+        let report = store.organize_legacy_layout().unwrap();
+
+        assert_eq!(report.migrated, 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].snapshot_id, corrupt.snapshot_id);
+        assert!(report.warnings[0].message.contains("哈希不匹配"));
+        assert!(corrupt_legacy.exists());
+        assert!(!valid_legacy.exists());
+        assert!(store.current_envelope_path(&valid).exists());
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -963,7 +1234,7 @@ mod tests {
         })
         .is_err());
 
-        let bytes = std::fs::read(store.envelope_path(&created.snapshot_id)).unwrap();
+        let bytes = std::fs::read(store.current_envelope_path(&created)).unwrap();
         let mut envelope: SnapshotEnvelope = serde_json::from_slice(&bytes).unwrap();
         assert!(validate_request(&envelope).is_ok());
         assert!(validate_envelope(&envelope, &created).is_ok());

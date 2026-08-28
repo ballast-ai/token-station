@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "./ui/select";
 import { Separator } from "./ui/separator";
+import { Button } from "./ui/button";
 
 interface QuotaPriorityPanelProps {
   providers: ProviderView[];
@@ -139,18 +140,17 @@ export default function QuotaPriorityPanel({
           </p>
         </div>
         <div className="quota-heading-actions">
-          <button type="button" className="btn quiet" onClick={onViewUsage}>
+          <Button type="button" variant="outline" onClick={onViewUsage}>
             {copy("Live quota", "实时额度", "即時額度", "リアルタイムクォータ")}
-          </button>
-          <button
-            className="btn primary"
+          </Button>
+          <Button
             type="button"
             data-onboarding-target="route-apply"
             disabled={busy || applying || !canApply}
             onClick={() => onSave(entries)}
           >
             {applying ? copy("Applying…", "应用中…", "應用中…", "適用中…") : copy("Save & apply", "保存并应用", "儲存並應用", "保存して適用")}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -223,22 +223,24 @@ export default function QuotaPriorityPanel({
                     </span>
                   )}
                 </div>
-                <button
+                <Button
                   type="button"
                   className="quota-entry-remove"
+                  variant="ghost"
+                  size="icon-sm"
                   aria-label={copy("Remove account", "移除账户", "移除帳號", "アカウントを削除")}
                   disabled={busy}
                   onClick={() => removeEntry(index)}
                 >
                   ×
-                </button>
+                </Button>
               </div>
               );
             })
           )}
-          <button type="button" className="btn quota-add-btn" disabled={busy} onClick={addEntry}>
+          <Button type="button" className="quota-add-btn" variant="outline" disabled={busy} onClick={addEntry}>
             {copy("+ Add model", "+ 添加模型", "+ 新增模型", "+ モデルを追加")}
-          </button>
+          </Button>
         </div>
       )}
 

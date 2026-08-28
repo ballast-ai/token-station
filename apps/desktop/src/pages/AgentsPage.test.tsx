@@ -49,7 +49,9 @@ describe("AgentsPage split workspaces", () => {
     const selector = screen.getByRole("region", { name: "Agent 选择列表" });
 
     expect(screen.getByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
+    expect(selector).toHaveClass("agent-flat-surface");
     expect(within(selector).getByRole("heading", { name: "发现 Agents" })).toBeInTheDocument();
+    expect(within(selector).getByRole("button", { name: "重新扫描" })).toHaveClass("agent-rescan-action");
     expect(within(selector).queryByRole("button", { name: "全局路由" })).toBeNull();
     expect(within(selector).getByRole("button", { name: "Claude Code" })).toHaveAttribute("aria-current", "page");
 

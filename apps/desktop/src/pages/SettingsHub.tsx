@@ -4,14 +4,17 @@ import {
   Globe,
   Info,
   KeyRound,
+  Monitor,
+  Moon,
   Palette,
   ScrollText,
-  ServerCog,
   Settings2,
+  Sun,
   type LucideIcon,
 } from "lucide-react";
 import type {
   AgentUiMetadataView,
+  ProviderView,
   ServeView,
   SettingsView,
   StateView,
@@ -23,11 +26,22 @@ import {
   type Language,
   type TranslationKey,
 } from "../components/LanguageProvider";
-import { useTheme, type Theme } from "../components/ThemeProvider";
+import { ThemeBoundary, useTheme, type Theme } from "../components/ThemeProvider";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Field, FieldDescription, FieldLabel } from "../components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { useErrorToast } from "../components/ErrorToast";
+import { usePageTransition } from "../components/use-page-transition";
 import About from "./About";
 import Settings from "./Settings";
 import RequestLogsPage from "./RequestLogsPage";
@@ -35,7 +49,6 @@ import RequestLogsPage from "./RequestLogsPage";
 type SettingsSection =
   | "general"
   | "api-key"
-  | "runtime"
   | "agent-visibility"
   | "appearance"
   | "language"
@@ -67,12 +80,6 @@ const SECTIONS: Array<{
     label: "settings.apiKey",
     description: "settings.apiKeyHint",
     icon: KeyRound,
-  },
-  {
-    id: "runtime",
-    label: "settings.runtime",
-    description: "settings.runtimeHint",
-    icon: ServerCog,
   },
   {
     id: "agent-visibility",
@@ -178,44 +185,19 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
   );
 }
 
-function RuntimeInformationCard({ settings }: { settings: SettingsView }) {
-  const { t } = useLanguage();
-  return (
-    <Card className="settings-card runtime-information-card">
-      <CardHeader className="panel-head">
-        <CardTitle><h2>{t("runtime.title")}</h2></CardTitle>
-        <p className="sub">{t("runtime.description")}</p>
-      </CardHeader>
-      <CardContent>
-        <div className="kv-grid">
-          <div className="kv-k">{t("general.listen")}</div>
-          <div className="kv-v mono">{settings.listen}</div>
-          <div className="kv-k">{t("general.dataDir")}</div>
-          <div className="kv-v mono">{settings.data_dir || "—"}</div>
-          <div className="kv-k">{t("general.pluginsDir")}</div>
-          <div className="kv-v mono">{settings.plugins_dir || "—"}</div>
-          <div className="kv-k">{t("general.adapter")}</div>
-          <div className="kv-v mono">{settings.agent || "—"}</div>
-          <div className="kv-k">{t("general.coreVersion")}</div>
-          <div className="kv-v mono">{settings.version}</div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function AppearancePanel() {
   const { theme, resolvedTheme, setTheme } = useTheme();
   const { t } = useLanguage();
-  const choices: Array<{ value: Theme; label: string; hint: string }> = [
-    { value: "light", label: t("appearance.light"), hint: t("appearance.lightHint") },
-    { value: "dark", label: t("appearance.dark"), hint: t("appearance.darkHint") },
+  const choices: Array<{ value: Theme; label: string; hint: string; icon: LucideIcon }> = [
+    { value: "light", label: t("appearance.light"), hint: t("appearance.lightHint"), icon: Sun },
+    { value: "dark", label: t("appearance.dark"), hint: t("appearance.darkHint"), icon: Moon },
     {
       value: "system",
       label: t("appearance.system"),
       hint: t("appearance.systemHint", {
         theme: t(resolvedTheme === "dark" ? "appearance.systemDark" : "appearance.systemLight"),
       }),
+      icon: Monitor,
     },
   ];
   return (
@@ -224,22 +206,35 @@ function AppearancePanel() {
         <CardTitle><h2>{t("appearance.title")}</h2></CardTitle>
         <p className="sub">{t("appearance.description")}</p>
       </CardHeader>
-      <CardContent className="theme-options" role="radiogroup" aria-label={t("appearance.groupLabel")}>
-        {choices.map((choice) => (
-          <Button
-            key={choice.value}
-            className={`theme-option ${theme === choice.value ? "selected" : ""}`}
-            variant="ghost"
-            type="button"
-            role="radio"
-            aria-checked={theme === choice.value}
-            onClick={() => setTheme(choice.value)}
+      <CardContent className="appearance-control-row">
+        <Field orientation="horizontal">
+          <FieldLabel id="appearance-theme-label">{t("appearance.groupLabel")}</FieldLabel>
+          <ToggleGroup
+            className="appearance-toggle-group"
+            type="single"
+            value={theme}
+            aria-labelledby="appearance-theme-label"
+            onValueChange={(value) => {
+              if (value) setTheme(value as Theme);
+            }}
           >
-            <span className={`theme-preview ${choice.value}`} aria-hidden="true"><i /><i /></span>
-            <strong>{choice.label}</strong>
-            <small>{choice.hint}</small>
-          </Button>
-        ))}
+            {choices.map((choice) => {
+              const Icon = choice.icon;
+              return (
+                <ToggleGroupItem
+                  key={choice.value}
+                  value={choice.value}
+                  aria-label={choice.label}
+                  title={choice.hint}
+                >
+                  <Icon aria-hidden="true" />
+                  <span>{choice.label}</span>
+                </ToggleGroupItem>
+              );
+            })}
+          </ToggleGroup>
+          <FieldDescription className="sr-only">{t("appearance.description")}</FieldDescription>
+        </Field>
       </CardContent>
     </Card>
   );
@@ -320,13 +315,12 @@ function AgentVisibilityPanel({
 const LANGUAGE_OPTIONS: Array<{
   value: Language;
   label: string;
-  mark: string;
   hint: TranslationKey;
 }> = [
-  { value: "en", label: "English", mark: "EN", hint: "language.enHint" },
-  { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
-  { value: "zh-TW", label: "繁體中文", mark: "繁", hint: "language.zhTWHint" },
-  { value: "ja", label: "日本語", mark: "日", hint: "language.jaHint" },
+  { value: "en", label: "English", hint: "language.enHint" },
+  { value: "zh-CN", label: "简体中文", hint: "language.zhCNHint" },
+  { value: "zh-TW", label: "繁體中文", hint: "language.zhTWHint" },
+  { value: "ja", label: "日本語", hint: "language.jaHint" },
 ];
 
 function LanguagePanel() {
@@ -337,25 +331,114 @@ function LanguagePanel() {
         <CardTitle><h2>{t("language.title")}</h2></CardTitle>
         <p className="sub">{t("language.description")}</p>
       </CardHeader>
-      <CardContent className="language-options" role="radiogroup" aria-label={t("language.groupLabel")}>
-        {LANGUAGE_OPTIONS.map((option) => (
-          <Button
-            key={option.value}
-            className={`language-option ${language === option.value ? "selected" : ""}`}
-            variant="ghost"
-            type="button"
-            role="radio"
-            aria-checked={language === option.value}
-            onClick={() => setLanguage(option.value)}
-          >
-            <span className="language-mark" aria-hidden="true">{option.mark}</span>
-            <span>
-              <strong>{option.label}</strong>
-              <small>{t(option.hint)}</small>
+      <CardContent className="language-control-row">
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="interface-language">{t("language.groupLabel")}</FieldLabel>
+          <Select value={language} onValueChange={(value) => setLanguage(value as Language)}>
+            <SelectTrigger id="interface-language" aria-label={t("language.groupLabel")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper" align="end">
+              <SelectGroup>
+                {LANGUAGE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value} textValue={option.label}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <FieldDescription className="sr-only">{t("language.description")}</FieldDescription>
+        </Field>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LocalRoutingSettings({
+  providers,
+  localOnly,
+  allowCloudFallback,
+  busy,
+  onSetLocalRouting,
+}: {
+  providers: ProviderView[];
+  localOnly: boolean;
+  allowCloudFallback: boolean;
+  busy: boolean;
+  onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
+}) {
+  const { copy } = useLanguage();
+  const hasLocalProvider = providers.some((provider) => provider.local);
+  const localDescription = hasLocalProvider
+    ? copy(
+        "Route model requests only to Providers marked as local.",
+        "模型请求只发送给标记为本地的供应商。",
+        "模型請求只傳送給標記為本地的供應商。",
+        "モデルリクエストをローカルとして設定されたプロバイダーだけに送信します。",
+      )
+    : localOnly
+      ? copy(
+          "Strict local routing is active, but no local Provider exists. Disable it here or add a local Provider.",
+          "严格本地路由已启用，但当前没有本地供应商。请在此关闭，或添加本地供应商。",
+          "嚴格本地路由已啟用，但目前沒有本地供應商。請在此關閉，或新增本地供應商。",
+          "厳格なローカルルーティングは有効ですが、ローカルプロバイダーがありません。ここで無効にするか追加してください。",
+        )
+      : copy(
+          "Add a local Provider before enabling this boundary.",
+          "请先添加本地供应商，再启用此边界。",
+          "請先新增本地供應商，再啟用此邊界。",
+          "この境界を有効にする前にローカルプロバイダーを追加してください。",
+        );
+
+  return (
+    <Card className="settings-card local-routing-settings">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{copy("Local only", "只走本地", "只走本地", "ローカルのみ")}</h2></CardTitle>
+        <p className="sub">{localDescription}</p>
+      </CardHeader>
+      <CardContent className="settings-card-content">
+        <div className="setting-row setting-toggle-row local-routing-setting-row">
+          <span className="setting-toggle-copy">
+            <b id="local-routing-label">{copy("Use local models only", "只使用本地模型", "只使用本地模型", "ローカルモデルのみ使用")}</b>
+            <em id="local-routing-description">{copy(
+              "When cloud fallback is off, requests fail instead of leaving this device.",
+              "云端兜底关闭时，请求会失败，不会离开本机。",
+              "雲端備援關閉時，請求會失敗，不會離開本機。",
+              "クラウドフォールバックがオフの場合、リクエストは外部へ送信されず失敗します。",
+            )}</em>
+          </span>
+          <Switch
+            aria-labelledby="local-routing-label"
+            aria-describedby="local-routing-description"
+            checked={localOnly}
+            disabled={busy || (!hasLocalProvider && !localOnly)}
+            onCheckedChange={(checked) => onSetLocalRouting(
+              checked,
+              checked && allowCloudFallback,
+            )}
+          />
+        </div>
+        {localOnly && (
+          <div className="setting-row setting-toggle-row local-routing-setting-row">
+            <span className="setting-toggle-copy">
+              <b id="cloud-fallback-label">{copy("Allow cloud fallback", "允许云模型兜底", "允許雲端模型備援", "クラウドフォールバックを許可")}</b>
+              <em id="cloud-fallback-description">{copy(
+                "Use a cloud model only when local models are unavailable.",
+                "仅在本地模型不可用时使用云模型。",
+                "僅在本地模型不可用時使用雲端模型。",
+                "ローカルモデルが利用できない場合だけクラウドモデルを使用します。",
+              )}</em>
             </span>
-            <i className="language-selected-dot" aria-hidden="true" />
-          </Button>
-        ))}
+            <Switch
+              aria-labelledby="cloud-fallback-label"
+              aria-describedby="cloud-fallback-description"
+              checked={allowCloudFallback}
+              disabled={busy}
+              onCheckedChange={(checked) => onSetLocalRouting(true, checked)}
+            />
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -369,6 +452,11 @@ interface SettingsHubProps {
   onAgentVisibilityChange: (agentId: string, visible: boolean) => void;
   onOpenFirstRunGuide: () => void;
   onSaved: (state: StateView) => void;
+  providers?: ProviderView[];
+  localOnly?: boolean;
+  allowCloudFallback?: boolean;
+  routingBusy?: boolean;
+  onSetLocalRouting?: (localOnly: boolean, allowCloudFallback: boolean) => void;
   initialSection?: SettingsSection;
 }
 
@@ -380,12 +468,17 @@ function SettingsHubContent({
   onAgentVisibilityChange,
   onOpenFirstRunGuide,
   onSaved,
+  providers = [],
+  localOnly = false,
+  allowCloudFallback = false,
+  routingBusy = false,
+  onSetLocalRouting = () => undefined,
   initialSection = "about",
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [navigationInputMode, setNavigationInputMode] = useState<"pointer" | "keyboard">("pointer");
   const navigationRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const contentRef = useRef<HTMLElement | null>(null);
+  const contentRef = usePageTransition<HTMLElement>(section);
   const { t, copy } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const resetScroll = () => {
@@ -462,7 +555,7 @@ function SettingsHubContent({
                   }
                 }}
               >
-                <Icon className="settings-subnav-icon" aria-hidden="true" />
+                <Icon data-icon="inline-start" aria-hidden="true" />
                 <span>
                   <strong>{item.englishLabel ? copy(
                     item.englishLabel,
@@ -484,7 +577,16 @@ function SettingsHubContent({
       </aside>
       <main ref={contentRef} className="settings-content">
         {section === "general" && (
-          <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="general" />
+          <>
+            <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="general" />
+            <LocalRoutingSettings
+              providers={providers}
+              localOnly={localOnly}
+              allowCloudFallback={allowCloudFallback}
+              busy={routingBusy}
+              onSetLocalRouting={onSetLocalRouting}
+            />
+          </>
         )}
         {section === "api-key" && (
           <>
@@ -492,7 +594,6 @@ function SettingsHubContent({
             <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="api-key" />
           </>
         )}
-        {section === "runtime" && <RuntimeInformationCard settings={settings} />}
         {section === "agent-visibility" && (
           <AgentVisibilityPanel
             registry={registry}
@@ -520,6 +621,7 @@ function SettingsHubContent({
           <About
             desktopVersion={settings.desktop_version ?? settings.version}
             coreVersion={settings.core_version ?? settings.version}
+            runtimeSettings={settings}
             onOpenFirstRunGuide={onOpenFirstRunGuide}
           />
         )}
@@ -531,7 +633,9 @@ function SettingsHubContent({
 export default function SettingsHub(props: SettingsHubProps) {
   return (
     <LanguageBoundary>
-      <SettingsHubContent {...props} />
+      <ThemeBoundary>
+        <SettingsHubContent {...props} />
+      </ThemeBoundary>
     </LanguageBoundary>
   );
 }

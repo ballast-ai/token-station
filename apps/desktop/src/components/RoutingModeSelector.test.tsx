@@ -13,7 +13,7 @@ describe("RoutingModeSelector", () => {
 
     const tabs = within(screen.getByRole("tablist", { name: "路由模式" })).getAllByRole("tab");
     expect(screen.getByRole("tablist", { name: "路由模式" }))
-      .toHaveAttribute("data-variant", "line");
+      .toHaveAttribute("data-variant", "default");
     expect(tabs.map((tab) => tab.getAttribute("aria-label"))).toEqual([
       "简单路由",
       "智能分档",

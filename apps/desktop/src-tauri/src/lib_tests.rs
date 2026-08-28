@@ -4609,6 +4609,105 @@ fn managed_enterprise_command_uses_the_valid_tokenstation_reference() {
 }
 
 #[test]
+fn managed_enterprise_command_appends_a_model_to_the_existing_managed_provider() {
+    let root = scratch_home("managed-enterprise-command-append-model");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    add_managed_enterprise_route(
+        app.state(),
+        "https://enterprise.example.com/v1".to_owned(),
+        "first-key".to_owned(),
+        "enterprise-reasoner".to_owned(),
+    )
+    .expect("the first managed model is valid");
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://enterprise.example.com/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "enterprise-chat".to_owned(),
+    )
+    .expect("another model can extend the managed provider");
+
+    let provider = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation")
+        .expect("the managed provider remains visible");
+    assert_eq!(provider.models, ["enterprise-reasoner", "enterprise-chat"]);
+    let target = view
+        .direct_target
+        .expect("the appended model becomes active");
+    assert_eq!(target.upstream, "tokenstation");
+    assert_eq!(target.model.as_deref(), Some("enterprise-chat"));
+
+    let managed = app.state::<AppStateManaged>();
+    let inner = managed.0.lock().unwrap();
+    let models = inner.draft["upstreams"]["tokenstation"]["models"]
+        .as_array()
+        .expect("managed models remain capability objects");
+    let mut first_capability = models[0].clone();
+    let mut appended_capability = models[1].clone();
+    first_capability.as_object_mut().unwrap().remove("model");
+    appended_capability.as_object_mut().unwrap().remove("model");
+    assert_eq!(appended_capability, first_capability);
+    drop(inner);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_rejects_an_endpoint_change_without_mutation() {
+    let root = scratch_home("managed-enterprise-command-endpoint-mismatch");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    add_managed_enterprise_route(
+        app.state(),
+        "https://enterprise.example.com/v1".to_owned(),
+        "first-key".to_owned(),
+        "enterprise-reasoner".to_owned(),
+    )
+    .expect("the first managed model is valid");
+    let error = match add_managed_enterprise_route(
+        app.state(),
+        "https://other.example.com/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "enterprise-chat".to_owned(),
+    ) {
+        Ok(_) => {
+            panic!("an existing managed provider cannot change endpoints while adding a model")
+        }
+        Err(error) => error,
+    };
+    assert!(error.contains("Base URL"), "{error}");
+
+    let managed = app.state::<AppStateManaged>();
+    let inner = managed.0.lock().unwrap();
+    let provider = &inner.draft["upstreams"]["tokenstation"];
+    assert_eq!(
+        provider["base_url"],
+        json!("https://enterprise.example.com/v1")
+    );
+    assert_eq!(provider["models"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        inner.draft["routing"]["direct_target"]["model"],
+        json!("enterprise-reasoner")
+    );
+    drop(inner);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn managed_enterprise_command_replaces_a_legacy_managed_route() {
     let root = scratch_home("managed-enterprise-legacy-migration");
     let app = tauri::test::mock_app();

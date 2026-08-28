@@ -255,7 +255,14 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
   );
 }
 
-function StationApp() {
+export type StartupOutcome = "ready" | "actionable-error";
+
+interface AppProps {
+  onStartupSettled?: (outcome: StartupOutcome) => void;
+  launchComplete?: boolean;
+}
+
+function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const { language, copy } = useLanguage();
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
@@ -311,6 +318,7 @@ function StationApp() {
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
   const firstRunGuideCheckedRef = useRef(false);
   const startupLoadStartedRef = useRef(false);
+  const startupSettledRef = useRef(false);
   const agentRevealTimerRef = useRef<number | null>(null);
 
   const revealAgents = useCallback((agentIds: string[]) => {
@@ -330,6 +338,12 @@ function StationApp() {
       window.clearTimeout(agentRevealTimerRef.current);
     }
   }, []);
+
+  useEffect(() => {
+    if (startupSettledRef.current || (!scanSucceeded && !error)) return;
+    startupSettledRef.current = true;
+    onStartupSettled?.(error ? "actionable-error" : "ready");
+  }, [error, onStartupSettled, scanSucceeded]);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -621,7 +635,7 @@ function StationApp() {
   }, [copy, showSuccess, state?.serve.app_runtime, state?.serve.error, state?.serve.listener_reachable, state?.serve.phase]);
 
   useEffect(() => {
-    if (!state || !scanSucceeded || firstRunGuideCheckedRef.current) return;
+    if (!launchComplete || !state || !scanSucceeded || firstRunGuideCheckedRef.current) return;
     firstRunGuideCheckedRef.current = true;
     if (shouldShowFirstRunTutorialPrompt()) {
       viewHistoryRef.current = [];
@@ -637,7 +651,7 @@ function StationApp() {
       setFirstRunMicroStep("overview");
       setFirstRunGuideOpen(true);
     }
-  }, [scanSucceeded, state]);
+  }, [launchComplete, scanSucceeded, state]);
 
   useEffect(() => {
     if (firstRunSetupStep !== "agent" || !hasConnectedAgent(agents)) return;
@@ -1038,9 +1052,6 @@ function StationApp() {
               configError={state.config_error ? humanizeAppError(state.config_error, language) : null}
               keywords={state.keywords}
               saveStatus={saveStatus}
-              localOnly={state.local_only}
-              allowCloudFallback={state.allow_cloud_fallback}
-              onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
               onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
               onSaveProfile={(name) => run(
                 () => saveHomeRouteAsProfile(name),
@@ -1056,7 +1067,7 @@ function StationApp() {
                   `策略组“${name}”已从草稿删除，请保存并应用。`, `策略組「${name}」已從草稿刪除。請儲存並應用。`, `プロファイル「${name}」が下書きから削除されました。保存して適用してください。`
                 ),
               )}
-              onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
+              onAddKeyword={(slot, keyword) => run(() => addKeyword(slot, keyword))}
               onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
               onSave={() => void run(serveStart, undefined, true)}
               onApplyAll={() => void run(
@@ -1191,6 +1202,13 @@ function StationApp() {
             setFirstRunGuideOpen(true);
           }}
           onSaved={showState}
+          providers={state.providers}
+          localOnly={state.local_only}
+          allowCloudFallback={state.allow_cloud_fallback}
+          routingBusy={busy}
+          onSetLocalRouting={(localOnly, allowCloudFallback) => void run(
+            () => setLocalRouting(localOnly, allowCloudFallback),
+          )}
           initialSection={view === "logs" ? "request-logs" : "about"}
         />
       )}
@@ -1354,12 +1372,12 @@ function StationApp() {
   );
 }
 
-export default function App() {
+export default function App({ onStartupSettled, launchComplete = true }: AppProps = {}) {
   return (
     <ErrorToastBoundary>
       <LanguageBoundary>
         <ThemeBoundary>
-          <StationApp />
+          <StationApp onStartupSettled={onStartupSettled} launchComplete={launchComplete} />
         </ThemeBoundary>
       </LanguageBoundary>
     </ErrorToastBoundary>

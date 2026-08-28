@@ -51,6 +51,55 @@ const serve: ServeView = {
 const registry: AgentUiMetadataView[] = [];
 
 describe("SettingsHub clipboard feedback", () => {
+  it("keeps Local-only recovery in Proxy settings without enabling an unusable boundary", async () => {
+    const user = userEvent.setup();
+    const onSetLocalRouting = vi.fn();
+    const view = render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+          localOnly={false}
+          allowCloudFallback={false}
+          onSetLocalRouting={onSetLocalRouting}
+          initialSection="general"
+        />
+      </ErrorToastProvider>,
+    );
+
+    expect(screen.getByRole("switch", { name: /只使用本地模型/ })).toBeDisabled();
+    expect(screen.queryByRole("switch", { name: /允许云模型兜底/ })).toBeNull();
+
+    view.rerender(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+          localOnly
+          allowCloudFallback={false}
+          onSetLocalRouting={onSetLocalRouting}
+          initialSection="general"
+        />
+      </ErrorToastProvider>,
+    );
+
+    const recoverySwitch = screen.getByRole("switch", { name: /只使用本地模型/ });
+    expect(recoverySwitch).toBeEnabled();
+    expect(screen.getByRole("switch", { name: /允许云模型兜底/ })).toBeInTheDocument();
+    await user.click(recoverySwitch);
+    expect(onSetLocalRouting).toHaveBeenCalledWith(false, false);
+  });
+
   it("moves and activates Settings sections with vertical navigation keys", async () => {
     const user = userEvent.setup();
     render(
@@ -69,7 +118,6 @@ describe("SettingsHub clipboard feedback", () => {
 
     const general = screen.getByRole("button", { name: /代理/ });
     const apiKey = screen.getByRole("button", { name: /API Key/ });
-    const runtime = screen.getByRole("button", { name: /运行信息/ });
     const agentVisibility = screen.getByRole("button", { name: /Agent 显示/ });
     const about = screen.getByRole("button", { name: /关于/ });
     const navigation = screen.getByRole("navigation", { name: "设置分类" });
@@ -87,16 +135,10 @@ describe("SettingsHub clipboard feedback", () => {
     expect(screen.getByRole("heading", { name: "虚拟 API Key" })).toBeInTheDocument();
 
     await user.keyboard("{ArrowDown}");
-    expect(runtime).toHaveFocus();
-    expect(runtime).toHaveAttribute("aria-current", "page");
-
-    await user.keyboard("{ArrowDown}");
     expect(agentVisibility).toHaveFocus();
     expect(agentVisibility).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
 
-    await user.keyboard("{ArrowUp}");
-    expect(runtime).toHaveFocus();
     await user.keyboard("{ArrowUp}");
     expect(apiKey).toHaveFocus();
     await user.keyboard("{ArrowUp}");
@@ -139,7 +181,7 @@ describe("SettingsHub clipboard feedback", () => {
     expect(screen.getByRole("heading", { name: "虚拟 API Key" })).toBeInTheDocument();
   });
 
-  it("splits API key and runtime information out of General", async () => {
+  it("moves compact runtime information into About without a duplicate navigation category", async () => {
     const user = userEvent.setup();
     render(
       <ErrorToastProvider>
@@ -156,6 +198,10 @@ describe("SettingsHub clipboard feedback", () => {
     );
 
     expect(screen.queryByRole("heading", { name: "虚拟 API Key" })).toBeNull();
+    const settingsNavigation = screen.getByRole("navigation", { name: "设置分类" });
+    expect(within(settingsNavigation).queryByRole("button", { name: /运行信息/ })).toBeNull();
+    const runtimeDisclosure = screen.getByRole("button", { name: /运行信息/ });
+    expect(runtimeDisclosure).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("/data")).toBeNull();
     expect(screen.queryByRole("switch", { name: /虚拟 Key 鉴权/ })).toBeNull();
 
@@ -166,12 +212,49 @@ describe("SettingsHub clipboard feedback", () => {
     expect(screen.queryByRole("heading", { name: "代理与数据" })).toBeNull();
     expect(screen.getAllByText("本机 Agent 访问凭据")).toHaveLength(2);
 
+    await user.click(screen.getByRole("button", { name: /关于/ }));
     await user.click(screen.getByRole("button", { name: /运行信息/ }));
-    expect(screen.getByRole("heading", { name: "运行信息" })).toBeInTheDocument();
-    expect(screen.getAllByText("地址、目录与适配器")).toHaveLength(2);
     expect(screen.getByText("/data")).toBeInTheDocument();
     expect(screen.getByText("/plugins")).toBeInTheDocument();
+    expect(screen.getByText("127.0.0.1:8787")).toBeInTheDocument();
+    expect(screen.getByText("codex")).toBeInTheDocument();
+    const runtimeDetails = document.querySelector(".about-runtime-details");
+    expect(runtimeDetails).not.toBeNull();
+    expect(within(runtimeDetails as HTMLElement).queryByText("1.1.3")).toBeNull();
     expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
+  });
+
+  it("uses compact shadcn controls for appearance and language", async () => {
+    const user = userEvent.setup();
+    render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: /外观/ }));
+    const themeGroup = screen.getByRole("radiogroup", { name: "界面主题" });
+    expect(within(themeGroup).getAllByRole("radio")).toHaveLength(3);
+    const darkTheme = within(themeGroup).getByRole("radio", { name: "深色" });
+    await user.click(darkTheme);
+    expect(darkTheme).toHaveAttribute("data-state", "on");
+
+    await user.click(screen.getByRole("button", { name: /^语言/ }));
+    const languageSelect = screen.getByRole("combobox", { name: "界面语言" });
+    expect(languageSelect).toHaveTextContent("简体中文");
+    await user.click(languageSelect);
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    await user.click(screen.getByRole("option", { name: "English" }));
+    expect(screen.getByRole("combobox", { name: "Interface language" }))
+      .toHaveTextContent("English");
   });
 
   it("clears stale pointer hover state while navigating Settings with keys", () => {
@@ -273,7 +356,7 @@ describe("SettingsHub clipboard feedback", () => {
     expect(workspace).toHaveProperty("scrollTop", 0);
   });
 
-  it("switches Settings categories without entrance motion", async () => {
+  it("animates the content surface when the Settings category changes", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();
     const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
@@ -302,7 +385,7 @@ describe("SettingsHub clipboard feedback", () => {
       await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
 
       expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
-      expect(animate).not.toHaveBeenCalled();
+      expect(animate).toHaveBeenCalledTimes(1);
     } finally {
       if (originalAnimate) {
         Object.defineProperty(HTMLElement.prototype, "animate", {

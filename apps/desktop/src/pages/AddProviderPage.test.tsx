@@ -58,6 +58,11 @@ beforeEach(() => {
 const pickPreset = (user: ReturnType<typeof userEvent.setup>, label: string) =>
   user.click(screen.getByText(label, { selector: ".provider-catalog-card-title strong" }));
 
+const pickModel = (user: ReturnType<typeof userEvent.setup>, label: string) =>
+  user.click(screen.getByRole("button", {
+    name: (accessibleName) => accessibleName.endsWith(label),
+  }));
+
 const regularFilters: RegularCatalogFilters = { query: "", region: "all" };
 const freeFilters: FreeCatalogFilters = { query: "", offer: "all", region: "all" };
 const freePresets: FreeProviderPresetView[] = [
@@ -219,7 +224,13 @@ describe("AddProviderPage", () => {
     renderPage({ onAdded, onStateChanged });
 
     await pickPreset(user, "DeepSeek");
+    expect(screen.getByRole("group", { name: "供应商凭据" }).closest(".provider-wizard"))
+      .not.toHaveClass("panel");
+    await pickModel(user, "deepseek-v4-flash");
+    await pickModel(user, "deepseek-v4-pro");
     expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" })).toBeChecked();
+    expect(screen.queryByRole("link", { name: "官方接入文档" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/使用 models\.dev 的公开美元标价作为估算/)).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("API Key"), "test-key");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
 
@@ -254,6 +265,7 @@ describe("AddProviderPage", () => {
     renderPage({ onAdded, onStateChanged });
 
     await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
     await user.type(screen.getByLabelText("API Key"), "test-key");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
 
@@ -304,12 +316,13 @@ describe("AddProviderPage", () => {
     renderPage();
 
     await pickPreset(user, "智谱 GLM（中国）");
+    await pickModel(user, "glm-5.2");
     await user.type(screen.getByLabelText("API Key"), "test-key");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
 
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("import_model_prices_for_provider", {
       upstreamName: "glm_cn",
-      modelIds: ["glm-5.2", "glm-5.1", "glm-5"],
+      modelIds: ["glm-5.2"],
     });
   });
 
@@ -328,6 +341,7 @@ describe("AddProviderPage", () => {
     renderPage({ onAdded, onStateChanged });
 
     await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
     await user.type(screen.getByLabelText("API Key"), "test-key");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
 
@@ -553,12 +567,10 @@ describe("AddProviderPage", () => {
     await pickPreset(user, "MiniMax（中国）");
 
     expect(screen.getByDisplayValue("https://api.minimaxi.com/v1")).toBeDisabled();
-    expect(screen.getByText("中国开放平台；与国际站 Key 不通用。")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "官方接入文档" })).toHaveAttribute(
-      "href",
-      "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
-    );
+    expect(screen.queryByText("中国开放平台；与国际站 Key 不通用。")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "官方接入文档" })).not.toBeInTheDocument();
     expect(screen.getByText("MiniMax-M3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /MiniMax-M3/ })).toHaveAttribute("aria-pressed", "false");
     expect(await screen.findByText("https://api.minimaxi.com/v1/chat/completions")).toBeInTheDocument();
     expect(screen.getByText("https://api.minimaxi.com/v1/responses")).toBeInTheDocument();
     expect(screen.getByText("https://api.minimaxi.com/v1/messages")).toBeInTheDocument();
@@ -574,7 +586,9 @@ describe("AddProviderPage", () => {
     const local = screen.getByRole("checkbox", { name: /该模型在本机运行/ });
     expect(local).not.toBeChecked();
     expect(local).toBeDisabled();
-    expect(await screen.findByText(/云端地址不能标记为本地模型/)).toBeInTheDocument();
+    const eligibility = screen.getByText(/云端地址不能标记为本地模型/);
+    expect(eligibility).not.toBeVisible();
+    expect(local).toHaveAttribute("aria-describedby", eligibility.id);
   });
 
   it("localizes a model-catalog warning returned while adding a provider", async () => {
@@ -610,7 +624,7 @@ describe("AddProviderPage", () => {
     const local = screen.getByRole("checkbox", { name: /该模型在本机运行/ });
     expect(local).toBeChecked();
     expect(local).toBeEnabled();
-    expect(await screen.findByText(/已检测到本机回环地址/)).toBeInTheDocument();
+    expect(screen.getByText(/已检测到本机回环地址/)).not.toBeVisible();
   });
 
   it("uses local store by default and submits env credentials as references only", async () => {
@@ -618,6 +632,7 @@ describe("AddProviderPage", () => {
     const user = userEvent.setup();
     renderPage();
     await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
 
     expect(screen.getByLabelText("API Key")).toBeInTheDocument();
     await user.click(screen.getByText("高级凭据来源"));

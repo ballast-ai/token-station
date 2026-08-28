@@ -5,6 +5,18 @@ import { describe, expect, it } from "vitest";
 const appCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
 
 describe("retained page theme styles", () => {
+  it("keeps the launch palette synchronized with the resolved App theme", () => {
+    const launchRule = appCss.match(/\.launch-screen\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const darkLaunchRule = appCss.match(
+      /:root\.dark \.launch-screen\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(launchRule).toMatch(/--launch-canvas:\s*#f3f0e9/);
+    expect(launchRule).toMatch(/--launch-ink:\s*#15181b/);
+    expect(darkLaunchRule).toMatch(/--launch-canvas:\s*#111620/);
+    expect(darkLaunchRule).toMatch(/--launch-ink:\s*#eef2f8/);
+  });
+
   it("prevents accidental static-text selection but keeps editable controls selectable", () => {
     const bodyRule = appCss.match(/(?:^|\n)body\s*\{([^}]*)\}/s)?.[1] ?? "";
     const editableRule = appCss.match(
@@ -39,8 +51,8 @@ describe("retained page theme styles", () => {
     const summaryHeaderRule = appCss.match(
       /\.station-content-overview \.overview-summary-card > \[data-slot="card-header"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    const summaryLinkRule = appCss.match(
-      /\.station-content-overview \.overview-summary-link\s*\{([^}]*)\}/s,
+    const summaryActionRule = appCss.match(
+      /\.station-content-overview \.overview-summary-card \[data-slot="card-action"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const alignedSummaryRowsRule = appCss.match(
       /\.station-content-overview \.overview-summary-list,\s*\.station-content-overview \.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,
@@ -51,10 +63,9 @@ describe("retained page theme styles", () => {
     const routeSummaryRowRule = appCss.match(
       /\.station-content-overview \.overview-route-summary \.overview-route-list > div\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    expect(summaryHeaderRule).toMatch(/padding:\s*16px 52px 8px 16px/);
-    expect(summaryLinkRule).toMatch(/top:\s*14px/);
-    expect(summaryLinkRule).toMatch(/right:\s*14px/);
-    expect(summaryLinkRule).toMatch(/bottom:\s*auto/);
+    expect(summaryHeaderRule).toMatch(/padding:\s*16px 16px 8px/);
+    expect(summaryActionRule).toMatch(/align-self:\s*start/);
+    expect(summaryActionRule).toMatch(/justify-self:\s*end/);
     expect(alignedSummaryRowsRule).toMatch(/flex:\s*1/);
     expect(alignedSummaryRowsRule).toMatch(/display:\s*grid/);
     expect(alignedSummaryRowsRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
@@ -62,6 +73,174 @@ describe("retained page theme styles", () => {
     expect(routeSummaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
     expect(routeSummaryRowRule).toMatch(/height:\s*auto/);
     expect(routeSummaryRowRule).toMatch(/min-height:\s*0/);
+  });
+
+  it("uses semantic color surfaces instead of decorative frames on Models and Overview", () => {
+    const rootRule = appCss.match(/:root\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const providerPanelRule = appCss.match(
+      /\.providers-page > \.provider-panel\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerCardRule = appCss.match(
+      /\.provider-card\[data-surface="flat-color-block"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerModelRule = appCss.match(
+      /\.provider-primary-models\[data-surface="plain-model-grid"\] > li\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerModelIndexRule = appCss.match(
+      /\.provider-card \.provider-primary-models\[data-layout="compact-model-index"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerModelNameRule = appCss.match(
+      /\.provider-card \.provider-primary-models strong\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const providerRecoveryRules = Array.from(
+      appCss.matchAll(/\.provider-recovery\s*\{([^}]*)\}/gs),
+    );
+    const providerRecoveryRule = providerRecoveryRules[providerRecoveryRules.length - 1]?.[1] ?? "";
+    const overviewCardRule = appCss.match(
+      /\.overview-page \[data-slot="card"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const overviewGroupRule = appCss.match(
+      /\.overview-runtime-metrics\[data-surface="flat-color-block"\],\s*\.overview-summary-grid\[data-surface="flat-color-block"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const overviewInternalDividerRule = appCss.match(
+      /\.overview-runtime-metrics\[data-surface="flat-color-block"\] > \[data-slot="card"\] \+ \[data-slot="card"\],\s*\.overview-summary-grid\[data-surface="flat-color-block"\] > \[data-slot="card"\] \+ \[data-slot="card"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(rootRule).toMatch(/--content-block-surface:\s*color-mix\(/);
+    expect(rootRule).not.toMatch(/--content-row-surface/);
+    expect(rootRule).not.toMatch(/--overview-(?:agent|route|model)-surface/);
+    expect(providerPanelRule).toMatch(/border:\s*0/);
+    expect(providerCardRule).toMatch(/border:\s*0/);
+    expect(providerCardRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(providerModelRule).toMatch(/border:\s*0/);
+    expect(providerModelRule).toMatch(/background:\s*transparent/);
+    expect(providerModelRule).toMatch(/min-height:\s*30px/);
+    expect(providerModelIndexRule).toMatch(/grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+    expect(providerModelIndexRule).toMatch(/column-gap:\s*24px/);
+    expect(providerModelIndexRule).toMatch(/row-gap:\s*0/);
+    expect(providerModelNameRule).toMatch(/font-weight:\s*500/);
+    expect(providerModelNameRule).toMatch(/font-size:\s*10\.5px/);
+    expect(appCss).toMatch(/@media \(min-width:\s*1400px\)[\s\S]*?compact-model-index[\s\S]*?repeat\(4, minmax\(0, 1fr\)\)/);
+    expect(providerRecoveryRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(providerRecoveryRule).not.toMatch(/var\(--warning\)/);
+    expect(overviewCardRule).toMatch(/border:\s*0/);
+    expect(overviewCardRule).toMatch(/border-radius:\s*0/);
+    expect(overviewCardRule).toMatch(/box-shadow:\s*none/);
+    expect(overviewCardRule).toMatch(/background:\s*transparent/);
+    expect(overviewGroupRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(overviewInternalDividerRule).not.toMatch(/border-left\s*:/);
+  });
+
+  it("uses flat semantic surfaces instead of nested routing frames", () => {
+    const flatRoutingStyles = appCss.slice(appCss.indexOf("/* Flat routing workspace:"));
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const surfaceRule = (pattern: RegExp) => {
+      const rules = Array.from(appCss.matchAll(pattern), (match) => match[1]);
+      return rules.reverse().find((rule: string) => rule.includes("background:")) ?? "";
+    };
+    const routingSectionRule = lastRule(/\.routing-mode-section\s*\{([^}]*)\}/gs);
+    const routingListRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tabs-list\[data-slot="tabs-list"\]\s*\{([^}]*)\}/gs,
+    );
+    const routingIndicatorRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tab\[data-slot="tabs-trigger"\]::after\s*\{([^}]*)\}/gs,
+    );
+    const routingTriggerRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tab\[data-slot="tabs-trigger"\]\s*\{([^}]*)\}/gs,
+    );
+    const activeRoutingTriggerRule = lastRule(
+      /\.routing-mode-tabs \.routing-mode-tab\[data-slot="tabs-trigger"\]\[data-state="active"\],[^{]*\{([^}]*)\}/gs,
+    );
+    const routePanelRule = lastRule(
+      /\.home-page > :is\(\.route-panel, \.direct-route-panel, \.quota-panel\)\s*\{([^}]*)\}/gs,
+    );
+    const directRowRule = lastRule(/\.direct-provider-row\s*\{([^}]*)\}/gs);
+    const tierGridRule = lastRule(/\.route-panel \.tier-grid\s*\{([^}]*)\}/gs);
+    const tierRowRule = surfaceRule(/\.route-panel \.tier-row\s*\{([^}]*)\}/gs);
+    const quotaRowRule = lastRule(/\.quota-entry-row\s*\{([^}]*)\}/gs);
+    const keywordValueRule = lastRule(/\.tier-keyword-value\s*\{([^}]*)\}/gs);
+
+    expect(routingSectionRule).toMatch(/border:\s*0/);
+    expect(routingSectionRule).toMatch(/background:\s*transparent/);
+    expect(routingListRule).toMatch(/border:\s*0/);
+    expect(routingListRule).toMatch(/border-bottom:\s*0/);
+    expect(routingListRule).toMatch(/border-radius:\s*999px/);
+    expect(routingListRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(routingListRule).toMatch(/height:\s*48px/);
+    expect(routingListRule).toMatch(/padding:\s*4px/);
+    expect(routingTriggerRule).toMatch(/height:\s*40px/);
+    expect(routingTriggerRule).toMatch(/border-radius:\s*999px/);
+    expect(activeRoutingTriggerRule).toMatch(/border-radius:\s*999px/);
+    expect(routingIndicatorRule).toMatch(/display:\s*none/);
+    expect(routePanelRule).toMatch(/border:\s*0/);
+    expect(routePanelRule).toMatch(/background:\s*transparent/);
+    expect(directRowRule).toMatch(/border:\s*0/);
+    expect(directRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(tierGridRule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
+    expect(tierRowRule).toMatch(/border:\s*0/);
+    expect(tierRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(quotaRowRule).toMatch(/border:\s*0/);
+    expect(quotaRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(keywordValueRule).toMatch(/border:\s*0/);
+    expect(keywordValueRule).toMatch(/background:\s*transparent/);
+    expect(flatRoutingStyles).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
+    expect(flatRoutingStyles).toMatch(/var\(--surface-2\)/);
+  });
+
+  it("uses the flat directory language for model-first search results", () => {
+    const catalogRule = appCss.match(/\.model-first-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const resultRule = appCss.match(/\.model-first-results button\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const hoverRule = appCss.match(
+      /\.model-first-results button:hover\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const focusRule = appCss.match(
+      /\.model-first-results button:focus-visible\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const inlineNoteRule = appCss.match(/\.inline-note\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const modelChipRule = appCss.match(/\.model-chip\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const selectedModelChipRule = appCss.match(/\.model-chip\.on\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(catalogRule).toMatch(/padding:\s*0/);
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*transparent/);
+    expect(catalogRule).toMatch(/box-shadow:\s*none/);
+    expect(resultRule).toMatch(/border:\s*0/);
+    expect(resultRule).toMatch(/background:\s*transparent/);
+    expect(resultRule).toMatch(/min-height:\s*64px/);
+    expect(hoverRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(focusRule).toMatch(/outline:\s*2px solid var\(--signal\)/);
+    expect(inlineNoteRule).toMatch(/color:\s*var\(--muted\)/);
+    expect(inlineNoteRule).toMatch(/background:\s*transparent/);
+    expect(inlineNoteRule).not.toMatch(/var\(--warning\)/);
+    expect(modelChipRule).toMatch(/font-weight:\s*500/);
+    expect(selectedModelChipRule).toMatch(/font-weight:\s*500/);
+  });
+
+  it("keeps provider configuration on one flat surface", () => {
+    const wizardRule = appCss.match(/\.provider-wizard\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const stepRule = appCss.match(/\.wizard-step\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const indexRule = appCss.match(/\.step-index\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const previewRule = appCss.match(/\.endpoint-preview\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const catalogRule = appCss.match(/\.provider-wizard \.model-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const chipRule = appCss.match(/\.provider-wizard \.model-chip\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const actionsRule = appCss.match(/\.wizard-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(wizardRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(wizardRule).toMatch(/border-radius:\s*12px/);
+    expect(wizardRule).toMatch(/background:\s*var\(--surface\)/);
+    expect(wizardRule).toMatch(/box-shadow:\s*none/);
+    expect(stepRule).not.toMatch(/border-(?:top|right|bottom|left):/);
+    expect(indexRule).toMatch(/background:\s*transparent/);
+    expect(previewRule).toMatch(/border:\s*0/);
+    expect(previewRule).toMatch(/background:\s*transparent/);
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*transparent/);
+    expect(chipRule).toMatch(/border-color:\s*transparent/);
+    expect(chipRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(actionsRule).toMatch(/background:\s*transparent/);
   });
 
   it("keeps a one-row global route snapshot at the top of its summary card", () => {
@@ -99,13 +278,16 @@ describe("retained page theme styles", () => {
     expect(appCss).not.toMatch(/\.routing-scope-item\[data-slot="button"\]\[aria-current="page"\]::before/);
   });
 
-  it("keeps the Agent actions compact in the card's top-right corner", () => {
+  it("keeps the Agent actions compact in the shadcn Card action slot", () => {
     const actionRule = appCss.match(/\.overview-agent-actions\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const cardActionRule = appCss.match(
+      /\.overview-summary-card \[data-slot="card-action"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
-    expect(actionRule).toMatch(/position:\s*absolute/);
-    expect(actionRule).toMatch(/top:\s*14px/);
-    expect(actionRule).toMatch(/right:\s*14px/);
     expect(actionRule).toMatch(/display:\s*flex/);
+    expect(actionRule).toMatch(/gap:\s*6px/);
+    expect(cardActionRule).toMatch(/display:\s*flex/);
+    expect(actionRule).not.toMatch(/position:\s*absolute/);
     expect(appCss).not.toMatch(/\.overview-agent-summary[^}]*padding-bottom:\s*58px/s);
     expect(appCss).not.toMatch(/\.model-test-(?:target|picker|model-name)/);
   });
@@ -167,13 +349,56 @@ describe("retained page theme styles", () => {
     const subnavRule = appCss.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
     expect(subnavRule).toMatch(/overflow-y:\s*auto/);
     expect(pressedNavigationRule).toMatch(/transform:\s*none/);
-    expect(pointerHoverRule).toMatch(/background:\s*var\(--surface\)/);
+    expect(pointerHoverRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(appCss).not.toMatch(
       /(?:^|\n)\.settings-subnav \[data-slot="button"\]\.settings-subnav-item:hover\s*\{/,
     );
     expect(appCss).not.toMatch(
-      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]::before/,
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]::(?:before|after)/,
     );
+  });
+
+  it("uses flat semantic Settings surfaces without selected-item frames", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const settingsCardRule = lastRule(/\.settings-card\s*\{([^}]*)\}/gs);
+    const selectedNavigationRule = lastRule(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]\s*\{([^}]*)\}/gs,
+    );
+    const productSurfaceRule = lastRule(/\.about-product-card\s*\{([^}]*)\}/gs);
+    const appearanceRowRule = lastRule(
+      /\.settings-card > \[data-slot="card-content"\]\.appearance-control-row\s*\{([^}]*)\}/gs,
+    );
+    const themeGroupRule = lastRule(/\.appearance-toggle-group\s*\{([^}]*)\}/gs);
+    const themeItemRule = lastRule(
+      /\.appearance-toggle-group \[data-slot="toggle-group-item"\]\s*\{([^}]*)\}/gs,
+    );
+    const selectedThemeItemRule = lastRule(
+      /\.appearance-toggle-group \[data-slot="toggle-group-item"\]\[data-state="on"\]\s*\{([^}]*)\}/gs,
+    );
+    const languageRowRule = lastRule(
+      /\.settings-card > \[data-slot="card-content"\]\.language-control-row\s*\{([^}]*)\}/gs,
+    );
+    const runtimeHintRule = lastRule(/\.about-runtime-trigger-copy small\s*\{([^}]*)\}/gs);
+    const runtimeLabelRule = lastRule(/\.about-runtime-details dt\s*\{([^}]*)\}/gs);
+
+    expect(settingsCardRule).toMatch(/border:\s*0/);
+    expect(settingsCardRule).toMatch(/background:\s*transparent/);
+    expect(selectedNavigationRule).toMatch(/border:\s*0/);
+    expect(selectedNavigationRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(productSurfaceRule).toMatch(/border:\s*0/);
+    expect(productSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(appearanceRowRule).toMatch(/background:\s*transparent/);
+    expect(themeGroupRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(themeItemRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
+    expect(selectedThemeItemRule).toMatch(/color:\s*var\(--ink\)/);
+    expect(languageRowRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(runtimeHintRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
+    expect(runtimeLabelRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
+    expect(appCss).not.toMatch(/\.theme-preview\s*\{/);
+    expect(appCss).not.toMatch(/\.language-option\s*\{/);
   });
 
   it("returns Settings scrolling to the outer workspace on narrow windows", () => {
@@ -187,6 +412,7 @@ describe("retained page theme styles", () => {
     const contentRule = narrowRules.match(
       /\.settings-page \.settings-content\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const subnavRule = narrowRules.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
 
     expect(workspaceRule).toMatch(/overflow:\s*auto/);
     expect(pageRule).toMatch(/height:\s*auto/);
@@ -194,6 +420,8 @@ describe("retained page theme styles", () => {
     expect(contentRule).toMatch(/overflow-y:\s*visible/);
     expect(contentRule).toMatch(/overscroll-behavior:\s*auto/);
     expect(contentRule).toMatch(/scrollbar-gutter:\s*auto/);
+    expect(subnavRule).toMatch(/border:\s*0/);
+    expect(subnavRule).toMatch(/background:\s*transparent/);
   });
 
   it("uses theme tokens for router JSON code blocks", () => {
@@ -308,7 +536,7 @@ describe("retained page theme styles", () => {
     expect(agentImageRule).toMatch(/width:\s*36px/);
     expect(agentImageRule).toMatch(/height:\s*36px/);
     expect(routeLabelRule).toMatch(/font-size:\s*13px/);
-    expect(selectedAgentRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(selectedAgentRule).toMatch(/background:\s*var\(--surface\)/);
     expect(selectedAgentRule).not.toMatch(/box-shadow:/);
   });
 
@@ -329,6 +557,27 @@ describe("retained page theme styles", () => {
     expect(credentialGridRule).not.toMatch(/1\.25fr/);
   });
 
+  it("uses flat provider catalog and enterprise selection surfaces", () => {
+    const catalogRule = appCss.match(/\.unified-provider-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const providerItemRule = appCss.match(/\.provider-catalog-card\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const providerHoverRule = appCss.match(/\.provider-catalog-card:hover\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const dialogRule = appCss.match(/\.enterprise-route-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const identityRule = appCss.match(/\.enterprise-provider-identity\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const modelOptionRule = appCss.match(/\.enterprise-model-option\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*transparent/);
+    expect(providerItemRule).toMatch(/border:\s*0/);
+    expect(providerItemRule).toMatch(/background:\s*transparent/);
+    expect(providerHoverRule).not.toMatch(/transform:|box-shadow:/);
+    expect(dialogRule).toMatch(/border:\s*0/);
+    expect(dialogRule).toMatch(/box-shadow:\s*none/);
+    expect(identityRule).toMatch(/border:\s*0/);
+    expect(identityRule).toMatch(/background:\s*transparent/);
+    expect(modelOptionRule).toMatch(/border:\s*0/);
+    expect(modelOptionRule).toMatch(/background:\s*transparent/);
+  });
+
   it("keeps the proxy control width stable across runtime states", () => {
     const baseRuntimeRules = Array.from(
       appCss.matchAll(/\.station-runtime-pill\[data-slot="button"\]\s*\{([^}]*)\}/g),
@@ -343,13 +592,13 @@ describe("retained page theme styles", () => {
     expect(stateRuntimeRules).not.toMatch(/(?:^|;)\s*width:/);
   });
 
-  it("styles the pre-connection route card as a neutral preview", () => {
+  it("styles the pre-connection route preview as a neutral filled surface", () => {
     const previewRule = appCss.match(/\.agent-default-route-state\s*\{([^}]*)\}/s)?.[1] ?? "";
     const previewIconRule = appCss.match(/\.agent-default-route-state\s*>\s*span\s*\{([^}]*)\}/s)?.[1] ?? "";
 
-    expect(previewRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(previewRule).toMatch(/border:\s*0/);
     expect(previewRule).toMatch(/color:\s*var\(--muted\)/);
-    expect(previewRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(previewRule).toMatch(/background:\s*var\(--surface\)/);
     expect(previewIconRule).toMatch(/color:\s*var\(--muted\)/);
     expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--signal\)|var\(--success\)/);
   });
@@ -486,13 +735,54 @@ describe("retained page theme styles", () => {
     const statusDetailRule = appCss.match(/\.agent-connect-status small\s*\{([^}]*)\}/s)?.[1] ?? "";
 
     expect(connectBoxRule).toMatch(/min-width:\s*0/);
-    expect(connectBoxRule).toMatch(/flex:\s*1 1 auto/);
+    expect(connectBoxRule).toMatch(/flex:\s*1 1 420px/);
     expect(connectActionsRule).toMatch(/display:\s*flex/);
     expect(connectActionsRule).toMatch(/flex:\s*0 0 auto/);
     expect(connectActionsRule).toMatch(/white-space:\s*nowrap/);
-    expect(statusDetailRule).toMatch(/text-overflow:\s*ellipsis/);
+    expect(statusDetailRule).toMatch(/min-width:\s*0/);
+    expect(statusDetailRule).toMatch(/white-space:\s*normal/);
+    expect(statusDetailRule).toMatch(/text-overflow:\s*clip/);
+    expect(statusDetailRule).not.toMatch(/overflow:\s*hidden/);
     expect(appCss).not.toMatch(
       /\.agent-connect-box\s*\{[^}]*flex-direction:\s*column/s,
     );
+  });
+
+  it("keeps the Agent identity visible and the detail surface rhythm compact", () => {
+    const identitySurfaceRule = appCss.match(
+      /\.agent-route-hero\.agent-flat-surface\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const detailSurfaceRule = appCss.match(
+      /\.agent-connection-detail\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const identityRule = appCss.match(
+      /\.agent-route-hero \.agent-identity\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const identityHeadingRule = appCss.match(
+      /\.agent-identity-copy h1,[^{]*\.agent-identity-copy h2\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const backupPolicyRule = appCss.match(
+      /\.agent-backup-policy\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const backupPathRule = appCss.match(
+      /\.agent-backup-location code\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const rescanRule = appCss.match(
+      /\.agent-rescan-action\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(identitySurfaceRule).toMatch(/flex:\s*0 0 auto/);
+    expect(detailSurfaceRule).toMatch(/gap:\s*8px/);
+    expect(detailSurfaceRule).toMatch(/flex:\s*0 0 auto/);
+    expect(identityRule).toMatch(/flex:\s*0 0 auto/);
+    expect(identityRule).toMatch(/min-width:\s*max-content/);
+    expect(identityHeadingRule).toMatch(/white-space:\s*nowrap/);
+    expect(backupPolicyRule).toMatch(/margin-top:\s*12px/);
+    expect(backupPolicyRule).toMatch(/line-height:\s*1\.6/);
+    expect(backupPathRule).toMatch(/line-height:\s*1\.65/);
+    expect(rescanRule).toMatch(/border-color:\s*color-mix/);
+    expect(rescanRule).toMatch(/color:\s*var\(--muted\)/);
+    expect(appCss).toMatch(/\.agent-backup-location-actions\s*\{[^}]*gap:\s*4px/s);
+    expect(appCss).not.toContain("agent-backup-policy-separator");
   });
 });
