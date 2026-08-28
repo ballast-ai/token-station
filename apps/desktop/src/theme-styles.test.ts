@@ -96,6 +96,9 @@ describe("retained page theme styles", () => {
     const overviewGroupRule = appCss.match(
       /\.overview-runtime-metrics\[data-surface="flat-color-block"\],\s*\.overview-summary-grid\[data-surface="flat-color-block"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const overviewInternalDividerRule = appCss.match(
+      /\.overview-runtime-metrics\[data-surface="flat-color-block"\] > \[data-slot="card"\] \+ \[data-slot="card"\],\s*\.overview-summary-grid\[data-surface="flat-color-block"\] > \[data-slot="card"\] \+ \[data-slot="card"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(rootRule).toMatch(/--content-block-surface:\s*color-mix\(/);
     expect(rootRule).not.toMatch(/--content-row-surface/);
@@ -112,6 +115,7 @@ describe("retained page theme styles", () => {
     expect(overviewCardRule).toMatch(/box-shadow:\s*none/);
     expect(overviewCardRule).toMatch(/background:\s*transparent/);
     expect(overviewGroupRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(overviewInternalDividerRule).not.toMatch(/border-left\s*:/);
   });
 
   it("keeps a one-row global route snapshot at the top of its summary card", () => {

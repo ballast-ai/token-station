@@ -6082,11 +6082,6 @@ pre.block {
   background: var(--content-block-surface);
 }
 
-.overview-runtime-metrics[data-surface="flat-color-block"] > [data-slot="card"] + [data-slot="card"],
-.overview-summary-grid[data-surface="flat-color-block"] > [data-slot="card"] + [data-slot="card"] {
-  border-left: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
-}
-
 .overview-runtime-card {
   margin-bottom: 11px;
   padding-block: 0;
