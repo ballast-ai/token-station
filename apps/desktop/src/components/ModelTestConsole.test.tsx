@@ -30,6 +30,8 @@ function renderConsole(
         onOpenChange={onOpenChange}
         routingMode="direct"
         routeState={routeState}
+        modelContextLabel="当前模型"
+        modelContext="openai-main / gpt-5.6-sol"
       />
     </LanguageProvider>,
   );
@@ -48,6 +50,8 @@ describe("ModelTestConsole", () => {
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
     expect(screen.getByLabelText("测试路由：简单路由")).toHaveAttribute("data-route-source", "running");
+    expect(screen.getByText("当前模型")).toBeInTheDocument();
+    expect(screen.getByText("openai-main / gpt-5.6-sol")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /选择模型/ })).toBeNull();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "消息" })).toHaveFocus());
     expect(screen.getByText("每次发送都会产生一次真实的模型请求，可能计入供应商用量。")).toBeInTheDocument();
@@ -69,6 +73,8 @@ describe("ModelTestConsole", () => {
           routingMode="direct"
           routeState="draft"
           enterpriseRoute
+          modelContextLabel="当前模型"
+          modelContext="enterprise / model"
         />
       </LanguageProvider>,
     );
@@ -282,6 +288,8 @@ describe("ModelTestConsole", () => {
           onOpenChange={onOpenChange}
           routingMode="direct"
           routeState="running"
+          modelContextLabel="当前模型"
+          modelContext="openai-main / gpt-5.6-sol"
         />
       </LanguageProvider>,
     );
@@ -292,6 +300,8 @@ describe("ModelTestConsole", () => {
           onOpenChange={onOpenChange}
           routingMode="direct"
           routeState="running"
+          modelContextLabel="当前模型"
+          modelContext="openai-main / gpt-5.6-sol"
         />
       </LanguageProvider>,
     );

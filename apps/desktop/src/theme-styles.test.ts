@@ -46,7 +46,13 @@ describe("retained page theme styles", () => {
     const statusHeaderRule = appCss.match(
       /\.station-content-overview \.overview-status-card \[data-slot="card-header"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    expect(statusHeaderRule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto/);
+    expect(statusHeaderRule).toMatch(/grid-template-columns:\s*minmax\(132px, \.72fr\) minmax\(0, 1\.28fr\)/);
+
+    const statusFactsRule = appCss.match(
+      /\.station-content-overview \.overview-status-card dl\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    expect(statusFactsRule).toMatch(/grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+    expect(statusFactsRule).toMatch(/justify-items:\s*start/);
 
     const summaryHeaderRule = appCss.match(
       /\.station-content-overview \.overview-summary-card > \[data-slot="card-header"\]\s*\{([^}]*)\}/s,
@@ -252,7 +258,7 @@ describe("retained page theme styles", () => {
     expect(routeSnapshotRule).not.toMatch(/align-content:\s*center/);
   });
 
-  it("nests compact Agent routes without decorative tree lines", () => {
+  it("aligns route scopes and keeps compact Agent routes without decorative tree lines", () => {
     const scopeCardRule = appCss.match(
       /\.routing-scope-item\[data-slot="button"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -268,9 +274,9 @@ describe("retained page theme styles", () => {
     )?.[1] ?? "";
 
     expect(scopeCardRule).toMatch(/min-height:\s*62px/);
-    expect(scopeCardRule).toMatch(/border:\s*1px solid var\(--line\)/);
-    expect(selectedRule).toMatch(/border-color:\s*var\(--signal-selection-border\)/);
-    expect(childDisclosureRule).toMatch(/margin-left:\s*18px/);
+    expect(scopeCardRule).toMatch(/border:\s*0/);
+    expect(selectedRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(childDisclosureRule).toMatch(/margin-left:\s*0/);
     expect(childDisclosureRule).toMatch(/padding-left:\s*0/);
     expect(nestedListRule).toMatch(/border:\s*0/);
     expect(compactAgentRule).toMatch(/height:\s*46px/);
@@ -368,8 +374,8 @@ describe("retained page theme styles", () => {
       /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]\s*\{([^}]*)\}/gs,
     );
     const productSurfaceRule = lastRule(/\.about-product-card\s*\{([^}]*)\}/gs);
-    const appearanceRowRule = lastRule(
-      /\.settings-card > \[data-slot="card-content"\]\.appearance-control-row\s*\{([^}]*)\}/gs,
+    const interfaceSurfaceRule = lastRule(
+      /\.settings-card > \[data-slot="card-content"\]\.interface-preferences-surface\s*\{([^}]*)\}/gs,
     );
     const themeGroupRule = lastRule(/\.appearance-toggle-group\s*\{([^}]*)\}/gs);
     const themeItemRule = lastRule(
@@ -377,9 +383,6 @@ describe("retained page theme styles", () => {
     );
     const selectedThemeItemRule = lastRule(
       /\.appearance-toggle-group \[data-slot="toggle-group-item"\]\[data-state="on"\]\s*\{([^}]*)\}/gs,
-    );
-    const languageRowRule = lastRule(
-      /\.settings-card > \[data-slot="card-content"\]\.language-control-row\s*\{([^}]*)\}/gs,
     );
     const runtimeHintRule = lastRule(/\.about-runtime-trigger-copy small\s*\{([^}]*)\}/gs);
     const runtimeLabelRule = lastRule(/\.about-runtime-details dt\s*\{([^}]*)\}/gs);
@@ -390,11 +393,10 @@ describe("retained page theme styles", () => {
     expect(selectedNavigationRule).toMatch(/background:\s*var\(--signal-soft\)/);
     expect(productSurfaceRule).toMatch(/border:\s*0/);
     expect(productSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
-    expect(appearanceRowRule).toMatch(/background:\s*transparent/);
+    expect(interfaceSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(themeGroupRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(themeItemRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
     expect(selectedThemeItemRule).toMatch(/color:\s*var\(--ink\)/);
-    expect(languageRowRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(runtimeHintRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
     expect(runtimeLabelRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
     expect(appCss).not.toMatch(/\.theme-preview\s*\{/);
@@ -603,7 +605,7 @@ describe("retained page theme styles", () => {
     expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--signal\)|var\(--success\)/);
   });
 
-  it("uses a visible neutral border as the composer's focus indicator", () => {
+  it("uses a quiet filled composer with a local focus indicator", () => {
     const composerRule = appCss.match(
       /\.model-test-composer\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -611,14 +613,31 @@ describe("retained page theme styles", () => {
       /\.model-test-composer:focus-visible\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
 
-    expect(composerRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(composerRule).toMatch(/border:\s*0/);
+    expect(composerRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(composerFocusRule).toMatch(/outline:\s*0/);
-    expect(composerFocusRule).toMatch(
-      /border-color:\s*color-mix\(in srgb, var\(--ink\) 52%, var\(--line\)\)/,
-    );
+    expect(composerFocusRule).toMatch(/box-shadow:\s*inset 0 -2px 0/);
     expect(appCss).toMatch(/--ink:\s*#[0-9a-f]{6}/i);
     expect(composerFocusRule).not.toMatch(/var\(--signal\)/);
-    expect(composerFocusRule).toMatch(/box-shadow:\s*none/);
+  });
+
+  it("uses one free-tier color family without decorative Provider rails", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const guidanceRule = appCss.match(/\.free-key-instruction\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const boundaryRule = appCss.match(/\.free-cost-boundary\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const sectionRule = lastRule(
+      /\.free-config-grid > \.free-credential-panel,\s*\.free-config-grid > \.free-model-panel\s*\{([^}]*)\}/gs,
+    );
+
+    expect(guidanceRule).toMatch(/border:\s*0/);
+    expect(guidanceRule).not.toMatch(/border-left/);
+    expect(guidanceRule).toMatch(/var\(--free-soft\)/);
+    expect(boundaryRule).toMatch(/border:\s*0/);
+    expect(boundaryRule).toMatch(/var\(--free-soft\)/);
+    expect(sectionRule).toMatch(/border:\s*0/);
   });
 
   it("removes Agent discovery motion when reduced motion is requested", () => {

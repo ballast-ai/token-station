@@ -315,6 +315,37 @@ describe("OverviewPage summaries", () => {
 
     expect(screen.getByRole("dialog", { name: "测试模型" })).toBeInTheDocument();
     expect(screen.getByText("测试路由")).toBeInTheDocument();
+    expect(screen.getByText("当前模型")).toBeInTheDocument();
+    expect(screen.getByText("openai-main / gpt-5.6-sol")).toBeInTheDocument();
+  });
+
+  it("summarizes dynamic model candidates without claiming one selected model", async () => {
+    const user = userEvent.setup();
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={{
+            ...state,
+            routing_mode: "tiered",
+            direct_target: null,
+            tiers: {
+              high: { upstream: "openai-main", model: "gpt-5.6-sol" },
+              mid: { upstream: "openai-main", model: "gpt-5.6-terra" },
+              low: { upstream: "openai-main", model: "gpt-5.6-luna" },
+            },
+          }}
+          registry={registry}
+          agents={agents}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "验证模型连接" }));
+
+    expect(screen.getByText("候选模型")).toBeInTheDocument();
+    expect(screen.getByText("3 个候选模型")).toBeInTheDocument();
+    expect(screen.queryByText("openai-main / gpt-5.6-sol")).toBeNull();
   });
 
   it("uses the backend Home-Gateway identity for the model test route label", async () => {

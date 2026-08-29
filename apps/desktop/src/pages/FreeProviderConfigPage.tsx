@@ -171,6 +171,7 @@ export default function FreeProviderConfigPage({
           className="panel free-credential-panel"
           role="group"
           aria-label={copy("Provider credentials", "供应商凭据", "供應商憑證", "プロバイダー資格情報")}
+          data-surface="flat-color-block"
           data-onboarding-target="provider-credential"
         >
           <div className="panel-head">
@@ -260,6 +261,7 @@ export default function FreeProviderConfigPage({
           className="panel free-model-panel"
           role="group"
           aria-label={copy("Provider models", "供应商模型", "供應商模型", "プロバイダーのモデル")}
+          data-surface="flat-color-block"
           data-onboarding-target="provider-models"
         >
           <div className="panel-head free-model-head">

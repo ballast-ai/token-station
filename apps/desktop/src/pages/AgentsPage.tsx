@@ -56,7 +56,7 @@ export default function AgentsPage({
 }: AgentsPageProps) {
   const { copy } = useLocalizedCopy();
   const connections = mode === "connections";
-  const [routeListOpen, setRouteListOpen] = useState(false);
+  const [routeListOpen, setRouteListOpen] = useState(true);
   const revealOrder = new Map(
     registry
       .filter((metadata) => revealingAgentIds.has(metadata.agent_id))
@@ -143,7 +143,7 @@ export default function AgentsPage({
                     </Button>
                     <div className="agent-route-disclosure">
                       <Button
-                        className="agent-route-disclosure-trigger agent-route-child-trigger"
+                        className="agent-route-disclosure-trigger agent-route-child-trigger routing-scope-item"
                         variant="ghost"
                         type="button"
                         aria-label={copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}

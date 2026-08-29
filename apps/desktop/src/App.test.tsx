@@ -2708,8 +2708,8 @@ describe("desktop station navigation", () => {
     expect(within(settingsNavigation).queryByRole("button", { name: /路由表/ })).toBeNull();
     expect(within(settingsNavigation).queryByRole("button", { name: /插件/ })).toBeNull();
     expect(within(settingsNavigation).getByRole("button", { name: /Agent 显示/ })).toBeInTheDocument();
-    expect(within(settingsNavigation).getByRole("button", { name: /外观/ })).toBeInTheDocument();
-    expect(within(settingsNavigation).getByRole("button", { name: /语言/ })).toBeInTheDocument();
+    expect(within(settingsNavigation).getByRole("button", { name: /外观与语言/ })).toBeInTheDocument();
+    expect(within(settingsNavigation).queryByRole("button", { name: /^语言/ })).toBeNull();
     expect(within(settingsNavigation).getByRole("button", { name: /请求日志/ })).toBeInTheDocument();
     expect(within(settingsNavigation).getByRole("button", { name: /关于/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /返回/ })).toBeNull();
@@ -2764,11 +2764,10 @@ describe("desktop station navigation", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "Settings" }));
-    const languageButton = screen.getByRole("button", { name: /Language/ });
-    expect(languageButton.querySelector(".lucide-globe")).not.toBeNull();
-    expect(languageButton.querySelector(".lucide-languages")).toBeNull();
-    await user.click(languageButton);
-    expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
+    const interfaceButton = screen.getByRole("button", { name: /Interface/ });
+    expect(interfaceButton.querySelector(".lucide-palette")).not.toBeNull();
+    await user.click(interfaceButton);
+    expect(screen.getByRole("heading", { name: "Interface" })).toBeInTheDocument();
     const languageSelect = screen.getByRole("combobox", { name: "Interface language" });
     expect(languageSelect).toHaveTextContent("English");
     await user.click(languageSelect);

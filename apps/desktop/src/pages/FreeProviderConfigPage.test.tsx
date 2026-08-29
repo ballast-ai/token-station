@@ -56,7 +56,11 @@ it("exposes the real credential, model, and save regions to the spotlight guide"
   render(<FreeProviderConfigPage preset={preset} onBack={vi.fn()} onAdded={vi.fn()} onBusyChange={vi.fn()} />);
 
   expect(screen.getByRole("group", { name: "供应商凭据" }))
+    .toHaveAttribute("data-surface", "flat-color-block");
+  expect(screen.getByRole("group", { name: "供应商凭据" }))
     .toHaveAttribute("data-onboarding-target", "provider-credential");
+  expect(screen.getByRole("group", { name: "供应商模型" }))
+    .toHaveAttribute("data-surface", "flat-color-block");
   expect(screen.getByRole("group", { name: "供应商模型" }))
     .toHaveAttribute("data-onboarding-target", "provider-models");
   expect(screen.getByRole("button", { name: "验证并添加免费供应商" }))

@@ -224,7 +224,7 @@ describe("SettingsHub clipboard feedback", () => {
     expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
   });
 
-  it("uses compact shadcn controls for appearance and language", async () => {
+  it("combines appearance and language in one compact Interface section", async () => {
     const user = userEvent.setup();
     render(
       <ErrorToastProvider>
@@ -240,14 +240,16 @@ describe("SettingsHub clipboard feedback", () => {
       </ErrorToastProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: /外观/ }));
+    const settingsNavigation = screen.getByRole("navigation", { name: "设置分类" });
+    const interfaceButton = within(settingsNavigation).getByRole("button", { name: /外观与语言/ });
+    expect(within(settingsNavigation).queryByRole("button", { name: /^语言/ })).toBeNull();
+    await user.click(interfaceButton);
     const themeGroup = screen.getByRole("radiogroup", { name: "界面主题" });
     expect(within(themeGroup).getAllByRole("radio")).toHaveLength(3);
     const darkTheme = within(themeGroup).getByRole("radio", { name: "深色" });
     await user.click(darkTheme);
     expect(darkTheme).toHaveAttribute("data-state", "on");
 
-    await user.click(screen.getByRole("button", { name: /^语言/ }));
     const languageSelect = screen.getByRole("combobox", { name: "界面语言" });
     expect(languageSelect).toHaveTextContent("简体中文");
     await user.click(languageSelect);
