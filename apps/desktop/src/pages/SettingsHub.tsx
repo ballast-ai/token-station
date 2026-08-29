@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Bot,
-  Globe,
   Info,
   KeyRound,
   Monitor,
@@ -51,7 +50,6 @@ type SettingsSection =
   | "api-key"
   | "agent-visibility"
   | "appearance"
-  | "language"
   | "request-logs"
   | "about";
 
@@ -91,13 +89,15 @@ const SECTIONS: Array<{
     id: "appearance",
     label: "settings.appearance",
     description: "settings.appearanceHint",
+    englishLabel: "Interface",
+    chineseLabel: "外观与语言",
+    traditionalLabel: "外觀與語言",
+    japaneseLabel: "外観と言語",
+    englishDescription: "Theme and display language",
+    chineseDescription: "主题与界面语言",
+    traditionalDescription: "主題與介面語言",
+    japaneseDescription: "テーマと表示言語",
     icon: Palette,
-  },
-  {
-    id: "language",
-    label: "settings.language",
-    description: "settings.languageHint",
-    icon: Globe,
   },
   {
     id: "request-logs",
@@ -187,7 +187,7 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
 
 function AppearancePanel() {
   const { theme, resolvedTheme, setTheme } = useTheme();
-  const { t } = useLanguage();
+  const { language, setLanguage, t, copy } = useLanguage();
   const choices: Array<{ value: Theme; label: string; hint: string; icon: LucideIcon }> = [
     { value: "light", label: t("appearance.light"), hint: t("appearance.lightHint"), icon: Sun },
     { value: "dark", label: t("appearance.dark"), hint: t("appearance.darkHint"), icon: Moon },
@@ -201,40 +201,67 @@ function AppearancePanel() {
     },
   ];
   return (
-    <Card className="settings-card appearance-panel">
+    <Card className="settings-card appearance-panel interface-preferences-panel">
       <CardHeader className="panel-head">
-        <CardTitle><h2>{t("appearance.title")}</h2></CardTitle>
-        <p className="sub">{t("appearance.description")}</p>
+        <CardTitle><h2>{copy("Interface", "外观与语言", "外觀與語言", "外観と言語")}</h2></CardTitle>
+        <p className="sub">{copy(
+          "Choose the App theme and display language.",
+          "统一设置应用主题与界面语言。",
+          "統一設定應用程式主題與介面語言。",
+          "アプリのテーマと表示言語を設定します。",
+        )}</p>
       </CardHeader>
-      <CardContent className="appearance-control-row">
-        <Field orientation="horizontal">
-          <FieldLabel id="appearance-theme-label">{t("appearance.groupLabel")}</FieldLabel>
-          <ToggleGroup
-            className="appearance-toggle-group"
-            type="single"
-            value={theme}
-            aria-labelledby="appearance-theme-label"
-            onValueChange={(value) => {
-              if (value) setTheme(value as Theme);
-            }}
-          >
-            {choices.map((choice) => {
-              const Icon = choice.icon;
-              return (
-                <ToggleGroupItem
-                  key={choice.value}
-                  value={choice.value}
-                  aria-label={choice.label}
-                  title={choice.hint}
-                >
-                  <Icon aria-hidden="true" />
-                  <span>{choice.label}</span>
-                </ToggleGroupItem>
-              );
-            })}
-          </ToggleGroup>
-          <FieldDescription className="sr-only">{t("appearance.description")}</FieldDescription>
-        </Field>
+      <CardContent className="interface-preferences-surface">
+        <div className="appearance-control-row">
+          <Field orientation="horizontal">
+            <FieldLabel id="appearance-theme-label">{t("appearance.groupLabel")}</FieldLabel>
+            <ToggleGroup
+              className="appearance-toggle-group"
+              type="single"
+              value={theme}
+              aria-labelledby="appearance-theme-label"
+              onValueChange={(value) => {
+                if (value) setTheme(value as Theme);
+              }}
+            >
+              {choices.map((choice) => {
+                const Icon = choice.icon;
+                return (
+                  <ToggleGroupItem
+                    key={choice.value}
+                    value={choice.value}
+                    aria-label={choice.label}
+                    title={choice.hint}
+                  >
+                    <Icon aria-hidden="true" />
+                    <span>{choice.label}</span>
+                  </ToggleGroupItem>
+                );
+              })}
+            </ToggleGroup>
+            <FieldDescription className="sr-only">{t("appearance.description")}</FieldDescription>
+          </Field>
+        </div>
+        <div className="language-control-row">
+          <Field orientation="horizontal">
+            <FieldLabel htmlFor="interface-language">{t("language.groupLabel")}</FieldLabel>
+            <Select value={language} onValueChange={(value) => setLanguage(value as Language)}>
+              <SelectTrigger id="interface-language" aria-label={t("language.groupLabel")}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="end">
+                <SelectGroup>
+                  {LANGUAGE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value} textValue={option.label}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <FieldDescription className="sr-only">{t("language.description")}</FieldDescription>
+          </Field>
+        </div>
       </CardContent>
     </Card>
   );
@@ -322,38 +349,6 @@ const LANGUAGE_OPTIONS: Array<{
   { value: "zh-TW", label: "繁體中文", hint: "language.zhTWHint" },
   { value: "ja", label: "日本語", hint: "language.jaHint" },
 ];
-
-function LanguagePanel() {
-  const { language, setLanguage, t } = useLanguage();
-  return (
-    <Card className="settings-card language-panel">
-      <CardHeader className="panel-head">
-        <CardTitle><h2>{t("language.title")}</h2></CardTitle>
-        <p className="sub">{t("language.description")}</p>
-      </CardHeader>
-      <CardContent className="language-control-row">
-        <Field orientation="horizontal">
-          <FieldLabel htmlFor="interface-language">{t("language.groupLabel")}</FieldLabel>
-          <Select value={language} onValueChange={(value) => setLanguage(value as Language)}>
-            <SelectTrigger id="interface-language" aria-label={t("language.groupLabel")}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent position="popper" align="end">
-              <SelectGroup>
-                {LANGUAGE_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value} textValue={option.label}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          <FieldDescription className="sr-only">{t("language.description")}</FieldDescription>
-        </Field>
-      </CardContent>
-    </Card>
-  );
-}
 
 function LocalRoutingSettings({
   providers,
@@ -602,7 +597,6 @@ function SettingsHubContent({
           />
         )}
         {section === "appearance" && <AppearancePanel />}
-        {section === "language" && <LanguagePanel />}
         {section === "request-logs" && (
           <section className="settings-request-logs">
             <header className="overview-heading">

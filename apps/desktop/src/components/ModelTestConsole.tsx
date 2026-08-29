@@ -17,6 +17,8 @@ interface ModelTestConsoleProps {
   routingMode: StateView["routing_mode"];
   routeState: "running" | "draft";
   enterpriseRoute?: boolean;
+  modelContextLabel: string;
+  modelContext: string;
 }
 
 export type TranscriptItem = ModelTestMessage & {
@@ -121,6 +123,8 @@ export default function ModelTestConsole({
   routingMode,
   routeState,
   enterpriseRoute = false,
+  modelContextLabel,
+  modelContext,
 }: ModelTestConsoleProps) {
   const { copy } = useLocalizedCopy();
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -403,9 +407,15 @@ export default function ModelTestConsole({
             )}
           >
             <Route aria-hidden="true" />
-            <span>
-              <small>{routeStateLabel}</small>
-              <strong>{routeModeLabel}</strong>
+            <span className="model-test-route-context">
+              <span>
+                <small>{routeStateLabel}</small>
+                <strong>{routeModeLabel}</strong>
+              </span>
+              <span className="model-test-model-context" title={modelContext}>
+                <small>{modelContextLabel}</small>
+                <code>{modelContext}</code>
+              </span>
             </span>
           </div>
         </DialogHeader>
