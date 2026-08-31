@@ -3252,10 +3252,17 @@ describe("desktop station navigation", () => {
         intent: "connect",
         target_config_path: "/tmp/settings.json",
         related_config_paths: [],
-        human_diff: "~ /env/ANTHROPIC_BASE_URL: <设置受管值>\n~ /env/ANTHROPIC_AUTH_TOKEN: <敏感值已隐藏>",
+        human_diff: "~ /env/ANTHROPIC_BASE_URL: <设置受管值>\n~ /env/ANTHROPIC_AUTH_TOKEN: <本机敏感值，明文见确认详情>",
         changes: [
           { operation: "replace", path: { segments: ["env", "ANTHROPIC_BASE_URL"] }, sensitive: false, summary: "<设置受管值>" },
-          { operation: "replace", path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] }, sensitive: true, summary: "<敏感值已隐藏>" },
+          {
+            operation: "replace",
+            path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] },
+            sensitive: true,
+            summary: "<本机敏感值，明文见确认详情>",
+            before_preview: '"previous-local-token"',
+            after_preview: '"token-station-local-token"',
+          },
         ],
       };
       if (command === "apply_agent_plan") return { operation_id: "op-1", maintenance_warning: null };
@@ -3274,7 +3281,8 @@ describe("desktop station navigation", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
     const previewDialog = await screen.findByRole("dialog", { name: "确认接入改动" });
     expect(previewDialog).toHaveTextContent("env.ANTHROPIC_BASE_URL");
-    expect(previewDialog).toHaveTextContent("本机凭据（内容已隐藏）");
+    expect(previewDialog).toHaveTextContent('"previous-local-token"');
+    expect(previewDialog).toHaveTextContent('"token-station-local-token"');
     await user.click(within(previewDialog).getByRole("button", { name: "确认接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
     expect(await within(screen.getByTestId("error-toast-viewport")).findByText("Agent 已接入。"))

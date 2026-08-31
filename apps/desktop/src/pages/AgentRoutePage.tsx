@@ -128,17 +128,11 @@ function planFiles(plan: ConfigPlanView, direction: "forward" | "reverse" = "for
 
 function changeState(
   operation: ConfigPlanView["changes"][number]["operation"],
-  sensitive: boolean,
   side: "before" | "after",
   intent: "connect" | "restore" | "review",
   preview: string | undefined,
   copy: LocalizedCopy,
 ) {
-  if (sensitive) {
-    return side === "before"
-      ? copy("Current sensitive value (content hidden)", "当前敏感值（内容已隐藏）", "目前敏感值（內容已隱藏）", "現在の機密値（内容は非表示）")
-      : copy("Local credential (content hidden)", "本机凭据（内容已隐藏）", "本機憑證（內容已隱藏）", "ローカル認証情報（内容は非表示）");
-  }
   if (preview !== undefined) return preview;
   if (side === "before") {
     return copy("Not set", "未设置", "未設定", "未設定");
@@ -1090,13 +1084,13 @@ export default function AgentRoutePage({
                           <div className="agent-change-states">
                             <div>
                               <span>{copy("Before", "修改前", "修改前", "変更前")}</span>
-                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "before", pendingPlan.intent, beforePreview, copy)}</strong>
+                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "before", pendingPlan.intent, beforePreview, copy)}</strong>
                               {beforeMeaning ? <small>{beforeMeaning}</small> : null}
                             </div>
                             <span className="agent-change-arrow" aria-hidden="true">→</span>
                             <div className="after">
                               <span>{copy("After", "修改后", "修改後", "変更後")}</span>
-                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "after", pendingPlan.intent, afterPreview, copy)}</strong>
+                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "after", pendingPlan.intent, afterPreview, copy)}</strong>
                               {afterMeaning ? <small>{afterMeaning}</small> : null}
                             </div>
                           </div>

@@ -249,9 +249,10 @@ pub struct CompatibilityDecision {
     pub allowed_actions: std::collections::BTreeSet<AllowedAction>,
 }
 
-/// Redacted, IPC-safe view of a server-held configuration plan. Secret patch
-/// values and complete projected documents never enter this type. A plan can
-/// include bounded semantic previews for fields the Connector marks non-secret.
+/// Local-only IPC view of a server-held configuration plan. It carries the
+/// exact field values, including credentials, so the local user can review
+/// every configuration change before it is applied. Complete projected
+/// documents and internal patch data remain server-held.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigChangePlan {
@@ -279,8 +280,9 @@ pub struct ConfigChangePlan {
     pub required_confirmations: Vec<ConfirmationKind>,
 }
 
-/// Public contract for one reversible Connector projection. It contains only
-/// bounded non-secret previews. Exact patch values stay in the prepared plan.
+/// Public contract for one reversible Connector projection. It contains exact
+/// field values for the local confirmation UI; complete projected documents stay
+/// in the prepared plan.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorProjection {
