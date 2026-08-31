@@ -963,6 +963,593 @@ body :is(input, textarea, [contenteditable="true"]) {
   }
 }
 
+/* Request log audit workbench: one dialog frame, flat sections, one execution rail. */
+.request-detail-dialog[data-slot="dialog-content"] {
+  width: min(1320px, calc(100vw - 32px));
+  max-width: 1320px;
+  gap: 0;
+  padding: 24px 28px 26px;
+}
+
+.request-detail-dialog [data-slot="dialog-header"] {
+  gap: 5px;
+  padding: 0 36px 18px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.request-detail-dialog [data-slot="dialog-title"] {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -.015em;
+}
+
+.request-detail-dialog [data-slot="dialog-description"] {
+  color: var(--muted);
+  font: 10.5px/1.4 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+
+.request-detail-dialog-body {
+  scrollbar-gutter: stable;
+}
+
+.request-detail-dialog .usage-log-expanded {
+  gap: 0;
+  padding: 0;
+}
+
+.request-detail-overview {
+  padding: 18px 0 20px;
+}
+
+.request-detail-outcome {
+  display: flex;
+  align-items: center;
+  gap: 9px 18px;
+  margin-bottom: 14px;
+  color: var(--muted);
+  font: 10px/1.3 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+
+.request-detail-outcome strong {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.request-detail-outcome strong.success {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.request-detail-outcome strong.error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.request-detail-outcome strong.cancelled {
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.request-detail-dialog .usage-log-facts {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.8fr) repeat(5, minmax(108px, 1fr));
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.request-detail-dialog .usage-log-facts > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border-right: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.request-detail-dialog .usage-log-facts > div:first-child { padding-left: 0; }
+.request-detail-dialog .usage-log-facts > div:last-child { border-right: 0; }
+.request-detail-dialog .usage-log-facts dt {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.request-detail-dialog .usage-log-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font: 600 10.5px/1.35 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-detail-dialog .usage-log-facts code { color: inherit; font: inherit; }
+
+.request-detail-measures {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding-top: 13px;
+}
+
+.request-detail-dialog .usage-log-token-facts {
+  gap: 7px 20px;
+  font-size: 10px;
+}
+
+.request-detail-dialog .usage-log-token-facts small {
+  flex-basis: 100%;
+  color: var(--warning);
+}
+
+.request-detail-dialog .request-detail-measures > .usage-log-cost {
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font: 600 10px/1.3 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+}
+
+.request-detail-dialog .receipt-timeline {
+  grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr);
+  gap: 22px 48px;
+  margin: 0;
+  padding: 22px 0 24px;
+  border-top: 1px solid var(--line);
+}
+
+.request-detail-dialog .receipt-timeline h4 {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .1em;
+}
+
+.request-detail-dialog .receipt-event {
+  gap: 10px;
+  padding: 0;
+  border: 0;
+}
+
+.request-detail-dialog .receipt-event + .receipt-event {
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.request-detail-dialog .receipt-event-index {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--signal-soft) 72%, transparent);
+}
+
+.request-detail-dialog .receipt-event strong { font-size: 11px; }
+.request-detail-dialog .receipt-event span { font-size: 10px; }
+.request-detail-dialog .receipt-event small { font-size: 9.5px; }
+
+.request-detail-dialog .receipt-conversions {
+  padding-top: 1px;
+}
+
+.request-detail-dialog .receipt-conversion-heading {
+  margin-bottom: 12px;
+}
+
+.request-detail-dialog .receipt-conversion-flow {
+  position: relative;
+  gap: 0;
+}
+
+.request-detail-dialog .receipt-conversion-step {
+  position: relative;
+  gap: 9px;
+  padding: 0 18px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-detail-dialog .receipt-conversion-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 10px;
+  left: 20px;
+  right: 0;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.request-detail-dialog .receipt-conversion-step > .receipt-event-index,
+.request-detail-dialog .receipt-conversion-step > div {
+  position: relative;
+  z-index: 1;
+}
+
+.request-detail-dialog .receipt-conversion-step > div {
+  padding-right: 2px;
+  background: var(--surface);
+}
+
+.request-detail-dialog .receipt-conversion-step strong { font-size: 10.5px; }
+.request-detail-dialog .receipt-conversion-step code { margin-top: 1px; font-size: 8.5px; }
+.request-detail-dialog .receipt-conversion-step span,
+.request-detail-dialog .receipt-conversion-step small { font-size: 9px; }
+
+.request-detail-dialog .request-plaintext {
+  overflow: visible;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-detail-dialog .request-plaintext > header {
+  min-height: 54px;
+  padding: 14px 0 10px;
+  border-bottom: 0;
+}
+
+.request-detail-dialog .request-plaintext-title {
+  gap: 7px;
+}
+
+.request-detail-dialog .request-plaintext > header strong { font-size: 11.5px; }
+.request-detail-dialog .request-plaintext > header span { font-size: 9.5px; }
+
+.request-detail-dialog .request-plaintext-mode {
+  gap: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-detail-dialog .request-plaintext-mode button {
+  min-height: 28px;
+  padding: 0 1px;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font-size: 10px;
+}
+
+.request-detail-dialog .request-plaintext-mode button[aria-pressed="true"] {
+  color: var(--signal);
+  border-bottom-color: var(--signal);
+  background: transparent;
+}
+
+.request-detail-dialog .request-plaintext-grid {
+  gap: 18px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.request-detail-dialog .request-plaintext-panel {
+  padding: 14px 0 16px;
+}
+
+.request-detail-dialog .request-plaintext-panel + .request-plaintext-panel {
+  padding-left: 18px;
+  border-left: 1px solid var(--line);
+}
+
+.request-detail-dialog .request-plaintext-scroll {
+  border: 0;
+  border-radius: 4px;
+  background: var(--canvas);
+}
+
+.request-detail-dialog .request-semantic-view {
+  gap: 0;
+  padding: 2px 12px;
+}
+
+.request-detail-dialog .request-semantic-block {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-detail-dialog .request-semantic-block + .request-semantic-block {
+  border-top: 1px solid color-mix(in srgb, var(--line) 74%, transparent);
+}
+
+.request-detail-dialog .request-semantic-block > div {
+  padding: 10px 0 4px;
+  border: 0;
+  background: transparent;
+}
+
+.request-detail-dialog .request-semantic-block.thinking > div {
+  color: var(--muted);
+  background: transparent;
+}
+
+.request-detail-dialog .request-semantic-block > pre {
+  padding: 4px 0 10px;
+  color: var(--ink);
+}
+
+.request-detail-dialog .http-trace-inspector {
+  padding: 0 0 8px;
+  overflow: visible;
+  background: linear-gradient(
+    90deg,
+    transparent 14px,
+    color-mix(in srgb, var(--line-strong) 82%, transparent) 14px,
+    color-mix(in srgb, var(--line-strong) 82%, transparent) 15px,
+    transparent 15px
+  );
+}
+
+.request-detail-dialog .http-trace-legend {
+  justify-content: flex-start;
+  gap: 7px 18px;
+  margin: 0 0 4px 46px;
+  padding: 9px 0 11px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.request-detail-dialog .http-trace-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 8.5px;
+  font-weight: 500;
+}
+
+.request-detail-dialog .http-trace-legend span::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.request-detail-dialog .http-trace-legend .modified { color: var(--signal); background: transparent; }
+.request-detail-dialog .http-trace-legend .added { color: var(--success); background: transparent; }
+.request-detail-dialog .http-trace-legend .removed { color: var(--danger); background: transparent; }
+.request-detail-dialog .http-trace-legend .kept { color: var(--muted); background: transparent; }
+.request-detail-dialog .http-trace-legend .redacted { color: var(--warning); background: transparent; }
+
+.request-detail-dialog .http-trace-stage {
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 16px;
+  margin: 0;
+  padding: 8px 0;
+}
+
+.request-detail-dialog .http-trace-stage-marker {
+  width: 30px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  color: var(--signal);
+  background: var(--surface);
+  font-size: 8.5px;
+}
+
+.request-detail-dialog .http-trace-stage-content {
+  gap: 26px;
+}
+
+.request-detail-dialog .http-packet {
+  min-width: 0;
+  overflow: visible;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-detail-dialog .http-packet > summary {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 0;
+  color: var(--ink);
+  list-style: none;
+  cursor: pointer;
+}
+
+.request-detail-dialog .http-packet > summary::-webkit-details-marker { display: none; }
+
+.request-detail-dialog .http-packet > summary:focus-visible,
+.request-detail-dialog .http-change-list > summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--signal) 60%, transparent);
+  outline-offset: 3px;
+}
+
+.request-detail-dialog .http-packet-summary-copy {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(185px, .7fr) minmax(0, 1.3fr);
+  align-items: baseline;
+  gap: 8px 16px;
+}
+
+.request-detail-dialog .http-trace-stage-content .http-packet-summary-copy {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+
+.request-detail-dialog .http-packet-summary-copy strong {
+  overflow: hidden;
+  font: 600 10.5px/1.35 "IBM Plex Sans", sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-detail-dialog .http-packet-summary-copy code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--signal);
+  font: 600 9.5px/1.45 "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-detail-dialog .http-packet-summary-meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.request-detail-dialog .http-packet-summary-meta em {
+  color: var(--warning);
+  font: 600 8.5px/1 "IBM Plex Mono", monospace;
+  font-style: normal;
+}
+
+.request-detail-dialog :is(.http-packet-disclosure, .http-change-disclosure) {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--ink) 76%, var(--muted));
+  background: var(--surface-2);
+}
+
+.request-detail-dialog :is(.http-packet-disclosure, .http-change-disclosure) svg {
+  width: 17px;
+  height: 17px;
+  stroke-width: 2.4;
+  transition: transform 140ms ease;
+}
+
+.request-detail-dialog :is(.http-packet > summary, .http-change-list > summary):hover :is(.http-packet-disclosure, .http-change-disclosure) {
+  color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.request-detail-dialog :is(.http-packet, .http-change-list)[open] :is(.http-packet-disclosure, .http-change-disclosure) svg {
+  transform: rotate(180deg);
+}
+
+.request-detail-dialog .http-packet-content {
+  margin-bottom: 10px;
+  padding-left: 13px;
+  border-left: 1px solid var(--line-strong);
+}
+
+.request-detail-dialog .http-packet-section {
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.request-detail-dialog .http-packet-section:last-child { border-bottom: 0; }
+
+.request-detail-dialog .http-packet-section-title {
+  padding: 7px 0;
+  background: transparent;
+}
+
+.request-detail-dialog .http-header-row {
+  padding: 7px 0;
+}
+
+.request-detail-dialog .http-packet-section.body pre {
+  padding: 10px 0;
+}
+
+.request-detail-dialog .http-change-list,
+.request-detail-dialog .http-change-empty {
+  margin: 7px 0 0 46px;
+  border: 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--signal) 32%, var(--line));
+  border-radius: 0;
+  background: transparent;
+}
+
+.request-detail-dialog .http-change-list > summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 9px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.request-detail-dialog .http-change-list > summary::-webkit-details-marker { display: none; }
+.request-detail-dialog .http-change-list > summary strong { color: var(--ink); font-weight: 550; }
+.request-detail-dialog .http-change-summary-meta { display: flex; align-items: center; gap: 10px; color: var(--signal); font: 8.5px/1 "IBM Plex Mono", monospace; }
+.request-detail-dialog .http-change-list > div { max-height: 220px; overflow: auto; border-top: 1px solid var(--line); }
+.request-detail-dialog .http-change-row { padding: 8px 0; }
+.request-detail-dialog .http-change-empty { padding: 9px 0; }
+
+@media (max-width: 1000px) {
+  .request-detail-dialog .usage-log-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .request-detail-dialog .usage-log-facts > div:first-child { padding-left: 14px; }
+  .request-detail-dialog .usage-log-facts > div:nth-child(3n) { border-right: 0; }
+  .request-detail-dialog .usage-log-facts > div:nth-child(n + 4) { border-top: 1px solid var(--line); }
+}
+
+@media (max-width: 760px) {
+  .request-detail-dialog[data-slot="dialog-content"] {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+    padding: 20px;
+  }
+
+  .request-detail-outcome,
+  .request-detail-measures { align-items: flex-start; flex-wrap: wrap; }
+  .request-detail-dialog .usage-log-facts { grid-template-columns: 1fr; }
+  .request-detail-dialog .usage-log-facts > div {
+    padding: 10px 0;
+    border-top: 1px solid var(--line);
+    border-right: 0;
+  }
+  .request-detail-dialog .usage-log-facts > div:first-child { padding-left: 0; border-top: 0; }
+  .request-detail-dialog .receipt-timeline { grid-template-columns: 1fr; gap: 20px; }
+  .request-detail-dialog .receipt-conversion-flow { grid-template-columns: 1fr; gap: 12px; }
+  .request-detail-dialog .receipt-conversion-step { padding: 0; }
+  .request-detail-dialog .receipt-conversion-step:not(:last-child)::after {
+    top: 20px;
+    bottom: -12px;
+    left: 10px;
+    right: auto;
+    width: 1px;
+    height: auto;
+  }
+  .request-detail-dialog .request-plaintext-grid { grid-template-columns: 1fr; }
+  .request-detail-dialog .request-plaintext-panel + .request-plaintext-panel {
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+  .request-detail-dialog .http-trace-stage-content { grid-template-columns: 1fr; gap: 8px; }
+  .request-detail-dialog .http-packet-summary-copy { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .request-detail-dialog .http-header-row { grid-template-columns: minmax(96px, .4fr) minmax(0, 1fr); }
+  .request-detail-dialog .http-header-row small { grid-column: 2; justify-self: start; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .request-detail-dialog :is(.http-packet-disclosure, .http-change-disclosure) svg { transition: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .provider-card,
   .model-chip {
