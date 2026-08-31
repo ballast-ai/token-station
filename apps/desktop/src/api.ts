@@ -26,7 +26,7 @@ export interface ProviderView {
   south_header_auth_v1_unavailable_reason?: SouthUnavailableReason | null;
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
-  /** Enterprise route created through the fixed Token-station provider flow. */
+  /** Provider Channel created through the managed Token-station endpoint flow. */
   managed_route?: boolean;
   access_tier?: "free" | "paid";
   /** Declared quota plan for local estimates; absent means non-windowed or usage-based. */
@@ -1036,11 +1036,9 @@ export const discoverProviderModels = (
   });
 
 export const verifyEnterpriseRoute = (
-  name: string,
   base_url: string,
   api_key: string,
 ) => invoke<ModelDiscoveryView>("verify_enterprise_route", {
-  name,
   baseUrl: base_url,
   apiKey: api_key,
 });

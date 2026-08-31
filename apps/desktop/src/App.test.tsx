@@ -1881,7 +1881,6 @@ describe("desktop station navigation", () => {
       model: "enterprise-reasoner",
     });
     expect(invokeMock).toHaveBeenCalledWith("verify_enterprise_route", {
-      name: "tokenstation",
       baseUrl: enterpriseProvider.base_url,
       apiKey: "secret-key",
     });

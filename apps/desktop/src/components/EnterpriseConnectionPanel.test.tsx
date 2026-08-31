@@ -1,17 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderView } from "../api";
 import EnterpriseConnectionPanel from "./EnterpriseConnectionPanel";
-
-const connectedProvider: ProviderView = {
-  name: "tokenstation",
-  provider: "openai-compatible",
-  base_url: "https://api.example.com/v1",
-  models: ["enterprise-reasoner"],
-  has_auth: true,
-  managed_route: true,
-};
 
 const liveDiscovery = {
   models: ["enterprise-chat", "enterprise-reasoner"],
@@ -21,13 +11,12 @@ const liveDiscovery = {
 };
 
 describe("EnterpriseConnectionPanel", () => {
-  it("extends an existing managed provider with another verified model", async () => {
+  it("keeps every discovered model selectable for the submitted endpoint", async () => {
     const user = userEvent.setup();
     const onVerify = vi.fn().mockResolvedValue(liveDiscovery);
     const onConnect = vi.fn().mockResolvedValue(true);
     render(
       <EnterpriseConnectionPanel
-        existingProvider={connectedProvider}
         busy={false}
         onVerify={onVerify}
         onConnect={onConnect}
@@ -35,19 +24,18 @@ describe("EnterpriseConnectionPanel", () => {
     );
 
     expect(screen.getByText("Token-station")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Base URL" }))
-      .toHaveValue("https://api.example.com/v1");
-    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeEnabled();
+    await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
     await user.type(screen.getByLabelText("API Key"), "replacement-key");
     await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
 
-    expect(await screen.findByRole("radio", { name: "enterprise-reasoner, 已添加" })).toBeDisabled();
+    expect(await screen.findByRole("radio", { name: "enterprise-reasoner" })).toBeEnabled();
     expect(screen.getByRole("radio", { name: "enterprise-chat" })).toBeEnabled();
     await user.click(screen.getByRole("radio", { name: "enterprise-chat" }));
     await user.click(screen.getByRole("button", { name: "添加并使用" }));
 
     await waitFor(() => expect(onConnect).toHaveBeenCalledWith({
-      name: "tokenstation",
       baseUrl: "https://api.example.com/v1",
       apiKey: "replacement-key",
       model: "enterprise-chat",
@@ -71,7 +59,6 @@ describe("EnterpriseConnectionPanel", () => {
     await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(screen.getByRole("button", { name: "验证并获取模型" }));
     await waitFor(() => expect(onVerify).toHaveBeenCalledWith({
-      name: "tokenstation",
       baseUrl: "https://api.example.com/v1",
       apiKey: "secret-key",
     }));
@@ -87,7 +74,6 @@ describe("EnterpriseConnectionPanel", () => {
     expect(screen.getByRole("button", { name: "添加并使用" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "添加并使用" }));
     await waitFor(() => expect(onConnect).toHaveBeenCalledWith({
-      name: "tokenstation",
       baseUrl: "https://api.example.com/v1",
       apiKey: "secret-key",
       model: "enterprise-reasoner",

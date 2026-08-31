@@ -1,7 +1,6 @@
 import { useState } from "react";
-import type { ModelDiscoveryView, ProviderView } from "../api";
+import type { ModelDiscoveryView } from "../api";
 import {
-  ENTERPRISE_PROVIDER_ID,
   ENTERPRISE_PROVIDER_NAME,
 } from "../providerPresentation";
 import { useLocalizedCopy } from "./LanguageProvider";
@@ -12,29 +11,24 @@ import { Input } from "./ui/input";
 export { ENTERPRISE_PROVIDER_ID, ENTERPRISE_PROVIDER_NAME } from "../providerPresentation";
 
 export interface EnterpriseConnectionInput {
-  name: typeof ENTERPRISE_PROVIDER_ID;
   baseUrl: string;
   apiKey: string;
   model: string;
 }
 
 interface EnterpriseConnectionPanelProps {
-  existingProvider?: ProviderView | null;
   busy: boolean;
-  onVerify: (connection: Pick<EnterpriseConnectionInput, "name" | "baseUrl" | "apiKey">) => Promise<ModelDiscoveryView>;
+  onVerify: (connection: Pick<EnterpriseConnectionInput, "baseUrl" | "apiKey">) => Promise<ModelDiscoveryView>;
   onConnect: (connection: EnterpriseConnectionInput) => boolean | Promise<boolean>;
 }
 
 export default function EnterpriseConnectionPanel({
-  existingProvider = null,
   busy,
   onVerify,
   onConnect,
 }: EnterpriseConnectionPanelProps) {
   const { copy } = useLocalizedCopy();
-  const extendingProvider = existingProvider?.managed_route === true;
-  const configuredModels = new Set(extendingProvider ? existingProvider.models : []);
-  const [baseUrl, setBaseUrl] = useState(extendingProvider ? existingProvider.base_url : "");
+  const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState("");
@@ -57,7 +51,6 @@ export default function EnterpriseConnectionPanel({
     setMessage("");
     try {
       const discovery = await onVerify({
-        name: ENTERPRISE_PROVIDER_ID,
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
       });
@@ -90,7 +83,6 @@ export default function EnterpriseConnectionPanel({
     setMessage("");
     try {
       const started = await onConnect({
-        name: ENTERPRISE_PROVIDER_ID,
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
         model,
@@ -100,31 +92,13 @@ export default function EnterpriseConnectionPanel({
         return;
       }
       setApiKey("");
-      setMessage(extendingProvider
-        ? copy("Model added and selected.", "模型已添加并切换使用。", "模型已新增並切換使用。", "モデルを追加して選択しました。")
-        : copy("Enterprise route added and is being applied.", "企业路由已添加，正在应用配置。", "企業路由已新增，正在套用設定。", "企業ルートを追加し、設定を適用しています。"));
+      setMessage(copy("Enterprise route added and is being applied.", "企业路由已添加，正在应用配置。", "企業路由已新增，正在套用設定。", "企業ルートを追加し、設定を適用しています。"));
     } finally {
       setWorking(false);
     }
   };
 
   const disabled = busy || verifying || working;
-  if (existingProvider && !extendingProvider) {
-    return (
-      <div className="enterprise-provider-collision" role="status">
-        <span>{copy("Reserved provider name is already in use", "保留的供应商名称已被占用", "保留的供應商名稱已被使用", "予約済みプロバイダー名は既に使用されています")}</span>
-        <strong>{ENTERPRISE_PROVIDER_NAME}</strong>
-        <code>{existingProvider.base_url}</code>
-        <p className="enterprise-secret-note">{copy(
-          "Rename or remove this ordinary provider before using the managed enterprise flow.",
-          "请先重命名或删除这个普通供应商，再使用企业托管流程。",
-          "請先重新命名或刪除此一般供應商，再使用企業託管流程。",
-          "この通常プロバイダーの名前を変更するか削除してから、企業管理フローを使用してください。",
-        )}</p>
-      </div>
-    );
-  }
-
   return (
     <div className="enterprise-connection-panel">
       <div className="enterprise-provider-identity">
@@ -132,14 +106,6 @@ export default function EnterpriseConnectionPanel({
           <span>{copy("Provider", "供应商", "供應商", "プロバイダー")}</span>
           <strong>{ENTERPRISE_PROVIDER_NAME}</strong>
         </div>
-        {extendingProvider && (
-          <span className="enterprise-existing-count">{copy(
-            `${existingProvider.models.length} models configured`,
-            `已配置 ${existingProvider.models.length} 个模型`,
-            `已設定 ${existingProvider.models.length} 個模型`,
-            `${existingProvider.models.length} 個のモデルを設定済み`,
-          )}</span>
-        )}
       </div>
       <FieldGroup className="enterprise-credential-grid">
         <Field>
@@ -150,7 +116,7 @@ export default function EnterpriseConnectionPanel({
             type="url"
             placeholder="https://api.example.com/v1"
             value={baseUrl}
-            disabled={disabled || extendingProvider}
+            disabled={disabled}
             onChange={(event) => {
               setBaseUrl(event.target.value);
               invalidateVerification();
@@ -188,30 +154,25 @@ export default function EnterpriseConnectionPanel({
           </div>
           <div className="enterprise-model-options" role="radiogroup" aria-labelledby="enterprise-model-picker-label">
             {models.map((item) => {
-              const configured = configuredModels.has(item);
-              const configuredLabel = copy("Configured", "已添加", "已新增", "追加済み");
               return (
                 <label
                   className="enterprise-model-option"
-                  data-configured={configured || undefined}
                   key={item}
                 >
                   <input
                     type="radio"
                     name="enterprise-model"
                     value={item}
-                    aria-label={configured ? `${item}, ${configuredLabel}` : item}
+                    aria-label={item}
                     checked={model === item}
-                    disabled={disabled || configured}
+                    disabled={disabled}
                     onChange={() => setModel(item)}
                   />
                   <span className="enterprise-model-name">{item}</span>
                   <span className="enterprise-model-option-status" aria-hidden="true">
-                    {configured
-                      ? configuredLabel
-                      : model === item
-                        ? copy("Selected", "已选择", "已選擇", "選択済み")
-                        : ""}
+                    {model === item
+                      ? copy("Selected", "已选择", "已選擇", "選択済み")
+                      : ""}
                   </span>
                 </label>
               );
