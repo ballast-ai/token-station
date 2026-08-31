@@ -488,6 +488,7 @@ pub fn run() {
             preview_provider_removal,
             remove_provider,
             restore_provider,
+            purge_deleted_providers,
             set_tier,
             add_keyword,
             remove_keyword,

@@ -1764,3 +1764,48 @@ pub(crate) fn restore_provider(
     }
     Ok(inner.snapshot())
 }
+
+#[tauri::command]
+pub(crate) fn purge_deleted_providers(
+    state: State<'_, AppStateManaged>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let data_dir = inner.data_dir();
+    let names = provider_tombstones::names(&data_dir)?;
+    let inactive_names = names
+        .iter()
+        .filter(|name| inner.draft["upstreams"].get(name.as_str()).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    let previous_keys = inactive_names
+        .iter()
+        .filter_map(|name| {
+            secrets::store_get(&data_dir, name, "provider_api_key")
+                .ok()
+                .map(|key| (name.clone(), key))
+        })
+        .collect::<Vec<_>>();
+
+    for name in &inactive_names {
+        if let Err(error) = secrets::store_remove(&data_dir, name, "provider_api_key") {
+            for (removed_name, key) in &previous_keys {
+                secrets::store_set(&data_dir, removed_name, "provider_api_key", key).ok();
+            }
+            return Err(error);
+        }
+    }
+    if let Err(error) = provider_tombstones::discard_all(&data_dir) {
+        for (name, key) in &previous_keys {
+            secrets::store_set(&data_dir, name, "provider_api_key", key).ok();
+        }
+        return Err(error);
+    }
+
+    for name in inactive_names {
+        inner.pending_provider_keys.remove(&name);
+        inner.pending_provider_key_removals.remove(&name);
+        inner.bump_upstream_epoch(&name);
+    }
+    Ok(inner.snapshot())
+}

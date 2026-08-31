@@ -5667,6 +5667,58 @@ fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views()
         .expect("empty routing config is rejected")
         .contains("至少配置一档"));
 
+    secrets::store_set(
+        &root.join("data"),
+        "local",
+        "provider_api_key",
+        "local-secret",
+    )
+    .unwrap();
+    let removed_again = remove_provider(app.state(), "local".to_string()).unwrap();
+    assert_eq!(removed_again.deleted_providers, ["local"]);
+    assert_eq!(
+        secrets::store_get(&root.join("data"), "local", "provider_api_key").unwrap(),
+        "local-secret",
+        "recoverable deletion must retain the stored credential"
+    );
+
+    restore_provider(app.state(), "local".to_string()).unwrap();
+    let active_local = {
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        inner.draft["upstreams"]["local"].clone()
+    };
+    provider_tombstones::archive(&root.join("data"), "local", &active_local).unwrap();
+    provider_tombstones::archive(
+        &root.join("data"),
+        "old-account",
+        &json!({"provider": "openai-compatible", "base_url": "https://old.example/v1"}),
+    )
+    .unwrap();
+    secrets::store_set(
+        &root.join("data"),
+        "old-account",
+        "provider_api_key",
+        "old-secret",
+    )
+    .unwrap();
+
+    let purged = purge_deleted_providers(app.state()).unwrap();
+    assert!(purged.deleted_providers.is_empty());
+    assert!(provider_tombstones::names(&root.join("data"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        secrets::store_get(&root.join("data"), "local", "provider_api_key").unwrap(),
+        "local-secret",
+        "an active Provider sharing a tombstone name must retain its credential"
+    );
+    assert!(secrets::store_get(&root.join("data"), "old-account", "provider_api_key").is_err());
+    assert!(purge_deleted_providers(app.state())
+        .unwrap()
+        .deleted_providers
+        .is_empty());
+
     std::fs::remove_dir_all(root).ok();
 }
 

@@ -11,6 +11,7 @@ const baseProps = {
   busy: false,
   onRemove: vi.fn(),
   onRestore: vi.fn(),
+  onPurgeDeleted: vi.fn(),
   onStateChange: vi.fn(),
   onAddProvider: vi.fn(),
   onVerifyEnterprise: vi.fn().mockResolvedValue({

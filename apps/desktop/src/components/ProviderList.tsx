@@ -26,6 +26,7 @@ interface ProviderListProps {
   busy: boolean;
   onRemove: (name: string) => Promise<boolean>;
   onRestore: (name: string) => void;
+  onPurgeDeleted?: () => Promise<boolean>;
   onStateChange: (state: StateView) => void;
 }
 
@@ -37,6 +38,7 @@ export default function ProviderList({
   busy,
   onRemove,
   onRestore,
+  onPurgeDeleted = async () => false,
   onStateChange,
 }: ProviderListProps) {
   const { copy, language } = useLocalizedCopy();
@@ -44,9 +46,12 @@ export default function ProviderList({
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
   const [removing, setRemoving] = useState(false);
+  const [purgeDialogOpen, setPurgeDialogOpen] = useState(false);
+  const [purging, setPurging] = useState(false);
   const providerListRef = useRef<HTMLElement>(null);
   const manageTriggerRef = useRef<HTMLButtonElement | null>(null);
   const removalTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const purgeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const removalRequestRef = useRef(0);
   const modelCount = providers.reduce((total, provider) => total + provider.models.length, 0);
   const activeProvider = providers.find((provider) => provider.name === managedProvider);
@@ -93,6 +98,18 @@ export default function ProviderList({
                 {copy(`Restore ${name}`, `恢复 ${name}`, `恢復 ${name}`, `${name} を復元`)}
               </Button>
             ))}
+            <Button
+              variant="destructive"
+              size="sm"
+              type="button"
+              disabled={busy}
+              onClick={(event) => {
+                purgeTriggerRef.current = event.currentTarget;
+                setPurgeDialogOpen(true);
+              }}
+            >
+              {copy("Empty recycle bin", "清空回收站", "清空回收站", "ゴミ箱を空にする")}
+            </Button>
           </div>
         )}
         {providers.length === 0 && (
@@ -284,6 +301,49 @@ export default function ProviderList({
                 }}
               >
                 {copy("Move to recycle bin", "确认移入回收站", "確認移入回收站", "ゴミ箱に移動")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        )}
+      </Dialog>
+
+      <Dialog open={purgeDialogOpen} onOpenChange={setPurgeDialogOpen}>
+        {purgeDialogOpen && (
+          <DialogContent
+            className="provider-purge-dialog"
+            closeLabel={copy("Close", "关闭", "關閉", "閉じる")}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              restoreFocus(purgeTriggerRef.current);
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>{copy("Empty provider recycle bin?", "清空 Provider 回收站？", "清空供應商回收站？", "プロバイダーのゴミ箱を空にしますか？")}</DialogTitle>
+              <DialogDescription>{copy(
+                `All ${deletedProviders.length} recovery snapshots will be deleted. Credentials unused by active providers will also be removed. This cannot be undone.`,
+                `将删除全部 ${deletedProviders.length} 个恢复快照，并清理未被当前 Provider 使用的本地凭据。此操作无法撤销。`,
+                `將刪除全部 ${deletedProviders.length} 個復原快照，並清理未被當前供應商使用的本機憑證。此操作無法復原。`,
+                `${deletedProviders.length} 件すべての復元スナップショットと、現在のプロバイダーが使用していないローカル認証情報を削除します。この操作は元に戻せません。`,
+              )}</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" type="button" onClick={() => setPurgeDialogOpen(false)}>
+                {copy("Cancel", "取消", "取消", "キャンセル")}
+              </Button>
+              <Button
+                variant="destructive"
+                type="button"
+                disabled={busy || purging}
+                onClick={async () => {
+                  setPurging(true);
+                  try {
+                    if (await onPurgeDeleted()) setPurgeDialogOpen(false);
+                  } finally {
+                    setPurging(false);
+                  }
+                }}
+              >
+                {copy("Empty recycle bin", "清空回收站", "清空回收站", "ゴミ箱を空にする")}
               </Button>
             </DialogFooter>
           </DialogContent>
