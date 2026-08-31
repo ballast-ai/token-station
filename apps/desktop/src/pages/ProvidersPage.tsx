@@ -24,6 +24,7 @@ interface ProvidersPageProps {
   busy: boolean;
   onRemove: (name: string) => Promise<boolean>;
   onRestore: (name: string) => void;
+  onPurgeDeleted: () => Promise<boolean>;
   onStateChange: (state: StateView) => void;
   onAddProvider: () => void;
   onVerifyEnterprise: (connection: Pick<EnterpriseConnectionInput, "name" | "baseUrl" | "apiKey">) => Promise<ModelDiscoveryView>;

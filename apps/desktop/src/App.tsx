@@ -11,6 +11,7 @@ import {
   listFreeProviderPresets,
   listenServeState,
   listenStatusMenuNavigate,
+  purgeDeletedProviders,
   removeKeyword,
   removeProvider,
   restoreProvider,
@@ -1156,6 +1157,10 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
           onRestore={(name) => void run(
             () => restoreProvider(name),
             copy("Provider restored from the recycle bin", "供应商已从回收站恢复", "供應商已從回收站恢復", "プロバイダーがゴミ箱から復元されました"),
+          )}
+          onPurgeDeleted={() => run(
+            purgeDeletedProviders,
+            copy("Provider recycle bin emptied", "Provider 回收站已清空", "供應商回收站已清空", "プロバイダーのゴミ箱を空にしました"),
           )}
           onStateChange={showState}
           onVerifyEnterprise={(connection) => verifyEnterpriseRoute(

@@ -81,6 +81,19 @@ pub(crate) fn discard(data_dir: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn names(data_dir: &Path) -> Result<Vec<String>, String> {
+    Ok(load(data_dir)?.providers.into_keys().collect())
+}
+
+pub(crate) fn discard_all(data_dir: &Path) -> Result<(), String> {
+    let mut file = load(data_dir)?;
+    if !file.providers.is_empty() {
+        file.providers.clear();
+        persist(data_dir, &file)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn list(data_dir: &Path) -> Result<Vec<String>, String> {
     Ok(load(data_dir)?
         .providers
@@ -135,7 +148,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive, contains, discard, get, list, path, take};
+    use super::{archive, contains, discard, discard_all, get, list, names, path, take};
     use serde_json::json;
 
     #[test]
@@ -164,6 +177,12 @@ mod tests {
         archive(&root, "example", &provider).unwrap();
         discard(&root, "example").unwrap();
         assert_eq!(take(&root, "example").unwrap(), None);
+
+        archive(&root, "first", &provider).unwrap();
+        archive(&root, "second", &replacement).unwrap();
+        assert_eq!(names(&root).unwrap(), ["first", "second"]);
+        discard_all(&root).unwrap();
+        assert!(names(&root).unwrap().is_empty());
 
         std::fs::remove_dir_all(root).ok();
     }

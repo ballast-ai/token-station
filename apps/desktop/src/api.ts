@@ -1021,6 +1021,9 @@ export const previewProviderRemoval = (name: string) =>
 export const restoreProvider = (name: string) =>
   invoke<StateView>("restore_provider", { name });
 
+export const purgeDeletedProviders = () =>
+  invoke<StateView>("purge_deleted_providers");
+
 export const discoverProviderModels = (
   name: string,
   base_url: string,
