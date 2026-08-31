@@ -1034,24 +1034,26 @@ body :is(input, textarea, [contenteditable="true"]) {
 
 .request-detail-dialog .usage-log-facts {
   display: grid;
-  grid-template-columns: minmax(220px, 1.8fr) repeat(5, minmax(108px, 1fr));
-  gap: 0;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 24px 48px;
   margin: 0;
-  padding: 0;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  padding: 18px 20px 20px;
+  border-radius: 10px;
+  background: var(--surface-2);
 }
 
 .request-detail-dialog .usage-log-facts > div {
+  grid-column: span 4;
   min-width: 0;
   display: grid;
-  gap: 5px;
-  padding: 12px 14px;
-  border-right: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  gap: 7px;
+  align-content: start;
 }
 
-.request-detail-dialog .usage-log-facts > div:first-child { padding-left: 0; }
-.request-detail-dialog .usage-log-facts > div:last-child { border-right: 0; }
+.request-detail-dialog .usage-log-facts > .request-detail-fact--identity {
+  grid-column: span 6;
+}
+
 .request-detail-dialog .usage-log-facts dt {
   color: var(--muted);
   font-size: 9px;
@@ -1061,11 +1063,10 @@ body :is(input, textarea, [contenteditable="true"]) {
 .request-detail-dialog .usage-log-facts dd {
   min-width: 0;
   margin: 0;
-  overflow: hidden;
   color: var(--ink);
   font: 600 10.5px/1.35 "IBM Plex Mono", "SF Mono", Menlo, monospace;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .request-detail-dialog .usage-log-facts code { color: inherit; font: inherit; }
@@ -1497,16 +1498,6 @@ body :is(input, textarea, [contenteditable="true"]) {
 .request-detail-dialog .http-change-row { padding: 8px 0; }
 .request-detail-dialog .http-change-empty { padding: 9px 0; }
 
-@media (max-width: 1000px) {
-  .request-detail-dialog .usage-log-facts {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .request-detail-dialog .usage-log-facts > div:first-child { padding-left: 14px; }
-  .request-detail-dialog .usage-log-facts > div:nth-child(3n) { border-right: 0; }
-  .request-detail-dialog .usage-log-facts > div:nth-child(n + 4) { border-top: 1px solid var(--line); }
-}
-
 @media (max-width: 760px) {
   .request-detail-dialog[data-slot="dialog-content"] {
     width: calc(100vw - 20px);
@@ -1516,13 +1507,11 @@ body :is(input, textarea, [contenteditable="true"]) {
 
   .request-detail-outcome,
   .request-detail-measures { align-items: flex-start; flex-wrap: wrap; }
-  .request-detail-dialog .usage-log-facts { grid-template-columns: 1fr; }
+  .request-detail-dialog .usage-log-facts { gap: 18px; }
   .request-detail-dialog .usage-log-facts > div {
-    padding: 10px 0;
-    border-top: 1px solid var(--line);
-    border-right: 0;
+    grid-column: 1 / -1;
   }
-  .request-detail-dialog .usage-log-facts > div:first-child { padding-left: 0; border-top: 0; }
+  .request-detail-dialog .usage-log-facts > .request-detail-fact--identity { grid-column: 1 / -1; }
   .request-detail-dialog .receipt-timeline { grid-template-columns: 1fr; gap: 20px; }
   .request-detail-dialog .receipt-conversion-flow { grid-template-columns: 1fr; gap: 12px; }
   .request-detail-dialog .receipt-conversion-step { padding: 0; }

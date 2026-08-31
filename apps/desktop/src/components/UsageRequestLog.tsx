@@ -879,13 +879,13 @@ function ReceiptDetail({
           className="usage-log-facts"
           aria-label={copy("Request audit summary", "请求审计摘要", "請求稽核摘要", "リクエスト監査の概要")}
         >
-          <div><dt>{copy("Request ID", "请求 ID", "請求 ID", "リクエスト ID")}</dt><dd><code>{receipt.request_id}</code></dd></div>
-          <div><dt>{copy("Requested model", "请求模型", "請求模型", "リクエストモデル")}</dt><dd>{receipt.requested_model}</dd></div>
-          <div><dt>{copy("Protocol", "协议", "協議", "プロトコル")}</dt><dd>{receipt.protocol}</dd></div>
-          <div><dt>{copy("Endpoint", "端点", "端點", "エンドポイント")}</dt><dd>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</dd></div>
-          <div><dt>{copy("Transport", "传输", "傳輸", "トランスポート")}</dt><dd>{receipt.stream ? copy("Streaming", "流式", "流式", "ストリーム") : copy("Non-streaming", "非流式", "非流式", "非ストリーム")}</dd></div>
+          <div className="request-detail-fact request-detail-fact--identity"><dt>{copy("Request ID", "请求 ID", "請求 ID", "リクエスト ID")}</dt><dd><code>{receipt.request_id}</code></dd></div>
+          <div className="request-detail-fact request-detail-fact--identity"><dt>{copy("Requested model", "请求模型", "請求模型", "リクエストモデル")}</dt><dd>{receipt.requested_model}</dd></div>
+          <div className="request-detail-fact request-detail-fact--technical"><dt>{copy("Protocol", "协议", "協議", "プロトコル")}</dt><dd>{receipt.protocol}</dd></div>
+          <div className="request-detail-fact request-detail-fact--technical"><dt>{copy("Endpoint", "端点", "端點", "エンドポイント")}</dt><dd>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</dd></div>
+          <div className="request-detail-fact request-detail-fact--technical"><dt>{copy("Transport", "传输", "傳輸", "トランスポート")}</dt><dd>{receipt.stream ? copy("Streaming", "流式", "流式", "ストリーム") : copy("Non-streaming", "非流式", "非流式", "非ストリーム")}</dd></div>
         {receipt.price_version != null && (
-            <div><dt>{copy("Price version", "价格版本", "價格版本", "価格バージョン")}</dt><dd>v{receipt.price_version}</dd></div>
+            <div className="request-detail-fact"><dt>{copy("Price version", "价格版本", "價格版本", "価格バージョン")}</dt><dd>v{receipt.price_version}</dd></div>
         )}
         </dl>
         <div className="request-detail-measures">
