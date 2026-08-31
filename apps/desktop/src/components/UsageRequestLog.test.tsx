@@ -485,6 +485,11 @@ describe("UsageRequestLog", () => {
     const summary = within(row).getByLabelText("请求审计摘要");
     expect(summary.tagName).toBe("DL");
     expect(summary).toHaveClass("usage-log-facts");
+    const identityFacts = summary.querySelectorAll(".request-detail-fact--identity");
+    expect(identityFacts).toHaveLength(2);
+    expect(within(identityFacts[0] as HTMLElement).getByText("req-1")).toBeInTheDocument();
+    expect(within(identityFacts[1] as HTMLElement).getByText("auto")).toBeInTheDocument();
+    expect(summary.querySelectorAll(".request-detail-fact--technical")).toHaveLength(3);
 
     const trace = within(row).getByTestId("receipt-trace");
     expect(trace).toHaveClass("receipt-timeline-compact");
