@@ -10684,9 +10684,9 @@ samp {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
+  grid-template-columns: 160px minmax(0, 1fr);
   align-items: stretch;
-  gap: 26px;
+  gap: 20px;
 }
 
 .settings-sidebar {
@@ -10729,11 +10729,11 @@ samp {
 .settings-subnav [data-slot="button"].settings-subnav-item {
   position: relative;
   min-width: 0;
-  min-height: 54px;
+  min-height: 44px;
   height: auto;
   justify-content: flex-start;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 7px;
+  padding: 5px 7px;
   border: 0;
   border-radius: 8px;
   color: var(--muted);
@@ -10757,6 +10757,8 @@ samp {
 }
 
 .settings-subnav-item > svg {
+  width: 15px;
+  height: 15px;
   stroke-width: 1.75;
 }
 
@@ -10781,13 +10783,13 @@ samp {
 }
 
 .settings-subnav-item strong {
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 650;
 }
 
 .settings-subnav-item small {
   color: var(--muted);
-  font-size: 8.5px;
+  font-size: 8px;
   font-weight: 400;
 }
 
@@ -11378,12 +11380,12 @@ samp {
   }
 
   .settings-page {
-    grid-template-columns: 184px minmax(0, 1fr);
-    gap: 18px;
+    grid-template-columns: 156px minmax(0, 1fr);
+    gap: 16px;
   }
 
   .settings-subnav [data-slot="button"].settings-subnav-item {
-    padding-inline: 9px;
+    padding-inline: 7px;
   }
 }
 
