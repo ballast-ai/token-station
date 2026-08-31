@@ -2,6 +2,13 @@ use crate::*;
 
 pub(crate) const MANAGED_ENTERPRISE_PROVIDER_ID: &str = "tokenstation";
 
+fn is_managed_enterprise_provider_id(name: &str) -> bool {
+    name == MANAGED_ENTERPRISE_PROVIDER_ID
+        || name.strip_prefix("tokenstation_").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 pub(crate) const PROVIDER_BRANDS_BY_BASE_URL: &[(&str, &str)] = &[
     ("https://api.openai.com/v1", "openai"),
     ("https://api.anthropic.com/v1", "anthropic"),
@@ -757,19 +764,38 @@ pub(crate) fn add_managed_enterprise_route(
     api_key: String,
     model: String,
 ) -> Result<StateView, String> {
+    let endpoint = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let base_url = endpoint.as_str();
     let model = model.trim().to_owned();
     if model.is_empty() {
         return Err("企业路由模型不能为空".to_owned());
     }
-    let provider_exists = state.0.lock().unwrap().draft["upstreams"]
-        .get(MANAGED_ENTERPRISE_PROVIDER_ID)
-        .is_some();
-    if provider_exists {
-        return extend_managed_enterprise_route(state, base_url, api_key, model);
+    let (existing_provider, new_provider) = {
+        let inner = state.0.lock().unwrap();
+        let existing_provider = inner.draft["upstreams"]
+            .as_object()
+            .into_iter()
+            .flat_map(|upstreams| upstreams.iter())
+            .find(|(name, upstream)| {
+                is_managed_enterprise_provider_id(name)
+                    && upstream["managed_route"].as_bool() == Some(true)
+                    && upstream["base_url"].as_str() == Some(base_url.as_str())
+            })
+            .map(|(name, _)| name.clone());
+        let new_provider = if existing_provider.is_none() {
+            Some(next_managed_enterprise_provider_id(&inner)?)
+        } else {
+            None
+        };
+        (existing_provider, new_provider)
+    };
+    if let Some(provider) = existing_provider {
+        return extend_managed_enterprise_route(state, provider, base_url, api_key, model);
     }
     add_provider_impl(
         state,
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
+        new_provider.expect("a new managed Provider Channel id was allocated"),
         base_url,
         vec![model],
         Some(api_key),
@@ -781,8 +807,26 @@ pub(crate) fn add_managed_enterprise_route(
     )
 }
 
+pub(crate) fn next_managed_enterprise_provider_id(inner: &AppInner) -> Result<String, String> {
+    let data_dir = inner.data_dir();
+    for index in 1..=10_000 {
+        let candidate = if index == 1 {
+            MANAGED_ENTERPRISE_PROVIDER_ID.to_owned()
+        } else {
+            format!("{MANAGED_ENTERPRISE_PROVIDER_ID}_{index}")
+        };
+        if inner.draft["upstreams"].get(&candidate).is_none()
+            && !provider_tombstones::contains(&data_dir, &candidate)?
+        {
+            return Ok(candidate);
+        }
+    }
+    Err("企业供应商数量已超过支持的上限".to_owned())
+}
+
 fn extend_managed_enterprise_route(
     state: State<'_, AppStateManaged>,
+    provider: String,
     base_url: String,
     api_key: String,
     model: String,
@@ -805,13 +849,11 @@ fn extend_managed_enterprise_route(
     ensure_credential_transport(&endpoint, &egress)?;
 
     let previous_upstream = inner.draft["upstreams"]
-        .get(MANAGED_ENTERPRISE_PROVIDER_ID)
+        .get(&provider)
         .cloned()
         .ok_or_else(|| "托管企业供应商不存在".to_owned())?;
     if previous_upstream["managed_route"].as_bool() != Some(true) {
-        return Err(format!(
-            "供应商 `{MANAGED_ENTERPRISE_PROVIDER_ID}` 已存在，但不是托管企业供应商"
-        ));
+        return Err(format!("供应商 `{provider}` 已存在，但不是托管企业供应商"));
     }
     let configured_base_url = previous_upstream["base_url"]
         .as_str()
@@ -834,32 +876,29 @@ fn extend_managed_enterprise_route(
     let previous_routing = inner.draft.get("routing").cloned();
     let previous_router = inner.draft["router"].clone();
     let previous_state = inner.config_state.clone();
-    inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID]["models"] = json!(models);
-    inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID]["auth"] =
+    inner.draft["upstreams"][&provider]["models"] = json!(models);
+    inner.draft["upstreams"][&provider]["auth"] =
         json!({ "slot": "provider_api_key", "store": true });
     if !inner.draft["routing"].is_object() {
         inner.draft["routing"] = json!({});
     }
     inner.draft["routing"]["mode"] = json!("direct");
     inner.draft["routing"]["direct_target"] = json!({
-        "upstream": MANAGED_ENTERPRISE_PROVIDER_ID,
+        "upstream": provider,
         "model": model
     });
     inner.draft["router"]["routing_mode"] = json!("tiered");
     if let Err(error) = inner.observe_draft() {
-        inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = previous_upstream;
+        inner.draft["upstreams"][&provider] = previous_upstream;
         restore_managed_route_mutation(&mut inner.draft, &previous_routing, &previous_router);
         inner.config_state = previous_state;
         return Err(error);
     }
 
-    inner.pending_provider_keys.insert(
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
-        Zeroizing::new(api_key),
-    );
     inner
-        .pending_provider_key_removals
-        .remove(MANAGED_ENTERPRISE_PROVIDER_ID);
+        .pending_provider_keys
+        .insert(provider.clone(), Zeroizing::new(api_key));
+    inner.pending_provider_key_removals.remove(&provider);
     Ok(inner.snapshot())
 }
 
@@ -953,13 +992,26 @@ pub(crate) fn add_provider_impl(
         ));
     }
 
-    let legacy_managed_upstreams = if managed_route {
+    let has_modern_managed_upstream = inner.draft["upstreams"]
+        .as_object()
+        .into_iter()
+        .flat_map(|upstreams| upstreams.iter())
+        .any(|(upstream_name, upstream)| {
+            is_managed_enterprise_provider_id(upstream_name)
+                && upstream["managed_route"].as_bool() == Some(true)
+        });
+    let legacy_managed_upstreams = if managed_route
+        && name == MANAGED_ENTERPRISE_PROVIDER_ID
+        && !has_modern_managed_upstream
+    {
         inner.draft["upstreams"]
             .as_object()
             .into_iter()
             .flat_map(|upstreams| upstreams.iter())
             .filter(|(legacy_name, upstream)| {
-                legacy_name.as_str() != name && upstream["managed_route"].as_bool() == Some(true)
+                legacy_name.as_str() != name
+                    && !is_managed_enterprise_provider_id(legacy_name)
+                    && upstream["managed_route"].as_bool() == Some(true)
             })
             .map(|(legacy_name, upstream)| (legacy_name.clone(), upstream.clone()))
             .collect::<Vec<_>>()

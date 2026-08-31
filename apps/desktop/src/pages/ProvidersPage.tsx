@@ -3,7 +3,6 @@ import type { ModelDiscoveryView, ProviderView, StateView } from "../api";
 import { Building2, Plus } from "lucide-react";
 import ProviderList from "../components/ProviderList";
 import EnterpriseConnectionPanel, {
-  ENTERPRISE_PROVIDER_ID,
   type EnterpriseConnectionInput,
 } from "../components/EnterpriseConnectionPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
@@ -27,16 +26,13 @@ interface ProvidersPageProps {
   onPurgeDeleted: () => Promise<boolean>;
   onStateChange: (state: StateView) => void;
   onAddProvider: () => void;
-  onVerifyEnterprise: (connection: Pick<EnterpriseConnectionInput, "name" | "baseUrl" | "apiKey">) => Promise<ModelDiscoveryView>;
+  onVerifyEnterprise: (connection: Pick<EnterpriseConnectionInput, "baseUrl" | "apiKey">) => Promise<ModelDiscoveryView>;
   onConnectEnterprise: (connection: EnterpriseConnectionInput) => boolean | Promise<boolean>;
 }
 
 export default function ProvidersPage(props: ProvidersPageProps) {
   const { copy } = useLocalizedCopy();
   const [enterpriseOpen, setEnterpriseOpen] = useState(false);
-  const existingEnterprise = props.providers.find((provider) => (
-    provider.name === ENTERPRISE_PROVIDER_ID
-  )) ?? null;
   return (
     <div className="page-stack providers-page">
       <header className="overview-heading page-heading-with-action">
@@ -66,22 +62,13 @@ export default function ProvidersPage(props: ProvidersPageProps) {
           <DialogHeader>
             <DialogTitle>{copy("Add enterprise model", "添加企业模型", "新增企業模型", "企業モデルを追加")}</DialogTitle>
             <DialogDescription>{copy(
-              existingEnterprise?.managed_route
-                ? "Verify the configured Token-station endpoint and add another model."
-                : "Connect a Token-station endpoint, verify its credential, and select one model.",
-              existingEnterprise?.managed_route
-                ? "验证已配置的 Token-station 地址，并继续添加模型。"
-                : "连接 Token-station 地址，验证凭据并选择一个模型。",
-              existingEnterprise?.managed_route
-                ? "驗證已設定的 Token-station 端點，並繼續新增模型。"
-                : "連接 Token-station 端點，驗證憑據並選擇一個模型。",
-              existingEnterprise?.managed_route
-                ? "設定済みの Token-station エンドポイントを検証し、別のモデルを追加します。"
-                : "Token-station エンドポイントに接続し、認証情報を検証してモデルを1つ選択します。",
+              "Connect a Token-station endpoint, verify its credential, and select one model.",
+              "连接 Token-station 地址，验证凭据并选择一个模型。",
+              "連接 Token-station 端點，驗證憑據並選擇一個模型。",
+              "Token-station エンドポイントに接続し、認証情報を検証してモデルを1つ選択します。",
             )}</DialogDescription>
           </DialogHeader>
           <EnterpriseConnectionPanel
-            existingProvider={existingEnterprise}
             busy={props.busy}
             onVerify={props.onVerifyEnterprise}
             onConnect={async (connection) => {

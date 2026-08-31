@@ -1378,7 +1378,6 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
 
     let result = tauri::async_runtime::block_on(verify_enterprise_route(
         app.state(),
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
         base_url,
         "secret-key".to_owned(),
     ))
@@ -1393,8 +1392,10 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
 }
 
 #[test]
-fn enterprise_verification_rejects_the_reserved_provider_collision_before_network_io() {
+fn enterprise_verification_uses_the_submitted_endpoint_when_the_first_id_is_occupied() {
+    const CATALOG: &str = r#"{"data":[{"id":"second-enterprise-model"}]}"#;
     let root = scratch_home("enterprise-verification-name-collision");
+    let (base_url, server) = serve_model_catalog(vec![(200, CATALOG)]);
     let mut draft = template_for_test(&root);
     draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = json!({
         "provider": "openai-compatible",
@@ -1408,15 +1409,20 @@ fn enterprise_verification_rejects_the_reserved_provider_collision_before_networ
         None,
     )))));
 
-    let error = tauri::async_runtime::block_on(verify_enterprise_route(
+    let result = tauri::async_runtime::block_on(verify_enterprise_route(
         app.state(),
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
-        "not a valid URL".to_owned(),
-        "must-not-leave-process".to_owned(),
+        base_url,
+        "second-key".to_owned(),
     ))
-    .expect_err("the local provider collision must stop verification");
+    .expect("verification allocates an isolated temporary Provider Channel id");
 
-    assert!(error.contains("已存在"), "{error}");
+    assert_eq!(result.source, "live");
+    assert_eq!(result.models, ["second-enterprise-model"]);
+    let state = get_state(app.state());
+    assert_eq!(state.providers.len(), 1);
+    assert_eq!(state.providers[0].name, MANAGED_ENTERPRISE_PROVIDER_ID);
+    assert!(!state.providers[0].managed_route);
+    server.join().expect("model catalog fixture exits");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -4661,8 +4667,8 @@ fn managed_enterprise_command_appends_a_model_to_the_existing_managed_provider()
 }
 
 #[test]
-fn managed_enterprise_command_rejects_an_endpoint_change_without_mutation() {
-    let root = scratch_home("managed-enterprise-command-endpoint-mismatch");
+fn managed_enterprise_command_creates_a_second_channel_for_another_endpoint() {
+    let root = scratch_home("managed-enterprise-command-second-endpoint");
     let app = tauri::test::mock_app();
     assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
         root.join("token-station.json"),
@@ -4677,32 +4683,94 @@ fn managed_enterprise_command_rejects_an_endpoint_change_without_mutation() {
         "enterprise-reasoner".to_owned(),
     )
     .expect("the first managed model is valid");
-    let error = match add_managed_enterprise_route(
+    let view = add_managed_enterprise_route(
         app.state(),
         "https://other.example.com/v1".to_owned(),
-        "replacement-key".to_owned(),
+        "second-key".to_owned(),
         "enterprise-chat".to_owned(),
-    ) {
-        Ok(_) => {
-            panic!("an existing managed provider cannot change endpoints while adding a model")
-        }
-        Err(error) => error,
-    };
-    assert!(error.contains("Base URL"), "{error}");
+    )
+    .expect("another endpoint creates another managed channel");
+
+    let first = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation")
+        .expect("the first managed channel remains visible");
+    assert_eq!(first.base_url, "https://enterprise.example.com/v1");
+    assert_eq!(first.models, ["enterprise-reasoner"]);
+    let second = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation_2")
+        .expect("the second managed channel uses the next stable id");
+    assert_eq!(second.base_url, "https://other.example.com/v1");
+    assert_eq!(second.models, ["enterprise-chat"]);
+    assert!(second.managed_route);
+    let target = view.direct_target.expect("the new offering becomes active");
+    assert_eq!(target.upstream, "tokenstation_2");
+    assert_eq!(target.model.as_deref(), Some("enterprise-chat"));
 
     let managed = app.state::<AppStateManaged>();
-    let inner = managed.0.lock().unwrap();
-    let provider = &inner.draft["upstreams"]["tokenstation"];
-    assert_eq!(
-        provider["base_url"],
-        json!("https://enterprise.example.com/v1")
-    );
-    assert_eq!(provider["models"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        inner.draft["routing"]["direct_target"]["model"],
-        json!("enterprise-reasoner")
-    );
+    let mut inner = managed.0.lock().unwrap();
+    inner
+        .save_draft()
+        .expect("both managed channels and credentials save together");
+    let data_dir = inner.data_dir();
     drop(inner);
+    assert_eq!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key")
+            .expect("the first credential remains stored"),
+        "first-key"
+    );
+    assert_eq!(
+        secrets::store_get(&data_dir, "tokenstation_2", "provider_api_key")
+            .expect("the second credential is stored separately"),
+        "second-key"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_skips_active_and_deleted_reserved_ids() {
+    let root = scratch_home("managed-enterprise-command-reserved-id-allocation");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    for name in ["tokenstation", "tokenstation_2"] {
+        add_provider(
+            app.state(),
+            name.to_owned(),
+            format!("https://{name}.example/v1"),
+            vec!["ordinary-model".to_owned()],
+            None,
+            false,
+        )
+        .expect("an ordinary Provider Channel can own a reserved candidate id");
+    }
+    remove_provider(app.state(), "tokenstation_2".to_owned())
+        .expect("the second candidate moves to the recycle bin");
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://managed.example/v1".to_owned(),
+        "managed-key".to_owned(),
+        "managed-model".to_owned(),
+    )
+    .expect("managed id allocation skips active and deleted candidates");
+
+    let provider = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation_3")
+        .expect("the next free managed id is selected");
+    assert!(provider.managed_route);
+    assert_eq!(provider.models, ["managed-model"]);
+    assert_eq!(view.deleted_providers, ["tokenstation_2"]);
 
     std::fs::remove_dir_all(root).ok();
 }

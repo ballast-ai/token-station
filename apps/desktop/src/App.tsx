@@ -1164,7 +1164,6 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
           )}
           onStateChange={showState}
           onVerifyEnterprise={(connection) => verifyEnterpriseRoute(
-            connection.name,
             connection.baseUrl,
             connection.apiKey,
           )}
