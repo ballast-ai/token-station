@@ -1191,6 +1191,9 @@ describe("provider deletion lifecycle", () => {
     await user.click(manageButton);
     const managerDialog = screen.getByRole("dialog", { name: "管理 team-openai" });
     expect(managerDialog.querySelector(".provider-model-manager")).toBeInTheDocument();
+    expect(within(managerDialog).getAllByText("管理 team-openai")).toHaveLength(1);
+    expect(managerDialog.querySelector(".provider-manager-heading")).toBeNull();
+    expect(managerDialog.querySelector(".provider-manager-count")).toBeNull();
     expect(within(managerDialog).getByRole("button", { name: "关闭" })).toBeInTheDocument();
     expect(providerGroup).not.toHaveClass("expanded");
     expect(within(providerGroup).queryByText("管理 team-openai")).toBeNull();

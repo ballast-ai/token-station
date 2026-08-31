@@ -311,6 +311,64 @@ describe("retained page theme styles", () => {
     expect(bodyRule).toMatch(/overflow-y:\s*auto/);
   });
 
+  it("uses filled hierarchy instead of nested frames inside provider management", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const managerRule = lastRule(
+      /\.provider-management-dialog \.provider-model-manager\s*\{([^}]*)\}/gs,
+    );
+    const catalogRule = lastRule(
+      /\.provider-management-dialog \.model-catalog\s*\{([^}]*)\}/gs,
+    );
+    const chipRule = lastRule(
+      /\.provider-management-dialog \.model-chip\s*\{([^}]*)\}/gs,
+    );
+    const selectedChipRule = lastRule(
+      /\.provider-management-dialog \.model-chip\.on\s*\{([^}]*)\}/gs,
+    );
+    const manualRowRule = lastRule(
+      /\.provider-management-dialog \.custom-model-row\s*\{([^}]*)\}/gs,
+    );
+    const advancedRule = lastRule(
+      /\.provider-management-dialog \.provider-advanced-models\s*\{([^}]*)\}/gs,
+    );
+    const ledgerRowRule = lastRule(
+      /\.provider-management-dialog \.model-ledger-row\s*\{([^}]*)\}/gs,
+    );
+    const ledgerSeparatorRule = lastRule(
+      /\.provider-management-dialog \.model-ledger-row \+ \.model-ledger-row\s*\{([^}]*)\}/gs,
+    );
+    const taskSurfaceRule = lastRule(
+      /\.provider-management-dialog \.provider-edit-fields,\s*\.provider-management-dialog \.provider-detail-summary,\s*\.provider-management-dialog \.provider-transport-status\s*\{([^}]*)\}/gs,
+    );
+    const inputRule = lastRule(
+      /\.select,\s*\.input,\s*\.model-search,[^{]*\{([^}]*)\}/gs,
+    );
+
+    expect(managerRule).toMatch(/padding:\s*0/);
+    expect(managerRule).toMatch(/border:\s*0/);
+    expect(managerRule).toMatch(/background:\s*transparent/);
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(chipRule).toMatch(/border:\s*0/);
+    expect(chipRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(selectedChipRule).toMatch(/border:\s*0/);
+    expect(selectedChipRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(selectedChipRule).toMatch(/box-shadow:\s*none/);
+    expect(manualRowRule).toMatch(/border-top:\s*0/);
+    expect(advancedRule).toMatch(/border:\s*0/);
+    expect(advancedRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(ledgerRowRule).toMatch(/border:\s*0/);
+    expect(ledgerRowRule).toMatch(/border-radius:\s*0/);
+    expect(ledgerRowRule).toMatch(/background:\s*transparent/);
+    expect(ledgerSeparatorRule).toMatch(/border-top:\s*1px solid color-mix\(/);
+    expect(taskSurfaceRule).toMatch(/border:\s*0/);
+    expect(taskSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(inputRule).toMatch(/border:\s*1px solid var\(--line-strong\)/);
+  });
+
   it("keeps long provider-removal impact lists inside the viewport", () => {
     const dialogRule = appCss.match(
       /\.provider-removal-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s,
@@ -692,16 +750,34 @@ describe("retained page theme styles", () => {
   });
 
   it("groups the usage overview without internal dashboard dividers", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const heroRule = lastRule(/\.usage-hero\s*\{([^}]*)\}/gs);
+    const trendAndDetailRule = lastRule(
+      /\.usage-trend-panel,\s*\.usage-detail-panel,\s*\.usage-request-log,\s*\.usage-budget-overview\s*\{([^}]*)\}/gs,
+    );
+    const compositionPanelRule = lastRule(/\.usage-composition-panel\s*\{([^}]*)\}/gs);
     const primaryRule = appCss.match(/\.usage-primary-metric\s*\{([^}]*)\}/s)?.[1] ?? "";
     const healthRule = appCss.match(/\.usage-kpi-grid\s*\{([^}]*)\}/s)?.[1] ?? "";
     const healthItemRule = appCss.match(/\.usage-kpi-grid\s*>\s*div\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const compositionRule = appCss.match(/\.usage-token-rail\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const compositionRule = lastRule(/\.usage-token-rail\s*\{([^}]*)\}/gs);
     const detailRule = appCss.match(/\.usage-token-details\s*\{([^}]*)\}/s)?.[1] ?? "";
 
+    expect(heroRule).toMatch(/border:\s*0/);
+    expect(heroRule).toMatch(/background:\s*transparent/);
+    expect(heroRule).toMatch(/box-shadow:\s*none/);
+    expect(trendAndDetailRule).toMatch(/border:\s*0/);
+    expect(trendAndDetailRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(compositionPanelRule).toMatch(/border:\s*0/);
+    expect(compositionPanelRule).toMatch(/background:\s*transparent/);
     expect(primaryRule).not.toMatch(/border-(?:right|bottom|left|top):/);
     expect(healthRule).toMatch(/gap:/);
     expect(healthItemRule).toMatch(/border-radius:/);
     expect(healthItemRule).not.toMatch(/border-(?:right|bottom|left|top):/);
+    expect(compositionRule).toMatch(/margin:\s*0/);
+    expect(compositionRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(compositionRule).toMatch(/border-radius:/);
     expect(compositionRule).not.toMatch(/border-(?:right|bottom|left|top):/);
     expect(detailRule).not.toMatch(/border:/);
