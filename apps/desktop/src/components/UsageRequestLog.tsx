@@ -219,15 +219,14 @@ function HttpPacket({
   request,
   response,
   headerKinds = new Map<string, HttpChangeKind>(),
-  defaultOpen = false,
 }: {
   label: string;
   request?: HttpRequestView;
   response?: HttpResponseView;
   headerKinds?: Map<string, HttpChangeKind>;
-  defaultOpen?: boolean;
 }) {
   const { copy } = useLocalizedCopy();
+  const isRequest = Boolean(request);
   const headers = request?.headers ?? response?.headers ?? [];
   const body = request?.body ?? response?.body ?? "";
   const truncated = request?.body_truncated ?? response?.body_truncated ?? false;
@@ -235,7 +234,7 @@ function HttpPacket({
     ? `${request.method} ${request.url} HTTP`
     : `HTTP ${response?.status ?? 0}`;
   return (
-    <details className="http-packet" open={defaultOpen}>
+    <details className="http-packet">
       <summary>
         <span className="http-packet-summary-copy">
           <strong>{label}</strong>
@@ -249,7 +248,9 @@ function HttpPacket({
       <div className="http-packet-content">
         <section className="http-packet-section">
           <div className="http-packet-section-title">
-            <strong>HEADERS</strong>
+            <strong>{isRequest
+              ? copy("Request headers", "请求头", "請求標頭", "リクエストヘッダー")
+              : copy("Response headers", "响应头", "回應標頭", "レスポンスヘッダー")}</strong>
             <span>{headers.length}</span>
           </div>
           <div className="http-header-list">
@@ -267,12 +268,20 @@ function HttpPacket({
                   )}</small>
                 </div>
               );
-            }) : <span className="http-empty">{copy("No captured headers", "没有采集到 Header", "沒有擷取到 Header", "取得したヘッダーはありません")}</span>}
+            }) : <span className="http-empty">{isRequest
+              ? copy("No request headers captured", "未采集到请求头", "未擷取到請求標頭", "リクエストヘッダーは取得されていません")
+              : copy("No response headers captured", "未采集到响应头", "未擷取到回應標頭", "レスポンスヘッダーは取得されていません")}</span>}
           </div>
         </section>
         <section className="http-packet-section body">
-          <div className="http-packet-section-title"><strong>BODY</strong></div>
-          <pre>{body ? formatJsonSource(body) : copy("Empty body", "空包体", "空本體", "空の本文")}</pre>
+          <div className="http-packet-section-title">
+            <strong>{isRequest
+              ? copy("Request body", "请求体", "請求本文", "リクエスト本文")
+              : copy("Response body", "响应体", "回應本文", "レスポンス本文")}</strong>
+          </div>
+          <pre>{body ? formatJsonSource(body) : isRequest
+            ? copy("Empty request body", "请求体为空", "請求本文為空", "リクエスト本文は空です")
+            : copy("Empty response body", "响应体为空", "回應本文為空", "レスポンス本文は空です")}</pre>
         </section>
       </div>
     </details>
@@ -334,7 +343,7 @@ function HttpTraceInspector({ plaintext }: { plaintext: RequestPlaintextView }) 
       </div>
       <div className="http-trace-stage">
         <div className="http-trace-stage-marker">01</div>
-        <HttpPacket label={copy("Agent → Token Station", "Agent → Token Station", "Agent → Token Station", "Agent → Token Station")} request={source} defaultOpen />
+        <HttpPacket label={copy("Agent → Token Station", "Agent → Token Station", "Agent → Token Station", "Agent → Token Station")} request={source} />
       </div>
       {trace.upstream_exchanges.map((exchange, index) => {
         const changes = requestChanges(source, exchange.request);

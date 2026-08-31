@@ -443,9 +443,15 @@ describe("UsageRequestLog", () => {
     const dialog = screen.getByRole("dialog", { name: "请求详情" });
     const packets = dialog.querySelectorAll("details.http-packet");
     expect(packets).toHaveLength(4);
-    expect(packets[0]).toHaveAttribute("open");
+    expect(packets[0]).not.toHaveAttribute("open");
     expect(packets[1]).not.toHaveAttribute("open");
+    expect(packets[2]).not.toHaveAttribute("open");
+    expect(packets[3]).not.toHaveAttribute("open");
     expect(dialog.querySelectorAll(".http-packet-disclosure")).toHaveLength(4);
+    expect(within(packets[0] as HTMLElement).getByText("请求头")).toBeInTheDocument();
+    expect(within(packets[0] as HTMLElement).getByText("请求体")).toBeInTheDocument();
+    expect(within(packets[2] as HTMLElement).getByText("响应头")).toBeInTheDocument();
+    expect(within(packets[2] as HTMLElement).getByText("响应体")).toBeInTheDocument();
 
     const changeSet = dialog.querySelector("details.http-change-list");
     expect(changeSet).not.toBeNull();
