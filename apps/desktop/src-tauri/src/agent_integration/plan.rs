@@ -1211,7 +1211,9 @@ fn redact_changes(
                     || is_path_prefix(sensitive, &operation.path)
             });
             let summary = match (operation.operation, sensitive) {
-                (PatchKind::Add | PatchKind::Replace, true) => "<本机敏感值，明文见确认详情>".to_string(),
+                (PatchKind::Add | PatchKind::Replace, true) => {
+                    "<本机敏感值，明文见确认详情>".to_string()
+                }
                 (PatchKind::Add | PatchKind::Replace, false) => "<设置受管值>".to_string(),
                 (PatchKind::Remove, _) => "<移除受管值>".to_string(),
                 (PatchKind::Test, _) => "<核对受管值>".to_string(),
@@ -1278,7 +1280,20 @@ fn operation_preview(operation: &PatchOperation) -> Option<String> {
     if operation.operation == PatchKind::Remove {
         return None;
     }
-    serde_json::to_string(operation.value.as_ref()?).ok()
+    const PREVIEW_CHAR_LIMIT: usize = 4_096;
+    const TRUNCATED_MARKER: &str = "… <truncated>";
+
+    let rendered = serde_json::to_string(operation.value.as_ref()?).ok()?;
+    if rendered.chars().count() <= PREVIEW_CHAR_LIMIT {
+        return Some(rendered);
+    }
+    Some(
+        rendered
+            .chars()
+            .take(PREVIEW_CHAR_LIMIT)
+            .chain(TRUNCATED_MARKER.chars())
+            .collect(),
+    )
 }
 
 fn credential_bindings(
@@ -1510,8 +1525,26 @@ mod tests {
             "region=private",
             "fragment-secret",
         ] {
-            assert!(preview.contains(value), "preview omitted {value}: {preview}");
+            assert!(
+                preview.contains(value),
+                "preview omitted {value}: {preview}"
+            );
         }
+    }
+
+    #[test]
+    fn operation_preview_bounds_large_local_values() {
+        let operation = PatchOperation {
+            operation: PatchKind::Replace,
+            path: ConfigPath {
+                segments: vec!["env".to_owned(), "ANTHROPIC_AUTH_TOKEN".to_owned()],
+            },
+            value: Some(json!("x".repeat(8 * 1024))),
+        };
+
+        let preview = operation_preview(&operation).expect("credential preview");
+        assert!(preview.chars().count() <= 4_128, "preview was not bounded");
+        assert!(preview.ends_with("… <truncated>"));
     }
 
     #[test]

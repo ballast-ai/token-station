@@ -408,6 +408,16 @@ export interface DirectRouteTarget {
   model: string | null;
 }
 
+export interface ModelOfferingRouteTarget {
+  upstream: string;
+  model: string;
+}
+
+export interface RouteContextView {
+  /** Complete, deduplicated Home routing candidates in routing priority order. */
+  model_offerings: ModelOfferingRouteTarget[];
+}
+
 export type AgentRouteMode = "inherit" | "custom" | "profile";
 
 export interface AgentRouteView {
@@ -504,6 +514,8 @@ export interface StateView {
   routing_mode: RoutingMode;
   /** Exact Home target used by Direct mode; null means the draft is incomplete. */
   direct_target?: DirectRouteTarget | null;
+  /** Backend-owned complete routing context. Tiered mode includes every pool member. */
+  route_context: RouteContextView;
   /** Globally shared quota-first rotation accounts, provider plus model, in priority order. */
   quota_accounts: QuotaAccount[];
   serve: ServeView;

@@ -19,12 +19,23 @@ pub(crate) fn clear_provider_scoped_prices(
     inner: &mut AppInner,
     name: &str,
 ) -> Result<bool, String> {
+    clear_provider_scoped_prices_for(inner, std::slice::from_ref(&name))
+}
+
+/// Permanently retire prices for several Provider identities in one table
+/// revision so a recycle-bin purge cannot make a reused name inherit any of
+/// their account-scoped settlement data.
+pub(crate) fn clear_provider_scoped_prices_for<T: AsRef<str>>(
+    inner: &mut AppInner,
+    names: &[T],
+) -> Result<bool, String> {
     let mut pricing = draft_price_table(inner)?;
-    let prefix = format!("{name}/");
     let before = pricing.models.len();
-    pricing
-        .models
-        .retain(|model, _| !model.starts_with(&prefix));
+    pricing.models.retain(|model, _| {
+        !names
+            .iter()
+            .any(|name| model.starts_with(&format!("{}/", name.as_ref())))
+    });
     if pricing.models.len() == before {
         return Ok(false);
     }

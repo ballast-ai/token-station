@@ -94,6 +94,9 @@ const state = {
   allow_cloud_fallback: false,
   routing_mode: "direct",
   direct_target: { upstream: "openai-main", model: "gpt-5.6-sol" },
+  route_context: {
+    model_offerings: [{ upstream: "openai-main", model: "gpt-5.6-sol" }],
+  },
   quota_accounts: [],
   serve: {
     phase: "stopped",
@@ -333,6 +336,13 @@ describe("OverviewPage summaries", () => {
               mid: { upstream: "openai-main", model: "gpt-5.6-terra" },
               low: { upstream: "openai-main", model: "gpt-5.6-luna" },
             },
+            route_context: {
+              model_offerings: [
+                { upstream: "openai-main", model: "gpt-5.6-sol" },
+                { upstream: "openai-main", model: "gpt-5.6-terra" },
+                { upstream: "openai-main", model: "gpt-5.6-luna" },
+              ],
+            },
           }}
           registry={registry}
           agents={agents}
@@ -345,6 +355,43 @@ describe("OverviewPage summaries", () => {
 
     expect(screen.getByText("候选模型")).toBeInTheDocument();
     expect(screen.getByText("3 个候选模型")).toBeInTheDocument();
+    expect(screen.queryByText("openai-main / gpt-5.6-sol")).toBeNull();
+  });
+
+  it("uses the complete backend route context for multi-member tier candidate counts", async () => {
+    const user = userEvent.setup();
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={{
+            ...state,
+            routing_mode: "tiered",
+            direct_target: null,
+            tiers: {
+              high: { upstream: "openai-main", model: "gpt-5.6-sol" },
+              mid: { upstream: "deepseek-main", model: "deepseek-v4" },
+              low: { upstream: null, model: null },
+            },
+            route_context: {
+              model_offerings: [
+                { upstream: "openai-main", model: "gpt-5.6-sol" },
+                { upstream: "openai-main", model: "gpt-5.6-terra" },
+                { upstream: "deepseek-main", model: "deepseek-v4" },
+                { upstream: "deepseek-main", model: "deepseek-v4-flash" },
+              ],
+            },
+          }}
+          registry={registry}
+          agents={agents}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "验证模型连接" }));
+
+    expect(screen.getByText("候选模型")).toBeInTheDocument();
+    expect(screen.getByText("4 个候选模型")).toBeInTheDocument();
     expect(screen.queryByText("openai-main / gpt-5.6-sol")).toBeNull();
   });
 

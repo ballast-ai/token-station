@@ -561,43 +561,53 @@ impl AppInner {
         let draft = self.draft.clone();
         let revision = self.config_state.prepare_save(&draft)?;
         let data_dir = self.data_dir();
-        let mut applied_keys: Vec<(String, Option<String>)> = Vec::new();
-        for (upstream, value) in &self.pending_provider_keys {
-            let previous = secrets::store_get(&data_dir, upstream, "provider_api_key").ok();
-            if let Err(error) = secrets::store_set(&data_dir, upstream, "provider_api_key", value) {
-                for (applied, old_value) in applied_keys.iter().rev() {
-                    restore_provider_key(
-                        &data_dir,
-                        applied,
-                        "provider_api_key",
-                        old_value.as_deref(),
-                    )
-                    .ok();
+        if self.pending_provider_keys.is_empty() {
+            config
+                .save(&self.config_path)
+                .map_err(|error| format!("写配置失败: {error}"))?;
+        } else {
+            secrets::with_locked_store(&data_dir, |store| {
+                let previous = self
+                    .pending_provider_keys
+                    .keys()
+                    .map(|upstream| {
+                        (
+                            upstream.clone(),
+                            store.get(upstream, "provider_api_key").map(str::to_owned),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (upstream, value) in &self.pending_provider_keys {
+                    store.set(upstream, "provider_api_key", value);
                 }
-                return Err(error);
-            }
-            applied_keys.push((upstream.clone(), previous));
-        }
-        if let Err(error) = config.save(&self.config_path) {
-            let mut rollback_errors = Vec::new();
-            for (upstream, previous) in applied_keys.iter().rev() {
-                if let Err(rollback_error) = restore_provider_key(
-                    &data_dir,
-                    upstream,
-                    "provider_api_key",
-                    previous.as_deref(),
-                ) {
-                    rollback_errors.push(rollback_error);
+                let restore_previous = |store: &mut secrets::LockedStore<'_>| {
+                    for (upstream, value) in &previous {
+                        match value {
+                            Some(value) => store.set(upstream, "provider_api_key", value),
+                            None => store.remove(upstream, "provider_api_key"),
+                        }
+                    }
+                };
+                if let Err(error) = store.persist() {
+                    restore_previous(store);
+                    return match store.persist() {
+                        Ok(()) => Err(error),
+                        Err(rollback_error) => Err(format!(
+                            "{error}；同时恢复 Provider 凭据失败：{rollback_error}"
+                        )),
+                    };
                 }
-            }
-            let mut message = format!("写配置失败: {error}");
-            if !rollback_errors.is_empty() {
-                message.push_str(&format!(
-                    "；同时恢复 Provider 凭据失败：{}",
-                    rollback_errors.join("；")
-                ));
-            }
-            return Err(message);
+                if let Err(error) = config.save(&self.config_path) {
+                    restore_previous(store);
+                    return match store.persist() {
+                        Ok(()) => Err(format!("写配置失败: {error}")),
+                        Err(rollback_error) => Err(format!(
+                            "写配置失败: {error}；同时恢复 Provider 凭据失败：{rollback_error}"
+                        )),
+                    };
+                }
+                Ok(())
+            })?;
         }
         let removable_keys = self
             .pending_provider_key_removals
@@ -1073,6 +1083,104 @@ impl AppInner {
             .unwrap_or_default()
     }
 
+    pub(crate) fn home_route_context_view(&self) -> RouteContextView {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut model_offerings = Vec::new();
+        let mut push = |upstream: &str, model: &str| {
+            let identity = (upstream.to_owned(), model.to_owned());
+            if seen.insert(identity.clone()) {
+                model_offerings.push(ModelOfferingView {
+                    upstream: identity.0,
+                    model: identity.1,
+                });
+            }
+        };
+
+        match self.home_routing_mode() {
+            "direct" => {
+                if let Some(target) = self.home_direct_target_view() {
+                    if let Some(model) = target.model {
+                        push(&target.upstream, &model);
+                    }
+                }
+            }
+            "quota_first" => {
+                for account in self.quota_accounts_view() {
+                    push(&account.upstream, &account.model);
+                }
+            }
+            _ => {
+                let router = &self.draft["router"];
+                if router["honor_exact_model"].as_bool() == Some(true) {
+                    if let Some(upstreams) = self.draft["upstreams"].as_object() {
+                        for (upstream, config) in upstreams {
+                            for model in config["models"].as_array().into_iter().flatten() {
+                                if let Some(model) = model["model"].as_str() {
+                                    push(upstream, model);
+                                }
+                            }
+                        }
+                    }
+                    return RouteContextView { model_offerings };
+                }
+                let strict_local_only = router["local_only"].as_bool() == Some(true)
+                    && router["allow_cloud_fallback"].as_bool() != Some(true);
+                let mut reachable = Vec::new();
+                let mut seen_pools = std::collections::BTreeSet::new();
+                let mut push_pool = |pool: Option<&str>| {
+                    if let Some(pool) = pool.filter(|pool| !pool.is_empty()) {
+                        if seen_pools.insert(pool.to_owned()) {
+                            reachable.push(pool.to_owned());
+                        }
+                    }
+                };
+                push_pool(router["default_pool"].as_str());
+                for rule in router["rules"].as_array().into_iter().flatten() {
+                    push_pool(rule["route_to"].as_str());
+                }
+                for route in router["hint_routes"].as_array().into_iter().flatten() {
+                    push_pool(route["route_to"].as_str());
+                }
+                if let Some(heuristic) = router["heuristic"].as_object() {
+                    push_pool(heuristic.get("above").and_then(Value::as_str));
+                    push_pool(heuristic.get("below").and_then(Value::as_str));
+                    for band in heuristic
+                        .get("bands")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        push_pool(band["pool"].as_str());
+                    }
+                }
+                if router["recovery"]["policy"].as_str() == Some("ordered") {
+                    for pool in router["recovery"]["pools"].as_array().into_iter().flatten() {
+                        push_pool(pool.as_str());
+                    }
+                }
+                for pool in reachable {
+                    if let Some(members) = router["pools"][&pool].as_array() {
+                        for member in members {
+                            if let (Some(upstream), Some(model)) =
+                                (member["upstream"].as_str(), member["model"].as_str())
+                            {
+                                if strict_local_only
+                                    && self.draft["upstreams"][upstream]["local"].as_bool()
+                                        != Some(true)
+                                {
+                                    continue;
+                                }
+                                push(upstream, model);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        RouteContextView { model_offerings }
+    }
+
     /// Rebuild tier-pool references, heuristic bands, and default from configured
     /// tiers. Include only tiers with a selected upstream-model pair.
     pub(crate) fn rebuild_routing(&mut self) {
@@ -1270,6 +1378,7 @@ impl AppInner {
                 .unwrap_or(false),
             routing_mode: self.home_routing_mode().to_string(),
             direct_target: self.home_direct_target_view(),
+            route_context: self.home_route_context_view(),
             quota_accounts: self.quota_accounts_view(),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),

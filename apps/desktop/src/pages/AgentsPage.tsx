@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDown, GitBranch, RefreshCw, Route } from "lucide-react";
+import { Bot, ChevronDown, Layers3, RefreshCw } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
@@ -133,7 +133,7 @@ export default function AgentsPage({
                       onClick={onOpenHome}
                     >
                       <span className="agent-master-icon global-route-mark" aria-hidden="true">
-                        <Route />
+                        <Layers3 />
                       </span>
                       <span className="agent-master-copy routing-scope-copy">
                         <strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong>
@@ -152,7 +152,7 @@ export default function AgentsPage({
                         onClick={() => setRouteListOpen((open) => !open)}
                       >
                         <span className="agent-master-icon agent-route-mark" aria-hidden="true">
-                          <GitBranch />
+                          <Bot />
                         </span>
                         <span className="agent-route-disclosure-label routing-scope-copy">
                           <span className="routing-scope-title">
