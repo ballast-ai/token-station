@@ -128,6 +128,7 @@ jobs:
     uses: ./.github/workflows/platform.yml
     with:
       checkout_ref: ${{ needs.release-target.outputs.sha }}
+      legacy_v2_windows_path_test_compat: ${{ needs.release-target.outputs.tag == 'v2.0.0' }}
 
   linux-desktop:
     needs: [release-target, verify-main-full-ci, platform-gates]
