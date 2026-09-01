@@ -341,10 +341,10 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   }, []);
 
   useEffect(() => {
-    if (startupSettledRef.current || (!scanSucceeded && !error)) return;
+    if (startupSettledRef.current || (!state && !error)) return;
     startupSettledRef.current = true;
-    onStartupSettled?.(error ? "actionable-error" : "ready");
-  }, [error, onStartupSettled, scanSucceeded]);
+    onStartupSettled?.(state ? "ready" : "actionable-error");
+  }, [error, onStartupSettled, state]);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -887,27 +887,6 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     );
   }
 
-  if (!scanSucceeded) {
-    return (
-      <AppShell
-        view="home"
-        serve={state.serve}
-        registry={[]}
-        agents={[]}
-        commandBusy
-        discoveryPending
-        modelCount={0}
-        modelEntryOpen={false}
-        suppressModelEntryAutoOpen
-        onModelEntryOpenChange={() => undefined}
-        onNavigate={() => undefined}
-        onToggleServe={() => undefined}
-      >
-        <StartupHome error={error} onReload={() => window.location.reload()} />
-      </AppShell>
-    );
-  }
-
   const connectionAgentId = view.startsWith("agent:") ? view.slice("agent:".length) : null;
   const routeAgentId = view.startsWith("agent-route:") ? view.slice("agent-route:".length) : null;
   const selectedAgentId = connectionAgentId
@@ -993,6 +972,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       registry={visibleRegistry}
       agents={agents}
       commandBusy={serveBusy || busy || freeProviderBusy}
+      discoveryPending={!scanSucceeded}
       modelCount={state.providers.reduce((total, provider) => total + provider.models.length, 0)}
       modelEntryOpen={modelEntryOpen}
       suppressModelEntryAutoOpen={firstRunGuideOpen}
@@ -1009,7 +989,11 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
         />
       )}
 
-      {showAgentWorkspace && (
+      {showAgentWorkspace && !scanSucceeded && (
+        <StartupHome error={error} onReload={() => window.location.reload()} />
+      )}
+
+      {showAgentWorkspace && scanSucceeded && (
         <AgentsPage
           mode={agentWorkspaceMode}
           registry={visibleRegistry}
