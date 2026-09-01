@@ -94,10 +94,21 @@ assert.match(entry, /TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED/);
 assert.match(entry, /TOKEN_STATION_RELEASE_PUBKEY_HEX/);
 assert.match(entry, /TOKEN_STATION_UPDATER_PUBKEY/);
 assert.match(entry, /APPLE_CERTIFICATE_PASSWORD/);
+assert.match(entry, /if \[\[ "\$version" != "2\.0\.0" \]\]/);
 assert.match(entry, /WINDOWS_CERTIFICATE_PASSWORD/);
 assert.match(entry, /gh secret list/);
 assert.match(entry, /gh run watch/);
 assert.match(entry, /isDraft,isPrerelease/);
+
+assert.match(releaseWorkflow, /--production --unsigned-windows --target x86_64-pc-windows-msvc/);
+assert.match(releaseWorkflow, /github\.ref_name != 'v2\.0\.0'/);
+assert.match(releaseWorkflow, /scripts\/build-desktop\.sh --production --target x86_64-pc-windows-msvc/);
+
+const desktopBuild = read("scripts/build-desktop.sh");
+assert.match(desktopBuild, /--unsigned-windows/);
+assert.match(desktopBuild, /restricted to Token Station 2\.0\.0/);
+assert.match(desktopBuild, /production Windows build needs WINDOWS_CERTIFICATE_THUMBPRINT/);
+assert.match(read(".github/workflows/full-ci.yml"), /tests\/windows-authenticode-audit\.sh/);
 
 const inTreeTransfer = spawnSync(
   path.join(root, "scripts/release-latest-formal.sh"),
