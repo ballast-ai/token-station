@@ -2,26 +2,29 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/publish-formal-release.sh --version <x.y.z> --dir <release-directory> [--repo <owner/repo>]" >&2
+  echo "usage: scripts/publish-formal-release.sh --version <x.y.z> --dir <release-directory> --notes-file <file> [--repo <owner/repo>]" >&2
   exit 2
 }
 
 version=""
 release_dir=""
 repo="ballast-ai/token-station"
+notes_file=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) version=${2:-}; shift 2 ;;
     --dir) release_dir=${2:-}; shift 2 ;;
     --repo) repo=${2:-}; shift 2 ;;
+    --notes-file) notes_file=${2:-}; shift 2 ;;
     *) usage ;;
   esac
 done
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && -d "$release_dir" && -n "$repo" ]] || usage
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && -d "$release_dir" && -n "$repo" && -f "$notes_file" ]] || usage
 : "${TOKEN_STATION_RELEASE_PUBKEY_HEX:?set the trusted CLI release public key}"
 : "${TOKEN_STATION_UPDATER_PUBKEY:?set the trusted Tauri updater public key}"
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+node "$root/scripts/check-formal-release-notes.mjs" --version "$version" --file "$notes_file"
 node "$root/scripts/check-release-assets.mjs" --version "$version" --dir "$release_dir"
 cargo run --locked --offline --manifest-path "$root/Cargo.toml" \
   -p token-station-release --bin ts-release -- verify \
@@ -53,5 +56,6 @@ if ! diff -u "$comparison_dir/local" "$comparison_dir/remote"; then
   exit 1
 fi
 
-gh release edit "$tag" --repo "$repo" --draft=false --prerelease=false --title "Token Station $tag"
+gh release edit "$tag" --repo "$repo" --draft=false --prerelease=false \
+  --title "Token Station $tag" --notes-file "$notes_file"
 echo "formal release published: https://github.com/$repo/releases/tag/$tag"
