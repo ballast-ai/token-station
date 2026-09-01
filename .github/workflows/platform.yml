@@ -4,6 +4,12 @@ name: Platform Gates
 # not call this workflow. The release workflow calls it before artifact builds.
 on:
   workflow_call:
+    inputs:
+      checkout_ref:
+        description: "Commit to validate; defaults to the caller commit."
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
 
 concurrency:
@@ -62,6 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.checkout_ref }}
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
@@ -81,6 +88,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.checkout_ref }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -125,6 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.checkout_ref }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
