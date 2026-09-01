@@ -36,8 +36,8 @@ const compactCondition = windowsMsi
   .trim();
 assert.equal(
   compactCondition,
-  "!cancelled() && needs.changes.outputs.installer == 'true'",
-  "Windows MSI must run for every eligible platform validation",
+  "needs.windows-rust.result == 'success' && needs.changes.outputs.installer == 'true'",
+  "Windows MSI must run only after the full Windows gate succeeds",
 );
 assert.equal(
   windowsMsi.includes("github.event_name == 'pull_request'"),
@@ -50,6 +50,16 @@ assert.match(
   platform,
   /\n  changes:\n/,
   "the platform workflow must define the changes job the MSI condition reads",
+);
+
+const windowsRust = platform.match(
+  /\n  windows-rust:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]+:\n|$)/,
+)?.[0];
+assert.ok(windowsRust, "the platform workflow must define the windows-rust job");
+assert.ok(
+  windowsRust.indexOf("scripts/prepare-desktop-test-plugins.sh") <
+    windowsRust.indexOf("cargo test --workspace"),
+  "official plugins must exist before CLI workspace tests run on Windows",
 );
 
 // Full CI must keep executing this policy check before a release build.
