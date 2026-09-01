@@ -443,18 +443,32 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out the trusted release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Stage the trusted formal artifact collector
+        run: /usr/bin/install -m 0700 scripts/collect-formal-release-artifacts.sh "$RUNNER_TEMP/collect-formal-release-artifacts.sh"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-target.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
+          path: artifact-inputs
+          pattern: dist-*
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifact-inputs
+          pattern: token-station-desktop-*
       - name: Create the unsigned CLI manifest
         env:
           RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         run: |
           VERSION="${RELEASE_TAG#v}"
+          "$RUNNER_TEMP/collect-formal-release-artifacts.sh" \
+            --version "$VERSION" --artifacts-dir artifact-inputs --out-dir dist
           cargo run --locked -p token-station-release --bin ts-release -- \
             manifest --version "$VERSION" --out dist/manifest.json \
             dist/token-station-cli-*.tar.gz
