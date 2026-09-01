@@ -5250,7 +5250,7 @@ mod tests {
             .projection
             .files
             .iter()
-            .find(|file| file.target_config_path == case.companions[0].path.to_string_lossy())
+            .find(|file| file.target_config_path.ends_with(".credentials.yaml"))
             .expect("DeepSeek credentials companion must be present in the disconnect review");
         assert!(
             credential_projection

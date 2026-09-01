@@ -61,6 +61,23 @@ assert.ok(
     windowsRust.indexOf("cargo test --workspace"),
   "official plugins must exist before CLI workspace tests run on Windows",
 );
+assert.match(
+  platform,
+  /legacy_v2_windows_path_test_compat:\n(?: {8}.*\n)*? {8}type: boolean\n(?: {8}.*\n)*? {8}default: false/,
+  "the v2 path-test exception must be an explicit opt-in",
+);
+assert.match(
+  windowsRust,
+  /if: \$\{\{ inputs\.legacy_v2_windows_path_test_compat \}\}[\s\S]*--skip agent_integration::commands::tests::deepseek_harness_connects_from_stock_settings_without_a_credentials_file/,
+  "the v2 compatibility lane may skip only the known Windows path assertion",
+);
+
+const release = await readFile(resolve(root, ".github/workflows/release.yml"), "utf8");
+assert.match(
+  release,
+  /legacy_v2_windows_path_test_compat: \$\{\{ needs\.release-target\.outputs\.tag == 'v2\.0\.0' \}\}/,
+  "only the immutable v2.0.0 recovery target may opt into the path-test exception",
+);
 
 // Full CI must keep executing this policy check before a release build.
 assert.match(
