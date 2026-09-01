@@ -13696,6 +13696,47 @@ samp {
   margin: 8px 0 0;
 }
 
+/* Agent routing: use filled hierarchy instead of framed panels. */
+.agent-route-routing-heading {
+  margin-bottom: 0;
+  border: 0;
+  border-radius: 12px;
+  background: var(--content-block-surface);
+  box-shadow: none;
+}
+
+.agent-route-routing-heading > .status-chip {
+  border: 0;
+  color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.agent-route-inheritance-card {
+  margin-bottom: 0;
+  border: 0;
+  border-radius: 12px;
+  background: var(--content-block-surface);
+  box-shadow: none;
+}
+
+.agent-route-inheritance-mark {
+  border-radius: 10px;
+  color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.agent-route-inheritance-action[data-slot="button"] {
+  border: 0;
+  color: var(--ink);
+  background: var(--signal-soft);
+  box-shadow: none;
+}
+
+.agent-route-inheritance-action[data-slot="button"]:hover:not(:disabled) {
+  border: 0;
+  background: color-mix(in srgb, var(--signal) 16%, var(--surface));
+}
+
 @media (max-width: 720px) {
   .route-panel .tier-row {
     grid-template-columns: minmax(0, 1fr);

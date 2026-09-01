@@ -196,6 +196,32 @@ describe("retained page theme styles", () => {
     expect(flatRoutingStyles).toMatch(/var\(--surface-2\)/);
   });
 
+  it("uses filled surfaces instead of frames on inherited Agent routes", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const headingRule = lastRule(/\.agent-route-routing-heading\s*\{([^}]*)\}/gs);
+    const statusRule = lastRule(
+      /\.agent-route-routing-heading > \.status-chip\s*\{([^}]*)\}/gs,
+    );
+    const inheritanceRule = lastRule(/\.agent-route-inheritance-card\s*\{([^}]*)\}/gs);
+    const actionRule = lastRule(
+      /\.agent-route-inheritance-action\[data-slot="button"\]\s*\{([^}]*)\}/gs,
+    );
+
+    expect(headingRule).toMatch(/border:\s*0/);
+    expect(headingRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(headingRule).toMatch(/box-shadow:\s*none/);
+    expect(statusRule).toMatch(/border:\s*0/);
+    expect(statusRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(inheritanceRule).toMatch(/border:\s*0/);
+    expect(inheritanceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(inheritanceRule).toMatch(/box-shadow:\s*none/);
+    expect(actionRule).toMatch(/border:\s*0/);
+    expect(actionRule).toMatch(/background:\s*var\(--signal-soft\)/);
+  });
+
   it("uses the flat directory language for model-first search results", () => {
     const catalogRule = appCss.match(/\.model-first-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
     const resultRule = appCss.match(/\.model-first-results button\s*\{([^}]*)\}/s)?.[1] ?? "";
