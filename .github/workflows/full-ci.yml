@@ -221,6 +221,7 @@ jobs:
       - run: tests/package-list-line-endings.sh
       - run: node tests/diagram-supersession.mjs
       - run: node tests/source-release-mode.mjs
+      - run: node tests/macos-signing-import-policy.mjs
       - run: node tests/release-script-variable-order.mjs
       - run: node tests/formal-release-finalization.mjs
       - run: node tests/formal-release-notes.mjs
