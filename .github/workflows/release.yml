@@ -87,10 +87,7 @@ jobs:
             TOKEN_STATION_UPDATER_PUBKEY,
             APPLE_CERTIFICATE,
             APPLE_SIGNING_IDENTITY,
-            APPLE_API_KEY_CONTENT,
-            WINDOWS_CERTIFICATE,
-            WINDOWS_CERTIFICATE_PASSWORD,
-            WINDOWS_TIMESTAMP_URL
+            APPLE_API_KEY_CONTENT
           # Presence only. A secret's value never reaches the process.
           TS_HAS_TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED == 'true' }}
           TS_HAS_TOKEN_STATION_RELEASE_PUBKEY_HEX: ${{ vars.TOKEN_STATION_RELEASE_PUBKEY_HEX != '' }}
@@ -98,6 +95,13 @@ jobs:
           TS_HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
           TS_HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
           TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
+        run: node scripts/resolve-release-mode.mjs
+      - name: Require Windows Authenticode configuration after v2.0.0
+        if: steps.mode.outputs.formal == 'true' && github.ref_name != 'v2.0.0'
+        env:
+          TS_EVENT: workflow_dispatch
+          TS_REQUESTED_MODE: formal
+          TS_REQUIRED: WINDOWS_CERTIFICATE,WINDOWS_CERTIFICATE_PASSWORD,WINDOWS_TIMESTAMP_URL
           TS_HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
           TS_HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
           TS_HAS_WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL != '' }}
@@ -270,7 +274,8 @@ jobs:
           fi
           node scripts/check-release-readiness.mjs --version "$version" --formal
           node scripts/check-windows-release-config.mjs
-      - name: Import Windows signing certificate
+      - name: Import the Windows signing certificate after v2.0.0
+        if: github.ref_name != 'v2.0.0'
         shell: pwsh
         run: |
           if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
@@ -282,10 +287,15 @@ jobs:
           $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
           if (-not $certificate.Thumbprint) { throw "certificate import returned no thumbprint" }
           "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Build, sign, audit, and stage MSI
+      - name: Build, audit, and stage the Windows MSI
         shell: bash
         run: |
-          scripts/build-desktop.sh --production --target x86_64-pc-windows-msvc
+          if [[ "$GITHUB_REF_NAME" == "v2.0.0" ]]; then
+            scripts/build-desktop.sh --production --unsigned-windows --target x86_64-pc-windows-msvc
+            echo "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning." >> "$GITHUB_STEP_SUMMARY"
+          else
+            scripts/build-desktop.sh --production --target x86_64-pc-windows-msvc
+          fi
           version=$(node -p "require('./apps/desktop/package.json').version")
           mkdir desktop-dist
           cp apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi "desktop-dist/token-station_${version}_x86_64.msi"

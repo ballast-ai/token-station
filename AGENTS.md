@@ -114,6 +114,23 @@ each failed step accurately.
 A change to documentation, comments, or test data does not require App installation. Install the App if
 the user explicitly requests it.
 
+## Publish a stable release with an unsigned Windows MSI
+
+Use this exception only for Token Station v2.0.0. Later stable versions require Windows Authenticode again.
+
+1. Sign and notarize both macOS Apps with the required Apple credentials.
+2. Keep the CLI and macOS updater private keys offline.
+3. Build the formal Windows MSI only with the explicit `--unsigned-windows` option.
+4. Keep normal Windows production builds fail-closed on missing Authenticode configuration.
+5. Require the formal release notes to contain this exact sentence:
+
+```text
+The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.
+```
+
+Windows updates remain manual. Do not describe the MSI or its checksum as a publisher signature. The v2.0.0
+tag workflow does not require Windows certificate secrets.
+
 ## Publish an unsigned cross-platform preview release
 
 Use this procedure when a preview includes Windows or Linux packages without formal platform signing
@@ -143,8 +160,8 @@ scripts/build-desktop.sh --preview --target x86_64-apple-darwin
    passes a fresh download check.
 
 Windows and Linux updates remain manual. A Windows preview MSI can show a SmartScreen warning. macOS preview
-Apps are ad-hoc signed, Apple-unsigned, and unnotarized. The formal release workflow and its signing
-requirements do not change.
+Apps are ad-hoc signed, Apple-unsigned, and unnotarized. The stable workflow uses the separate, explicit
+unsigned Windows policy above.
 
 ## Publish an Apple Silicon updater preview release
 

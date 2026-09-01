@@ -123,7 +123,7 @@ export default function AppShell({
                 variant="ghost"
                 size="sm"
                 type="button"
-                disabled={discoveryPending || (commandBusy && !selected)}
+                disabled={commandBusy && !selected}
                 aria-current={selected ? "page" : undefined}
                 aria-label={label}
                 data-onboarding-return-focus={item.view === "overview" ? "" : undefined}
@@ -155,7 +155,7 @@ export default function AppShell({
             variant="outline"
             size="lg"
             type="button"
-            disabled={commandBusy || serve.phase === "stopping"}
+            disabled={discoveryPending || commandBusy || serve.phase === "stopping"}
             onClick={onToggleServe}
             aria-label={`${serveLabel} · ${serve.listen}${serve.running_revision != null ? ` · rev ${serve.running_revision}` : ""} · ${taskRunning ? t("serve.stop") : t("serve.start")}`}
             title={`${serveLabel} · ${serve.listen}${serve.running_revision != null ? ` · rev ${serve.running_revision}` : ""}`}

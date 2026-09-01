@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|preview|production> --binary <path> --bundle-root <path> --source-root <path> --rust-sysroot <path> --private-cargo-home <path>" >&2
+  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|preview|production> --binary <path> --bundle-root <path> --source-root <path> --rust-sysroot <path> --private-cargo-home <path> [--unsigned-windows]" >&2
   exit 2
 }
 
@@ -12,6 +12,7 @@ bundle_root=""
 source_root=""
 rust_sysroot=""
 private_cargo_home=""
+unsigned_windows=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode=${2:-}; shift 2 ;;
@@ -20,11 +21,13 @@ while [[ $# -gt 0 ]]; do
     --source-root) source_root=${2:-}; shift 2 ;;
     --rust-sysroot) rust_sysroot=${2:-}; shift 2 ;;
     --private-cargo-home) private_cargo_home=${2:-}; shift 2 ;;
+    --unsigned-windows) unsigned_windows=true; shift ;;
     *) usage ;;
   esac
 done
 [[ "$mode" == "local" || "$mode" == "preview" || "$mode" == "production" ]] || usage
 [[ -n "$binary" && -n "$bundle_root" && -n "$source_root" && -n "$rust_sysroot" && -n "$private_cargo_home" ]] || usage
+[[ "$unsigned_windows" != "true" || "$mode" == "production" ]] || usage
 [[ -f "$binary" ]] || { echo "desktop executable missing: $binary" >&2; exit 1; }
 
 strings_file="$(mktemp "${TMPDIR:-/tmp}/token-station-strings.XXXXXX")"
@@ -105,6 +108,10 @@ done < <("$source_root/scripts/official-packages.py" --field id)
 
 case "$(uname -s)" in
   Darwin)
+    [[ "$unsigned_windows" != "true" ]] || {
+      echo "--unsigned-windows is valid only on Windows" >&2
+      exit 1
+    }
     app="$(find "$bundle_root/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
     [[ -n "$app" ]] || { echo "macOS app bundle missing under $bundle_root/macos" >&2; exit 1; }
     codesign --verify --deep --strict --verbose=2 "$app"
@@ -143,21 +150,36 @@ case "$(uname -s)" in
       exit 0
     }
     windows_binary="$(cygpath -w "$binary")"
-    status="$(powershell.exe -NoProfile -NonInteractive -Command \
-      "(Get-AuthenticodeSignature -LiteralPath '$windows_binary').Status")"
-    [[ "$status" == *Valid* ]] || {
-      echo "Windows production executable signature is not valid: $status" >&2
-      exit 1
-    }
     windows_installer="$(cygpath -w "$installer")"
-    status="$(powershell.exe -NoProfile -NonInteractive -Command \
-      "(Get-AuthenticodeSignature -LiteralPath '$windows_installer').Status")"
-    [[ "$status" == *Valid* ]] || {
-      echo "Windows production installer signature is not valid: $status" >&2
-      exit 1
-    }
+    binary_status="$(powershell.exe -NoProfile -NonInteractive -Command \
+      "(Get-AuthenticodeSignature -LiteralPath '$windows_binary').Status" | tr -d '\r')"
+    installer_status="$(powershell.exe -NoProfile -NonInteractive -Command \
+      "(Get-AuthenticodeSignature -LiteralPath '$windows_installer').Status" | tr -d '\r')"
+    if [[ "$unsigned_windows" == "true" ]]; then
+      [[ "$binary_status" == "NotSigned" ]] || {
+        echo "Windows unsigned executable has an unexpected signature status: $binary_status" >&2
+        exit 1
+      }
+      [[ "$installer_status" == "NotSigned" ]] || {
+        echo "Windows unsigned installer has an unexpected signature status: $installer_status" >&2
+        exit 1
+      }
+    else
+      [[ "$binary_status" == "Valid" ]] || {
+        echo "Windows production executable signature is not valid: $binary_status" >&2
+        exit 1
+      }
+      [[ "$installer_status" == "Valid" ]] || {
+        echo "Windows production installer signature is not valid: $installer_status" >&2
+        exit 1
+      }
+    fi
     ;;
   Linux)
+    [[ "$unsigned_windows" != "true" ]] || {
+      echo "--unsigned-windows is valid only on Windows" >&2
+      exit 1
+    }
     # Linux packages (deb / AppImage / rpm) are not code-signed, so the audit
     # verifies the binary is a real Linux executable and at least one package was
     # produced — not a signature.

@@ -40,9 +40,34 @@ try {
 
   const formal = check(
     "formal.md",
-    "# Token Station v2.0.0\n\nThis stable release contains signed packages for supported platforms.\n",
+    [
+      "# Token Station v2.0.0",
+      "",
+      "This stable release contains signed packages for supported platforms.",
+      "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.",
+      "",
+    ].join("\n"),
   );
   assert.equal(formal.status, 0, formal.stderr);
+
+  const missingWindowsWarning = check(
+    "missing-windows-warning.md",
+    "# Token Station v2.0.0\n\nThis stable release contains signed packages for supported platforms.\n",
+  );
+  assert.equal(missingWindowsWarning.status, 1);
+  assert.match(missingWindowsWarning.stderr, /Windows MSI/);
+
+  const laterVersionNotes = path.join(testDir, "later-version.md");
+  fs.writeFileSync(
+    laterVersionNotes,
+    "# Token Station v2.0.1\n\nThis stable release contains signed packages for supported platforms.\n",
+  );
+  const laterVersion = spawnSync(
+    process.execPath,
+    [checker, "--version", "2.0.1", "--file", laterVersionNotes],
+    { cwd: root, encoding: "utf8" },
+  );
+  assert.equal(laterVersion.status, 0, laterVersion.stderr);
 
   for (const [name, marker] of [
     ["preview.md", "This preview adds a new desktop package."],
@@ -51,14 +76,29 @@ try {
     ["unnotarized.md", "The macOS package is unnotarized."],
     ["chinese-preview.md", "\u8fd9是测试版。"],
   ]) {
-    const result = check(name, `# Token Station v2.0.0\n\n${marker}\n`);
+    const result = check(
+      name,
+      [
+        "# Token Station v2.0.0",
+        "",
+        "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.",
+        marker,
+        "",
+      ].join("\n"),
+    );
     assert.equal(result.status, 1, `${name} unexpectedly passed`);
     assert.match(result.stderr, /formal release notes check failed/);
   }
 
   const wrongVersion = check(
     "wrong-version.md",
-    "# Token Station v1.9.0\n\nThis stable release contains signed packages for supported platforms.\n",
+    [
+      "# Token Station v1.9.0",
+      "",
+      "This stable release contains signed packages for supported platforms.",
+      "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.",
+      "",
+    ].join("\n"),
   );
   assert.equal(wrongVersion.status, 1);
   assert.match(wrongVersion.stderr, /first heading/);

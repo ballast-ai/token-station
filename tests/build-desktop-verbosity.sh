@@ -125,6 +125,17 @@ run_windows_production_build() {
     "$repo/scripts/build-desktop.sh" --production --target x86_64-pc-windows-msvc
 }
 
+run_unsigned_windows_production_build() {
+  env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    CARGO_HOME="$fixture/cargo-home" \
+    RUSTFLAGS= \
+    RUNNER_TEMP="$fixture/runner-temp" \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
+    TEST_STATE="$state" \
+    "$repo/scripts/build-desktop.sh" --production --unsigned-windows --target x86_64-pc-windows-msvc
+}
+
 run_macos_production_build() {
   env \
     PATH="$fake_bin:/usr/bin:/bin" \
@@ -289,6 +300,46 @@ test_windows_production_build_does_not_require_updater_artifacts_for_the_first_r
   fi
 }
 
+test_windows_production_build_requires_authenticode_by_default() {
+  make_fixture windows-production-requires-authenticode
+  if env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    CARGO_HOME="$fixture/cargo-home" \
+    RUSTFLAGS= \
+    RUNNER_TEMP="$fixture/runner-temp" \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
+    TEST_STATE="$state" \
+    "$repo/scripts/build-desktop.sh" --production --target x86_64-pc-windows-msvc \
+    >"$state/output" 2>&1; then
+    fail "Windows production build accepted missing Authenticode configuration"
+  fi
+  grep -Fq "WINDOWS_CERTIFICATE_THUMBPRINT" "$state/output" \
+    || fail "missing Windows Authenticode error was not explicit"
+}
+
+test_explicit_unsigned_windows_production_build_skips_authenticode_only() {
+  make_fixture unsigned-windows-production
+  printf '{\n  "version": "2.0.0"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
+  run_unsigned_windows_production_build >"$state/output" 2>&1
+  grep -Fxq -- '--unsigned-windows' "$state/audit-args" \
+    || fail "unsigned Windows production build did not preserve the audit boundary"
+  if [[ -f "$state/tauri-configs" ]] && grep -Fq 'certificateThumbprint' "$state/tauri-configs"; then
+    fail "unsigned Windows production build injected Authenticode configuration"
+  fi
+  grep -Fq "not Authenticode-signed" "$state/output" \
+    || fail "unsigned Windows production build did not emit its trust warning"
+}
+
+test_unsigned_windows_exception_rejects_later_versions() {
+  make_fixture unsigned-windows-future-version
+  printf '{\n  "version": "2.0.1"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
+  if run_unsigned_windows_production_build >"$state/output" 2>&1; then
+    fail "unsigned Windows exception accepted a later version"
+  fi
+  grep -Fq "restricted to Token Station 2.0.0" "$state/output" \
+    || fail "future unsigned Windows rejection was not explicit"
+}
+
 test_production_build_rejects_private_material_in_the_public_key_variable() {
   make_fixture private-in-public-variable Darwin
   if env \
@@ -324,6 +375,9 @@ test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg
 test_preview_build_supports_an_intel_updater_payload_and_unsigned_test_dmg
 test_preview_build_loads_the_private_key_path_for_the_tauri_bundler
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release
+test_windows_production_build_requires_authenticode_by_default
+test_explicit_unsigned_windows_production_build_skips_authenticode_only
+test_unsigned_windows_exception_rejects_later_versions
 test_production_build_rejects_private_material_in_the_public_key_variable
 
 echo "build-desktop verbosity tests: PASS"

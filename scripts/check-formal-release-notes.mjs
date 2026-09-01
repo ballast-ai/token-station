@@ -36,6 +36,8 @@ if (!fs.existsSync(notesPath) || !fs.statSync(notesPath).isFile()) {
 const notes = fs.readFileSync(notesPath, "utf8");
 const firstContentLine = notes.split(/\r?\n/).find((line) => line.trim() !== "")?.trim();
 const expectedHeading = `# Token Station v${version}`;
+const requiredWindowsWarning =
+  "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.";
 const failures = [];
 
 if (firstContentLine !== expectedHeading) {
@@ -43,6 +45,9 @@ if (firstContentLine !== expectedHeading) {
 }
 if (notes.trim().length < expectedHeading.length + 40) {
   failures.push("the notes must contain a useful formal release summary");
+}
+if (version === "2.0.0" && !notes.includes(requiredWindowsWarning)) {
+  failures.push(`the notes must contain exactly: ${requiredWindowsWarning}`);
 }
 
 const previewMarkers = [

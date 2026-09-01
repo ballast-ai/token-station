@@ -79,6 +79,7 @@ load_github_variable() {
 
 require_formal_github_config() {
   local repo=$1
+  local version=$2
   local enabled
   enabled=$(gh variable get TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED --repo "$repo" 2>/dev/null) ||
     fail "configure the TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED GitHub Actions variable"
@@ -91,18 +92,24 @@ require_formal_github_config() {
   local secret_names
   secret_names=$(gh secret list --repo "$repo" --app actions --json name --jq '.[].name') ||
     fail "could not inspect GitHub Actions secret names"
-  local secret
-  for secret in \
+  local -a required_secrets=(
     APPLE_CERTIFICATE \
     APPLE_CERTIFICATE_PASSWORD \
     APPLE_SIGNING_IDENTITY \
     APPLE_KEYCHAIN_PASSWORD \
     APPLE_API_ISSUER \
     APPLE_API_KEY \
-    APPLE_API_KEY_CONTENT \
-    WINDOWS_CERTIFICATE \
-    WINDOWS_CERTIFICATE_PASSWORD \
-    WINDOWS_TIMESTAMP_URL; do
+    APPLE_API_KEY_CONTENT
+  )
+  if [[ "$version" != "2.0.0" ]]; then
+    required_secrets+=(
+      WINDOWS_CERTIFICATE
+      WINDOWS_CERTIFICATE_PASSWORD
+      WINDOWS_TIMESTAMP_URL
+    )
+  fi
+  local secret
+  for secret in "${required_secrets[@]}"; do
     grep -Fqx "$secret" <<<"$secret_names" ||
       fail "configure the $secret GitHub Actions secret before creating a formal tag"
   done
@@ -158,7 +165,7 @@ start_release() {
   notes_file="$root/docs/release/$tag.md"
   [[ "$confirm" == "$tag" ]] || fail "rerun with --confirm $tag"
   require_formal_notes "$version" "$notes_file"
-  require_formal_github_config "$repo"
+  require_formal_github_config "$repo" "$version"
   node "$root/scripts/check-release-readiness.mjs" --version "$version" --formal
 
   if git -C "$root" show-ref --verify --quiet "refs/tags/$tag"; then

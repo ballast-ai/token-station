@@ -1257,7 +1257,7 @@ describe("desktop station navigation", () => {
     }, { timeout: 1_000 });
   });
 
-  it("等启动扫描完成后一次性显示合并主页与已发现 Agent", async () => {
+  it("publishes discovered Agents together after the background startup scan", async () => {
     window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
     const user = userEvent.setup();
     let emitServe: ((serve: ServeView) => void) | undefined;
@@ -1279,16 +1279,12 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    const startupStatus = await screen.findByRole("status", { name: "正在检查本机 Agent" });
-    expect(startupStatus).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
-    expect(screen.getByText("发现 Agents")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
     const startupNavigation = within(screen.getByLabelText("主导航"));
     for (const name of ["主页", "Agent", "路由", "模型", "用量"]) {
-      expect(startupNavigation.getByRole("button", { name })).toBeDisabled();
+      expect(startupNavigation.getByRole("button", { name })).toBeEnabled();
     }
-    expect(screen.getByRole("button", { name: "设置" })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "切换颜色主题" })).toBeNull();
+    expect(screen.getByRole("button", { name: "设置" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
     expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
     expect(screen.queryByTestId("agent-runtime-connection")).toBeNull();
@@ -1330,11 +1326,31 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
   });
 
-  it("reports startup settlement only after initial Agent discovery finishes", async () => {
-    let resolveScan!: (agents: AgentView[]) => void;
-    const startupScan = new Promise<AgentView[]>((resolve) => {
-      resolveScan = resolve;
+  it("keeps the core workspace interactive while initial Agent discovery continues", async () => {
+    const user = userEvent.setup();
+    const startupScan = new Promise<AgentView[]>(() => undefined);
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return startupScan;
+      throw new Error(`unexpected IPC command: ${command}`);
     });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    const mainNavigation = within(screen.getByLabelText("主导航"));
+    expect(mainNavigation.getByRole("button", { name: "Agent" })).toBeEnabled();
+
+    await user.click(mainNavigation.getByRole("button", { name: "Agent" }));
+
+    expect(await screen.findByRole("status", { name: "正在检查本机 Agent" }))
+      .toHaveAttribute("aria-busy", "true");
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("reports startup settlement after core state loads while Agent discovery continues", async () => {
+    const startupScan = new Promise<AgentView[]>(() => undefined);
     const onStartupSettled = vi.fn();
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
@@ -1344,11 +1360,9 @@ describe("desktop station navigation", () => {
     });
 
     render(<App onStartupSettled={onStartupSettled} />);
-    await screen.findByRole("status", { name: "正在检查本机 Agent" });
-    expect(onStartupSettled).not.toHaveBeenCalled();
-
-    await act(async () => resolveScan([scannedClaude]));
+    await screen.findByRole("heading", { name: "概览" });
     await waitFor(() => expect(onStartupSettled).toHaveBeenCalledTimes(1));
+    expect(onStartupSettled).toHaveBeenCalledWith("ready");
   });
 
   it("serve 事件早于 get_state 返回时保留最新运行代次并只扫描一次", async () => {
@@ -1411,8 +1425,9 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("启动扫描失败时保留主页壳并提供明确的重新进入操作", async () => {
+  it("keeps discovery failure actionable inside the normal App shell", async () => {
     window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+    const user = userEvent.setup();
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
@@ -1421,6 +1436,9 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "Agent" }));
 
     const startupStatus = await screen.findByRole("status", { name: "无法检查本机 Agent" });
     expect(startupStatus).toHaveAttribute("aria-busy", "false");
@@ -1432,7 +1450,7 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("reports startup settlement when discovery exposes an actionable failure", async () => {
+  it("keeps ready startup settlement when discovery exposes an actionable failure", async () => {
     const onStartupSettled = vi.fn();
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
@@ -1443,8 +1461,9 @@ describe("desktop station navigation", () => {
 
     render(<App onStartupSettled={onStartupSettled} />);
 
-    await screen.findByRole("status", { name: "无法检查本机 Agent" });
-    expect(onStartupSettled).toHaveBeenCalledTimes(1);
+    await screen.findByRole("heading", { name: "概览" });
+    await waitFor(() => expect(onStartupSettled).toHaveBeenCalledTimes(1));
+    expect(onStartupSettled).toHaveBeenCalledWith("ready");
   });
 
   it("启动扫描成功为空时进入正常主页而不是失败状态", async () => {

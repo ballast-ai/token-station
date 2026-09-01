@@ -236,6 +236,7 @@ jobs:
           version=$(node -p "require('./apps/desktop/package.json').version")
           node scripts/check-release-readiness.mjs --version "$version"
       - run: tests/build-desktop-verbosity.sh
+      - run: tests/windows-authenticode-audit.sh
       - run: tests/desktop-updater-release.sh
       - run: tests/report-legacy-usage.sh
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/build-desktop.sh <--local|--preview|--production> [--target <target-triple>] [--test-version <version>]" >&2
+  echo "usage: scripts/build-desktop.sh <--local|--preview|--production> [--unsigned-windows] [--target <target-triple>] [--test-version <version>]" >&2
   exit 2
 }
 
@@ -16,8 +16,13 @@ esac
 
 target=""
 test_version=""
+unsigned_windows=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --unsigned-windows)
+      unsigned_windows=true
+      shift
+      ;;
     --target)
       [[ $# -ge 2 ]] || usage
       target=$2
@@ -107,6 +112,26 @@ elif [[ -z "$target" ]]; then
   case "$host_os" in
     MINGW*|MSYS*|CYGWIN*) is_windows_target=true ;;
   esac
+fi
+
+if [[ "$unsigned_windows" == "true" ]]; then
+  [[ "$mode" == "production" && "$is_windows_target" == "true" ]] || {
+    echo "--unsigned-windows requires a production Windows target" >&2
+    exit 2
+  }
+  case "$host_os" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *)
+      echo "--unsigned-windows must run on Windows" >&2
+      exit 2
+      ;;
+  esac
+  unsigned_windows_version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$root/apps/desktop/src-tauri/tauri.conf.json" | head -n 1)
+  [[ "$unsigned_windows_version" == "2.0.0" ]] || {
+    echo "--unsigned-windows is restricted to Token Station 2.0.0" >&2
+    exit 2
+  }
 fi
 
 if [[ "$mode" == "preview" ]]; then
@@ -286,17 +311,21 @@ case "$host_os" in
   MINGW*|MSYS*|CYGWIN*)
     binary_path="${binary_path}.exe"
     if [[ "$mode" == "production" ]]; then
-      : "${WINDOWS_CERTIFICATE_THUMBPRINT:?production Windows build needs WINDOWS_CERTIFICATE_THUMBPRINT}"
-      : "${WINDOWS_TIMESTAMP_URL:?production Windows build needs WINDOWS_TIMESTAMP_URL}"
-      [[ "$WINDOWS_CERTIFICATE_THUMBPRINT" =~ ^[[:xdigit:]]{40,64}$ ]] || {
-        echo "WINDOWS_CERTIFICATE_THUMBPRINT must be a hexadecimal certificate thumbprint" >&2
-        exit 1
-      }
-      windows_config="$stage/windows-signing.json"
-      printf '%s\n' \
-        "{\"bundle\":{\"windows\":{\"certificateThumbprint\":\"$WINDOWS_CERTIFICATE_THUMBPRINT\",\"digestAlgorithm\":\"sha256\",\"timestampUrl\":\"$WINDOWS_TIMESTAMP_URL\",\"tsp\":true}}}" \
-        >"$windows_config"
-      tauri_args+=(--config "$windows_config")
+      if [[ "$unsigned_windows" == "true" ]]; then
+        echo "WARNING: The Windows MSI is not Authenticode-signed and can show an unknown publisher warning." >&2
+      else
+        : "${WINDOWS_CERTIFICATE_THUMBPRINT:?production Windows build needs WINDOWS_CERTIFICATE_THUMBPRINT}"
+        : "${WINDOWS_TIMESTAMP_URL:?production Windows build needs WINDOWS_TIMESTAMP_URL}"
+        [[ "$WINDOWS_CERTIFICATE_THUMBPRINT" =~ ^[[:xdigit:]]{40,64}$ ]] || {
+          echo "WINDOWS_CERTIFICATE_THUMBPRINT must be a hexadecimal certificate thumbprint" >&2
+          exit 1
+        }
+        windows_config="$stage/windows-signing.json"
+        printf '%s\n' \
+          "{\"bundle\":{\"windows\":{\"certificateThumbprint\":\"$WINDOWS_CERTIFICATE_THUMBPRINT\",\"digestAlgorithm\":\"sha256\",\"timestampUrl\":\"$WINDOWS_TIMESTAMP_URL\",\"tsp\":true}}}" \
+          >"$windows_config"
+        tauri_args+=(--config "$windows_config")
+      fi
     fi
     ;;
   Linux)
@@ -349,13 +378,18 @@ else
   )
 fi
 
-"$root/scripts/audit-desktop-artifact.sh" \
-  --mode "$mode" \
-  --binary "$binary_path" \
-  --bundle-root "$bundle_root" \
-  --source-root "$root" \
-  --rust-sysroot "$rust_sysroot" \
+audit_args=(
+  --mode "$mode"
+  --binary "$binary_path"
+  --bundle-root "$bundle_root"
+  --source-root "$root"
+  --rust-sysroot "$rust_sysroot"
   --private-cargo-home "$private_cargo_home"
+)
+if [[ "$unsigned_windows" == "true" ]]; then
+  audit_args+=(--unsigned-windows)
+fi
+"$root/scripts/audit-desktop-artifact.sh" "${audit_args[@]}"
 
 if [[ "$host_os" == "Darwin" && "$mode" != "local" ]]; then
   app_path="$bundle_root/macos/token-station.app"
