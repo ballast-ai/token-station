@@ -6,7 +6,8 @@ export const ENTERPRISE_PROVIDER_NAME = "Token-station";
 export function providerDisplayName(
   provider: Pick<ProviderView, "name" | "managed_route">,
 ): string {
-  return provider.managed_route && provider.name === ENTERPRISE_PROVIDER_ID
-    ? ENTERPRISE_PROVIDER_NAME
-    : provider.name;
+  if (!provider.managed_route) return provider.name;
+  if (provider.name === ENTERPRISE_PROVIDER_ID) return ENTERPRISE_PROVIDER_NAME;
+  const managedIndex = /^tokenstation_(\d+)$/.exec(provider.name)?.[1];
+  return managedIndex ? `${ENTERPRISE_PROVIDER_NAME} ${managedIndex}` : provider.name;
 }

@@ -26,7 +26,7 @@ export interface ProviderView {
   south_header_auth_v1_unavailable_reason?: SouthUnavailableReason | null;
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
-  /** Enterprise route created through the fixed Token-station provider flow. */
+  /** Provider Channel created through the managed Token-station endpoint flow. */
   managed_route?: boolean;
   access_tier?: "free" | "paid";
   /** Declared quota plan for local estimates; absent means non-windowed or usage-based. */
@@ -408,6 +408,16 @@ export interface DirectRouteTarget {
   model: string | null;
 }
 
+export interface ModelOfferingRouteTarget {
+  upstream: string;
+  model: string;
+}
+
+export interface RouteContextView {
+  /** Complete, deduplicated Home routing candidates in routing priority order. */
+  model_offerings: ModelOfferingRouteTarget[];
+}
+
 export type AgentRouteMode = "inherit" | "custom" | "profile";
 
 export interface AgentRouteView {
@@ -504,6 +514,8 @@ export interface StateView {
   routing_mode: RoutingMode;
   /** Exact Home target used by Direct mode; null means the draft is incomplete. */
   direct_target?: DirectRouteTarget | null;
+  /** Backend-owned complete routing context. Tiered mode includes every pool member. */
+  route_context: RouteContextView;
   /** Globally shared quota-first rotation accounts, provider plus model, in priority order. */
   quota_accounts: QuotaAccount[];
   serve: ServeView;
@@ -1021,6 +1033,9 @@ export const previewProviderRemoval = (name: string) =>
 export const restoreProvider = (name: string) =>
   invoke<StateView>("restore_provider", { name });
 
+export const purgeDeletedProviders = () =>
+  invoke<StateView>("purge_deleted_providers");
+
 export const discoverProviderModels = (
   name: string,
   base_url: string,
@@ -1033,11 +1048,9 @@ export const discoverProviderModels = (
   });
 
 export const verifyEnterpriseRoute = (
-  name: string,
   base_url: string,
   api_key: string,
 ) => invoke<ModelDiscoveryView>("verify_enterprise_route", {
-  name,
   baseUrl: base_url,
   apiKey: api_key,
 });

@@ -317,27 +317,15 @@ pub(crate) async fn discover_provider_models(
 #[tauri::command]
 pub(crate) async fn verify_enterprise_route(
     state: State<'_, AppStateManaged>,
-    name: String,
     base_url: String,
     api_key: String,
 ) -> Result<ModelDiscoveryView, String> {
-    if name.trim() != MANAGED_ENTERPRISE_PROVIDER_ID {
-        return Err("企业路由必须使用保留的 Provider 标识".to_owned());
-    }
-    let data_dir = {
+    let verification_provider = {
         let inner = state.0.lock().unwrap();
-        if inner.draft["upstreams"]
-            .get(MANAGED_ENTERPRISE_PROVIDER_ID)
-            .is_some()
-        {
-            return Err("Provider `tokenstation` 已存在，请先在模型列表中管理或删除它".to_owned());
-        }
-        inner.data_dir()
+        next_managed_enterprise_provider_id(&inner)?
     };
-    if provider_tombstones::contains(&data_dir, MANAGED_ENTERPRISE_PROVIDER_ID)? {
-        return Err("Provider 回收站中已有 `tokenstation`，请先恢复并管理它".to_owned());
-    }
-    discover_provider_models_impl(state, name, base_url, Some(api_key), false).await
+    discover_provider_models_impl(state, verification_provider, base_url, Some(api_key), false)
+        .await
 }
 
 pub(crate) async fn discover_provider_models_impl(

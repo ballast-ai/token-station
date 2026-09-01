@@ -128,17 +128,11 @@ function planFiles(plan: ConfigPlanView, direction: "forward" | "reverse" = "for
 
 function changeState(
   operation: ConfigPlanView["changes"][number]["operation"],
-  sensitive: boolean,
   side: "before" | "after",
   intent: "connect" | "restore" | "review",
   preview: string | undefined,
   copy: LocalizedCopy,
 ) {
-  if (sensitive) {
-    return side === "before"
-      ? copy("Current sensitive value (content hidden)", "当前敏感值（内容已隐藏）", "目前敏感值（內容已隱藏）", "現在の機密値（内容は非表示）")
-      : copy("Local credential (content hidden)", "本机凭据（内容已隐藏）", "本機憑證（內容已隱藏）", "ローカル認証情報（内容は非表示）");
-  }
   if (preview !== undefined) return preview;
   if (side === "before") {
     return copy("Not set", "未设置", "未設定", "未設定");
@@ -1053,17 +1047,23 @@ export default function AgentRoutePage({
                 : copy("Confirm connection changes", "确认接入改动", "確認連線變更", "接続変更を確認")}</DialogTitle>
             <DialogDescription>{pendingPlan?.intent === "restore"
               ? copy(
-                "Review the owned fields that will return to their pre-connection state.",
-                "请确认将恢复到接入前状态的受管字段。", "請確認將恢復到連線前狀態的受管欄位。", "接続前の状態に戻す管理フィールドを確認してください。"
+                "Review the owned fields that will return to their pre-connection state. Local credentials appear as plain text. Avoid screenshots and screen sharing.",
+                "请确认将恢复到接入前状态的受管字段。本机凭据会以明文显示，请避免截屏或共享屏幕。",
+                "請確認將恢復到連線前狀態的受管欄位。本機憑證會以明文顯示，請避免截圖或共享螢幕。",
+                "接続前の状態に戻す管理フィールドを確認してください。ローカル認証情報は平文で表示されます。スクリーンショットと画面共有を避けてください。"
               )
               : pendingPlan?.intent === "review"
                 ? copy(
-                  "These are the exact Connector-owned values Token Station changed during connection.",
-                  "这是 Token Station 接入时修改的确切受管值。", "這是 Token Station 接入時修改的確切受管值。", "Token Station が接続時に変更した正確な管理値です。"
+                  "These are the exact Connector-owned values Token Station changed during connection. Local credentials appear as plain text. Avoid screenshots and screen sharing.",
+                  "这是 Token Station 接入时修改的确切受管值。本机凭据会以明文显示，请避免截屏或共享屏幕。",
+                  "這是 Token Station 接入時修改的確切受管值。本機憑證會以明文顯示，請避免截圖或共享螢幕。",
+                  "Token Station が接続時に変更した正確な管理値です。ローカル認証情報は平文で表示されます。スクリーンショットと画面共有を避けてください。"
                 )
               : copy(
-                "No file has been changed yet. Review every field before continuing.",
-                "配置文件尚未修改。请先核对每一项改动。", "設定檔案尚未修改。請先核對每一項變更。", "設定ファイルはまだ変更されていません。続行する前に各フィールドを確認してください。"
+                "No file has been changed yet. Review every field before continuing. Local credentials appear as plain text. Avoid screenshots and screen sharing.",
+                "配置文件尚未修改。请先核对每一项改动。本机凭据会以明文显示，请避免截屏或共享屏幕。",
+                "設定檔案尚未修改。請先核對每一項變更。本機憑證會以明文顯示，請避免截圖或共享螢幕。",
+                "設定ファイルはまだ変更されていません。続行する前に各フィールドを確認してください。ローカル認証情報は平文で表示されます。スクリーンショットと画面共有を避けてください。"
               )}</DialogDescription>
           </DialogHeader>
           <div className="agent-change-scroll" role="region" aria-label={copy("Configuration changes", "配置改动", "設定變更", "設定変更")} tabIndex={0}>
@@ -1090,13 +1090,13 @@ export default function AgentRoutePage({
                           <div className="agent-change-states">
                             <div>
                               <span>{copy("Before", "修改前", "修改前", "変更前")}</span>
-                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "before", pendingPlan.intent, beforePreview, copy)}</strong>
+                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "before", pendingPlan.intent, beforePreview, copy)}</strong>
                               {beforeMeaning ? <small>{beforeMeaning}</small> : null}
                             </div>
                             <span className="agent-change-arrow" aria-hidden="true">→</span>
                             <div className="after">
                               <span>{copy("After", "修改后", "修改後", "変更後")}</span>
-                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, change.sensitive, "after", pendingPlan.intent, afterPreview, copy)}</strong>
+                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "after", pendingPlan.intent, afterPreview, copy)}</strong>
                               {afterMeaning ? <small>{afterMeaning}</small> : null}
                             </div>
                           </div>

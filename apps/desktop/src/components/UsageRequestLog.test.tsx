@@ -440,7 +440,25 @@ describe("UsageRequestLog", () => {
     expect(screen.getByRole("button", { name: "HTTP 链路" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("Agent → Token Station")).toBeInTheDocument();
     expect(screen.getByText("尝试 1 · Token Station → deepseek/deepseek-v4-pro")).toBeInTheDocument();
-    expect(screen.getByText("Token Station 改动")).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "请求详情" });
+    const packets = dialog.querySelectorAll("details.http-packet");
+    expect(packets).toHaveLength(4);
+    expect(packets[0]).not.toHaveAttribute("open");
+    expect(packets[1]).not.toHaveAttribute("open");
+    expect(packets[2]).not.toHaveAttribute("open");
+    expect(packets[3]).not.toHaveAttribute("open");
+    expect(dialog.querySelectorAll(".http-packet-disclosure")).toHaveLength(4);
+    expect(within(packets[0] as HTMLElement).getByText("请求头")).toBeInTheDocument();
+    expect(within(packets[0] as HTMLElement).getByText("请求体")).toBeInTheDocument();
+    expect(within(packets[2] as HTMLElement).getByText("响应头")).toBeInTheDocument();
+    expect(within(packets[2] as HTMLElement).getByText("响应体")).toBeInTheDocument();
+
+    const changeSet = dialog.querySelector("details.http-change-list");
+    expect(changeSet).not.toBeNull();
+    expect(changeSet).not.toHaveAttribute("open");
+    expect(changeSet?.querySelector(".http-change-disclosure")).not.toBeNull();
+    await user.click(within(changeSet as HTMLElement).getByText("Token Station 改动"));
+    expect(changeSet).toHaveAttribute("open");
     expect(screen.getByText("body.model")).toBeInTheDocument();
     expect(screen.getAllByText("<redacted>").length).toBeGreaterThanOrEqual(2);
     expect(screen.getAllByText("https://api.deepseek.com/v1/chat/completions", { exact: false }).length).toBeGreaterThanOrEqual(1);
@@ -463,6 +481,15 @@ describe("UsageRequestLog", () => {
     const route = (await screen.findAllByText("deepseek/deepseek-v4-pro"))[0];
     await user.click(route);
     const row = screen.getByRole("dialog", { name: "请求详情" });
+
+    const summary = within(row).getByLabelText("请求审计摘要");
+    expect(summary.tagName).toBe("DL");
+    expect(summary).toHaveClass("usage-log-facts");
+    const identityFacts = summary.querySelectorAll(".request-detail-fact--identity");
+    expect(identityFacts).toHaveLength(2);
+    expect(within(identityFacts[0] as HTMLElement).getByText("req-1")).toBeInTheDocument();
+    expect(within(identityFacts[1] as HTMLElement).getByText("auto")).toBeInTheDocument();
+    expect(summary.querySelectorAll(".request-detail-fact--technical")).toHaveLength(3);
 
     const trace = within(row).getByTestId("receipt-trace");
     expect(trace).toHaveClass("receipt-timeline-compact");

@@ -80,6 +80,21 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
       provider.name === state.direct_target?.upstream && provider.managed_route
     )) ?? null
     : null;
+  const modelOfferings = state.route_context.model_offerings;
+  const exactModelContext = modelOfferings.length === 1
+    ? `${modelOfferings[0].upstream} / ${modelOfferings[0].model}`
+    : null;
+  const modelContextLabel = state.routing_mode === "direct"
+    ? copy("Current model", "当前模型", "目前模型", "現在のモデル")
+    : copy("Candidate models", "候选模型", "候選模型", "候補モデル");
+  const modelContext = exactModelContext ?? (modelOfferings.length > 1
+    ? copy(
+        `${modelOfferings.length} candidate models`,
+        `${modelOfferings.length} 个候选模型`,
+        `${modelOfferings.length} 個候選模型`,
+        `${modelOfferings.length} 個の候補モデル`,
+      )
+    : copy("Not configured", "未配置", "未配置", "未設定"));
 
   const routeModeName = (mode: StateView["routing_mode"]) => {
     if (mode === "direct") return copy("Direct", "简单路由", "簡單路由", "シンプルルーティング");
@@ -312,6 +327,8 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         routingMode={state.routing_mode}
         routeState={state.serve.model_test_uses_running_gateway ? "running" : "draft"}
         enterpriseRoute={Boolean(activeEnterpriseProvider)}
+        modelContextLabel={modelContextLabel}
+        modelContext={modelContext}
       />
     </div>
   );

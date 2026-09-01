@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -45,6 +46,7 @@ assert.doesNotMatch(linuxWorkflow, /push:\s*\n\s*tags:/);
 assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[verify-main-full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);
 
 for (const script of [
+  "scripts/release-latest-formal.sh",
   "scripts/prepare-formal-release.sh",
   "scripts/sign-formal-release.sh",
   "scripts/publish-formal-release.sh",
@@ -72,7 +74,38 @@ assert.match(publish, /ts-release -- verify-updater/);
 assert.match(publish, /check-release-assets\.mjs/);
 assert.match(publish, /gh release upload/);
 assert.match(publish, /gh release edit/);
+assert.match(publish, /--notes-file/);
 assert.doesNotMatch(publish, /SIGNING_PRIVATE_KEY|release-signing\.key/);
+
+const entry = read("scripts/release-latest-formal.sh");
+assert.match(entry, /start\) start_release/);
+assert.match(entry, /prepare\) prepare_release/);
+assert.match(entry, /sign\) sign_release/);
+assert.match(entry, /publish\) publish_release/);
+assert.match(entry, /branch --show-current/);
+assert.match(entry, /status --porcelain/);
+assert.match(entry, /rev-parse "\$remote\/main"/);
+assert.match(entry, /event=push/);
+assert.match(entry, /conclusion == "success"/);
+assert.match(entry, /--confirm \$tag/);
+assert.match(entry, /check-formal-release-notes\.mjs/);
+assert.match(entry, /release transfer directory must be outside the source checkout/);
+assert.match(entry, /TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED/);
+assert.match(entry, /TOKEN_STATION_RELEASE_PUBKEY_HEX/);
+assert.match(entry, /TOKEN_STATION_UPDATER_PUBKEY/);
+assert.match(entry, /APPLE_CERTIFICATE_PASSWORD/);
+assert.match(entry, /WINDOWS_CERTIFICATE_PASSWORD/);
+assert.match(entry, /gh secret list/);
+assert.match(entry, /gh run watch/);
+assert.match(entry, /isDraft,isPrerelease/);
+
+const inTreeTransfer = spawnSync(
+  path.join(root, "scripts/release-latest-formal.sh"),
+  ["prepare", "--dir", path.join(root, "release-transfer")],
+  { cwd: root, encoding: "utf8" },
+);
+assert.equal(inTreeTransfer.status, 1);
+assert.match(inTreeTransfer.stderr, /release transfer directory must be outside/);
 
 const ci = read(".github/workflows/full-ci.yml");
 assert.match(ci, /node tests\/formal-release-finalization\.mjs/);

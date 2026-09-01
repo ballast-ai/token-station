@@ -1,6 +1,155 @@
 use crate::*;
 
 pub(crate) const MANAGED_ENTERPRISE_PROVIDER_ID: &str = "tokenstation";
+const PROVIDER_PURGE_PENDING_VERSION: u32 = 1;
+const PROVIDER_PURGE_PENDING_FILE: &str = "provider-purge-pending.json";
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderPurgePending {
+    version: u32,
+    providers: Vec<String>,
+}
+
+fn provider_purge_pending_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(PROVIDER_PURGE_PENDING_FILE)
+}
+
+fn load_pending_provider_purge(data_dir: &Path) -> Result<Option<ProviderPurgePending>, String> {
+    let path = provider_purge_pending_path(data_dir);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Provider 凭据待清理记录不可读：{error}")),
+    };
+    let pending: ProviderPurgePending = serde_json::from_str(&text)
+        .map_err(|error| format!("Provider 凭据待清理记录损坏，已拒绝复用名称：{error}"))?;
+    if pending.version != PROVIDER_PURGE_PENDING_VERSION {
+        return Err(format!(
+            "Provider 凭据待清理记录版本 {} 不受支持，已拒绝复用名称",
+            pending.version
+        ));
+    }
+    if pending.providers.is_empty() {
+        return Err("Provider 凭据待清理记录为空，已拒绝复用名称".to_owned());
+    }
+    let unique = pending
+        .providers
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique.len() != pending.providers.len()
+        || pending.providers.iter().any(|name| name.trim().is_empty())
+    {
+        return Err("Provider 凭据待清理记录包含无效或重复名称，已拒绝复用".to_owned());
+    }
+    Ok(Some(pending))
+}
+
+fn persist_pending_provider_purge(data_dir: &Path, providers: &[String]) -> Result<(), String> {
+    let pending = ProviderPurgePending {
+        version: PROVIDER_PURGE_PENDING_VERSION,
+        providers: providers.to_vec(),
+    };
+    let mut rendered = serde_json::to_string_pretty(&pending)
+        .map_err(|error| format!("序列化 Provider 凭据待清理记录失败：{error}"))?;
+    rendered.push('\n');
+    crate::agent_integration::safe_fs::write_atomic_private(
+        &provider_purge_pending_path(data_dir),
+        rendered.as_bytes(),
+    )
+    .map_err(|error| format!("保存 Provider 凭据待清理记录失败：{error}"))
+}
+
+fn remove_pending_provider_purge(data_dir: &Path) -> Result<(), String> {
+    let path = provider_purge_pending_path(data_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => crate::agent_integration::safe_fs::sync_parent(data_dir)
+            .map_err(|error| format!("同步 Provider 凭据待清理记录目录失败：{error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("移除 Provider 凭据待清理记录失败：{error}")),
+    }
+}
+
+fn recover_pending_provider_purge(inner: &mut AppInner) -> Result<(), String> {
+    let data_dir = inner.data_dir();
+    let Some(pending) = load_pending_provider_purge(&data_dir)? else {
+        return Ok(());
+    };
+    let tombstoned = provider_tombstones::names(&data_dir)?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let pending_names = pending
+        .providers
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let retained = pending_names.intersection(&tombstoned).count();
+    if retained == pending_names.len() {
+        return remove_pending_provider_purge(&data_dir);
+    }
+    if retained != 0 {
+        return Err("Provider 回收站与凭据待清理记录状态不一致，已拒绝自动删除凭据".to_owned());
+    }
+    let active_draft = pending
+        .providers
+        .iter()
+        .filter(|name| inner.draft["upstreams"].get(name.as_str()).is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !active_draft.is_empty() {
+        return Err(format!(
+            "当前草稿已复用待清理 Provider {}，已拒绝删除其凭据",
+            active_draft.join("、")
+        ));
+    }
+    if inner.config_path.exists() {
+        let persisted = ClientConfig::load(&inner.config_path).map_err(|error| {
+            format!("无法核对磁盘配置中的待清理 Provider，已拒绝删除凭据：{error}")
+        })?;
+        let active_persisted = pending
+            .providers
+            .iter()
+            .filter(|name| persisted.upstreams.contains_key(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !active_persisted.is_empty() {
+            return Err(format!(
+                "磁盘配置已复用待清理 Provider {}，已拒绝删除其凭据",
+                active_persisted.join("、")
+            ));
+        }
+    }
+    if inner.config_state.is_dirty() {
+        return Err("Provider 永久删除已提交，但凭据和定价清理待重试；请先保存当前配置".to_owned());
+    }
+    secrets::store_remove_provider_api_keys(&data_dir, &pending.providers)?;
+    let previous_pricing = inner.draft["pricing"].clone();
+    let previous_state = inner.config_state.clone();
+    let pricing_changed = clear_provider_scoped_prices_for(inner, &pending.providers)?;
+    if pricing_changed {
+        if let Err(error) = inner.observe_draft().and_then(|()| inner.save_draft()) {
+            inner.draft["pricing"] = previous_pricing;
+            inner.config_state = previous_state;
+            return Err(format!(
+                "Provider 永久删除已提交，但保存定价清理失败，已记录待重试：{error}"
+            ));
+        }
+    }
+    remove_pending_provider_purge(&data_dir)
+}
+
+pub(crate) fn recover_pending_provider_purge_on_startup(
+    inner: &mut AppInner,
+) -> Result<(), String> {
+    recover_pending_provider_purge(inner)
+}
+
+fn is_managed_enterprise_provider_id(name: &str) -> bool {
+    name == MANAGED_ENTERPRISE_PROVIDER_ID
+        || name.strip_prefix("tokenstation_").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
 
 pub(crate) const PROVIDER_BRANDS_BY_BASE_URL: &[(&str, &str)] = &[
     ("https://api.openai.com/v1", "openai"),
@@ -337,18 +486,6 @@ pub(crate) fn provider_auth_value(
 
 pub(crate) fn is_free_provider_value(provider: &Value) -> bool {
     provider["access_tier"].as_str() == Some("free")
-}
-
-pub(crate) fn restore_provider_key(
-    data_dir: &std::path::Path,
-    upstream: &str,
-    slot: &str,
-    previous: Option<&str>,
-) -> Result<(), String> {
-    match previous {
-        Some(value) => secrets::store_set(data_dir, upstream, slot, value),
-        None => secrets::store_remove(data_dir, upstream, slot),
-    }
 }
 
 #[tauri::command]
@@ -757,32 +894,109 @@ pub(crate) fn add_managed_enterprise_route(
     api_key: String,
     model: String,
 ) -> Result<StateView, String> {
+    let endpoint = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let base_url = endpoint.as_str();
     let model = model.trim().to_owned();
     if model.is_empty() {
         return Err("企业路由模型不能为空".to_owned());
     }
-    let provider_exists = state.0.lock().unwrap().draft["upstreams"]
-        .get(MANAGED_ENTERPRISE_PROVIDER_ID)
-        .is_some();
-    if provider_exists {
-        return extend_managed_enterprise_route(state, base_url, api_key, model);
+    loop {
+        let (existing_provider, new_provider) = {
+            let inner = state.0.lock().unwrap();
+            let existing_provider = inner.draft["upstreams"]
+                .as_object()
+                .into_iter()
+                .flat_map(|upstreams| upstreams.iter())
+                .find(|(name, upstream)| {
+                    is_managed_enterprise_provider_id(name)
+                        && upstream["managed_route"].as_bool() == Some(true)
+                        && upstream["base_url"].as_str() == Some(base_url.as_str())
+                })
+                .map(|(name, _)| name.clone());
+            let new_provider = if existing_provider.is_none() {
+                Some(next_managed_enterprise_provider_id(&inner)?)
+            } else {
+                None
+            };
+            (existing_provider, new_provider)
+        };
+        if let Some(provider) = existing_provider {
+            let result = extend_managed_enterprise_route(
+                state.clone(),
+                provider.clone(),
+                base_url.clone(),
+                api_key.clone(),
+                model.clone(),
+            );
+            if result.is_ok() {
+                return result;
+            }
+            let still_matches = {
+                let inner = state.0.lock().unwrap();
+                inner.draft["upstreams"]
+                    .get(&provider)
+                    .is_some_and(|upstream| {
+                        upstream["managed_route"].as_bool() == Some(true)
+                            && upstream["base_url"].as_str() == Some(base_url.as_str())
+                    })
+            };
+            if still_matches {
+                return result;
+            }
+            continue;
+        }
+        let provider = new_provider.expect("a new managed Provider Channel id was allocated");
+        let result = add_provider_impl(
+            state.clone(),
+            provider.clone(),
+            base_url.clone(),
+            vec![model.clone()],
+            Some(api_key.clone()),
+            false,
+            "store",
+            None,
+            "openai-compatible",
+            true,
+        );
+        if result.is_ok() {
+            return result;
+        }
+        let allocation_was_claimed = {
+            let inner = state.0.lock().unwrap();
+            inner.draft["upstreams"].get(&provider).is_some()
+                || provider_tombstones::contains(&inner.data_dir(), &provider)?
+        };
+        if !allocation_was_claimed {
+            return result;
+        }
     }
-    add_provider_impl(
-        state,
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
-        base_url,
-        vec![model],
-        Some(api_key),
-        false,
-        "store",
-        None,
-        "openai-compatible",
-        true,
-    )
+}
+
+pub(crate) fn next_managed_enterprise_provider_id(inner: &AppInner) -> Result<String, String> {
+    let data_dir = inner.data_dir();
+    let mut reserved = provider_tombstones::names(&data_dir)?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(pending) = load_pending_provider_purge(&data_dir)? {
+        reserved.extend(pending.providers);
+    }
+    for index in 1..=10_000 {
+        let candidate = if index == 1 {
+            MANAGED_ENTERPRISE_PROVIDER_ID.to_owned()
+        } else {
+            format!("{MANAGED_ENTERPRISE_PROVIDER_ID}_{index}")
+        };
+        if inner.draft["upstreams"].get(&candidate).is_none() && !reserved.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err("企业供应商数量已超过支持的上限".to_owned())
 }
 
 fn extend_managed_enterprise_route(
     state: State<'_, AppStateManaged>,
+    provider: String,
     base_url: String,
     api_key: String,
     model: String,
@@ -801,17 +1015,16 @@ fn extend_managed_enterprise_route(
 
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    recover_pending_provider_purge(&mut inner)?;
     let egress = draft_egress_config(&inner.draft)?;
     ensure_credential_transport(&endpoint, &egress)?;
 
     let previous_upstream = inner.draft["upstreams"]
-        .get(MANAGED_ENTERPRISE_PROVIDER_ID)
+        .get(&provider)
         .cloned()
         .ok_or_else(|| "托管企业供应商不存在".to_owned())?;
     if previous_upstream["managed_route"].as_bool() != Some(true) {
-        return Err(format!(
-            "供应商 `{MANAGED_ENTERPRISE_PROVIDER_ID}` 已存在，但不是托管企业供应商"
-        ));
+        return Err(format!("供应商 `{provider}` 已存在，但不是托管企业供应商"));
     }
     let configured_base_url = previous_upstream["base_url"]
         .as_str()
@@ -834,32 +1047,29 @@ fn extend_managed_enterprise_route(
     let previous_routing = inner.draft.get("routing").cloned();
     let previous_router = inner.draft["router"].clone();
     let previous_state = inner.config_state.clone();
-    inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID]["models"] = json!(models);
-    inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID]["auth"] =
+    inner.draft["upstreams"][&provider]["models"] = json!(models);
+    inner.draft["upstreams"][&provider]["auth"] =
         json!({ "slot": "provider_api_key", "store": true });
     if !inner.draft["routing"].is_object() {
         inner.draft["routing"] = json!({});
     }
     inner.draft["routing"]["mode"] = json!("direct");
     inner.draft["routing"]["direct_target"] = json!({
-        "upstream": MANAGED_ENTERPRISE_PROVIDER_ID,
+        "upstream": provider,
         "model": model
     });
     inner.draft["router"]["routing_mode"] = json!("tiered");
     if let Err(error) = inner.observe_draft() {
-        inner.draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = previous_upstream;
+        inner.draft["upstreams"][&provider] = previous_upstream;
         restore_managed_route_mutation(&mut inner.draft, &previous_routing, &previous_router);
         inner.config_state = previous_state;
         return Err(error);
     }
 
-    inner.pending_provider_keys.insert(
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
-        Zeroizing::new(api_key),
-    );
     inner
-        .pending_provider_key_removals
-        .remove(MANAGED_ENTERPRISE_PROVIDER_ID);
+        .pending_provider_keys
+        .insert(provider.clone(), Zeroizing::new(api_key));
+    inner.pending_provider_key_removals.remove(&provider);
     Ok(inner.snapshot())
 }
 
@@ -941,6 +1151,7 @@ pub(crate) fn add_provider_impl(
     }
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    recover_pending_provider_purge(&mut inner)?;
     let egress = draft_egress_config(&inner.draft)?;
     ensure_credential_transport(&endpoint, &egress)?;
     if inner.draft["upstreams"].get(&name).is_some() {
@@ -953,16 +1164,44 @@ pub(crate) fn add_provider_impl(
         ));
     }
 
-    let legacy_managed_upstreams = if managed_route {
-        inner.draft["upstreams"]
+    let has_modern_managed_upstream = inner.draft["upstreams"]
+        .as_object()
+        .into_iter()
+        .flat_map(|upstreams| upstreams.iter())
+        .any(|(upstream_name, upstream)| {
+            is_managed_enterprise_provider_id(upstream_name)
+                && upstream["managed_route"].as_bool() == Some(true)
+        });
+    let legacy_managed_upstreams = if managed_route && !has_modern_managed_upstream {
+        let candidates = inner.draft["upstreams"]
             .as_object()
             .into_iter()
             .flat_map(|upstreams| upstreams.iter())
             .filter(|(legacy_name, upstream)| {
-                legacy_name.as_str() != name && upstream["managed_route"].as_bool() == Some(true)
+                legacy_name.as_str() != name
+                    && !is_managed_enterprise_provider_id(legacy_name)
+                    && upstream["managed_route"].as_bool() == Some(true)
             })
             .map(|(legacy_name, upstream)| (legacy_name.clone(), upstream.clone()))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        let direct_target = inner.draft["routing"]["direct_target"]["upstream"].as_str();
+        if let Some(index) = candidates
+            .iter()
+            .position(|(candidate, _)| Some(candidate.as_str()) == direct_target)
+        {
+            vec![candidates[index].clone()]
+        } else if candidates.len() <= 1 {
+            Vec::new()
+        } else {
+            return Err(format!(
+                "存在多个旧版托管 Provider {}，但当前直连路由未指向其中一个，无法确定迁移目标",
+                candidates
+                    .iter()
+                    .map(|(candidate, _)| candidate.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
     } else {
         Vec::new()
     };
@@ -1698,6 +1937,7 @@ pub(crate) fn remove_provider(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    recover_pending_provider_purge(&mut inner)?;
     let name = name.trim();
     let references = provider_references(&inner, name);
     if !references.is_empty() {
@@ -1737,6 +1977,7 @@ pub(crate) fn restore_provider(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    recover_pending_provider_purge(&mut inner)?;
     let name = name.trim();
     if inner.draft["upstreams"].get(name).is_some() {
         return Err(format!("同名供应商 `{name}` 已存在，不能覆盖恢复"));
@@ -1761,6 +2002,97 @@ pub(crate) fn restore_provider(
             .remove(name);
         provider_tombstones::archive(&data_dir, name, &provider).ok();
         return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+pub(crate) fn purge_deleted_providers(
+    state: State<'_, AppStateManaged>,
+) -> Result<StateView, String> {
+    purge_deleted_providers_with_discard(state, provider_tombstones::discard_all)
+}
+
+pub(crate) fn purge_deleted_providers_with_discard(
+    state: State<'_, AppStateManaged>,
+    discard: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    recover_pending_provider_purge(&mut inner)?;
+    if inner.config_state.is_dirty() {
+        return Err("Provider 回收站只能在配置已保存后清空；请先保存当前 Provider 删除".to_owned());
+    }
+    let data_dir = inner.data_dir();
+    let names = provider_tombstones::names(&data_dir)?;
+    let still_active = names
+        .iter()
+        .filter(|name| inner.draft["upstreams"].get(name.as_str()).is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !still_active.is_empty() {
+        return Err(format!(
+            "当前草稿仍包含回收站 Provider {}；已拒绝删除活动 Provider 的恢复点",
+            still_active.join("、")
+        ));
+    }
+    if inner.config_path.exists() {
+        let persisted = ClientConfig::load(&inner.config_path)
+            .map_err(|error| format!("无法核对磁盘配置中的 Provider，已拒绝清空回收站：{error}"))?;
+        let still_persisted = names
+            .iter()
+            .filter(|name| persisted.upstreams.contains_key(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !still_persisted.is_empty() {
+            return Err(format!(
+                "磁盘配置仍包含待删除 Provider {}；请先保存 Provider 删除后再清空回收站",
+                still_persisted.join("、")
+            ));
+        }
+    }
+    let inactive_names = names;
+    if inactive_names.is_empty() {
+        return Ok(inner.snapshot());
+    }
+    persist_pending_provider_purge(&data_dir, &inactive_names)?;
+    if let Err(error) = discard(&data_dir) {
+        let tombstoned = provider_tombstones::names(&data_dir).map_err(|state_error| {
+            format!(
+                "{error}；且无法确认 Provider 回收站是否已提交，待清理记录已保留：{state_error}"
+            )
+        })?;
+        let retained = inactive_names
+            .iter()
+            .filter(|name| tombstoned.contains(name))
+            .count();
+        if retained == inactive_names.len() {
+            return match remove_pending_provider_purge(&data_dir) {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "{error}；回收站未提交，但移除待清理记录失败：{cleanup_error}"
+                )),
+            };
+        }
+        if retained == 0 {
+            return Err(format!(
+                "Provider 回收站删除已提交，但持久化确认失败；凭据与定价待清理记录已保留：{error}"
+            ));
+        }
+        return Err(format!(
+            "{error}；Provider 回收站仅删除了部分待清理项，记录已保留并拒绝自动删除凭据"
+        ));
+    }
+    if let Err(error) = recover_pending_provider_purge(&mut inner) {
+        return Err(format!(
+            "Provider 永久删除已提交，后续清理已记录待重试：{error}"
+        ));
+    }
+
+    for name in inactive_names {
+        inner.pending_provider_keys.remove(&name);
+        inner.pending_provider_key_removals.remove(&name);
+        inner.bump_upstream_epoch(&name);
     }
     Ok(inner.snapshot())
 }

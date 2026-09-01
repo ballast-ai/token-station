@@ -1,6 +1,5 @@
 use std::path::{Component, Path};
 
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -1212,7 +1211,9 @@ fn redact_changes(
                     || is_path_prefix(sensitive, &operation.path)
             });
             let summary = match (operation.operation, sensitive) {
-                (PatchKind::Add | PatchKind::Replace, true) => "<敏感值已隐藏>".to_string(),
+                (PatchKind::Add | PatchKind::Replace, true) => {
+                    "<本机敏感值，明文见确认详情>".to_string()
+                }
                 (PatchKind::Add | PatchKind::Replace, false) => "<设置受管值>".to_string(),
                 (PatchKind::Remove, _) => "<移除受管值>".to_string(),
                 (PatchKind::Test, _) => "<核对受管值>".to_string(),
@@ -1225,10 +1226,13 @@ fn redact_changes(
                 path: operation.path.clone(),
                 sensitive,
                 summary,
-                before_preview: (!sensitive)
-                    .then(|| inverse.and_then(operation_preview))
-                    .flatten(),
-                after_preview: (!sensitive).then(|| operation_preview(operation)).flatten(),
+                // The connection confirmation is a local-only UI. Show the
+                // values for every Connector so the user can audit the
+                // credentials being replaced or installed before authorizing
+                // the write. `human_diff` remains a concise summary and no
+                // request/diagnostic log receives these previews.
+                before_preview: inverse.and_then(operation_preview),
+                after_preview: operation_preview(operation),
             }
         })
         .collect()
@@ -1243,7 +1247,7 @@ fn redact_reverse_changes(
         .into_iter()
         .map(|mut change| {
             change.summary = if change.sensitive {
-                "<恢复接管前敏感值，内容已隐藏>"
+                "<恢复接管前本机敏感值，明文见确认详情>"
             } else {
                 "<恢复接管前受管值>"
             }
@@ -1262,7 +1266,7 @@ fn redact_restore_changes(
         .into_iter()
         .map(|mut change| {
             change.summary = if change.sensitive {
-                "<恢复受管敏感值，内容已隐藏>"
+                "<恢复受管本机敏感值，明文见确认详情>"
             } else {
                 "<恢复受管值>"
             }
@@ -1276,49 +1280,20 @@ fn operation_preview(operation: &PatchOperation) -> Option<String> {
     if operation.operation == PatchKind::Remove {
         return None;
     }
-    let value = sanitize_preview_value(operation.value.as_ref()?);
-    let serialized = serde_json::to_string(&value).ok()?;
-    const MAX_PREVIEW_CHARS: usize = 512;
-    if serialized.chars().count() <= MAX_PREVIEW_CHARS {
-        return Some(serialized);
-    }
-    let mut preview = serialized
-        .chars()
-        .take(MAX_PREVIEW_CHARS)
-        .collect::<String>();
-    preview.push('…');
-    Some(preview)
-}
+    const PREVIEW_CHAR_LIMIT: usize = 4_096;
+    const TRUNCATED_MARKER: &str = "… <truncated>";
 
-fn sanitize_preview_value(value: &Value) -> Value {
-    let Value::String(text) = value else {
-        return value.clone();
-    };
-    let Ok(mut url) = reqwest::Url::parse(text) else {
-        return value.clone();
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return value.clone();
+    let rendered = serde_json::to_string(operation.value.as_ref()?).ok()?;
+    if rendered.chars().count() <= PREVIEW_CHAR_LIMIT {
+        return Some(rendered);
     }
-    if !url.username().is_empty() {
-        let _ = url.set_username("<redacted>");
-    }
-    if url.password().is_some() {
-        let _ = url.set_password(Some("<redacted>"));
-    }
-    if url.query().is_some() {
-        let keys = url
-            .query_pairs()
-            .map(|(name, _)| name.into_owned())
-            .collect::<Vec<_>>();
-        url.query_pairs_mut()
-            .clear()
-            .extend_pairs(keys.iter().map(|name| (name.as_str(), "<redacted>")));
-    }
-    if url.fragment().is_some() {
-        url.set_fragment(Some("<redacted>"));
-    }
-    Value::String(url.into())
+    Some(
+        rendered
+            .chars()
+            .take(PREVIEW_CHAR_LIMIT)
+            .chain(TRUNCATED_MARKER.chars())
+            .collect(),
+    )
 }
 
 fn credential_bindings(
@@ -1530,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_preview_redacts_url_credentials_and_query_values() {
+    fn operation_preview_preserves_local_url_credentials_and_query_values() {
         let operation = PatchOperation {
             operation: PatchKind::Replace,
             path: ConfigPath {
@@ -1542,24 +1517,38 @@ mod tests {
         };
 
         let preview = operation_preview(&operation).expect("URL preview");
-        assert!(preview.contains("example.test/v1"));
-        assert!(preview.contains("api_key="));
-        for secret in [
+        for value in [
             "alice",
             "password",
-            "query-secret",
-            "private",
+            "example.test/v1",
+            "api_key=query-secret",
+            "region=private",
             "fragment-secret",
         ] {
             assert!(
-                !preview.contains(secret),
-                "preview leaked {secret}: {preview}"
+                preview.contains(value),
+                "preview omitted {value}: {preview}"
             );
         }
     }
 
     #[test]
-    fn plan_is_redacted_and_binds_instance_revision_catalog_and_expiry() {
+    fn operation_preview_bounds_large_local_values() {
+        let operation = PatchOperation {
+            operation: PatchKind::Replace,
+            path: ConfigPath {
+                segments: vec!["env".to_owned(), "ANTHROPIC_AUTH_TOKEN".to_owned()],
+            },
+            value: Some(json!("x".repeat(8 * 1024))),
+        };
+
+        let preview = operation_preview(&operation).expect("credential preview");
+        assert!(preview.chars().count() <= 4_128, "preview was not bounded");
+        assert!(preview.ends_with("… <truncated>"));
+    }
+
+    #[test]
+    fn plan_exposes_local_confirmation_values_and_binds_instance_revision_catalog_and_expiry() {
         #[cfg(windows)]
         let target = Path::new(r"C:\tmp\token-station-plan\settings.json");
         #[cfg(not(windows))]
@@ -1596,8 +1585,8 @@ mod tests {
         .unwrap();
 
         let serialized = serde_json::to_string(&prepared.view).unwrap();
-        assert!(!serialized.contains(secret));
-        assert!(!serialized.contains(old_secret));
+        assert!(serialized.contains(secret));
+        assert!(serialized.contains(old_secret));
         assert!(!serialized.contains(source_marker));
         assert!(serialized.contains(old_base_url));
         assert!(serialized.contains("http://127.0.0.1:8787"));
@@ -1693,6 +1682,9 @@ mod tests {
             "06".repeat(16),
         )
         .expect("a first Codex connection must be reversible");
+
+        let serialized = serde_json::to_string(&prepared.view).unwrap();
+        assert!(serialized.contains("fixture-codex-virtual-key"));
 
         assert!(prepared.view.projection.files[0]
             .reverse_changes

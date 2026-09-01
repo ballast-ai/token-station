@@ -46,7 +46,13 @@ describe("retained page theme styles", () => {
     const statusHeaderRule = appCss.match(
       /\.station-content-overview \.overview-status-card \[data-slot="card-header"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
-    expect(statusHeaderRule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto/);
+    expect(statusHeaderRule).toMatch(/grid-template-columns:\s*minmax\(132px, \.72fr\) minmax\(0, 1\.28fr\)/);
+
+    const statusFactsRule = appCss.match(
+      /\.station-content-overview \.overview-status-card dl\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    expect(statusFactsRule).toMatch(/grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+    expect(statusFactsRule).toMatch(/justify-items:\s*start/);
 
     const summaryHeaderRule = appCss.match(
       /\.station-content-overview \.overview-summary-card > \[data-slot="card-header"\]\s*\{([^}]*)\}/s,
@@ -190,6 +196,32 @@ describe("retained page theme styles", () => {
     expect(flatRoutingStyles).toMatch(/var\(--surface-2\)/);
   });
 
+  it("uses filled surfaces instead of frames on inherited Agent routes", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const headingRule = lastRule(/\.agent-route-routing-heading\s*\{([^}]*)\}/gs);
+    const statusRule = lastRule(
+      /\.agent-route-routing-heading > \.status-chip\s*\{([^}]*)\}/gs,
+    );
+    const inheritanceRule = lastRule(/\.agent-route-inheritance-card\s*\{([^}]*)\}/gs);
+    const actionRule = lastRule(
+      /\.agent-route-inheritance-action\[data-slot="button"\]\s*\{([^}]*)\}/gs,
+    );
+
+    expect(headingRule).toMatch(/border:\s*0/);
+    expect(headingRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(headingRule).toMatch(/box-shadow:\s*none/);
+    expect(statusRule).toMatch(/border:\s*0/);
+    expect(statusRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(inheritanceRule).toMatch(/border:\s*0/);
+    expect(inheritanceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(inheritanceRule).toMatch(/box-shadow:\s*none/);
+    expect(actionRule).toMatch(/border:\s*0/);
+    expect(actionRule).toMatch(/background:\s*var\(--signal-soft\)/);
+  });
+
   it("uses the flat directory language for model-first search results", () => {
     const catalogRule = appCss.match(/\.model-first-catalog\s*\{([^}]*)\}/s)?.[1] ?? "";
     const resultRule = appCss.match(/\.model-first-results button\s*\{([^}]*)\}/s)?.[1] ?? "";
@@ -252,7 +284,7 @@ describe("retained page theme styles", () => {
     expect(routeSnapshotRule).not.toMatch(/align-content:\s*center/);
   });
 
-  it("nests compact Agent routes without decorative tree lines", () => {
+  it("aligns route scopes and keeps compact Agent routes without decorative tree lines", () => {
     const scopeCardRule = appCss.match(
       /\.routing-scope-item\[data-slot="button"\]\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -268,9 +300,9 @@ describe("retained page theme styles", () => {
     )?.[1] ?? "";
 
     expect(scopeCardRule).toMatch(/min-height:\s*62px/);
-    expect(scopeCardRule).toMatch(/border:\s*1px solid var\(--line\)/);
-    expect(selectedRule).toMatch(/border-color:\s*var\(--signal-selection-border\)/);
-    expect(childDisclosureRule).toMatch(/margin-left:\s*18px/);
+    expect(scopeCardRule).toMatch(/border:\s*0/);
+    expect(selectedRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(childDisclosureRule).toMatch(/margin-left:\s*0/);
     expect(childDisclosureRule).toMatch(/padding-left:\s*0/);
     expect(nestedListRule).toMatch(/border:\s*0/);
     expect(compactAgentRule).toMatch(/height:\s*46px/);
@@ -303,6 +335,64 @@ describe("retained page theme styles", () => {
     expect(dialogRule).toMatch(/max-height:/);
     expect(bodyRule).toMatch(/min-height:\s*0/);
     expect(bodyRule).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("uses filled hierarchy instead of nested frames inside provider management", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const managerRule = lastRule(
+      /\.provider-management-dialog \.provider-model-manager\s*\{([^}]*)\}/gs,
+    );
+    const catalogRule = lastRule(
+      /\.provider-management-dialog \.model-catalog\s*\{([^}]*)\}/gs,
+    );
+    const chipRule = lastRule(
+      /\.provider-management-dialog \.model-chip\s*\{([^}]*)\}/gs,
+    );
+    const selectedChipRule = lastRule(
+      /\.provider-management-dialog \.model-chip\.on\s*\{([^}]*)\}/gs,
+    );
+    const manualRowRule = lastRule(
+      /\.provider-management-dialog \.custom-model-row\s*\{([^}]*)\}/gs,
+    );
+    const advancedRule = lastRule(
+      /\.provider-management-dialog \.provider-advanced-models\s*\{([^}]*)\}/gs,
+    );
+    const ledgerRowRule = lastRule(
+      /\.provider-management-dialog \.model-ledger-row\s*\{([^}]*)\}/gs,
+    );
+    const ledgerSeparatorRule = lastRule(
+      /\.provider-management-dialog \.model-ledger-row \+ \.model-ledger-row\s*\{([^}]*)\}/gs,
+    );
+    const taskSurfaceRule = lastRule(
+      /\.provider-management-dialog \.provider-edit-fields,\s*\.provider-management-dialog \.provider-detail-summary,\s*\.provider-management-dialog \.provider-transport-status\s*\{([^}]*)\}/gs,
+    );
+    const inputRule = lastRule(
+      /\.select,\s*\.input,\s*\.model-search,[^{]*\{([^}]*)\}/gs,
+    );
+
+    expect(managerRule).toMatch(/padding:\s*0/);
+    expect(managerRule).toMatch(/border:\s*0/);
+    expect(managerRule).toMatch(/background:\s*transparent/);
+    expect(catalogRule).toMatch(/border:\s*0/);
+    expect(catalogRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(chipRule).toMatch(/border:\s*0/);
+    expect(chipRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(selectedChipRule).toMatch(/border:\s*0/);
+    expect(selectedChipRule).toMatch(/background:\s*var\(--signal-soft\)/);
+    expect(selectedChipRule).toMatch(/box-shadow:\s*none/);
+    expect(manualRowRule).toMatch(/border-top:\s*0/);
+    expect(advancedRule).toMatch(/border:\s*0/);
+    expect(advancedRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(ledgerRowRule).toMatch(/border:\s*0/);
+    expect(ledgerRowRule).toMatch(/border-radius:\s*0/);
+    expect(ledgerRowRule).toMatch(/background:\s*transparent/);
+    expect(ledgerSeparatorRule).toMatch(/border-top:\s*1px solid color-mix\(/);
+    expect(taskSurfaceRule).toMatch(/border:\s*0/);
+    expect(taskSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(inputRule).toMatch(/border:\s*1px solid var\(--line-strong\)/);
   });
 
   it("keeps long provider-removal impact lists inside the viewport", () => {
@@ -368,8 +458,8 @@ describe("retained page theme styles", () => {
       /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\[aria-current="page"\]\s*\{([^}]*)\}/gs,
     );
     const productSurfaceRule = lastRule(/\.about-product-card\s*\{([^}]*)\}/gs);
-    const appearanceRowRule = lastRule(
-      /\.settings-card > \[data-slot="card-content"\]\.appearance-control-row\s*\{([^}]*)\}/gs,
+    const interfaceSurfaceRule = lastRule(
+      /\.settings-card > \[data-slot="card-content"\]\.interface-preferences-surface\s*\{([^}]*)\}/gs,
     );
     const themeGroupRule = lastRule(/\.appearance-toggle-group\s*\{([^}]*)\}/gs);
     const themeItemRule = lastRule(
@@ -377,9 +467,6 @@ describe("retained page theme styles", () => {
     );
     const selectedThemeItemRule = lastRule(
       /\.appearance-toggle-group \[data-slot="toggle-group-item"\]\[data-state="on"\]\s*\{([^}]*)\}/gs,
-    );
-    const languageRowRule = lastRule(
-      /\.settings-card > \[data-slot="card-content"\]\.language-control-row\s*\{([^}]*)\}/gs,
     );
     const runtimeHintRule = lastRule(/\.about-runtime-trigger-copy small\s*\{([^}]*)\}/gs);
     const runtimeLabelRule = lastRule(/\.about-runtime-details dt\s*\{([^}]*)\}/gs);
@@ -390,11 +477,10 @@ describe("retained page theme styles", () => {
     expect(selectedNavigationRule).toMatch(/background:\s*var\(--signal-soft\)/);
     expect(productSurfaceRule).toMatch(/border:\s*0/);
     expect(productSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
-    expect(appearanceRowRule).toMatch(/background:\s*transparent/);
+    expect(interfaceSurfaceRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(themeGroupRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(themeItemRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
     expect(selectedThemeItemRule).toMatch(/color:\s*var\(--ink\)/);
-    expect(languageRowRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(runtimeHintRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
     expect(runtimeLabelRule).toMatch(/color:\s*color-mix\(in srgb, var\(--muted\) 70%, var\(--ink\)\)/);
     expect(appCss).not.toMatch(/\.theme-preview\s*\{/);
@@ -603,7 +689,7 @@ describe("retained page theme styles", () => {
     expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--signal\)|var\(--success\)/);
   });
 
-  it("uses a visible neutral border as the composer's focus indicator", () => {
+  it("uses a quiet filled composer with a local focus indicator", () => {
     const composerRule = appCss.match(
       /\.model-test-composer\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
@@ -611,14 +697,31 @@ describe("retained page theme styles", () => {
       /\.model-test-composer:focus-visible\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
 
-    expect(composerRule).toMatch(/border:\s*1px solid var\(--line\)/);
+    expect(composerRule).toMatch(/border:\s*0/);
+    expect(composerRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(composerFocusRule).toMatch(/outline:\s*0/);
-    expect(composerFocusRule).toMatch(
-      /border-color:\s*color-mix\(in srgb, var\(--ink\) 52%, var\(--line\)\)/,
-    );
+    expect(composerFocusRule).toMatch(/box-shadow:\s*inset 0 -2px 0/);
     expect(appCss).toMatch(/--ink:\s*#[0-9a-f]{6}/i);
     expect(composerFocusRule).not.toMatch(/var\(--signal\)/);
-    expect(composerFocusRule).toMatch(/box-shadow:\s*none/);
+  });
+
+  it("uses one free-tier color family without decorative Provider rails", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const guidanceRule = appCss.match(/\.free-key-instruction\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const boundaryRule = appCss.match(/\.free-cost-boundary\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const sectionRule = lastRule(
+      /\.free-config-grid > \.free-credential-panel,\s*\.free-config-grid > \.free-model-panel\s*\{([^}]*)\}/gs,
+    );
+
+    expect(guidanceRule).toMatch(/border:\s*0/);
+    expect(guidanceRule).not.toMatch(/border-left/);
+    expect(guidanceRule).toMatch(/var\(--free-soft\)/);
+    expect(boundaryRule).toMatch(/border:\s*0/);
+    expect(boundaryRule).toMatch(/var\(--free-soft\)/);
+    expect(sectionRule).toMatch(/border:\s*0/);
   });
 
   it("removes Agent discovery motion when reduced motion is requested", () => {
@@ -636,21 +739,32 @@ describe("retained page theme styles", () => {
     );
   });
 
-  it("uses active theme surfaces for the usage plaintext inspector", () => {
-    const plaintextRule = appCss.match(/\.request-plaintext\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const scrollRule = appCss.match(/\.request-plaintext-scroll\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const semanticBlockRule = appCss.match(/\.request-semantic-block\s*\{([^}]*)\}/s)?.[1] ?? "";
+  it("uses one flat theme-aware surface for the request audit inspector", () => {
+    const plaintextRule = appCss.match(/\.request-detail-dialog \.request-plaintext\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const scrollRule = appCss.match(/\.request-detail-dialog \.request-plaintext-scroll\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const semanticBlockRule = appCss.match(/\.request-detail-dialog \.request-semantic-block\s*\{([^}]*)\}/s)?.[1] ?? "";
     const semanticBodyRule = appCss.match(/\.request-semantic-block > pre\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const thinkingLabelRule = appCss.match(/\.request-detail-dialog \.request-semantic-block\.thinking > div\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const packetRule = appCss.match(/\.request-detail-dialog \.http-packet\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const packetContentRule = appCss.match(/\.request-detail-dialog \.http-packet-content\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const disclosureRule = appCss.match(/\.request-detail-dialog :is\(\.http-packet-disclosure, \.http-change-disclosure\)\s*\{([^}]*)\}/s)?.[1] ?? "";
 
-    expect(plaintextRule).toMatch(/background:\s*var\(--surface-2\)/);
-    expect(scrollRule).toMatch(/border:\s*1px solid var\(--line-strong\)/);
-    expect(scrollRule).toMatch(/color:\s*var\(--ink\)/);
+    expect(plaintextRule).toMatch(/border:\s*0/);
+    expect(plaintextRule).toMatch(/background:\s*transparent/);
+    expect(scrollRule).toMatch(/border:\s*0/);
     expect(scrollRule).toMatch(/background:\s*var\(--canvas\)/);
-    expect(semanticBlockRule).toMatch(/border:\s*1px solid var\(--line-strong\)/);
-    expect(semanticBlockRule).toMatch(/background:\s*var\(--surface\)/);
+    expect(semanticBlockRule).toMatch(/border:\s*0/);
+    expect(semanticBlockRule).toMatch(/background:\s*transparent/);
     expect(semanticBodyRule).toMatch(/color:\s*var\(--ink\)/);
+    expect(thinkingLabelRule).toMatch(/color:\s*var\(--muted\)/);
+    expect(thinkingLabelRule).toMatch(/background:\s*transparent/);
+    expect(thinkingLabelRule).not.toMatch(/var\(--warning\)/);
+    expect(packetRule).toMatch(/border:\s*0/);
+    expect(packetContentRule).toMatch(/border-left:\s*1px solid var\(--line-strong\)/);
+    expect(disclosureRule).toMatch(/width:\s*28px/);
+    expect(disclosureRule).toMatch(/height:\s*28px/);
 
-    for (const rule of [plaintextRule, scrollRule, semanticBlockRule, semanticBodyRule]) {
+    for (const rule of [plaintextRule, scrollRule, semanticBlockRule, semanticBodyRule, thinkingLabelRule, packetRule, packetContentRule, disclosureRule]) {
       expect(rule).not.toMatch(/#08101d|#0b1220|#fff\b/i);
     }
   });
@@ -673,16 +787,34 @@ describe("retained page theme styles", () => {
   });
 
   it("groups the usage overview without internal dashboard dividers", () => {
+    const lastRule = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches[matches.length - 1]?.[1] ?? "";
+    };
+    const heroRule = lastRule(/\.usage-hero\s*\{([^}]*)\}/gs);
+    const trendAndDetailRule = lastRule(
+      /\.usage-trend-panel,\s*\.usage-detail-panel,\s*\.usage-request-log,\s*\.usage-budget-overview\s*\{([^}]*)\}/gs,
+    );
+    const compositionPanelRule = lastRule(/\.usage-composition-panel\s*\{([^}]*)\}/gs);
     const primaryRule = appCss.match(/\.usage-primary-metric\s*\{([^}]*)\}/s)?.[1] ?? "";
     const healthRule = appCss.match(/\.usage-kpi-grid\s*\{([^}]*)\}/s)?.[1] ?? "";
     const healthItemRule = appCss.match(/\.usage-kpi-grid\s*>\s*div\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const compositionRule = appCss.match(/\.usage-token-rail\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const compositionRule = lastRule(/\.usage-token-rail\s*\{([^}]*)\}/gs);
     const detailRule = appCss.match(/\.usage-token-details\s*\{([^}]*)\}/s)?.[1] ?? "";
 
+    expect(heroRule).toMatch(/border:\s*0/);
+    expect(heroRule).toMatch(/background:\s*transparent/);
+    expect(heroRule).toMatch(/box-shadow:\s*none/);
+    expect(trendAndDetailRule).toMatch(/border:\s*0/);
+    expect(trendAndDetailRule).toMatch(/background:\s*var\(--content-block-surface\)/);
+    expect(compositionPanelRule).toMatch(/border:\s*0/);
+    expect(compositionPanelRule).toMatch(/background:\s*transparent/);
     expect(primaryRule).not.toMatch(/border-(?:right|bottom|left|top):/);
     expect(healthRule).toMatch(/gap:/);
     expect(healthItemRule).toMatch(/border-radius:/);
     expect(healthItemRule).not.toMatch(/border-(?:right|bottom|left|top):/);
+    expect(compositionRule).toMatch(/margin:\s*0/);
+    expect(compositionRule).toMatch(/background:\s*var\(--content-block-surface\)/);
     expect(compositionRule).toMatch(/border-radius:/);
     expect(compositionRule).not.toMatch(/border-(?:right|bottom|left|top):/);
     expect(detailRule).not.toMatch(/border:/);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Maximize2 } from "lucide-react";
+import { ChevronDown, Maximize2 } from "lucide-react";
 import {
   getRequestReceipts,
   type ReceiptCostKind,
@@ -226,6 +226,7 @@ function HttpPacket({
   headerKinds?: Map<string, HttpChangeKind>;
 }) {
   const { copy } = useLocalizedCopy();
+  const isRequest = Boolean(request);
   const headers = request?.headers ?? response?.headers ?? [];
   const body = request?.body ?? response?.body ?? "";
   const truncated = request?.body_truncated ?? response?.body_truncated ?? false;
@@ -233,40 +234,57 @@ function HttpPacket({
     ? `${request.method} ${request.url} HTTP`
     : `HTTP ${response?.status ?? 0}`;
   return (
-    <article className="http-packet">
-      <header>
-        <span>{label}</span>
-        {truncated && <em>{copy("Truncated", "已截断", "已截斷", "切り捨て")}</em>}
-      </header>
-      <code className="http-start-line">{startLine}</code>
-      <section className="http-packet-section">
-        <div className="http-packet-section-title">
-          <strong>HEADERS</strong>
-          <span>{headers.length}</span>
-        </div>
-        <div className="http-header-list">
-          {headers.length ? headers.map((header, index) => {
-            const kind = header.redacted ? "redacted" : headerKinds.get(header.name.toLowerCase()) ?? "kept";
-            return (
-              <div className={`http-header-row ${kind}`} key={`${header.name}-${index}`}>
-                <code>{header.name}</code>
-                <code>{header.value}</code>
-                <small>{copy(
-                  kind === "redacted" ? "Redacted" : kind === "added" ? "Added" : kind === "modified" ? "Modified" : "Kept",
-                  kind === "redacted" ? "已脱敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
-                  kind === "redacted" ? "已脫敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
-                  kind === "redacted" ? "編集済み" : kind === "added" ? "追加" : kind === "modified" ? "変更" : "保持",
-                )}</small>
-              </div>
-            );
-          }) : <span className="http-empty">{copy("No captured headers", "没有采集到 Header", "沒有擷取到 Header", "取得したヘッダーはありません")}</span>}
-        </div>
-      </section>
-      <section className="http-packet-section body">
-        <div className="http-packet-section-title"><strong>BODY</strong></div>
-        <pre>{body ? formatJsonSource(body) : copy("Empty body", "空包体", "空本體", "空の本文")}</pre>
-      </section>
-    </article>
+    <details className="http-packet">
+      <summary>
+        <span className="http-packet-summary-copy">
+          <strong>{label}</strong>
+          <code>{startLine}</code>
+        </span>
+        <span className="http-packet-summary-meta">
+          {truncated && <em>{copy("Truncated", "已截断", "已截斷", "切り捨て")}</em>}
+          <span className="http-packet-disclosure" aria-hidden="true"><ChevronDown /></span>
+        </span>
+      </summary>
+      <div className="http-packet-content">
+        <section className="http-packet-section">
+          <div className="http-packet-section-title">
+            <strong>{isRequest
+              ? copy("Request headers", "请求头", "請求標頭", "リクエストヘッダー")
+              : copy("Response headers", "响应头", "回應標頭", "レスポンスヘッダー")}</strong>
+            <span>{headers.length}</span>
+          </div>
+          <div className="http-header-list">
+            {headers.length ? headers.map((header, index) => {
+              const kind = header.redacted ? "redacted" : headerKinds.get(header.name.toLowerCase()) ?? "kept";
+              return (
+                <div className={`http-header-row ${kind}`} key={`${header.name}-${index}`}>
+                  <code>{header.name}</code>
+                  <code>{header.value}</code>
+                  <small>{copy(
+                    kind === "redacted" ? "Redacted" : kind === "added" ? "Added" : kind === "modified" ? "Modified" : "Kept",
+                    kind === "redacted" ? "已脱敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
+                    kind === "redacted" ? "已脫敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
+                    kind === "redacted" ? "編集済み" : kind === "added" ? "追加" : kind === "modified" ? "変更" : "保持",
+                  )}</small>
+                </div>
+              );
+            }) : <span className="http-empty">{isRequest
+              ? copy("No request headers captured", "未采集到请求头", "未擷取到請求標頭", "リクエストヘッダーは取得されていません")
+              : copy("No response headers captured", "未采集到响应头", "未擷取到回應標頭", "レスポンスヘッダーは取得されていません")}</span>}
+          </div>
+        </section>
+        <section className="http-packet-section body">
+          <div className="http-packet-section-title">
+            <strong>{isRequest
+              ? copy("Request body", "请求体", "請求本文", "リクエスト本文")
+              : copy("Response body", "响应体", "回應本文", "レスポンス本文")}</strong>
+          </div>
+          <pre>{body ? formatJsonSource(body) : isRequest
+            ? copy("Empty request body", "请求体为空", "請求本文為空", "リクエスト本文は空です")
+            : copy("Empty response body", "响应体为空", "回應本文為空", "レスポンス本文は空です")}</pre>
+        </section>
+      </div>
+    </details>
   );
 }
 
@@ -276,11 +294,14 @@ function HttpChangeList({ changes }: { changes: HttpChange[] }) {
     return <div className="http-change-empty">{copy("No semantic changes detected", "未检测到语义改动", "未偵測到語義變更", "意味上の変更は検出されませんでした")}</div>;
   }
   return (
-    <section className="http-change-list" aria-label={copy("HTTP changes", "HTTP 改动", "HTTP 變更", "HTTP の変更")}>
-      <header>
+    <details className="http-change-list">
+      <summary>
         <strong>{copy("Changes made by Token Station", "Token Station 改动", "Token Station 變更", "Token Station による変更")}</strong>
-        <span>{changes.length}</span>
-      </header>
+        <span className="http-change-summary-meta">
+          <span>{copy(`${changes.length} changes`, `${changes.length} 项`, `${changes.length} 項`, `${changes.length} 件`)}</span>
+          <span className="http-change-disclosure" aria-hidden="true"><ChevronDown /></span>
+        </span>
+      </summary>
       <div>
         {changes.map((change, index) => (
           <div className={`http-change-row ${change.kind}`} key={`${change.path}-${index}`}>
@@ -298,7 +319,7 @@ function HttpChangeList({ changes }: { changes: HttpChange[] }) {
           </div>
         ))}
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -308,7 +329,11 @@ function HttpTraceInspector({ plaintext }: { plaintext: RequestPlaintextView }) 
   const source = trace?.agent_request;
   if (!trace || !source) return null;
   return (
-    <div className="http-trace-inspector">
+    <div
+      className="http-trace-inspector"
+      role="region"
+      aria-label={copy("HTTP execution trace", "HTTP 执行链路", "HTTP 執行鏈路", "HTTP 実行トレース")}
+    >
       <div className="http-trace-legend">
         <span className="modified">{copy("Modified", "修改", "修改", "変更")}</span>
         <span className="added">{copy("Added", "新增", "新增", "追加")}</span>
@@ -833,38 +858,59 @@ function ReceiptDetail({
   plaintextError?: string;
 }) {
   const { language, copy } = useLocalizedCopy();
+  const cancelled = receipt.status === 499;
+  const success = receipt.status >= 200 && receipt.status < 400 && receipt.error_code == null;
   return (
     <div className="usage-log-expanded">
-      <div className="usage-log-facts">
-        <span><small>{copy("Request ID", "请求 ID", "請求 ID", "リクエスト ID")}</small><code>{receipt.request_id}</code></span>
-        <span><small>{copy("Requested model", "请求模型", "請求模型", "リクエストモデル")}</small><strong>{receipt.requested_model}</strong></span>
-        <span><small>{copy("Protocol", "协议", "協議", "プロトコル")}</small><strong>{receipt.protocol}</strong></span>
-        <span><small>{copy("Endpoint", "端点", "端點", "エンドポイント")}</small><strong>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</strong></span>
-        <span><small>{copy("Transport", "传输", "傳輸", "トランスポート")}</small><strong>{receipt.stream ? copy("Streaming", "流式", "流式", "ストリーム") : copy("Non-streaming", "非流式", "非流式", "非ストリーム")}</strong></span>
-        {receipt.price_version != null && (
-          <span><small>{copy("Price version", "价格版本", "價格版本", "価格バージョン")}</small><strong>v{receipt.price_version}</strong></span>
-        )}
-      </div>
-      {receipt.usage && (
-        <div className="usage-log-token-facts">
-          <span>{receipt.usage_semantics === "provider_reported_v1"
-            ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
-            : copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
-          <span>{copy("Output", "输出", "輸出", "出力")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
-          <span>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
-          <span>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
-          <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
-          {receipt.usage_semantics === "provider_reported_v1" && (
-            <small>{copy(
-              "Historical provider-reported input may exclude cache tokens; totals are not canonical.",
-              "历史上游输入可能不含缓存 Token；总量并非规范总量。",
-              "歷史上游輸入可能不含快取 Token；總量並非規範總量。",
-              "過去のプロバイダー報告入力にはキャッシュトークンが含まれない場合があり、合計は正規化済みではありません。",
-            )}</small>
-          )}
+      <section className="request-detail-overview" aria-label={copy("Request overview", "请求概览", "請求概覽", "リクエスト概要")}>
+        <div className="request-detail-outcome">
+          <strong className={success ? "success" : cancelled ? "cancelled" : "error"}>
+            {cancelled ? copy("Cancelled", "已取消", "已取消", "キャンセル") : `HTTP ${receipt.status}`}
+          </strong>
+          <span>{receipt.latency_ms.toLocaleString(language)} ms</span>
+          <span>{copy(
+            `${receipt.attempts} upstream attempts`,
+            `${receipt.attempts} 次上游尝试`,
+            `${receipt.attempts} 次上游嘗試`,
+            `${receipt.attempts} 回のアップストリーム試行`,
+          )}</span>
         </div>
-      )}
-      <CostState receipt={receipt} />
+        <dl
+          className="usage-log-facts"
+          aria-label={copy("Request audit summary", "请求审计摘要", "請求稽核摘要", "リクエスト監査の概要")}
+        >
+          <div className="request-detail-fact request-detail-fact--identity"><dt>{copy("Request ID", "请求 ID", "請求 ID", "リクエスト ID")}</dt><dd><code>{receipt.request_id}</code></dd></div>
+          <div className="request-detail-fact request-detail-fact--identity"><dt>{copy("Requested model", "请求模型", "請求模型", "リクエストモデル")}</dt><dd>{receipt.requested_model}</dd></div>
+          <div className="request-detail-fact request-detail-fact--technical"><dt>{copy("Protocol", "协议", "協議", "プロトコル")}</dt><dd>{receipt.protocol}</dd></div>
+          <div className="request-detail-fact request-detail-fact--technical"><dt>{copy("Endpoint", "端点", "端點", "エンドポイント")}</dt><dd>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</dd></div>
+          <div className="request-detail-fact request-detail-fact--technical"><dt>{copy("Transport", "传输", "傳輸", "トランスポート")}</dt><dd>{receipt.stream ? copy("Streaming", "流式", "流式", "ストリーム") : copy("Non-streaming", "非流式", "非流式", "非ストリーム")}</dd></div>
+        {receipt.price_version != null && (
+            <div className="request-detail-fact"><dt>{copy("Price version", "价格版本", "價格版本", "価格バージョン")}</dt><dd>v{receipt.price_version}</dd></div>
+        )}
+        </dl>
+        <div className="request-detail-measures">
+          {receipt.usage && (
+            <div className="usage-log-token-facts">
+              <span>{receipt.usage_semantics === "provider_reported_v1"
+                ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
+                : copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
+              <span>{copy("Output", "输出", "輸出", "出力")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
+              <span>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
+              <span>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
+              <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
+              {receipt.usage_semantics === "provider_reported_v1" && (
+                <small>{copy(
+                  "Historical provider-reported input may exclude cache tokens; totals are not canonical.",
+                  "历史上游输入可能不含缓存 Token；总量并非规范总量。",
+                  "歷史上游輸入可能不含快取 Token；總量並非規範總量。",
+                  "過去のプロバイダー報告入力にはキャッシュトークンが含まれない場合があり、合計は正規化済みではありません。",
+                )}</small>
+              )}
+            </div>
+          )}
+          <CostState receipt={receipt} />
+        </div>
+      </section>
       <ReceiptDetails receipt={receipt} />
       <RequestPlaintext plaintext={plaintext} error={plaintextError} />
     </div>

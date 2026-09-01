@@ -1378,7 +1378,6 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
 
     let result = tauri::async_runtime::block_on(verify_enterprise_route(
         app.state(),
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
         base_url,
         "secret-key".to_owned(),
     ))
@@ -1393,8 +1392,10 @@ fn enterprise_verification_never_persists_the_discovered_catalog() {
 }
 
 #[test]
-fn enterprise_verification_rejects_the_reserved_provider_collision_before_network_io() {
+fn enterprise_verification_uses_the_submitted_endpoint_when_the_first_id_is_occupied() {
+    const CATALOG: &str = r#"{"data":[{"id":"second-enterprise-model"}]}"#;
     let root = scratch_home("enterprise-verification-name-collision");
+    let (base_url, server) = serve_model_catalog(vec![(200, CATALOG)]);
     let mut draft = template_for_test(&root);
     draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = json!({
         "provider": "openai-compatible",
@@ -1408,15 +1409,20 @@ fn enterprise_verification_rejects_the_reserved_provider_collision_before_networ
         None,
     )))));
 
-    let error = tauri::async_runtime::block_on(verify_enterprise_route(
+    let result = tauri::async_runtime::block_on(verify_enterprise_route(
         app.state(),
-        MANAGED_ENTERPRISE_PROVIDER_ID.to_owned(),
-        "not a valid URL".to_owned(),
-        "must-not-leave-process".to_owned(),
+        base_url,
+        "second-key".to_owned(),
     ))
-    .expect_err("the local provider collision must stop verification");
+    .expect("verification allocates an isolated temporary Provider Channel id");
 
-    assert!(error.contains("已存在"), "{error}");
+    assert_eq!(result.source, "live");
+    assert_eq!(result.models, ["second-enterprise-model"]);
+    let state = get_state(app.state());
+    assert_eq!(state.providers.len(), 1);
+    assert_eq!(state.providers[0].name, MANAGED_ENTERPRISE_PROVIDER_ID);
+    assert!(!state.providers[0].managed_route);
+    server.join().expect("model catalog fixture exits");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -4661,8 +4667,8 @@ fn managed_enterprise_command_appends_a_model_to_the_existing_managed_provider()
 }
 
 #[test]
-fn managed_enterprise_command_rejects_an_endpoint_change_without_mutation() {
-    let root = scratch_home("managed-enterprise-command-endpoint-mismatch");
+fn managed_enterprise_command_creates_a_second_channel_for_another_endpoint() {
+    let root = scratch_home("managed-enterprise-command-second-endpoint");
     let app = tauri::test::mock_app();
     assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
         root.join("token-station.json"),
@@ -4677,32 +4683,150 @@ fn managed_enterprise_command_rejects_an_endpoint_change_without_mutation() {
         "enterprise-reasoner".to_owned(),
     )
     .expect("the first managed model is valid");
-    let error = match add_managed_enterprise_route(
+    let view = add_managed_enterprise_route(
         app.state(),
         "https://other.example.com/v1".to_owned(),
-        "replacement-key".to_owned(),
+        "second-key".to_owned(),
         "enterprise-chat".to_owned(),
-    ) {
-        Ok(_) => {
-            panic!("an existing managed provider cannot change endpoints while adding a model")
-        }
-        Err(error) => error,
-    };
-    assert!(error.contains("Base URL"), "{error}");
+    )
+    .expect("another endpoint creates another managed channel");
+
+    let first = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation")
+        .expect("the first managed channel remains visible");
+    assert_eq!(first.base_url, "https://enterprise.example.com/v1");
+    assert_eq!(first.models, ["enterprise-reasoner"]);
+    let second = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation_2")
+        .expect("the second managed channel uses the next stable id");
+    assert_eq!(second.base_url, "https://other.example.com/v1");
+    assert_eq!(second.models, ["enterprise-chat"]);
+    assert!(second.managed_route);
+    let target = view.direct_target.expect("the new offering becomes active");
+    assert_eq!(target.upstream, "tokenstation_2");
+    assert_eq!(target.model.as_deref(), Some("enterprise-chat"));
 
     let managed = app.state::<AppStateManaged>();
-    let inner = managed.0.lock().unwrap();
-    let provider = &inner.draft["upstreams"]["tokenstation"];
-    assert_eq!(
-        provider["base_url"],
-        json!("https://enterprise.example.com/v1")
-    );
-    assert_eq!(provider["models"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        inner.draft["routing"]["direct_target"]["model"],
-        json!("enterprise-reasoner")
-    );
+    let mut inner = managed.0.lock().unwrap();
+    inner
+        .save_draft()
+        .expect("both managed channels and credentials save together");
+    let data_dir = inner.data_dir();
     drop(inner);
+    assert_eq!(
+        secrets::store_get(&data_dir, "tokenstation", "provider_api_key")
+            .expect("the first credential remains stored"),
+        "first-key"
+    );
+    assert_eq!(
+        secrets::store_get(&data_dir, "tokenstation_2", "provider_api_key")
+            .expect("the second credential is stored separately"),
+        "second-key"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn concurrent_managed_enterprise_commands_allocate_distinct_channels() {
+    let root = scratch_home("managed-enterprise-command-concurrent-allocation");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let app_handle = app.handle().clone();
+    let results = std::thread::scope(|scope| {
+        let handles = (1..=8)
+            .map(|index| {
+                let app_handle = app_handle.clone();
+                scope.spawn(move || {
+                    add_managed_enterprise_route(
+                        app_handle.state(),
+                        format!("https://enterprise-{index}.example/v1"),
+                        format!("key-{index}"),
+                        format!("model-{index}"),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("managed command thread exits"))
+            .collect::<Vec<_>>()
+    });
+
+    let errors = results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(errors.is_empty(), "concurrent additions failed: {errors:?}");
+    let state = get_state(app.state());
+    let managed = state
+        .providers
+        .iter()
+        .filter(|provider| provider.managed_route)
+        .collect::<Vec<_>>();
+    assert_eq!(managed.len(), 8);
+    assert_eq!(
+        managed
+            .iter()
+            .map(|provider| provider.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        8
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_skips_active_and_deleted_reserved_ids() {
+    let root = scratch_home("managed-enterprise-command-reserved-id-allocation");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    for name in ["tokenstation", "tokenstation_2"] {
+        add_provider(
+            app.state(),
+            name.to_owned(),
+            format!("https://{name}.example/v1"),
+            vec!["ordinary-model".to_owned()],
+            None,
+            false,
+        )
+        .expect("an ordinary Provider Channel can own a reserved candidate id");
+    }
+    remove_provider(app.state(), "tokenstation_2".to_owned())
+        .expect("the second candidate moves to the recycle bin");
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://managed.example/v1".to_owned(),
+        "managed-key".to_owned(),
+        "managed-model".to_owned(),
+    )
+    .expect("managed id allocation skips active and deleted candidates");
+
+    let provider = view
+        .providers
+        .iter()
+        .find(|provider| provider.name == "tokenstation_3")
+        .expect("the next free managed id is selected");
+    assert!(provider.managed_route);
+    assert_eq!(provider.models, ["managed-model"]);
+    assert_eq!(view.deleted_providers, ["tokenstation_2"]);
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -4779,6 +4903,199 @@ fn managed_enterprise_command_replaces_a_legacy_managed_route() {
             .expect("the replacement credential is stored"),
         "replacement-key"
     );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_migrates_legacy_route_when_canonical_id_is_occupied() {
+    let root = scratch_home("managed-enterprise-legacy-migration-canonical-collision");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"][MANAGED_ENTERPRISE_PROVIDER_ID] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://ordinary.example/v1",
+        "models": [{ "model": "ordinary-model" }]
+    });
+    draft["upstreams"]["q"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://legacy.example/v1",
+        "auth": { "slot": "provider_api_key", "store": true },
+        "managed_route": true,
+        "models": [{ "model": "auto", "tool": true }]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": { "upstream": "q", "model": "auto" }
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+    let data_dir = root.join("token-station-data");
+    secrets::store_set(&data_dir, "q", "provider_api_key", "legacy-key")
+        .expect("legacy credential is stored");
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://new-managed.example/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "managed-model".to_owned(),
+    )
+    .expect("the first modern managed channel migrates legacy state");
+
+    assert!(view.providers.iter().all(|provider| provider.name != "q"));
+    assert!(view.providers.iter().any(|provider| {
+        provider.name == "tokenstation"
+            && !provider.managed_route
+            && provider.base_url == "https://ordinary.example/v1"
+    }));
+    assert!(view.providers.iter().any(|provider| {
+        provider.name == "tokenstation_2"
+            && provider.managed_route
+            && provider.base_url == "https://new-managed.example/v1"
+    }));
+    let target = view
+        .direct_target
+        .expect("the modern channel becomes active");
+    assert_eq!(target.upstream, "tokenstation_2");
+    assert_eq!(target.model.as_deref(), Some("managed-model"));
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_migrates_only_the_direct_legacy_route() {
+    let root = scratch_home("managed-enterprise-targeted-legacy-migration");
+    let mut draft = template_for_test(&root);
+    for (name, base_url) in [
+        ("selected", "https://selected-legacy.example/v1"),
+        ("unrelated", "https://unrelated-legacy.example/v1"),
+    ] {
+        draft["upstreams"][name] = json!({
+            "provider": "openai-compatible",
+            "base_url": base_url,
+            "managed_route": true,
+            "models": [{ "model": "auto" }]
+        });
+    }
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": { "upstream": "selected", "model": "auto" }
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://new-managed.example/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "managed-model".to_owned(),
+    )
+    .expect("the current direct legacy route is the migration target");
+
+    assert!(view
+        .providers
+        .iter()
+        .all(|provider| provider.name != "selected"));
+    assert!(view.providers.iter().any(|provider| {
+        provider.name == "unrelated"
+            && provider.managed_route
+            && provider.base_url == "https://unrelated-legacy.example/v1"
+    }));
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_preserves_a_unique_legacy_route_that_is_not_direct() {
+    let root = scratch_home("managed-enterprise-nondirect-legacy-preserved");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["ordinary"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://ordinary.example/v1",
+        "models": [{ "model": "ordinary-model" }]
+    });
+    draft["upstreams"]["legacy"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://legacy.example/v1",
+        "managed_route": true,
+        "models": [{ "model": "auto" }]
+    });
+    draft["routing"] = json!({
+        "mode": "direct",
+        "direct_target": { "upstream": "ordinary", "model": "ordinary-model" }
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let view = add_managed_enterprise_route(
+        app.state(),
+        "https://new-managed.example/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "managed-model".to_owned(),
+    )
+    .expect("an unrelated unique legacy account must not be migrated");
+
+    assert!(view.providers.iter().any(|provider| {
+        provider.name == "legacy" && provider.base_url == "https://legacy.example/v1"
+    }));
+    assert!(view.providers.iter().any(|provider| {
+        provider.name == "tokenstation"
+            && provider.managed_route
+            && provider.base_url == "https://new-managed.example/v1"
+    }));
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn managed_enterprise_command_rejects_ambiguous_legacy_migration() {
+    let root = scratch_home("managed-enterprise-ambiguous-legacy-migration");
+    let mut draft = template_for_test(&root);
+    for name in ["first", "second"] {
+        draft["upstreams"][name] = json!({
+            "provider": "openai-compatible",
+            "base_url": format!("https://{name}-legacy.example/v1"),
+            "managed_route": true,
+            "models": [{ "model": "auto" }]
+        });
+    }
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let error = match add_managed_enterprise_route(
+        app.state(),
+        "https://new-managed.example/v1".to_owned(),
+        "replacement-key".to_owned(),
+        "managed-model".to_owned(),
+    ) {
+        Ok(_) => panic!("multiple untargeted legacy routes are ambiguous"),
+        Err(error) => error,
+    };
+    assert!(error.contains("无法确定"), "{error}");
+    let state = get_state(app.state());
+    assert!(state
+        .providers
+        .iter()
+        .any(|provider| provider.name == "first"));
+    assert!(state
+        .providers
+        .iter()
+        .any(|provider| provider.name == "second"));
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -5667,6 +5984,481 @@ fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views()
         .expect("empty routing config is rejected")
         .contains("至少配置一档"));
 
+    secrets::store_set(
+        &root.join("data"),
+        "local",
+        "provider_api_key",
+        "local-secret",
+    )
+    .unwrap();
+    let removed_again = remove_provider(app.state(), "local".to_string()).unwrap();
+    assert_eq!(removed_again.deleted_providers, ["local"]);
+    assert_eq!(
+        secrets::store_get(&root.join("data"), "local", "provider_api_key").unwrap(),
+        "local-secret",
+        "recoverable deletion must retain the stored credential"
+    );
+
+    restore_provider(app.state(), "local".to_string()).unwrap();
+    set_tier(
+        app.state(),
+        "low".to_owned(),
+        Some("local".to_owned()),
+        Some("small".to_owned()),
+    )
+    .expect("restored Provider can make the persisted route valid again");
+    save_config(app.state()).expect("restored Provider is durable before permanent purge");
+    provider_tombstones::archive(
+        &root.join("data"),
+        "old-account",
+        &json!({"provider": "openai-compatible", "base_url": "https://old.example/v1"}),
+    )
+    .unwrap();
+    secrets::store_set(
+        &root.join("data"),
+        "old-account",
+        "provider_api_key",
+        "old-secret",
+    )
+    .unwrap();
+
+    let purged = purge_deleted_providers(app.state()).unwrap();
+    assert!(purged.deleted_providers.is_empty());
+    assert!(provider_tombstones::names(&root.join("data"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        secrets::store_get(&root.join("data"), "local", "provider_api_key").unwrap(),
+        "local-secret",
+        "an active Provider outside the recycle bin must retain its credential"
+    );
+    assert!(secrets::store_get(&root.join("data"), "old-account", "provider_api_key").is_err());
+    assert!(purge_deleted_providers(app.state())
+        .unwrap()
+        .deleted_providers
+        .is_empty());
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn purge_deleted_providers_rejects_an_unsaved_provider_removal() {
+    let root = scratch_home("purge-deleted-provider-dirty-draft");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["retired"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://retired.example/v1",
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [{ "model": "retired-model" }]
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let removed = remove_provider(app.state(), "retired".to_owned())
+        .expect("an unreferenced Provider can move to the recycle bin");
+    assert!(removed.config_dirty);
+    assert_eq!(removed.deleted_providers, ["retired"]);
+
+    let error = match purge_deleted_providers(app.state()) {
+        Ok(_) => panic!("permanent deletion must wait for the Provider removal to be saved"),
+        Err(error) => error,
+    };
+    assert!(error.contains("保存"), "{error}");
+    assert_eq!(get_state(app.state()).deleted_providers, ["retired"]);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn purge_deleted_providers_rejects_a_tombstone_still_present_on_disk() {
+    let root = scratch_home("purge-deleted-provider-persisted-config");
+    let config_path = root.join("token-station.json");
+    let data_dir = root.join("token-station-data");
+    let retired = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://retired.example/v1",
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [{ "model": "retired-model" }]
+    });
+    let mut persisted = template_for_test(&root);
+    persisted["upstreams"]["retired"] = retired.clone();
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&persisted).expect("persisted fixture serializes"),
+    )
+    .expect("persisted fixture writes");
+    provider_tombstones::archive(&data_dir, "retired", &retired)
+        .expect("recovery snapshot is available");
+    secrets::store_set(&data_dir, "retired", "provider_api_key", "retired-secret")
+        .expect("recoverable credential is available");
+
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        config_path,
+        template_for_test(&root),
+        None,
+    )))));
+    assert!(!get_state(app.state()).config_dirty);
+
+    let error = match purge_deleted_providers(app.state()) {
+        Ok(_) => panic!("a Provider still present in the persisted config cannot be purged"),
+        Err(error) => error,
+    };
+    assert!(error.contains("磁盘配置"), "{error}");
+    assert_eq!(get_state(app.state()).deleted_providers, ["retired"]);
+    assert_eq!(
+        secrets::store_get(&data_dir, "retired", "provider_api_key").as_deref(),
+        Ok("retired-secret")
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn purge_deleted_providers_rejects_a_tombstone_still_active_in_the_draft() {
+    let root = scratch_home("purge-deleted-provider-active-draft");
+    let data_dir = root.join("token-station-data");
+    let active = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://active.example/v1",
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [{ "model": "active-model" }]
+    });
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["active"] = active.clone();
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+    provider_tombstones::archive(&data_dir, "active", &active)
+        .expect("interrupted rollback left an active tombstone");
+
+    let error = match purge_deleted_providers(app.state()) {
+        Ok(_) => panic!("an active draft Provider cannot lose its recovery snapshot"),
+        Err(error) => error,
+    };
+    assert!(error.contains("当前草稿"), "{error}");
+    assert_eq!(get_state(app.state()).deleted_providers, ["active"]);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn interrupted_provider_purge_reserves_the_name_until_secret_cleanup_recovers() {
+    let root = scratch_home("purge-deleted-provider-durable-secret-cleanup");
+    let data_dir = root.join("token-station-data");
+    let retired = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://retired.example/v1",
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [{ "model": "retired-model" }]
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+    provider_tombstones::archive(&data_dir, "retired", &retired)
+        .expect("retired Provider has a recovery snapshot");
+    std::fs::create_dir_all(&data_dir).expect("data directory exists");
+    std::fs::write(data_dir.join(secrets::SECRETS_FILE), b"{")
+        .expect("malformed store simulates an interrupted credential cleanup");
+
+    let purge_error = match purge_deleted_providers(app.state()) {
+        Ok(_) => panic!("credential cleanup failure must be reported"),
+        Err(error) => error,
+    };
+    assert!(purge_error.contains("secrets store parse"), "{purge_error}");
+    assert!(provider_tombstones::names(&data_dir)
+        .expect("tombstone store remains readable")
+        .is_empty());
+    let blocked = match add_provider(
+        app.state(),
+        "retired".to_owned(),
+        "https://replacement.example/v1".to_owned(),
+        vec!["replacement-model".to_owned()],
+        None,
+        false,
+    ) {
+        Ok(_) => panic!("pending cleanup must reserve the retired Provider identity"),
+        Err(error) => error,
+    };
+    assert!(blocked.contains("secrets store parse"), "{blocked}");
+
+    std::fs::write(
+        data_dir.join(secrets::SECRETS_FILE),
+        serde_json::to_vec_pretty(&json!({
+            "retired/provider_api_key": "old-retired-secret",
+            "unrelated/provider_api_key": "keep-unrelated-secret"
+        }))
+        .expect("repaired store serializes"),
+    )
+    .expect("repair the local secret store");
+    let added = add_provider(
+        app.state(),
+        "retired".to_owned(),
+        "https://replacement.example/v1".to_owned(),
+        vec!["replacement-model".to_owned()],
+        None,
+        false,
+    )
+    .expect("retry completes pending cleanup before reusing the identity");
+    assert!(added
+        .providers
+        .iter()
+        .any(|provider| provider.name == "retired"));
+    assert!(secrets::store_get(&data_dir, "retired", "provider_api_key").is_err());
+    assert_eq!(
+        secrets::store_get(&data_dir, "unrelated", "provider_api_key").as_deref(),
+        Ok("keep-unrelated-secret")
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn ambiguous_tombstone_discard_error_keeps_committed_cleanup_recoverable() {
+    let root = scratch_home("purge-ambiguous-tombstone-discard");
+    let data_dir = root.join("token-station-data");
+    let retired = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://retired.example/v1",
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [{ "model": "retired-model" }]
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+    provider_tombstones::archive(&data_dir, "retired", &retired).unwrap();
+    secrets::store_set(&data_dir, "retired", "provider_api_key", "retired-key").unwrap();
+
+    let error = match purge_deleted_providers_with_discard(app.state(), |data_dir| {
+        provider_tombstones::discard_all(data_dir)?;
+        Err("simulated parent sync failure after rename".to_owned())
+    }) {
+        Ok(_) => panic!("ambiguous discard must be reported"),
+        Err(error) => error,
+    };
+    assert!(error.contains("已提交"), "{error}");
+    assert!(provider_tombstones::names(&data_dir).unwrap().is_empty());
+    assert!(data_dir.join("provider-purge-pending.json").exists());
+    assert_eq!(
+        secrets::store_get(&data_dir, "retired", "provider_api_key").as_deref(),
+        Ok("retired-key")
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn startup_recovers_a_committed_provider_purge_before_state_exposure() {
+    let root = scratch_home("startup-recovers-provider-purge");
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    crate::agent_integration::safe_fs::write_atomic_private(
+        &data_dir.join("provider-purge-pending.json"),
+        br#"{"version":1,"providers":["retired"]}"#,
+    )
+    .unwrap();
+    secrets::store_set(&data_dir, "retired", "provider_api_key", "retired-key").unwrap();
+    let draft = template_for_test(&root);
+    let mut inner =
+        AppInner::new_with_saved(root.join("token-station.json"), draft.clone(), draft, None);
+
+    recover_pending_provider_purge_on_startup(&mut inner)
+        .expect("startup completes the committed cleanup");
+
+    assert!(!data_dir.join("provider-purge-pending.json").exists());
+    assert!(secrets::store_get(&data_dir, "retired", "provider_api_key").is_err());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn pending_purge_recovery_refuses_an_active_draft_identity_reuse() {
+    let root = scratch_home("pending-purge-active-draft-reuse");
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    crate::agent_integration::safe_fs::write_atomic_private(
+        &data_dir.join("provider-purge-pending.json"),
+        br#"{"version":1,"providers":["retired"]}"#,
+    )
+    .unwrap();
+    secrets::store_set(&data_dir, "retired", "provider_api_key", "new-owner-key").unwrap();
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["retired"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://new-owner.example/v1",
+        "models": [{ "model": "new-model" }]
+    });
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+
+    let error = recover_pending_provider_purge_on_startup(&mut inner)
+        .expect_err("active draft identity reuse must block old cleanup");
+
+    assert!(error.contains("当前草稿"), "{error}");
+    assert_eq!(
+        secrets::store_get(&data_dir, "retired", "provider_api_key").as_deref(),
+        Ok("new-owner-key")
+    );
+    assert!(data_dir.join("provider-purge-pending.json").exists());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn pending_purge_recovery_refuses_a_persisted_identity_reuse() {
+    let root = scratch_home("pending-purge-persisted-reuse");
+    let config_path = root.join("token-station.json");
+    let data_dir = root.join("token-station-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    crate::agent_integration::safe_fs::write_atomic_private(
+        &data_dir.join("provider-purge-pending.json"),
+        br#"{"version":1,"providers":["retired"]}"#,
+    )
+    .unwrap();
+    secrets::store_set(
+        &data_dir,
+        "retired",
+        "provider_api_key",
+        "persisted-owner-key",
+    )
+    .unwrap();
+    let mut persisted = template_for_test(&root);
+    persisted["upstreams"]["retired"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://persisted-owner.example/v1",
+        "models": [{ "model": "persisted-model" }]
+    });
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+    let draft = template_for_test(&root);
+    let mut inner = AppInner::new_with_saved(config_path, draft.clone(), draft, None);
+
+    let error = recover_pending_provider_purge_on_startup(&mut inner)
+        .expect_err("persisted identity reuse must block old cleanup");
+
+    assert!(error.contains("磁盘配置"), "{error}");
+    assert_eq!(
+        secrets::store_get(&data_dir, "retired", "provider_api_key").as_deref(),
+        Ok("persisted-owner-key")
+    );
+    assert!(data_dir.join("provider-purge-pending.json").exists());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revision() {
+    let root = scratch_home("purge-deleted-provider-scoped-prices");
+    let config_path = root.join("token-station.json");
+    let data_dir = root.join("token-station-data");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        config_path.clone(),
+        template_for_test(&root),
+        None,
+    )))));
+    add_provider(
+        app.state(),
+        "active".to_owned(),
+        "https://active.example/v1".to_owned(),
+        vec!["active-model".to_owned()],
+        None,
+        false,
+    )
+    .expect("active Provider is valid");
+    for tier in ["high", "mid", "low"] {
+        set_tier(
+            app.state(),
+            tier.to_owned(),
+            Some("active".to_owned()),
+            Some("active-model".to_owned()),
+        )
+        .expect("active route is valid");
+    }
+    save_config(app.state()).expect("baseline configuration saves");
+    let baseline_price_version = get_price_table(app.state())
+        .expect("baseline pricing is readable")
+        .version;
+    set_model_price(
+        app.state(),
+        "retired/shared-model".to_owned(),
+        11,
+        22,
+        3,
+        11,
+        None,
+        baseline_price_version,
+    )
+    .expect("retired scoped price fixture saves");
+    set_model_price(
+        app.state(),
+        "retired-two/shared-model".to_owned(),
+        31,
+        62,
+        9,
+        31,
+        None,
+        baseline_price_version + 1,
+    )
+    .expect("second retired scoped price fixture saves");
+    set_model_price(
+        app.state(),
+        "active/active-model".to_owned(),
+        101,
+        202,
+        30,
+        101,
+        None,
+        baseline_price_version + 2,
+    )
+    .expect("unrelated scoped price fixture saves");
+    provider_tombstones::archive(
+        &data_dir,
+        "retired",
+        &json!({
+            "provider": "openai-compatible",
+            "base_url": "https://retired.example/v1",
+            "models": [{ "model": "shared-model" }]
+        }),
+    )
+    .expect("retired Provider has a recovery snapshot");
+    provider_tombstones::archive(
+        &data_dir,
+        "retired-two",
+        &json!({
+            "provider": "openai-compatible",
+            "base_url": "https://retired-two.example/v1",
+            "models": [{ "model": "shared-model" }]
+        }),
+    )
+    .expect("second retired Provider has a recovery snapshot");
+
+    let purged = purge_deleted_providers(app.state())
+        .expect("a saved, inactive Provider can be permanently purged");
+    assert!(!purged.config_dirty);
+    let pricing = get_price_table(app.state()).expect("pricing remains readable");
+    assert_eq!(pricing.version, baseline_price_version + 4);
+    assert!(!pricing.models.contains_key("retired/shared-model"));
+    assert!(!pricing.models.contains_key("retired-two/shared-model"));
+    assert_eq!(pricing.models["active/active-model"].input_per_mtok, 101);
+    let persisted = ClientConfig::load(&config_path).expect("purge price cleanup is durable");
+    assert!(!persisted
+        .pricing
+        .models
+        .contains_key("retired/shared-model"));
+    assert!(!persisted
+        .pricing
+        .models
+        .contains_key("retired-two/shared-model"));
+
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -6253,6 +7045,224 @@ fn historical_home_mode_without_top_level_routing_remains_visible() {
         .agent_routes
         .values()
         .all(|route| route.routing_mode == "quota_first"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn state_view_route_context_exposes_every_tier_pool_model_offering() {
+    let root = scratch_home("state-view-complete-route-context");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["primary"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://primary.example.test/v1",
+        "models": [{"model": "reasoner"}, {"model": "chat"}]
+    });
+    draft["upstreams"]["fallback"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://fallback.example.test/v1",
+        "models": [{"model": "chat-lite"}]
+    });
+    draft["routing"]["mode"] = json!("tiered");
+    draft["router"]["routing_mode"] = json!("tiered");
+    draft["router"]["pools"] = json!({
+        TIER_HIGH: [
+            {"upstream": "primary", "model": "reasoner"},
+            {"upstream": "primary", "model": "chat"},
+            {"upstream": "fallback", "model": "chat-lite"}
+        ]
+    });
+    draft["router"]["default_pool"] = json!(TIER_HIGH);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+
+    let view = get_state(app.state());
+    let offerings = view
+        .route_context
+        .model_offerings
+        .iter()
+        .map(|offering| (offering.upstream.as_str(), offering.model.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        offerings,
+        [
+            ("primary", "reasoner"),
+            ("primary", "chat"),
+            ("fallback", "chat-lite"),
+        ]
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn state_view_route_context_exposes_custom_cli_pool_offerings() {
+    let root = scratch_home("state-view-custom-pool-route-context");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["primary"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://primary.example.test/v1",
+        "models": [
+            {"model": "reasoner"},
+            {"model": "cheap-chat"},
+            {"model": "hinted-model"},
+            {"model": "above-model"},
+            {"model": "below-model"},
+            {"model": "band-model"},
+            {"model": "recovery-model"},
+            {"model": "orphan-model"}
+        ]
+    });
+    draft["routing"]["mode"] = json!("tiered");
+    draft["router"]["routing_mode"] = json!("tiered");
+    draft["router"]["pools"] = json!({
+        "sota": [{"upstream": "primary", "model": "reasoner"}],
+        "cheap": [{"upstream": "primary", "model": "cheap-chat"}],
+        "hinted": [{"upstream": "primary", "model": "hinted-model"}],
+        "above": [{"upstream": "primary", "model": "above-model"}],
+        "below": [{"upstream": "primary", "model": "below-model"}],
+        "banded": [{"upstream": "primary", "model": "band-model"}],
+        "recovery": [{"upstream": "primary", "model": "recovery-model"}],
+        "orphan": [{"upstream": "primary", "model": "orphan-model"}]
+    });
+    draft["router"]["default_pool"] = json!("cheap");
+    draft["router"]["rules"] = json!([{
+        "id": "hard-request",
+        "when": {"keywords_any": ["hard"]},
+        "route_to": "sota"
+    }]);
+    draft["router"]["hint_routes"] = json!([{
+        "kind": "step_type",
+        "value": "planning",
+        "route_to": "hinted"
+    }]);
+    draft["router"]["heuristic"] = json!({
+        "weights": {
+            "tokens_per_point": 100,
+            "per_tool": 0,
+            "json_schema": 0,
+            "image": 0,
+            "per_code_block": 0,
+            "per_extra_turn": 0
+        },
+        "threshold": 40,
+        "above": "above",
+        "below": "below",
+        "bands": [{"at_least": 100, "pool": "banded"}]
+    });
+    draft["router"]["recovery"] = json!({"policy": "ordered", "pools": ["recovery"]});
+    let config: ClientConfig = serde_json::from_value(draft.clone())
+        .expect("custom pool fixture uses the RouterConfig wire schema");
+    config
+        .validate()
+        .expect("custom reachable and orphan pools are all structurally valid");
+
+    let view = AppInner::new(root.join("token-station.json"), draft, None).snapshot();
+    let offerings = view
+        .route_context
+        .model_offerings
+        .iter()
+        .map(|offering| (offering.upstream.as_str(), offering.model.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        offerings,
+        [
+            ("primary", "above-model"),
+            ("primary", "band-model"),
+            ("primary", "below-model"),
+            ("primary", "cheap-chat"),
+            ("primary", "hinted-model"),
+            ("primary", "reasoner"),
+            ("primary", "recovery-model"),
+        ]
+        .into_iter()
+        .collect()
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn state_view_route_context_filters_cloud_models_for_strict_local_only_routing() {
+    let root = scratch_home("state-view-local-only-route-context");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["local"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "local": true,
+        "models": [{"model": "local-chat"}]
+    });
+    draft["upstreams"]["cloud"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://cloud.example.test/v1",
+        "models": [{"model": "cloud-chat"}]
+    });
+    draft["routing"]["mode"] = json!("tiered");
+    draft["router"]["routing_mode"] = json!("tiered");
+    draft["router"]["pools"] = json!({
+        "main": [
+            {"upstream": "local", "model": "local-chat"},
+            {"upstream": "cloud", "model": "cloud-chat"}
+        ]
+    });
+    draft["router"]["default_pool"] = json!("main");
+    draft["router"]["local_only"] = json!(true);
+    draft["router"]["allow_cloud_fallback"] = json!(false);
+    let config: ClientConfig = serde_json::from_value(draft.clone())
+        .expect("the local-only fixture uses the RouterConfig wire schema");
+    config.validate().expect("the local-only fixture is valid");
+
+    let view = AppInner::new(root.join("token-station.json"), draft, None).snapshot();
+    let offerings = view
+        .route_context
+        .model_offerings
+        .iter()
+        .map(|offering| (offering.upstream.as_str(), offering.model.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(offerings, [("local", "local-chat")]);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn state_view_route_context_uses_all_configured_models_for_exact_routing() {
+    let root = scratch_home("state-view-exact-route-context");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["primary"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://primary.example.test/v1",
+        "models": [{"model": "pooled"}, {"model": "exact-only"}]
+    });
+    draft["routing"]["mode"] = json!("tiered");
+    draft["router"]["routing_mode"] = json!("tiered");
+    draft["router"]["pools"] = json!({
+        "main": [{"upstream": "primary", "model": "pooled"}]
+    });
+    draft["router"]["default_pool"] = json!("main");
+    draft["router"]["honor_exact_model"] = json!(true);
+    let config: ClientConfig = serde_json::from_value(draft.clone())
+        .expect("the exact-routing fixture uses the RouterConfig wire schema");
+    config
+        .validate()
+        .expect("the exact-routing fixture is valid");
+
+    let view = AppInner::new(root.join("token-station.json"), draft, None).snapshot();
+    let offerings = view
+        .route_context
+        .model_offerings
+        .iter()
+        .map(|offering| (offering.upstream.as_str(), offering.model.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        offerings,
+        [("primary", "exact-only"), ("primary", "pooled")]
+            .into_iter()
+            .collect()
+    );
     std::fs::remove_dir_all(root).ok();
 }
 

@@ -137,6 +137,7 @@ const state: StateView = {
   local_only: false,
   allow_cloud_fallback: false,
   routing_mode: "tiered",
+  route_context: { model_offerings: [] },
   quota_accounts: [],
   serve: {
     phase: "stopped", app_runtime: "stopped", listener_reachable: false,
@@ -1145,6 +1146,34 @@ describe("model selection and provider model management", () => {
 });
 
 describe("provider deletion lifecycle", () => {
+  it("回收站用一个按钮二次确认后清空全部 Provider", async () => {
+    const onPurgeDeleted = vi.fn().mockResolvedValue(true);
+    const user = userEvent.setup();
+    render(
+      <ProviderList
+        providers={[]}
+        deletedProviders={["tokenstation", "x"]}
+        recoveryError={null}
+        serveRunning={false}
+        busy={false}
+        onRemove={vi.fn()}
+        onRestore={vi.fn()}
+        onPurgeDeleted={onPurgeDeleted}
+        onStateChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: "清空回收站" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "清空回收站" }));
+    const dialog = screen.getByRole("dialog", { name: "清空 Provider 回收站？" });
+    expect(within(dialog).getByText(/删除全部 2 个恢复快照/))
+      .toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "清空回收站" }));
+    expect(onPurgeDeleted).toHaveBeenCalledWith();
+    expect(screen.queryByRole("dialog", { name: "清空 Provider 回收站？" })).toBeNull();
+  });
+
   it("供应商管理列表复用稳定品牌图标并在弹窗中管理", async () => {
     const user = userEvent.setup();
     render(
@@ -1191,6 +1220,9 @@ describe("provider deletion lifecycle", () => {
     await user.click(manageButton);
     const managerDialog = screen.getByRole("dialog", { name: "管理 team-openai" });
     expect(managerDialog.querySelector(".provider-model-manager")).toBeInTheDocument();
+    expect(within(managerDialog).getAllByText("管理 team-openai")).toHaveLength(1);
+    expect(managerDialog.querySelector(".provider-manager-heading")).toBeNull();
+    expect(managerDialog.querySelector(".provider-manager-count")).toBeNull();
     expect(within(managerDialog).getByRole("button", { name: "关闭" })).toBeInTheDocument();
     expect(providerGroup).not.toHaveClass("expanded");
     expect(within(providerGroup).queryByText("管理 team-openai")).toBeNull();

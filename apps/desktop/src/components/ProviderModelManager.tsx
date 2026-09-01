@@ -501,23 +501,6 @@ export default function ProviderModelManager({
 
   return (
     <div className="provider-model-manager">
-      <div className="provider-manager-heading">
-        <div>
-          <strong>{copy(`Manage ${provider.name}`, `管理 ${provider.name}`, `管理 ${provider.name}`, `${provider.name} を管理`)}</strong>
-          <span>{copy(
-            "Choose one task. Changes apply only after you use its save action.",
-            "每次只处理一项任务；点击对应的保存按钮后才会生效。",
-            "每次只處理一項任務；點選對應的儲存按鈕後才會生效。",
-            "1回に1つのタスクを行い、対応する操作で保存します。",
-          )}</span>
-        </div>
-        <span className="provider-manager-count">{copy(
-          `${selected.length} active models`,
-          `${selected.length} 个已启用模型`,
-          `${selected.length} 個已啟用模型`,
-          `${selected.length} 個の有効なモデル`,
-        )}</span>
-      </div>
       <div
         className="provider-manager-tab-list"
         role="tablist"

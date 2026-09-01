@@ -300,7 +300,7 @@ describe("AgentRoutePage multi-install admission", () => {
         operation: "replace",
         path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] },
         sensitive: true,
-        summary: "<敏感值已隐藏>",
+        summary: "<本机敏感值，明文见确认详情>",
         before_preview: '"must-not-render-old-secret"',
         after_preview: '"must-not-render-new-secret"',
       }, {
@@ -367,10 +367,9 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(preview).toHaveTextContent('"0"');
     expect(preview).toHaveTextContent("Thinking token 预算设为 0");
     expect(preview).toHaveTextContent("关闭自适应 Thinking");
-    expect(preview).toHaveTextContent("当前敏感值（内容已隐藏）");
-    expect(preview).toHaveTextContent("本机凭据（内容已隐藏）");
-    expect(preview).not.toHaveTextContent("must-not-render-old-secret");
-    expect(preview).not.toHaveTextContent("must-not-render-new-secret");
+    expect(preview).toHaveTextContent('"must-not-render-old-secret"');
+    expect(preview).toHaveTextContent('"must-not-render-new-secret"');
+    expect(preview).toHaveTextContent("本机凭据会以明文显示，请避免截屏或共享屏幕");
     expect(preview).toHaveTextContent("已加密备份");
     expect(applyAgentPlan).not.toHaveBeenCalled();
 
@@ -528,6 +527,7 @@ describe("AgentRoutePage multi-install admission", () => {
 
     await user.click(screen.getByRole("button", { name: "查看接入改动" }));
     const review = await screen.findByRole("dialog", { name: "接入改动" });
+    expect(review).toHaveTextContent("本机凭据会以明文显示，请避免截屏或共享屏幕");
     expect(review).toHaveTextContent('"https://api.anthropic.com"');
     expect(review).toHaveTextContent('"http://127.0.0.1:8787/agents/claude-code"');
     expect(review).toHaveTextContent("这是只读记录");
