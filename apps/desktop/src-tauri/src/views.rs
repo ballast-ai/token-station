@@ -117,6 +117,17 @@ pub(crate) struct DirectTargetView {
     pub(crate) model: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct ModelOfferingView {
+    pub(crate) upstream: String,
+    pub(crate) model: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct RouteContextView {
+    pub(crate) model_offerings: Vec<ModelOfferingView>,
+}
+
 /// One account (upstream + model) in the quota-first rotation, in priority
 /// order. Shared across every scope in quota mode — the pool of allowances to
 /// drain is global; only the per-Agent *mode* is independent.
@@ -181,6 +192,8 @@ pub(crate) struct StateView {
     /// Routing mode: direct, tiered intelligent routing, or quota_first.
     pub(crate) routing_mode: String,
     pub(crate) direct_target: Option<DirectTargetView>,
+    /// Complete Home routing candidates. Tiered mode includes every pool member.
+    pub(crate) route_context: RouteContextView,
     /// Globally shared quota-first rotation accounts, provider plus model, in priority order.
     pub(crate) quota_accounts: Vec<QuotaAccountView>,
     pub(crate) serve: ServeView,

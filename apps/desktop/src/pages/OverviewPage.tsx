@@ -80,29 +80,19 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
       provider.name === state.direct_target?.upstream && provider.managed_route
     )) ?? null
     : null;
-  const configuredModelTargets = state.routing_mode === "direct"
-    ? state.direct_target ? [state.direct_target] : []
-    : state.routing_mode === "quota_first"
-      ? state.quota_accounts
-      : (["high", "mid", "low"] as TierSlot[]).flatMap((slot) => {
-          const target = state.tiers[slot];
-          return target.upstream && target.model ? [{ upstream: target.upstream, model: target.model }] : [];
-        });
-  const uniqueModelTargets = [...new Map(
-    configuredModelTargets.map((target) => [`${target.upstream}\u0000${target.model}`, target]),
-  ).values()];
-  const exactModelContext = uniqueModelTargets.length === 1
-    ? `${uniqueModelTargets[0].upstream} / ${uniqueModelTargets[0].model}`
+  const modelOfferings = state.route_context.model_offerings;
+  const exactModelContext = modelOfferings.length === 1
+    ? `${modelOfferings[0].upstream} / ${modelOfferings[0].model}`
     : null;
   const modelContextLabel = state.routing_mode === "direct"
     ? copy("Current model", "当前模型", "目前模型", "現在のモデル")
     : copy("Candidate models", "候选模型", "候選模型", "候補モデル");
-  const modelContext = exactModelContext ?? (uniqueModelTargets.length > 1
+  const modelContext = exactModelContext ?? (modelOfferings.length > 1
     ? copy(
-        `${uniqueModelTargets.length} candidate models`,
-        `${uniqueModelTargets.length} 个候选模型`,
-        `${uniqueModelTargets.length} 個候選模型`,
-        `${uniqueModelTargets.length} 個の候補モデル`,
+        `${modelOfferings.length} candidate models`,
+        `${modelOfferings.length} 个候选模型`,
+        `${modelOfferings.length} 個候選模型`,
+        `${modelOfferings.length} 個の候補モデル`,
       )
     : copy("Not configured", "未配置", "未配置", "未設定"));
 

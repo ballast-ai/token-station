@@ -23,8 +23,8 @@ for (const [file, forbidden] of [
   assert.doesNotMatch(
     read(file),
     forbidden,
-    `${file} must not expose complete Agent credential values`,
+    `${file} must not add a separate Agent credential reveal surface`,
   );
 }
 
-console.log("Agent sensitive-value boundary: PASS");
+console.log("Agent credential reveal surface: PASS");

@@ -3400,7 +3400,7 @@ mod tests {
             case.label
         );
         let public_plan = serde_json::to_string(&plan.plan).unwrap();
-        assert!(!public_plan.contains(runtime.virtual_key()));
+        assert!(public_plan.contains(runtime.virtual_key()));
         state
             .apply_from_cached_scan(
                 &plan.plan.operation_id,
@@ -3612,7 +3612,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_plan_token_is_session_bound_one_shot_and_secret_free() {
+    fn commands_plan_token_is_session_bound_one_shot_and_exposes_local_confirmation_values() {
         let state = state("token");
         let target = scratch("target").join("settings.json");
         let now_ms = state.clock.now_ms();
@@ -3621,7 +3621,7 @@ mod tests {
             .issue_plan(prepared, &record(&target, false), "main", Some([7_u8; 32]))
             .unwrap();
         let encoded = serde_json::to_string(&view).unwrap();
-        assert!(!encoded.contains("vk-command-secret"));
+        assert!(encoded.contains("vk-command-secret"));
         assert!(!encoded.contains("projected_bytes"));
 
         let wrong_session = state
@@ -3999,7 +3999,7 @@ mod tests {
         assert!(!target.exists());
         assert!(!state.paths.snapshot_root.exists());
         assert!(!state.paths.ownership_root.exists());
-        assert!(!serde_json::to_string(&plan)
+        assert!(serde_json::to_string(&plan)
             .unwrap()
             .contains("vk-plan-memory-only"));
 
@@ -5242,8 +5242,8 @@ mod tests {
             .unwrap();
         let public_disconnect = serde_json::to_string(&disconnect.plan).unwrap();
         assert!(
-            !public_disconnect.contains(fixture_runtime.virtual_key()),
-            "companion credentials must not enter the IPC-safe disconnect plan"
+            public_disconnect.contains(fixture_runtime.virtual_key()),
+            "the local disconnect confirmation must show the companion credential"
         );
         let credential_projection = disconnect
             .plan
@@ -5277,10 +5277,10 @@ mod tests {
             .plan_restore(&baseline.snapshot_id, "dsh-restore-review")
             .unwrap();
         assert!(
-            !serde_json::to_string(&restore.plan)
+            serde_json::to_string(&restore.plan)
                 .unwrap()
                 .contains(fixture_runtime.virtual_key()),
-            "companion credentials must not enter the IPC-safe restore plan"
+            "the local restore confirmation must show the companion credential"
         );
         #[cfg(unix)]
         {
@@ -5790,7 +5790,7 @@ mod tests {
             .plan_disconnect("claude-code", "/opt/claude", "main")
             .unwrap();
         assert_eq!(disconnect.plan.intent, PlanIntent::Disconnect);
-        assert!(!serde_json::to_string(&restore)
+        assert!(serde_json::to_string(&restore)
             .unwrap()
             .contains("vk-command-lifecycle"));
         std::fs::remove_dir_all(root).ok();

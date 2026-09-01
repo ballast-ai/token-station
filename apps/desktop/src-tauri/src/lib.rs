@@ -354,6 +354,13 @@ pub fn run() {
                 saved,
                 load_error,
             );
+            if inner.load_error.is_none() {
+                if let Err(error) = recover_pending_provider_purge_on_startup(&mut inner) {
+                    inner.load_error = Some(format!(
+                        "Provider 永久删除的待清理状态无法安全恢复，已进入只读保护：{error}"
+                    ));
+                }
+            }
             if inner.load_error.is_none()
                 && seed_builtin_pricing(&mut inner.draft).map_err(std::io::Error::other)?
             {

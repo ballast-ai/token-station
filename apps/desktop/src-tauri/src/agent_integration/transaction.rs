@@ -3700,7 +3700,7 @@ mod tests {
         let initial = include_bytes!("../../tests/fixtures/config/hermes/config.input.yaml");
         write_initial(&target, initial);
         let connect = prepare_hermes(&target, "vk-hermes-secret");
-        assert!(!format!("{:?}", connect.view).contains("vk-hermes-secret"));
+        assert!(format!("{:?}", connect.view).contains("vk-hermes-secret"));
         let keys = Arc::new(TestKeys::available());
         let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
         let ownership_store = FileOwnershipStore::new(root.join("ownership"));

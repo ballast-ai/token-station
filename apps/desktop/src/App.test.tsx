@@ -175,6 +175,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
     local_only: false,
     allow_cloud_fallback: false,
     routing_mode: "tiered",
+    route_context: { model_offerings: [] },
     quota_accounts: [],
     serve: serveFixture(),
     draft_revision: 0,
