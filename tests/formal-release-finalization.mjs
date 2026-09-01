@@ -18,6 +18,10 @@ assert.match(releaseWorkflow, /release-target:\n    runs-on:/);
 assert.match(releaseWorkflow, /release_tag:/);
 assert.match(releaseWorkflow, /git merge-base --is-ancestor "\$sha" origin\/main/);
 assert.match(releaseWorkflow, /checkout_ref: \$\{\{ needs\.release-target\.outputs\.sha \}\}/);
+assert.match(
+  releaseWorkflow,
+  /gh api \\\n\s+--method GET \\\n\s+"repos\/\$\{\{ github\.repository \}\}\/actions\/workflows\/full-ci\.yml\/runs"/,
+);
 assert.match(releaseWorkflow, /verify-main-full-ci:\n    needs: release-target\n    runs-on:/);
 assert.match(releaseWorkflow, /platform-gates:\n    needs: release-target\n    uses: \.\/\.github\/workflows\/platform\.yml/);
 assert.match(releaseWorkflow, /needs: \[release-target, release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows\]/);
@@ -33,6 +37,10 @@ assert.match(releaseWorkflow, /Awaiting offline CLI and updater signatures/);
 
 const desktopWorkflow = read(".github/workflows/desktop-release.yml");
 assert.match(desktopWorkflow, /workflow_dispatch:/);
+assert.match(
+  desktopWorkflow,
+  /gh api \\\n\s+--method GET \\\n\s+"repos\/\$\{\{ github\.repository \}\}\/actions\/workflows\/full-ci\.yml\/runs"/,
+);
 assert.doesNotMatch(desktopWorkflow, /push:\s*\n\s*tags:/);
 assert.match(desktopWorkflow, /verify-main-full-ci:\n    runs-on:/);
 assert.match(desktopWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);

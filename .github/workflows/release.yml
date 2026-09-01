@@ -111,6 +111,7 @@ jobs:
           COMMIT: ${{ needs.release-target.outputs.sha }}
         run: |
           conclusion=$(gh api \
+            --method GET \
             "repos/${{ github.repository }}/actions/workflows/full-ci.yml/runs" \
             -f "head_sha=$COMMIT" -f branch=main -f event=push -f per_page=100 \
             --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
