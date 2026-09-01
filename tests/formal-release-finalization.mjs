@@ -13,9 +13,14 @@ const releaseWorkflow = read(".github/workflows/release.yml");
 const linuxWorkflow = read(".github/workflows/linux-desktop.yml");
 assert.match(releaseWorkflow, /desktop-macos:/);
 assert.match(releaseWorkflow, /desktop-windows:/);
-assert.match(releaseWorkflow, /verify-main-full-ci:\n    runs-on:/);
-assert.match(releaseWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
-assert.match(releaseWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows\]/);
+assert.match(releaseWorkflow, /pull-requests: read/);
+assert.match(releaseWorkflow, /release-target:\n    runs-on:/);
+assert.match(releaseWorkflow, /release_tag:/);
+assert.match(releaseWorkflow, /git merge-base --is-ancestor "\$sha" origin\/main/);
+assert.match(releaseWorkflow, /checkout_ref: \$\{\{ needs\.release-target\.outputs\.sha \}\}/);
+assert.match(releaseWorkflow, /verify-main-full-ci:\n    needs: release-target\n    runs-on:/);
+assert.match(releaseWorkflow, /platform-gates:\n    needs: release-target\n    uses: \.\/\.github\/workflows\/platform\.yml/);
+assert.match(releaseWorkflow, /needs: \[release-target, release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows\]/);
 assert.match(releaseWorkflow, /token-station-desktop-\$\{\{ matrix\.target \}\}/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/dmg\/\*\.dmg/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/macos\/\*\.app\.tar\.gz/);
@@ -42,8 +47,9 @@ assert.match(
 assert.doesNotMatch(desktopWorkflow, /if: \$\{\{ false \}\}/);
 
 assert.match(linuxWorkflow, /workflow_call:/);
+assert.match(linuxWorkflow, /checkout_ref:/);
 assert.doesNotMatch(linuxWorkflow, /push:\s*\n\s*tags:/);
-assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[verify-main-full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);
+assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[release-target, verify-main-full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);
 
 for (const script of [
   "scripts/release-latest-formal.sh",
@@ -101,7 +107,7 @@ assert.match(entry, /gh run watch/);
 assert.match(entry, /isDraft,isPrerelease/);
 
 assert.match(releaseWorkflow, /--production --unsigned-windows --target x86_64-pc-windows-msvc/);
-assert.match(releaseWorkflow, /github\.ref_name != 'v2\.0\.0'/);
+assert.match(releaseWorkflow, /needs\.release-target\.outputs\.tag != 'v2\.0\.0'/);
 assert.match(releaseWorkflow, /scripts\/build-desktop\.sh --production --target x86_64-pc-windows-msvc/);
 
 const desktopBuild = read("scripts/build-desktop.sh");

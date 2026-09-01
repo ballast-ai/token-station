@@ -18,15 +18,81 @@ on:
         type: choice
         required: true
         options: [source-only, formal]
+      release_tag:
+        description: "existing vX.Y.Z tag to resume after a workflow-only failure"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   TOKEN_STATION_RELEASE_PUBKEY_HEX: ${{ vars.TOKEN_STATION_RELEASE_PUBKEY_HEX }}
   TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
 
 jobs:
+  # A tag push uses its own immutable target. A manual formal run is only a
+  # recovery path for an existing version tag: it resolves that tag to a commit,
+  # proves the commit is on main, and makes every build check out that exact SHA.
+  release-target:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+      tag: ${{ steps.target.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: target
+        env:
+          REQUESTED_MODE: ${{ inputs.mode }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == v* ]] || {
+              echo "::error::Release push must be a v* tag." >&2
+              exit 1
+            }
+            tag="$GITHUB_REF_NAME"
+          elif [[ "$REQUESTED_MODE" == "formal" ]]; then
+            [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "::error::Manual formal recovery requires release_tag=vX.Y.Z." >&2
+              exit 1
+            }
+            tag="$REQUESTED_TAG"
+          else
+            tag=""
+            sha="$GITHUB_SHA"
+          fi
+
+          if [[ -n "$tag" ]]; then
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag" || {
+              echo "::error::The requested release tag does not exist: $tag" >&2
+              exit 1
+            }
+            [[ "$(git cat-file -t "$tag")" == "tag" ]] || {
+              echo "::error::Formal release tags must be annotated: $tag" >&2
+              exit 1
+            }
+            sha=$(git rev-parse "$tag^{}")
+            git merge-base --is-ancestor "$sha" origin/main || {
+              echo "::error::Release target $sha is not on main." >&2
+              exit 1
+            }
+            version=$(git show "$sha:apps/desktop/package.json" | node -e \
+              'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
+            [[ "$tag" == "v$version" ]] || {
+              echo "::error::Release tag $tag does not match version $version." >&2
+              exit 1
+            }
+          fi
+
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   # A tag is releasable only once full-ci.yml has already passed for this exact
   # commit on main. Re-running it here would cost a second full Linux gate for a
   # revision that main has verified, so assert the recorded run instead.
@@ -36,12 +102,13 @@ jobs:
   # finds no run. event=push excludes runs this workflow itself started through
   # workflow_call, which would otherwise let a release vouch for itself.
   verify-main-full-ci:
+    needs: release-target
     runs-on: ubuntu-24.04
     steps:
       - name: Require a successful full-ci run for this commit on main
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMIT: ${{ github.sha }}
+          COMMIT: ${{ needs.release-target.outputs.sha }}
         run: |
           conclusion=$(gh api \
             "repos/${{ github.repository }}/actions/workflows/full-ci.yml/runs" \
@@ -56,26 +123,33 @@ jobs:
           echo "已确认提交 $COMMIT 在 main 上通过 full-ci。"
 
   platform-gates:
+    needs: release-target
     uses: ./.github/workflows/platform.yml
+    with:
+      checkout_ref: ${{ needs.release-target.outputs.sha }}
 
   linux-desktop:
-    needs: [verify-main-full-ci, platform-gates]
+    needs: [release-target, verify-main-full-ci, platform-gates]
     uses: ./.github/workflows/linux-desktop.yml
     # A called workflow sees its own `inputs`, not the caller's. Without this
     # a manual source-only release run would reach the callee with no mode and
     # be refused for not asking explicitly.
     with:
       mode: ${{ inputs.mode }}
+      checkout_ref: ${{ needs.release-target.outputs.sha }}
 
   # A `v*` tag fails closed: the run stops here and names what is missing,
   # rather than skipping every real job and reporting green.
   release-mode:
+    needs: release-target
     runs-on: ubuntu-24.04
     outputs:
       enabled: ${{ steps.mode.outputs.formal }}
       mode: ${{ steps.mode.outputs.mode }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release-target.outputs.sha }}
       - id: mode
         env:
           TS_EVENT: ${{ github.event_name }}
@@ -97,7 +171,7 @@ jobs:
           TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
         run: node scripts/resolve-release-mode.mjs
       - name: Require Windows Authenticode configuration after v2.0.0
-        if: steps.mode.outputs.formal == 'true' && github.ref_name != 'v2.0.0'
+        if: steps.mode.outputs.formal == 'true' && needs.release-target.outputs.tag != 'v2.0.0'
         env:
           TS_EVENT: workflow_dispatch
           TS_REQUESTED_MODE: formal
@@ -108,7 +182,7 @@ jobs:
         run: node scripts/resolve-release-mode.mjs
 
   build:
-    needs: [release-mode, verify-main-full-ci, platform-gates]
+    needs: [release-target, release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     strategy:
       fail-fast: false
@@ -121,11 +195,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-target.outputs.sha }}
       - name: Check tag, version, and public release key
+        env:
+          RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         run: |
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/cli/Cargo.toml | head -1)
-          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "发布标签 $GITHUB_REF_NAME 与 CLI 版本 $version 不一致。" >&2
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "发布标签 $RELEASE_TAG 与 CLI 版本 $version 不一致。" >&2
             exit 1
           fi
           node scripts/check-release-readiness.mjs --version "$version" --formal
@@ -143,11 +221,13 @@ jobs:
 
   # Rebuild the same recipe from clean trees and require byte identity.
   reproducibility:
-    needs: [release-mode, verify-main-full-ci, platform-gates]
+    needs: [release-target, release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-target.outputs.sha }}
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Build twice from clean trees, compare bytes
         run: |
@@ -158,7 +238,7 @@ jobs:
           sha256sum -c first.sum
 
   desktop-macos:
-    needs: [release-mode, verify-main-full-ci, platform-gates]
+    needs: [release-target, release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     name: Desktop macOS (${{ matrix.target }})
     runs-on: macos-14
@@ -178,6 +258,8 @@ jobs:
       APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-target.outputs.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
@@ -188,10 +270,12 @@ jobs:
           targets: wasm32-wasip2,${{ matrix.target }}
       - run: npm --prefix apps/desktop ci
       - name: Check formal desktop metadata and DMG policy
+        env:
+          RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         run: |
           version=$(node -p "require('./apps/desktop/package.json').version")
-          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "发布标签 $GITHUB_REF_NAME 与桌面版本 $version 不一致。" >&2
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "发布标签 $RELEASE_TAG 与桌面版本 $version 不一致。" >&2
             exit 1
           fi
           node scripts/check-release-readiness.mjs --version "$version" --formal
@@ -245,7 +329,7 @@ jobs:
           if-no-files-found: error
 
   desktop-windows:
-    needs: [release-mode, verify-main-full-ci, platform-gates]
+    needs: [release-target, release-mode, verify-main-full-ci, platform-gates]
     if: needs.release-mode.outputs.enabled == 'true'
     name: Desktop Windows (x86_64-pc-windows-msvc)
     runs-on: windows-2025
@@ -255,6 +339,8 @@ jobs:
       WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-target.outputs.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
@@ -265,17 +351,19 @@ jobs:
           targets: wasm32-wasip2,x86_64-pc-windows-msvc
       - run: npm --prefix apps/desktop ci
       - name: Check formal Windows metadata
+        env:
+          RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         shell: bash
         run: |
           version=$(node -p "require('./apps/desktop/package.json').version")
-          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "发布标签 $GITHUB_REF_NAME 与桌面版本 $version 不一致。" >&2
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "发布标签 $RELEASE_TAG 与桌面版本 $version 不一致。" >&2
             exit 1
           fi
           node scripts/check-release-readiness.mjs --version "$version" --formal
           node scripts/check-windows-release-config.mjs
       - name: Import the Windows signing certificate after v2.0.0
-        if: github.ref_name != 'v2.0.0'
+        if: needs.release-target.outputs.tag != 'v2.0.0'
         shell: pwsh
         run: |
           if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
@@ -288,9 +376,11 @@ jobs:
           if (-not $certificate.Thumbprint) { throw "certificate import returned no thumbprint" }
           "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Build, audit, and stage the Windows MSI
+        env:
+          RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_NAME" == "v2.0.0" ]]; then
+          if [[ "$RELEASE_TAG" == "v2.0.0" ]]; then
             scripts/build-desktop.sh --production --unsigned-windows --target x86_64-pc-windows-msvc
             echo "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -307,20 +397,24 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows]
+    needs: [release-target, release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows]
     if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-target.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Create the unsigned CLI manifest
+        env:
+          RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           cargo run --locked -p token-station-release --bin ts-release -- \
             manifest --version "$VERSION" --out dist/manifest.json \
             dist/token-station-cli-*.tar.gz
@@ -329,8 +423,9 @@ jobs:
       - name: Create the draft for offline finalization
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
-            --title "Token Station $GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" --draft --verify-tag \
+            --title "Token Station $RELEASE_TAG" \
             --notes "Draft. Awaiting offline CLI and updater signatures. Run the prepare, sign, and publish formal-release scripts." \
             dist/*.tar.gz dist/*.dmg dist/*.msi dist/*.deb dist/*.AppImage dist/*.rpm dist/manifest.json

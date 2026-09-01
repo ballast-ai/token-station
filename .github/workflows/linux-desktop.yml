@@ -11,6 +11,11 @@ on:
         type: string
         required: false
         default: ""
+      checkout_ref:
+        description: "Commit to build; defaults to the caller commit."
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
     inputs:
       mode:
@@ -31,6 +36,8 @@ jobs:
       mode: ${{ steps.mode.outputs.mode }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.checkout_ref }}
       - id: mode
         env:
           TS_EVENT: ${{ github.event_name }}
@@ -50,6 +57,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
 
       - name: Install Tauri Linux system dependencies
         run: |
