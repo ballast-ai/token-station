@@ -256,12 +256,16 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Stage the macOS identity importer
-        run: /usr/bin/install -m 0700 scripts/import-macos-signing-identity.sh "$RUNNER_TEMP/import-macos-signing-identity.sh"
+      - name: Stage trusted macOS release helpers
+        run: |
+          /usr/bin/install -m 0700 scripts/import-macos-signing-identity.sh "$RUNNER_TEMP/import-macos-signing-identity.sh"
+          /usr/bin/install -m 0700 scripts/audit-macos-dmg.sh "$RUNNER_TEMP/audit-macos-dmg.sh"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-target.outputs.sha }}
           persist-credentials: false
+      - name: Install the trusted DMG auditor
+        run: /usr/bin/install -m 0700 "$RUNNER_TEMP/audit-macos-dmg.sh" scripts/audit-macos-dmg.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1

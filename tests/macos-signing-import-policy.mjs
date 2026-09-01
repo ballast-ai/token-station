@@ -47,6 +47,11 @@ assert.match(
 );
 assert.match(
   releaseWorkflow,
+  /ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*?install -m 0700 scripts\/audit-macos-dmg\.sh "\$RUNNER_TEMP\/audit-macos-dmg\.sh"[\s\S]*?ref: \$\{\{ needs\.release-target\.outputs\.sha \}\}[\s\S]*?install -m 0700 "\$RUNNER_TEMP\/audit-macos-dmg\.sh" scripts\/audit-macos-dmg\.sh/,
+  "formal release must install the trusted DMG auditor after checking out the immutable release tag",
+);
+assert.match(
+  releaseWorkflow,
   /name: Import Developer ID certificate[\s\S]*?run: "\$RUNNER_TEMP\/import-macos-signing-identity\.sh"/,
   "formal release must run the staged importer",
 );
