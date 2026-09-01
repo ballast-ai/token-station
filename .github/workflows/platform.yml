@@ -112,10 +112,10 @@ jobs:
             cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
           done
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - name: Prepare official plugins for desktop gateway tests
+      - name: Prepare official plugins for CLI and desktop gateway tests
         shell: bash
         run: scripts/prepare-desktop-test-plugins.sh
+      - run: cargo test --workspace
       - run: >-
           cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
           --all-targets -- -D warnings
@@ -127,7 +127,7 @@ jobs:
     # This release-grade gate builds two installers and exercises the complete
     # lifecycle. Every invocation is explicit release validation.
     if: >-
-      !cancelled() &&
+      needs.windows-rust.result == 'success' &&
       needs.changes.outputs.installer == 'true'
     runs-on: windows-latest
     steps:
