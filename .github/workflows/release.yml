@@ -259,9 +259,17 @@ jobs:
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
     steps:
+      - name: Check out the trusted release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Stage the macOS identity importer
+        run: /usr/bin/install -m 0700 scripts/import-macos-signing-identity.sh "$RUNNER_TEMP/import-macos-signing-identity.sh"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-target.outputs.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
@@ -300,17 +308,7 @@ jobs:
           test -n "$APPLE_API_KEY"
           test -n "$APPLE_API_KEY_CONTENT"
       - name: Import Developer ID certificate
-        run: |
-          certificate="$RUNNER_TEMP/token-station-certificate.p12"
-          keychain="$RUNNER_TEMP/token-station-signing.keychain-db"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
-          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
-          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          security default-keychain -s "$keychain"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
+        run: "$RUNNER_TEMP/import-macos-signing-identity.sh"
       - name: Prepare App Store Connect key
         run: |
           key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
@@ -329,6 +327,30 @@ jobs:
           name: token-station-desktop-${{ matrix.target }}
           path: desktop-dist/*
           if-no-files-found: error
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          case "${APPLE_TEMP_KEYCHAIN_PATH:-}" in
+            "$RUNNER_TEMP"/*)
+              security default-keychain -d user -s login.keychain-db || true
+              security list-keychains -d user -s login.keychain-db || true
+              security delete-keychain "$APPLE_TEMP_KEYCHAIN_PATH" || /bin/rm -f -- "$APPLE_TEMP_KEYCHAIN_PATH"
+              ;;
+            "") ;;
+            *) echo "::error::Refusing to clean a keychain outside RUNNER_TEMP" >&2; exit 1 ;;
+          esac
+          for temporary_path in \
+            "${APPLE_TEMP_CERTIFICATE_PATH:-}" \
+            "${APPLE_API_KEY_PATH:-}" \
+            "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" \
+            "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}.pub"
+          do
+            case "$temporary_path" in
+              "$RUNNER_TEMP"/*) /bin/rm -f -- "$temporary_path" ;;
+              ""|.pub) ;;
+              *) echo "::error::Refusing to clean a file outside RUNNER_TEMP" >&2; exit 1 ;;
+            esac
+          done
 
   desktop-windows:
     needs: [release-target, release-mode, verify-main-full-ci, platform-gates]

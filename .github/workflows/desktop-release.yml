@@ -159,21 +159,9 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
-        run: |
-          umask 077
-          certificate="$RUNNER_TEMP/token-station-certificate.p12"
-          keychain="$RUNNER_TEMP/token-station-signing.keychain-db"
-          echo "APPLE_TEMP_CERTIFICATE_PATH=$certificate" >> "$GITHUB_ENV"
-          echo "APPLE_TEMP_KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
-          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
-          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          security default-keychain -s "$keychain"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
+        run: scripts/import-macos-signing-identity.sh
       - name: Prepare App Store Connect key
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
