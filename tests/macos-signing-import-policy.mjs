@@ -47,7 +47,7 @@ assert.match(
 );
 assert.match(
   releaseWorkflow,
-  /name: Import Developer ID certificate\n {8}run: "\$RUNNER_TEMP\/import-macos-signing-identity\.sh"/,
+  /name: Import Developer ID certificate[\s\S]*?run: "\$RUNNER_TEMP\/import-macos-signing-identity\.sh"/,
   "formal release must run the staged importer",
 );
 
@@ -59,6 +59,43 @@ assert.match(
   releaseWorkflow,
   /name: Remove temporary signing material\n {8}if: always\(\)/,
   "the formal release must always clean the temporary certificate and keychain",
+);
+
+const formalMacosJob = releaseWorkflow.slice(
+  releaseWorkflow.indexOf("  desktop-macos:"),
+  releaseWorkflow.indexOf("  desktop-windows:"),
+);
+const formalMacosJobHeader = formalMacosJob.slice(0, formalMacosJob.indexOf("    steps:"));
+assert.doesNotMatch(
+  formalMacosJobHeader,
+  /\n    env:/,
+  "Apple credentials must not be exposed to every formal macOS step",
+);
+
+const formalImportStep = formalMacosJob.slice(
+  formalMacosJob.indexOf("      - name: Import Developer ID certificate"),
+  formalMacosJob.indexOf("      - name: Prepare App Store Connect key"),
+);
+assert.match(formalImportStep, /APPLE_CERTIFICATE: \$\{\{ secrets\.APPLE_CERTIFICATE \}\}/);
+assert.match(
+  formalImportStep,
+  /APPLE_CERTIFICATE_PASSWORD: \$\{\{ secrets\.APPLE_CERTIFICATE_PASSWORD \}\}/,
+);
+
+const formalBuildStep = formalMacosJob.slice(
+  formalMacosJob.indexOf("      - name: Build, sign, notarize, and audit"),
+  formalMacosJob.indexOf("      - name: Stage flat desktop release inputs"),
+);
+assert.match(
+  formalBuildStep,
+  /APPLE_SIGNING_IDENTITY: \$\{\{ secrets\.APPLE_SIGNING_IDENTITY \}\}/,
+);
+assert.match(formalBuildStep, /APPLE_API_ISSUER: \$\{\{ secrets\.APPLE_API_ISSUER \}\}/);
+assert.match(formalBuildStep, /APPLE_API_KEY: \$\{\{ secrets\.APPLE_API_KEY \}\}/);
+assert.doesNotMatch(
+  formalBuildStep,
+  /APPLE_CERTIFICATE(?:_PASSWORD)?:/,
+  "Tauri must use the imported keychain identity instead of re-importing the original PKCS#12 bundle",
 );
 
 console.log("macOS signing import policy: PASS");
