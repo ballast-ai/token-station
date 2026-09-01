@@ -224,6 +224,7 @@ jobs:
       - run: node tests/macos-signing-import-policy.mjs
       - run: node tests/release-script-variable-order.mjs
       - run: node tests/formal-release-finalization.mjs
+      - run: tests/formal-release-artifact-collection.sh
       - run: node tests/formal-release-notes.mjs
       # Prime the locked Rust dependencies before the test enters its offline signing phase.
       - run: cargo test -p token-station-release --no-run --locked
