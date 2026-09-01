@@ -124,7 +124,19 @@ fi
   echo "DMG 没有保存 Finder 拖拽布局，打开后会变成散乱的自动排列。" >&2
   exit 1
 }
-expected_finder_layout=$(printf '%s\n' \
+expected_content_finder_layout=$(printf '%s\n' \
+  'window=1180x640' \
+  'view=icon view' \
+  'icon_size=128' \
+  'arrangement=not arranged' \
+  'toolbar=false' \
+  'statusbar=false' \
+  'pathbar=false' \
+  'sidebar_width=0' \
+  'app=300,240' \
+  'applications=880,240' \
+  'readme=590,455')
+expected_reported_finder_layout=$(printf '%s\n' \
   'window=1180x640' \
   'view=icon view' \
   'icon_size=128' \
@@ -140,9 +152,10 @@ if ! actual_finder_layout=$(osascript "$finder_layout_script" inspect "$mount_po
   echo "Finder 无法读取 DMG 的拖拽布局，请确认 Finder 可以正常启动后重试。" >&2
   exit 1
 fi
-[[ "$actual_finder_layout" == "$expected_finder_layout" ]] || {
-  echo "DMG 的 Finder 布局与发布模板不一致。" >&2
-  printf '期望：\n%s\n实际：\n%s\n' "$expected_finder_layout" "$actual_finder_layout" >&2
+[[ "$actual_finder_layout" == "$expected_content_finder_layout" || "$actual_finder_layout" == "$expected_reported_finder_layout" ]] || {
+  echo "DMG Finder layout does not match either supported exact coordinate profile." >&2
+  printf 'Expected content profile:\n%s\nExpected reported profile:\n%s\nActual:\n%s\n' \
+    "$expected_content_finder_layout" "$expected_reported_finder_layout" "$actual_finder_layout" >&2
   exit 1
 }
 
