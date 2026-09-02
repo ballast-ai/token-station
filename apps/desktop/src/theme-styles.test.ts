@@ -745,15 +745,16 @@ describe("retained page theme styles", () => {
     );
   });
 
-  it("uses one flat theme-aware surface for the request audit inspector", () => {
+  it("uses borderless theme-aware color blocks for the request audit inspector", () => {
     const plaintextRule = appCss.match(/\.request-detail-dialog \.request-plaintext\s*\{([^}]*)\}/s)?.[1] ?? "";
     const scrollRule = appCss.match(/\.request-detail-dialog \.request-plaintext-scroll\s*\{([^}]*)\}/s)?.[1] ?? "";
     const semanticBlockRule = appCss.match(/\.request-detail-dialog \.request-semantic-block\s*\{([^}]*)\}/s)?.[1] ?? "";
     const semanticBodyRule = appCss.match(/\.request-semantic-block > pre\s*\{([^}]*)\}/s)?.[1] ?? "";
     const thinkingLabelRule = appCss.match(/\.request-detail-dialog \.request-semantic-block\.thinking > div\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const packetRule = appCss.match(/\.request-detail-dialog \.http-packet\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const packetContentRule = appCss.match(/\.request-detail-dialog \.http-packet-content\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const disclosureRule = appCss.match(/\.request-detail-dialog :is\(\.http-packet-disclosure, \.http-change-disclosure\)\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const workbenchRule = appCss.match(/\.request-detail-dialog \.http-conversation-workbench\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const conversationRule = appCss.match(/\.request-detail-dialog \.http-conversation-item\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const packetSectionRule = appCss.match(/\.request-detail-dialog \.http-packet-section\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const disclosureRule = appCss.match(/\.request-detail-dialog \.http-change-disclosure\s*\{([^}]*)\}/s)?.[1] ?? "";
 
     expect(plaintextRule).toMatch(/border:\s*0/);
     expect(plaintextRule).toMatch(/background:\s*transparent/);
@@ -765,12 +766,15 @@ describe("retained page theme styles", () => {
     expect(thinkingLabelRule).toMatch(/color:\s*var\(--muted\)/);
     expect(thinkingLabelRule).toMatch(/background:\s*transparent/);
     expect(thinkingLabelRule).not.toMatch(/var\(--warning\)/);
-    expect(packetRule).toMatch(/border:\s*0/);
-    expect(packetContentRule).toMatch(/border-left:\s*1px solid var\(--line-strong\)/);
-    expect(disclosureRule).toMatch(/width:\s*28px/);
-    expect(disclosureRule).toMatch(/height:\s*28px/);
+    expect(workbenchRule).toMatch(/border:\s*0/);
+    expect(workbenchRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(conversationRule).toMatch(/border:\s*0/);
+    expect(packetSectionRule).toMatch(/border:\s*0/);
+    expect(packetSectionRule).toMatch(/background:\s*var\(--canvas\)/);
+    expect(disclosureRule).toMatch(/width:\s*26px/);
+    expect(disclosureRule).toMatch(/height:\s*26px/);
 
-    for (const rule of [plaintextRule, scrollRule, semanticBlockRule, semanticBodyRule, thinkingLabelRule, packetRule, packetContentRule, disclosureRule]) {
+    for (const rule of [plaintextRule, scrollRule, semanticBlockRule, semanticBodyRule, thinkingLabelRule, workbenchRule, conversationRule, packetSectionRule, disclosureRule]) {
       expect(rule).not.toMatch(/#08101d|#0b1220|#fff\b/i);
     }
   });
