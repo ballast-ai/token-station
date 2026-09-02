@@ -24,7 +24,7 @@ use super::types::{
 
 const CONFIG_READ_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const REGISTRY_SCAN_WORKERS: usize = 3;
-const CODEX_DESKTOP_PROBE_BUDGET: Duration = Duration::from_secs(8);
+const CODEX_DESKTOP_PROBE_START_BUDGET: Duration = Duration::from_secs(8);
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const OUTPUT_READER_GRACE: Duration = Duration::from_millis(100);
 
@@ -948,9 +948,9 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
 /// discovery still reports a useful broken installation. Return the selected
 /// probe result with its stable identity so record construction never launches
 /// the same candidate a second time or loses a transiently successful result.
-/// Stop starting new candidates after a descriptor-level budget; every started
-/// process keeps its own hard timeout, so a directory full of stale or hostile
-/// update entries cannot stall the entire registry scan for minutes.
+/// Stop starting new candidates after a descriptor-level start budget. Every
+/// started process keeps its own hard timeout. A directory full of stale or
+/// hostile update entries therefore cannot stall the registry scan for minutes.
 struct PrefetchedProbe {
     identity: String,
     outcome: ProbeOutcome,
@@ -962,21 +962,21 @@ fn select_windows_codex_desktop_candidate<R: ProbeRunner>(
     environment: &ScanEnvironment,
     runner: &R,
 ) -> (Vec<ExecutableCandidate>, Option<PrefetchedProbe>) {
-    select_windows_codex_desktop_candidate_within(
+    select_windows_codex_desktop_candidate_with_start_budget(
         candidates,
         descriptor,
         environment,
         runner,
-        CODEX_DESKTOP_PROBE_BUDGET,
+        CODEX_DESKTOP_PROBE_START_BUDGET,
     )
 }
 
-fn select_windows_codex_desktop_candidate_within<R: ProbeRunner>(
+fn select_windows_codex_desktop_candidate_with_start_budget<R: ProbeRunner>(
     candidates: Vec<ExecutableCandidate>,
     descriptor: &AgentDescriptor,
     environment: &ScanEnvironment,
     runner: &R,
-    probe_budget: Duration,
+    probe_start_budget: Duration,
 ) -> (Vec<ExecutableCandidate>, Option<PrefetchedProbe>) {
     if descriptor.agent_id != "codex" || environment.platform != Platform::Windows {
         return (candidates, None);
@@ -994,7 +994,7 @@ fn select_windows_codex_desktop_candidate_within<R: ProbeRunner>(
 
     let mut first_failure = None;
     let mut selected = None;
-    let deadline = Instant::now() + probe_budget;
+    let deadline = Instant::now() + probe_start_budget;
     for candidate in desktop_candidates {
         if first_failure.is_some() && Instant::now() >= deadline {
             break;
@@ -2672,7 +2672,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_desktop_fallback_stops_starting_candidates_after_its_budget() {
+    fn codex_desktop_fallback_stops_starting_candidates_after_its_start_budget() {
         let root = scratch("codex-probe-budget");
         let first = root.join("first/codex.exe");
         let second = root.join("second/codex.exe");
@@ -2703,7 +2703,7 @@ mod tests {
             })
             .collect();
 
-        let (selected, prefetched) = select_windows_codex_desktop_candidate_within(
+        let (selected, prefetched) = select_windows_codex_desktop_candidate_with_start_budget(
             candidates,
             descriptor,
             &context,
