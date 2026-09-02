@@ -273,17 +273,17 @@ fn probe_creation_flags(platform: Platform) -> u32 {
 
 fn spawn_probe_command(
     command: &mut Command,
-    platform: Platform,
+    _platform: Platform,
 ) -> std::io::Result<command_group::GroupChild> {
     #[cfg(windows)]
-    if platform == Platform::Windows {
+    if _platform == Platform::Windows {
         // `CommandGroup::group_spawn()` creates a builder whose default
         // creation flags overwrite flags previously set on `Command`.
         // Pass CREATE_NO_WINDOW through that builder so Windows Terminal does
         // not open a console for every Agent version probe.
         return command
             .group()
-            .creation_flags(probe_creation_flags(platform))
+            .creation_flags(probe_creation_flags(_platform))
             .spawn();
     }
 
