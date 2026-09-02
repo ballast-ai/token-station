@@ -13,7 +13,7 @@ fail() {
 
 make_artifacts() {
   local artifacts=$1
-  local version=2.0.0
+  local version=${2:-2.0.0}
   mkdir -p \
     "$artifacts/dist-aarch64-apple-darwin" \
     "$artifacts/dist-aarch64-unknown-linux-gnu" \
@@ -33,6 +33,9 @@ make_artifacts() {
   printf 'fixture\n' >"$artifacts/token-station-desktop-x86_64-apple-darwin/token-station.app.tar.gz"
   printf 'fixture\n' >"$artifacts/token-station-desktop-x86_64-apple-darwin/token-station_${version}_x86_64.dmg"
   printf 'fixture\n' >"$artifacts/token-station-desktop-x86_64-pc-windows-msvc/token-station_${version}_x86_64.msi"
+  if [[ "$version" != "2.0.0" ]]; then
+    printf 'temporary signature\n' >"$artifacts/token-station-desktop-x86_64-pc-windows-msvc/token-station_${version}_x86_64.msi.sig"
+  fi
   printf 'fixture\n' >"$artifacts/token-station-desktop-linux-x86_64/token-station_${version}_x86_64.AppImage"
   printf 'fixture\n' >"$artifacts/token-station-desktop-linux-x86_64/token-station_${version}_x86_64.deb"
   printf 'fixture\n' >"$artifacts/token-station-desktop-linux-x86_64/token-station_${version}_x86_64.rpm"
@@ -61,6 +64,14 @@ actual=$(find "$output" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | s
 while IFS= read -r file; do
   [[ -s "$output/$file" ]] || fail "the collected file is empty: $file"
 done <<<"$expected"
+
+future_artifacts="$test_root/future-artifacts"
+make_artifacts "$future_artifacts" 2.0.1
+"$collector" --version 2.0.1 --artifacts-dir "$future_artifacts" --out-dir "$test_root/future-output"
+rm "$future_artifacts/token-station-desktop-x86_64-pc-windows-msvc/token-station_2.0.1_x86_64.msi.sig"
+if "$collector" --version 2.0.1 --artifacts-dir "$future_artifacts" --out-dir "$test_root/missing-windows-signature-output" >/dev/null 2>&1; then
+  fail "the collector accepted a future Windows MSI without its temporary updater signature"
+fi
 
 with_logs="$test_root/with-logs"
 make_artifacts "$with_logs"

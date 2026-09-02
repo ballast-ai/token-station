@@ -33,6 +33,14 @@ for (const asset of ["x86_64.msi", "x86_64.deb", "x86_64.AppImage", "x86_64.rpm"
   assert.match(releaseWorkflow + linuxWorkflow, new RegExp(`token-station_\\$\\{version\\}_${asset.replace(".", "\\.")}`));
 }
 assert.doesNotMatch(releaseWorkflow, /^[ \t]+.*\*\.sig[ \t]*$/m);
+const windowsJob = releaseWorkflow.slice(
+  releaseWorkflow.indexOf("\n  desktop-windows:"),
+  releaseWorkflow.indexOf("\n  publish:"),
+);
+assert.match(windowsJob, /TOKEN_STATION_UPDATER_PUBKEY/);
+assert.match(windowsJob, /tauri signer generate/);
+assert.match(windowsJob, /\*\.msi\.sig/);
+assert.doesNotMatch(releaseWorkflow.slice(releaseWorkflow.indexOf("\n  publish:")), /dist\/\*\.msi\.sig/);
 assert.match(releaseWorkflow, /Awaiting offline CLI and updater signatures/);
 assert.match(releaseWorkflow, /pattern: dist-\*/);
 assert.match(releaseWorkflow, /pattern: token-station-desktop-\*/);
@@ -100,6 +108,8 @@ assert.doesNotMatch(sign, /gh release|curl |wget /);
 const publish = read("scripts/publish-formal-release.sh");
 assert.match(publish, /ts-release -- verify/);
 assert.match(publish, /ts-release -- verify-updater/);
+assert.match(publish, /x86_64\.msi/);
+assert.match(publish, /version.*!=.*2\.0\.0/);
 assert.match(publish, /check-release-assets\.mjs/);
 assert.match(publish, /gh release upload/);
 assert.match(publish, /gh release edit/);
@@ -142,6 +152,7 @@ assert.match(releaseWorkflow, /scripts\/build-desktop\.sh --production --target 
 const desktopBuild = read("scripts/build-desktop.sh");
 assert.match(desktopBuild, /--unsigned-windows/);
 assert.match(desktopBuild, /restricted to Token Station 2\.0\.0/);
+assert.match(read("scripts/sign-formal-release.sh"), /version.*!=.*2\.0\.0/);
 assert.match(desktopBuild, /production Windows build needs WINDOWS_CERTIFICATE_THUMBPRINT/);
 assert.match(read(".github/workflows/full-ci.yml"), /tests\/windows-authenticode-audit\.sh/);
 

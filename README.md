@@ -88,7 +88,7 @@ You need a provider API key or a local model endpoint. Token Station does not im
 
 The default listen address is `127.0.0.1:8787`.
 
-On macOS, Windows, and Linux, closing the window hides the app while the gateway keeps running. Restore it from the menu-bar or system-tray icon, or launch Token Station again. Use **Quit Token Station** in the native menu to stop the process. Automatic updates remain macOS-only; Windows and Linux builds update manually from Releases.
+On macOS, Windows, and Linux, closing the window hides the app while the gateway keeps running. Restore it from the menu-bar or system-tray icon, or launch Token Station again. Use **Quit Token Station** in the native menu to stop the process. Signed in-app updates are available on macOS and Windows; Linux builds update manually from Releases. Windows v2.0.0 requires one manual upgrade to the first release that includes updater support.
 
 ## Install from source
 

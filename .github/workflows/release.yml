@@ -390,6 +390,16 @@ jobs:
         with:
           targets: wasm32-wasip2,x86_64-pc-windows-msvc
       - run: npm --prefix apps/desktop ci
+      - name: Generate an untrusted temporary updater bundler key after v2.0.0
+        if: needs.release-target.outputs.tag != 'v2.0.0'
+        shell: bash
+        run: |
+          key_path="$RUNNER_TEMP/token-station-updater-ci.key"
+          echo "TAURI_TEMP_SIGNING_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          npx --prefix apps/desktop tauri signer generate --ci --force \
+            --password temporary-ci-only --write-keys "$key_path" >/dev/null
+          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=temporary-ci-only" >> "$GITHUB_ENV"
       - name: Check formal Windows metadata
         env:
           RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
@@ -418,6 +428,7 @@ jobs:
       - name: Build, audit, and stage the Windows MSI
         env:
           RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
+          TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
         shell: bash
         run: |
           if [[ "$RELEASE_TAG" == "v2.0.0" ]]; then
@@ -429,12 +440,41 @@ jobs:
           version=$(node -p "require('./apps/desktop/package.json').version")
           mkdir desktop-dist
           cp apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi "desktop-dist/token-station_${version}_x86_64.msi"
-          test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 1
+          if [[ "$RELEASE_TAG" == "v2.0.0" ]]; then
+            test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 1
+          else
+            cp apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig "desktop-dist/token-station_${version}_x86_64.msi.sig"
+            test "$(find desktop-dist -type f | wc -l | tr -d ' ')" = 2
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: token-station-desktop-x86_64-pc-windows-msvc
           path: desktop-dist/*
           if-no-files-found: error
+      - name: Remove temporary Windows signing material
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            if ($env:WINDOWS_CERTIFICATE_THUMBPRINT -notmatch '^[A-Fa-f0-9]+$') {
+              throw "Refusing to remove an invalid certificate thumbprint"
+            }
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+          $temporaryPaths = @((Join-Path $env:RUNNER_TEMP "token-station-certificate.pfx"))
+          if ($env:TAURI_TEMP_SIGNING_KEY_PATH) {
+            $temporaryPaths += $env:TAURI_TEMP_SIGNING_KEY_PATH
+            $temporaryPaths += "$($env:TAURI_TEMP_SIGNING_KEY_PATH).pub"
+          }
+          foreach ($temporaryPath in $temporaryPaths) {
+            if (-not $temporaryPath) { continue }
+            $resolved = [IO.Path]::GetFullPath($temporaryPath)
+            $temporaryRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+            if (-not $resolved.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Refusing to clean signing material outside RUNNER_TEMP"
+            }
+            Remove-Item $resolved -Force -ErrorAction SilentlyContinue
+          }
 
   publish:
     needs: [release-target, release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows]

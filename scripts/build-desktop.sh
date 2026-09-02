@@ -155,7 +155,7 @@ signing_private_key="${TAURI_SIGNING_PRIVATE_KEY:-}"
 signing_private_key_path="${TAURI_SIGNING_PRIVATE_KEY_PATH:-}"
 signing_private_key_password="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-if [[ "$mode" != "local" && "$is_windows_target" != "true" ]]; then
+if [[ "$mode" != "local" && "$unsigned_windows" != "true" ]]; then
   enable_updater_artifacts=true
   : "${TOKEN_STATION_UPDATER_PUBKEY:?signed updater build needs TOKEN_STATION_UPDATER_PUBKEY}"
   updater_pubkey_upper="$(LC_ALL=C tr '[:lower:]' '[:upper:]' <<<"$TOKEN_STATION_UPDATER_PUBKEY")"
@@ -258,6 +258,7 @@ cargo test --locked \
 
 tauri_args=(build --ci --features bundled-plugins)
 macos_bundle_kind=""
+windows_config=""
 if [[ "$enable_updater_artifacts" == "true" ]]; then
   updater_artifact_config="$stage/updater-artifacts.json"
   printf '%s\n' \
@@ -341,7 +342,7 @@ case "$host_os" in
     ;;
 esac
 
-if [[ "$host_os" == "Darwin" && "$enable_updater_artifacts" == "true" ]]; then
+if [[ "$enable_updater_artifacts" == "true" ]]; then
   # Compile all project and dependency code before exposing updater signing
   # material. The bundle-only phase packages the already-built binary and is
   # the smallest process boundary that needs the private key.
@@ -355,6 +356,9 @@ if [[ "$host_os" == "Darwin" && "$enable_updater_artifacts" == "true" ]]; then
   export TAURI_SIGNING_PRIVATE_KEY="$signing_private_key"
   export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$signing_private_key_password"
   bundle_args=(bundle --ci --features bundled-plugins --config "$updater_artifact_config")
+  if [[ -n "$windows_config" ]]; then
+    bundle_args+=(--config "$windows_config")
+  fi
   if [[ -n "$target" ]]; then
     bundle_args+=(--target "$target")
   fi

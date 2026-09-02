@@ -46,12 +46,20 @@ cargo run --locked --offline --manifest-path "$root/Cargo.toml" \
 
 updater_aarch64="$release_dir/token-station_${version}_aarch64.app.tar.gz"
 updater_x86_64="$release_dir/token-station_${version}_x86_64.app.tar.gz"
+updater_windows_x86_64="$release_dir/token-station_${version}_x86_64.msi"
 export TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key"
 "$tauri" signer sign "$updater_aarch64"
 "$tauri" signer sign "$updater_x86_64"
+if [[ "$version" != "2.0.0" ]]; then
+  "$tauri" signer sign "$updater_windows_x86_64"
+fi
 unset TAURI_SIGNING_PRIVATE_KEY_PATH
 
-for artifact in "$updater_aarch64" "$updater_x86_64"; do
+updater_artifacts=("$updater_aarch64" "$updater_x86_64")
+if [[ "$version" != "2.0.0" ]]; then
+  updater_artifacts+=("$updater_windows_x86_64")
+fi
+for artifact in "${updater_artifacts[@]}"; do
   cargo run --locked --offline --manifest-path "$root/Cargo.toml" \
     -p token-station-release --bin ts-release -- verify-updater \
     --pubkey "$TOKEN_STATION_UPDATER_PUBKEY" "$artifact"
@@ -65,6 +73,11 @@ manifest_args=(
   --artifact "darwin-aarch64=$updater_aarch64"
   --artifact "darwin-x86_64=$updater_x86_64"
 )
+if [[ "$version" == "2.0.0" ]]; then
+  manifest_args+=(--platforms darwin-aarch64,darwin-x86_64)
+else
+  manifest_args+=(--artifact "windows-x86_64=$updater_windows_x86_64")
+fi
 if [[ -n "$notes_file" ]]; then
   manifest_args+=(--notes-file "$notes_file")
 fi

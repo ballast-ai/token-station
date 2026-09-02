@@ -29,9 +29,14 @@ node "$root/scripts/check-release-assets.mjs" --version "$version" --dir "$relea
 cargo run --locked --offline --manifest-path "$root/Cargo.toml" \
   -p token-station-release --bin ts-release -- verify \
   --pubkey "$TOKEN_STATION_RELEASE_PUBKEY_HEX" "$release_dir/manifest.json"
-for artifact in \
-  "$release_dir/token-station_${version}_aarch64.app.tar.gz" \
-  "$release_dir/token-station_${version}_x86_64.app.tar.gz"; do
+updater_artifacts=(
+  "$release_dir/token-station_${version}_aarch64.app.tar.gz"
+  "$release_dir/token-station_${version}_x86_64.app.tar.gz"
+)
+if [[ "$version" != "2.0.0" ]]; then
+  updater_artifacts+=("$release_dir/token-station_${version}_x86_64.msi")
+fi
+for artifact in "${updater_artifacts[@]}"; do
   cargo run --locked --offline --manifest-path "$root/Cargo.toml" \
     -p token-station-release --bin ts-release -- verify-updater \
     --pubkey "$TOKEN_STATION_UPDATER_PUBKEY" "$artifact"

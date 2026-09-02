@@ -122,6 +122,8 @@ run_windows_production_build() {
     TEST_STATE="$state" \
     WINDOWS_CERTIFICATE_THUMBPRINT="0123456789abcdef0123456789abcdef01234567" \
     WINDOWS_TIMESTAMP_URL="https://timestamp.example.test" \
+    TOKEN_STATION_UPDATER_PUBKEY="untrusted comment: minisign public key\nRWTESTPUBLICKEY" \
+    TAURI_SIGNING_PRIVATE_KEY="untrusted comment: temporary CI key\nRWTESTPRIVATEKEY" \
     "$repo/scripts/build-desktop.sh" --production --target x86_64-pc-windows-msvc
 }
 
@@ -292,12 +294,17 @@ test_preview_build_loads_the_private_key_path_for_the_tauri_bundler() {
     || fail "preview build did not load the updater private key path for the Tauri bundler"
 }
 
-test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release() {
-  make_fixture windows-no-updater
+test_windows_production_build_creates_updater_artifacts_with_scoped_private_key() {
+  make_fixture windows-updater-artifacts
   run_windows_production_build >/dev/null
-  if [[ -f "$state/tauri-configs" ]] && grep -Fq '"createUpdaterArtifacts":true' "$state/tauri-configs"; then
-    fail "Windows production build unexpectedly enabled updater artifacts"
-  fi
+  grep -Fq '"createUpdaterArtifacts":true' "$state/tauri-configs" \
+    || fail "Windows production build did not enable updater artifacts"
+  grep -Fq '"pubkey":"untrusted comment: minisign public key\nRWTESTPUBLICKEY"' "$state/tauri-configs" \
+    || fail "Windows production build did not embed the updater public key"
+  [[ "$(sed -n '1p' "$state/tauri-calls")" == *"build"*"<unset>" ]] \
+    || fail "Windows compilation exposed the updater private key"
+  [[ "$(sed -n '2p' "$state/tauri-calls")" == *"bundle"*"RWTESTPRIVATEKEY" ]] \
+    || fail "Windows bundle phase did not receive the updater private key"
 }
 
 test_windows_production_build_requires_authenticode_by_default() {
@@ -309,6 +316,8 @@ test_windows_production_build_requires_authenticode_by_default() {
     RUNNER_TEMP="$fixture/runner-temp" \
     TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
+    TOKEN_STATION_UPDATER_PUBKEY="untrusted comment: minisign public key\nRWTESTPUBLICKEY" \
+    TAURI_SIGNING_PRIVATE_KEY="untrusted comment: temporary CI key\nRWTESTPRIVATEKEY" \
     "$repo/scripts/build-desktop.sh" --production --target x86_64-pc-windows-msvc \
     >"$state/output" 2>&1; then
     fail "Windows production build accepted missing Authenticode configuration"
@@ -325,6 +334,9 @@ test_explicit_unsigned_windows_production_build_skips_authenticode_only() {
     || fail "unsigned Windows production build did not preserve the audit boundary"
   if [[ -f "$state/tauri-configs" ]] && grep -Fq 'certificateThumbprint' "$state/tauri-configs"; then
     fail "unsigned Windows production build injected Authenticode configuration"
+  fi
+  if [[ -f "$state/tauri-configs" ]] && grep -Fq '"createUpdaterArtifacts":true' "$state/tauri-configs"; then
+    fail "the v2.0.0 unsigned Windows exception unexpectedly enabled updater artifacts"
   fi
   grep -Fq "not Authenticode-signed" "$state/output" \
     || fail "unsigned Windows production build did not emit its trust warning"
@@ -374,7 +386,7 @@ test_production_build_creates_updater_payloads_without_publishing_the_temporary_
 test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg
 test_preview_build_supports_an_intel_updater_payload_and_unsigned_test_dmg
 test_preview_build_loads_the_private_key_path_for_the_tauri_bundler
-test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release
+test_windows_production_build_creates_updater_artifacts_with_scoped_private_key
 test_windows_production_build_requires_authenticode_by_default
 test_explicit_unsigned_windows_production_build_skips_authenticode_only
 test_unsigned_windows_exception_rejects_later_versions

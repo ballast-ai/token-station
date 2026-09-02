@@ -16,7 +16,7 @@ pub(crate) fn desktop_updater<R: Runtime>(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
-    Some(desktop_update::WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -26,7 +26,7 @@ pub(crate) fn desktop_update_platform_unsupported_message() -> Option<&'static s
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
-    Some(desktop_update::MACOS_ONLY_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
+    Some(desktop_update::DESKTOP_UPDATE_UNSUPPORTED_MESSAGE)
 }
 
 /// Check the signed desktop update channel without changing the installed app.

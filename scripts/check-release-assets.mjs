@@ -36,9 +36,11 @@ const cliAssets = [
   `token-station-cli-${version}-aarch64-unknown-linux-gnu.tar.gz`,
   `token-station-cli-${version}-x86_64-unknown-linux-gnu.tar.gz`,
 ];
+const windowsUpdaterEnabled = version !== "2.0.0";
 const updaterAssets = [
   `token-station_${version}_aarch64.app.tar.gz`,
   `token-station_${version}_x86_64.app.tar.gz`,
+  ...(windowsUpdaterEnabled ? [`token-station_${version}_x86_64.msi`] : []),
 ];
 const requiredAssets = [
   ...cliAssets,
@@ -46,7 +48,7 @@ const requiredAssets = [
   `token-station_${version}_x86_64.dmg`,
   ...updaterAssets,
   ...updaterAssets.map((file) => `${file}.sig`),
-  `token-station_${version}_x86_64.msi`,
+  ...(!windowsUpdaterEnabled ? [`token-station_${version}_x86_64.msi`] : []),
   `token-station_${version}_x86_64.deb`,
   `token-station_${version}_x86_64.AppImage`,
   `token-station_${version}_x86_64.rpm`,
@@ -116,10 +118,15 @@ if (requiredAssets.every((file) => fs.existsSync(path.join(releaseDir, file)))) 
     const expectedPlatforms = {
       "darwin-aarch64": updaterAssets[0],
       "darwin-x86_64": updaterAssets[1],
+      ...(windowsUpdaterEnabled ? { "windows-x86_64": updaterAssets[2] } : {}),
     };
     const platformNames = Object.keys(latest.platforms ?? {}).sort();
     if (JSON.stringify(platformNames) !== JSON.stringify(Object.keys(expectedPlatforms).sort())) {
-      failures.push("latest.json 必须只包含两个 macOS 正式更新平台");
+      failures.push(
+        windowsUpdaterEnabled
+          ? "latest.json 必须精确包含两个 macOS 平台和 Windows x86-64 平台"
+          : "Windows v2.0.0 的 latest.json 必须只包含两个 macOS 平台",
+      );
     }
     for (const [platform, file] of Object.entries(expectedPlatforms)) {
       const entry = latest.platforms?.[platform];

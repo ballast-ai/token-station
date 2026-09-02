@@ -6,7 +6,7 @@ use std::sync::{
 use token_station_desktop_lib::desktop_update::{
     check_with, install_with, update_manifest_endpoint, DesktopUpdateOperation,
     DesktopUpdatePrepareFailure, DesktopUpdateStatus, DesktopUpdateView, STABLE_LATEST_JSON_URL,
-    WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE,
+    DESKTOP_UPDATE_UNSUPPORTED_MESSAGE,
 };
 
 #[test]
@@ -41,7 +41,7 @@ fn concurrent_update_operations_are_rejected_until_the_first_finishes() {
 
 #[test]
 fn unsupported_platform_view_keeps_release_page_available() {
-    let view = DesktopUpdateView::unsupported("1.1.2", WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE);
+    let view = DesktopUpdateView::unsupported("1.1.2", DESKTOP_UPDATE_UNSUPPORTED_MESSAGE);
 
     assert_eq!(view.status, DesktopUpdateStatus::Unsupported);
     assert_eq!(view.current_version, "1.1.2");
@@ -50,7 +50,7 @@ fn unsupported_platform_view_keeps_release_page_available() {
         .message
         .as_deref()
         .unwrap_or_default()
-        .contains("Windows"));
+        .contains("macOS 和 Windows"));
     assert!(view.release_url.ends_with("/releases"));
 }
 

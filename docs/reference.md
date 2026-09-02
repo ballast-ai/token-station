@@ -34,7 +34,7 @@ Anthropic-wire upstreams (`provider: anthropic`, the Anthropic API itself or a c
 
 The app includes first-run guidance, Agent rescanning, Provider, Usage, Settings, light and dark themes, English and Simplified Chinese, request-log inspection, encrypted connector snapshots, a provider recycle bin, and safe-mode recovery export.
 
-Signed in-app update checks and installation are limited to supported official macOS builds. Source or local builds without the official public key, plus Windows and Linux, use manual updates. Plugin management is a CLI workflow.
+Signed in-app update checks and installation are available in supported official macOS and Windows builds. Source or local builds without the official public key, and Linux builds, use manual updates. The unsigned Windows v2.0.0 release cannot bootstrap this channel, so it needs one manual upgrade to the first Windows release that includes updater support. Plugin management is a CLI workflow.
 
 On macOS, closing the main window hides it. The process stays resident and a running proxy keeps serving connected agents. The menu bar item shows proxy state, start and stop controls, managed agents, and shortcuts to Add Provider, Request logs, and Settings. Quit from the menu to stop the app and its proxy.
 

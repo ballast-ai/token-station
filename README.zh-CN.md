@@ -88,7 +88,7 @@
 
 默认监听地址是 `127.0.0.1:8787`。
 
-在 macOS、Windows 和 Linux 上，关闭窗口只会隐藏 App，网关仍会继续运行。可通过菜单栏/系统托盘图标恢复窗口，也可以再次启动 Token Station；单实例机制会唤起已有进程。只有在原生菜单中选择“退出 Token Station”才会结束进程。自动更新仍仅支持 macOS，Windows 与 Linux 需要从 Releases 手动更新。
+在 macOS、Windows 和 Linux 上，关闭窗口只会隐藏 App，网关仍会继续运行。可通过菜单栏/系统托盘图标恢复窗口，也可以再次启动 Token Station；单实例机制会唤起已有进程。只有在原生菜单中选择“退出 Token Station”才会结束进程。macOS 和 Windows 支持带签名的应用内更新；Linux 仍需从 Releases 手动更新。Windows v2.0.0 需要手动升级一次，安装首个支持应用内更新的版本。
 
 ## 从源码安装
 

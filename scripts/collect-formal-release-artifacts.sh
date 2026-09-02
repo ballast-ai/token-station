@@ -92,7 +92,13 @@ require_exact_entries "$artifacts_dir/token-station-desktop-aarch64-apple-darwin
   token-station.app.tar.gz "$macos_aarch64_dmg"
 require_exact_entries "$artifacts_dir/token-station-desktop-x86_64-apple-darwin" \
   token-station.app.tar.gz "$macos_x86_64_dmg"
-require_exact_entries "$artifacts_dir/token-station-desktop-x86_64-pc-windows-msvc" "$windows_msi"
+if [[ "$version" == "2.0.0" ]]; then
+  require_exact_entries "$artifacts_dir/token-station-desktop-x86_64-pc-windows-msvc" \
+    "$windows_msi"
+else
+  require_exact_entries "$artifacts_dir/token-station-desktop-x86_64-pc-windows-msvc" \
+    "$windows_msi" "$windows_msi.sig"
+fi
 require_exact_entries "$artifacts_dir/token-station-desktop-linux-x86_64" \
   "$linux_appimage" "$linux_deb" "$linux_rpm"
 

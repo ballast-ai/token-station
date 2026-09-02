@@ -29,18 +29,13 @@ fn agent_backup_directory_uses_the_backend_owned_snapshot_root() {
 }
 
 #[test]
-fn desktop_update_runtime_support_is_macos_only() {
-    #[cfg(target_os = "macos")]
+fn desktop_update_runtime_supports_macos_and_windows() {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     assert_eq!(desktop_update_platform_unsupported_message(), None);
-    #[cfg(target_os = "windows")]
-    assert_eq!(
-        desktop_update_platform_unsupported_message(),
-        Some(desktop_update::WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
-    );
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     assert_eq!(
         desktop_update_platform_unsupported_message(),
-        Some(desktop_update::MACOS_ONLY_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
+        Some(desktop_update::DESKTOP_UPDATE_UNSUPPORTED_MESSAGE)
     );
 }
 

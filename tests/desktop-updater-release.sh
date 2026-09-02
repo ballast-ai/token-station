@@ -10,11 +10,13 @@ fail() {
   exit 1
 }
 
-readonly mac_platforms=(darwin-aarch64 darwin-x86_64)
+readonly updater_platforms=(darwin-aarch64 darwin-x86_64 windows-x86_64)
 
 mkdir -p "$test_dir/payloads"
-for platform in "${mac_platforms[@]}"; do
-  payload="$test_dir/payloads/token-station-$platform.tar.gz"
+for platform in "${updater_platforms[@]}"; do
+  suffix=tar.gz
+  [[ "$platform" == windows-* ]] && suffix=msi
+  payload="$test_dir/payloads/token-station-$platform.$suffix"
   printf 'payload-%s\n' "$platform" >"$payload"
   printf 'trusted-signature-%s\n' "$platform" >"$payload.sig"
 done
@@ -27,13 +29,14 @@ node "$root/scripts/create-desktop-update-manifest.mjs" \
   --notes-file "$test_dir/notes.md" \
   --output "$test_dir/latest.json" \
   --artifact "darwin-aarch64=$test_dir/payloads/token-station-darwin-aarch64.tar.gz" \
-  --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz"
+  --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz" \
+  --artifact "windows-x86_64=$test_dir/payloads/token-station-windows-x86_64.msi"
 
 node - "$test_dir/latest.json" <<'NODE'
 const fs = require("node:fs");
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 if (manifest.version !== "1.2.3") throw new Error("wrong version");
-for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
+for (const platform of ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"]) {
   const entry = manifest.platforms[platform];
   if (!entry?.url.startsWith("https://github.com/ballast-ai/token-station/releases/download/v1.2.3/")) {
     throw new Error(`wrong URL for ${platform}`);
@@ -41,9 +44,6 @@ for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
   if (entry.signature !== `trusted-signature-${platform}`) {
     throw new Error(`wrong signature for ${platform}`);
   }
-}
-if ("windows-x86_64" in manifest.platforms) {
-  throw new Error("first updater release must not publish a Windows platform entry");
 }
 NODE
 
@@ -67,12 +67,13 @@ if node "$root/scripts/create-desktop-update-manifest.mjs" \
   --version 1.2.3 \
   --pub-date 2026-08-06T08:00:00Z \
   --release-base-url https://github.com/ballast-ai/token-station/releases/download/v1.2.3 \
-  --output "$test_dir/windows-rejected.json" \
+  --output "$test_dir/unsupported-rejected.json" \
   --artifact "darwin-aarch64=$test_dir/payloads/token-station-darwin-aarch64.tar.gz" \
   --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz" \
   --artifact "windows-x86_64=$test_dir/payloads/token-station-windows-x86_64.msi" \
-  >"$test_dir/windows-rejected.log" 2>&1; then
-  fail "manifest generation accepted a Windows updater artifact for the first release"
+  --artifact "linux-x86_64=$test_dir/payloads/token-station-linux-x86_64.AppImage" \
+  >"$test_dir/unsupported-rejected.log" 2>&1; then
+  fail "manifest generation accepted an unsupported updater platform"
 fi
 
 rm "$test_dir/payloads/token-station-darwin-x86_64.tar.gz.sig"
@@ -83,6 +84,7 @@ if node "$root/scripts/create-desktop-update-manifest.mjs" \
   --output "$test_dir/rejected.json" \
   --artifact "darwin-aarch64=$test_dir/payloads/token-station-darwin-aarch64.tar.gz" \
   --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz" \
+  --artifact "windows-x86_64=$test_dir/payloads/token-station-windows-x86_64.msi" \
   >"$test_dir/rejected.log" 2>&1; then
   fail "manifest generation accepted a missing offline signature"
 fi
@@ -120,12 +122,20 @@ if (!windows.includes("token-station_${version}_x86_64.msi")) {
   throw new Error("Windows desktop release must stage the normalized MSI name");
 }
 for (const forbidden of [
-  "TOKEN_STATION_UPDATER_PUBKEY",
-  "tauri signer generate",
-  "TAURI_SIGNING_PRIVATE_KEY",
+  "dist/*.msi.sig",
 ]) {
   if (windows.includes(forbidden)) {
-    throw new Error(`Windows first release must not configure updater signing: ${forbidden}`);
+    throw new Error(`Windows release must not publish its temporary updater signature: ${forbidden}`);
+  }
+}
+for (const required of [
+  "TOKEN_STATION_UPDATER_PUBKEY",
+  "tauri signer generate",
+  "TAURI_SIGNING_PRIVATE_KEY_PATH",
+  "*.msi.sig",
+]) {
+  if (!windows.includes(required)) {
+    throw new Error(`Windows release lost updater configuration: ${required}`);
   }
 }
 NODE

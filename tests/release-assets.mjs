@@ -47,6 +47,7 @@ try {
   const updaterAssets = [
     `token-station_${version}_aarch64.app.tar.gz`,
     `token-station_${version}_x86_64.app.tar.gz`,
+    `token-station_${version}_x86_64.msi`,
   ];
   for (const file of updaterAssets) fs.writeFileSync(path.join(stage, `${file}.sig`), `signature:${file}\n`);
 
@@ -72,6 +73,10 @@ try {
       "darwin-x86_64": {
         signature: fs.readFileSync(path.join(stage, `${updaterAssets[1]}.sig`), "utf8").trim(),
         url: `${releaseBase}/${updaterAssets[1]}`,
+      },
+      "windows-x86_64": {
+        signature: fs.readFileSync(path.join(stage, `${updaterAssets[2]}.sig`), "utf8").trim(),
+        url: `${releaseBase}/${updaterAssets[2]}`,
       },
     },
   };
