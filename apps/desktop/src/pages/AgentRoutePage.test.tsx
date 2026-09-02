@@ -315,6 +315,12 @@ describe("AgentRoutePage multi-install admission", () => {
         sensitive: false,
         summary: "<设置受管值>",
         after_preview: '"1"',
+      }, {
+        operation: "add",
+        path: { segments: ["provider", "tokenstation"] },
+        sensitive: false,
+        summary: "<设置受管值>",
+        after_preview: '{"models":{"auto":{"attachment":true,"limit":{"context":128000,"output":8192}}}}',
       }],
       human_diff: "endpoint changed",
     } as never);
@@ -355,7 +361,18 @@ describe("AgentRoutePage multi-install admission", () => {
     await user.click(connect);
 
     const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
-    expect(within(preview).getByRole("region", { name: "配置改动" })).toHaveClass("agent-change-scroll");
+    const changesRegion = within(preview).getByRole("region", { name: "配置改动" });
+    const backupAssurance = within(preview).getByText("已加密备份")
+      .closest<HTMLElement>(".agent-backup-assurance");
+    expect(changesRegion).toHaveClass("agent-change-scroll");
+    expect(backupAssurance).not.toBeNull();
+    expect(changesRegion).not.toContainElement(backupAssurance);
+    expect(backupAssurance?.compareDocumentPosition(changesRegion) ?? 0)
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(within(preview).getByRole("table", { name: "配置改动" })).toBeInTheDocument();
+    expect(within(preview).getByRole("columnheader", { name: "字段" })).toBeInTheDocument();
+    expect(within(preview).getByRole("columnheader", { name: "修改前" })).toBeInTheDocument();
+    expect(within(preview).getByRole("columnheader", { name: "修改后" })).toBeInTheDocument();
     expect(preview).toHaveTextContent("/Users/x/.claude/settings.json");
     expect(preview).toHaveTextContent("env.ANTHROPIC_BASE_URL");
     expect(preview).toHaveTextContent("修改前");
@@ -367,6 +384,10 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(preview).toHaveTextContent('"0"');
     expect(preview).toHaveTextContent("Thinking token 预算设为 0");
     expect(preview).toHaveTextContent("关闭自适应 Thinking");
+    const formattedJson = within(preview).getByRole("region", { name: "格式化 JSON" });
+    expect(formattedJson.textContent).toContain(
+      '{\n  "models": {\n    "auto": {\n      "attachment": true,\n      "limit": {\n        "context": 128000,\n        "output": 8192\n      }\n    }\n  }\n}',
+    );
     expect(preview).toHaveTextContent('"must-not-render-old-secret"');
     expect(preview).toHaveTextContent('"must-not-render-new-secret"');
     expect(preview).toHaveTextContent("本机凭据会以明文显示，请避免截屏或共享屏幕");

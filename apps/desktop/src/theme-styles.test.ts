@@ -343,6 +343,38 @@ describe("retained page theme styles", () => {
     expect(bodyRule).toMatch(/overflow-y:\s*auto/);
   });
 
+  it("keeps Agent change review in a wide flat table with a fixed assurance row", () => {
+    const rules = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches.map((match) => match[1] ?? "");
+    };
+    const dialogRule = rules(
+      /\.agent-change-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/gs,
+    ).find((rule) => rule.includes("max-width: 880px")) ?? "";
+    const listRule = rules(/\.agent-change-list\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("330px")) ?? "";
+    const rowRule = rules(/\.agent-change-row\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("subgrid")) ?? "";
+    const fieldRule = rules(/\.agent-change-path\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("white-space: nowrap")) ?? "";
+    const stateRule = rules(/\.agent-change-state\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("background: transparent")) ?? "";
+    const narrowRules = appCss.slice(appCss.indexOf("@media (max-width: 640px)"));
+
+    expect(dialogRule).toMatch(/max-width:\s*880px/);
+    expect(dialogRule).toMatch(/height:\s*min\(760px, calc\(100vh - 32px\)\)/);
+    expect(dialogRule).toMatch(/grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto/);
+    expect(listRule).toMatch(/grid-template-columns:\s*330px 110px minmax\(0, 1fr\)/);
+    expect(rowRule).toMatch(/grid-template-columns:\s*subgrid/);
+    expect(rowRule).not.toMatch(/border:/);
+    expect(fieldRule).toMatch(/white-space:\s*nowrap/);
+    expect(stateRule).toMatch(/border:\s*0/);
+    expect(stateRule).toMatch(/background:\s*transparent/);
+    expect(narrowRules).toMatch(/\.agent-change-path[^}]*white-space:\s*normal/s);
+    expect(appCss).not.toMatch(/\.agent-change-arrow/);
+    expect(appCss).not.toMatch(/\.agent-change-states/);
+  });
+
   it("uses filled hierarchy instead of nested frames inside provider management", () => {
     const lastRule = (pattern: RegExp) => {
       const matches = Array.from(appCss.matchAll(pattern));
