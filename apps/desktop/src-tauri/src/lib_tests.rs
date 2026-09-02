@@ -8405,7 +8405,7 @@ fn model_test_plugin_identity_rejects_a_package_changed_after_preflight() {
 }
 
 #[test]
-fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
+fn model_test_command_reuses_the_draft_gateway_records_details_and_cleans_registration() {
     let root = scratch_home("model-test-command");
     let (upstream, fixture) = serve_chat_completion("model-test-ok", 6);
     let mut draft = gateway_template_for_test(&root);
@@ -8462,8 +8462,26 @@ fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
     };
 
     assert_eq!(send("model-test-command-1").content, "model-test-ok");
-    assert!(!root.join("token-station-data/request-bodies").exists());
-    assert!(root.join("token-station-data/metrics.sqlite").exists());
+    let data_dir = root.join("token-station-data");
+    let receipts = SqliteStore::receipt_page(
+        &data_dir.join("metrics.sqlite"),
+        &ReceiptQuery::default(),
+        1,
+        0,
+    )
+    .unwrap();
+    let receipt = receipts.items.first().expect("model test receipt");
+    let exchange = BodyLog::open(&data_dir)
+        .unwrap()
+        .read(&receipt.request_id)
+        .unwrap()
+        .expect("model test body snapshot");
+    assert!(exchange.input.contains(r#""content":"ping""#));
+    assert!(exchange.output.contains("model-test-ok"));
+    assert!(exchange.http_trace.agent_request.is_some());
+    assert_eq!(exchange.http_trace.upstream_exchanges.len(), 1);
+    assert!(exchange.http_trace.upstream_exchanges[0].response.is_some());
+    assert!(exchange.http_trace.agent_response.is_some());
     let first_gateway = Arc::clone(
         &app.state::<ModelTestStreamState>()
             .1
@@ -8589,7 +8607,7 @@ fn model_test_command_reuses_the_draft_gateway_and_cleans_registration() {
 }
 
 #[test]
-fn model_test_command_reuses_the_running_gateway_without_body_logging() {
+fn model_test_command_reuses_the_running_gateway_and_records_request_details() {
     let root = scratch_home("model-test-running-gateway");
     let (upstream, fixture) = serve_chat_completion("model-test-live", 1);
     let mut draft = gateway_template_for_test(&root);
@@ -8648,12 +8666,26 @@ fn model_test_command_reuses_the_running_gateway_without_body_logging() {
     .unwrap();
 
     assert_eq!(reply.content, "model-test-live");
-    let body_log_dir = root.join("token-station-data/request-bodies");
-    let body_logs = std::fs::read_dir(&body_log_dir)
+    let data_dir = root.join("token-station-data");
+    let receipts = SqliteStore::receipt_page(
+        &data_dir.join("metrics.sqlite"),
+        &ReceiptQuery::default(),
+        1,
+        0,
+    )
+    .unwrap();
+    let receipt = receipts.items.first().expect("model test receipt");
+    let exchange = BodyLog::open(&data_dir)
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(body_logs.is_empty());
+        .read(&receipt.request_id)
+        .unwrap()
+        .expect("model test body snapshot");
+    assert!(exchange.input.contains(r#""content":"ping""#));
+    assert!(exchange.output.contains("model-test-live"));
+    assert!(exchange.http_trace.agent_request.is_some());
+    assert_eq!(exchange.http_trace.upstream_exchanges.len(), 1);
+    assert!(exchange.http_trace.upstream_exchanges[0].response.is_some());
+    assert!(exchange.http_trace.agent_response.is_some());
     {
         let state = app.state::<AppStateManaged>();
         let mut inner = state.0.lock().unwrap();
