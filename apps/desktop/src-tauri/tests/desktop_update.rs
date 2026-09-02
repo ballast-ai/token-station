@@ -5,8 +5,8 @@ use std::sync::{
 
 use token_station_desktop_lib::desktop_update::{
     check_with, install_with, update_manifest_endpoint, DesktopUpdateOperation,
-    DesktopUpdatePrepareFailure, DesktopUpdateStatus, DesktopUpdateView, STABLE_LATEST_JSON_URL,
-    DESKTOP_UPDATE_UNSUPPORTED_MESSAGE,
+    DesktopUpdatePrepareFailure, DesktopUpdateStatus, DesktopUpdateView,
+    DESKTOP_UPDATE_UNSUPPORTED_MESSAGE, STABLE_LATEST_JSON_URL,
 };
 
 #[test]
