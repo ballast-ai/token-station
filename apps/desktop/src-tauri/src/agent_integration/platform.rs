@@ -70,22 +70,32 @@ impl ScanEnvironment {
                 child_environment.insert(name.to_string(), value);
             }
         }
-        // Version probes run with env_clear() so credentials and unrelated
-        // process state cannot leak into discovered tools. Several Python CLIs,
-        // including Hermes on Windows, still need the ordinary user-directory
-        // variables just to initialize pathlib/platformdirs before printing
-        // --help. These roots were already allowlisted and validated above.
-        for name in ROOT_VARIABLES {
-            if let Some(value) = variables.get(*name) {
-                child_environment.insert((*name).to_string(), value.clone());
-            }
-        }
+        add_validated_user_roots(&mut child_environment, &variables, platform);
         Self {
             platform,
             variables,
             path_entries,
             present_environment,
             child_environment,
+        }
+    }
+}
+
+/// Restore only absolute user roots after `env_clear()`. Several Python CLIs,
+/// including Hermes on Windows, need these values to initialize pathlib or
+/// platformdirs before they can print help. Reject relative values so a probe
+/// cannot resolve configuration below Token Station's working directory.
+fn add_validated_user_roots(
+    child_environment: &mut BTreeMap<String, String>,
+    variables: &BTreeMap<String, String>,
+    platform: Platform,
+) {
+    for name in ROOT_VARIABLES {
+        if let Some(value) = variables
+            .get(*name)
+            .filter(|value| is_absolute_for(platform, value))
+        {
+            child_environment.insert((*name).to_string(), value.clone());
         }
     }
 }
@@ -510,19 +520,20 @@ fn windows_codex_cli_candidates(environment: &ScanEnvironment) -> Vec<PathBuf> {
     if !is_absolute_for(Platform::Windows, local_app_data) {
         return Vec::new();
     }
-    newest_codex_cli(Path::new(local_app_data).join("OpenAI/Codex/bin"))
-        .into_iter()
-        .collect()
+    codex_cli_candidates(Path::new(local_app_data).join("OpenAI/Codex/bin"))
 }
 
 /// Codex desktop stores the runnable CLI below the user's app-data directory.
 /// The similarly named executable in the MSIX package resources is an
 /// access-controlled app resource and cannot be launched by Token Station.
-/// Keep the scan one level deep and select the newest real CLI so retained
-/// desktop update directories do not appear as conflicting installations.
-fn newest_codex_cli(root: PathBuf) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(root).ok()?;
-    entries
+/// Keep the scan one level deep and return newest-first candidates. Discovery
+/// probes them in this order and keeps the first runnable CLI, so a partial
+/// desktop update cannot hide an older working installation.
+fn codex_cli_candidates(root: PathBuf) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut candidates = entries
         .take(MAX_CODEX_CLI_DIRECTORIES)
         .filter_map(Result::ok)
         .filter_map(|entry| {
@@ -539,8 +550,12 @@ fn newest_codex_cli(root: PathBuf) -> Option<PathBuf> {
             let modified = metadata.modified().ok();
             Some((modified, executable))
         })
-        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    candidates
+        .into_iter()
         .map(|(_, executable)| executable)
+        .collect()
 }
 
 fn path_executable_names(name: &str, platform: Platform) -> Vec<String> {
@@ -1104,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_desktop_scan_selects_the_newest_bounded_user_cli() {
+    fn codex_desktop_scan_orders_bounded_user_clis_newest_first() {
         let root = std::env::temp_dir().join(format!(
             "token-station-codex-user-cli-{}",
             std::process::id()
@@ -1120,8 +1135,32 @@ mod tests {
         std::fs::create_dir_all(ignored.parent().unwrap()).unwrap();
         std::fs::write(&ignored, b"ignored").unwrap();
 
-        assert_eq!(newest_codex_cli(root.clone()), Some(current));
+        assert_eq!(codex_cli_candidates(root.clone()), vec![current, old]);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn probe_environment_accepts_only_absolute_user_roots() {
+        let variables = BTreeMap::from([
+            ("HOME".to_string(), "relative/home".to_string()),
+            ("XDG_CONFIG_HOME".to_string(), "/safe/config".to_string()),
+            ("LOCALAPPDATA".to_string(), "relative/appdata".to_string()),
+            ("USERPROFILE".to_string(), "C:\\Users\\tester".to_string()),
+        ]);
+
+        let mut unix_child = BTreeMap::new();
+        add_validated_user_roots(&mut unix_child, &variables, Platform::Linux);
+        assert_eq!(
+            unix_child,
+            BTreeMap::from([("XDG_CONFIG_HOME".to_string(), "/safe/config".to_string())])
+        );
+
+        let mut windows_child = BTreeMap::new();
+        add_validated_user_roots(&mut windows_child, &variables, Platform::Windows);
+        assert_eq!(
+            windows_child,
+            BTreeMap::from([("USERPROFILE".to_string(), "C:\\Users\\tester".to_string())])
+        );
     }
 
     // This case creates a real directory, treats it as HOME, and then simulates a
@@ -1129,7 +1168,6 @@ mod tests {
     // Windows host's temp_dir is `C:\…`, so a `/`-rooted real directory cannot be
     // created there. `macos_npm_prefix` also only runs on the macOS platform, so
     // exercising it on a Windows host adds no coverage — run on non-Windows only.
-    #[cfg(not(target_os = "windows"))]
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn macos_node_agents_include_the_safe_npm_prefix_from_user_config() {

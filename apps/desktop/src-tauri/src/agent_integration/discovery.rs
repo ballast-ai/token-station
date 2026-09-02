@@ -826,8 +826,14 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
         descriptor: &AgentDescriptor,
         scanned_at_ms: u64,
     ) -> Vec<DiscoveryRecord> {
-        let mut installations = collect_installations(
+        let candidates = select_windows_codex_desktop_candidate(
             executable_candidates(descriptor, &self.environment),
+            descriptor,
+            &self.environment,
+            &self.runner,
+        );
+        let mut installations = collect_installations(
+            candidates,
             self.environment.platform,
             &descriptor.version_probe,
         );
@@ -854,7 +860,7 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                 let mut diagnostics = installation.diagnostics;
                 let probe = if installation.probe_allowed {
                     self.runner.run(
-                        &installation.canonical_path,
+                        &installation.canonical_probe_path,
                         &installation.observed_probe_path,
                         &descriptor.version_probe,
                         &self.environment,
@@ -878,17 +884,17 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                     .iter()
                     .any(|evidence| evidence.is_path_default);
                 let (binary_source, upgrade_command) = classify_binary_installation(
-                    &installation.canonical_path,
+                    &installation.identity_path,
                     &installation.evidence,
                 );
-                let (modified_at_ms, binary_sha256) = binary_facts(&installation.canonical_path);
+                let (modified_at_ms, binary_sha256) = binary_facts(&installation.identity_path);
                 DiscoveryRecord {
                     agent_id: descriptor.agent_id.clone(),
                     executable_path: installation
                         .observed_probe_path
                         .to_string_lossy()
                         .into_owned(),
-                    canonical_path: installation.canonical_path.to_string_lossy().into_owned(),
+                    canonical_path: installation.identity_path.to_string_lossy().into_owned(),
                     binary_source,
                     modified_at_ms,
                     binary_sha256,
@@ -908,6 +914,63 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
             })
             .collect()
     }
+}
+
+/// Codex Desktop can retain several update directories. Probe its candidates
+/// newest-first and keep one result before general installation conflict
+/// handling. Preserve the newest failure when none of the candidates run so
+/// discovery still reports a useful broken installation.
+fn select_windows_codex_desktop_candidate<R: ProbeRunner>(
+    candidates: Vec<ExecutableCandidate>,
+    descriptor: &AgentDescriptor,
+    environment: &ScanEnvironment,
+    runner: &R,
+) -> Vec<ExecutableCandidate> {
+    if descriptor.agent_id != "codex" || environment.platform != Platform::Windows {
+        return candidates;
+    }
+
+    let mut desktop_candidates = Vec::new();
+    let mut retained = Vec::new();
+    for candidate in candidates {
+        if candidate.source == DiscoverySource::PackageManager {
+            desktop_candidates.push(candidate);
+        } else {
+            retained.push(candidate);
+        }
+    }
+
+    let mut first_failure = None;
+    let mut selected = None;
+    for candidate in desktop_candidates {
+        let canonical = match std::fs::canonicalize(&candidate.path) {
+            Ok(path) => path,
+            Err(_) => {
+                if first_failure.is_none() {
+                    first_failure = Some(candidate);
+                }
+                continue;
+            }
+        };
+        let outcome = runner.run(
+            &canonical,
+            &candidate.path,
+            &descriptor.version_probe,
+            environment,
+        );
+        if outcome.runnable {
+            selected = Some(candidate);
+            break;
+        }
+        if first_failure.is_none() {
+            first_failure = Some(candidate);
+        }
+    }
+
+    if let Some(candidate) = selected.or(first_failure) {
+        retained.insert(0, candidate);
+    }
+    retained
 }
 
 fn classify_binary_installation(
@@ -1204,7 +1267,8 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
 }
 
 struct Installation {
-    canonical_path: PathBuf,
+    identity_path: PathBuf,
+    canonical_probe_path: PathBuf,
     observed_probe_path: PathBuf,
     evidence: Vec<DiscoveryEvidence>,
     path_orders: Vec<Option<usize>>,
@@ -1286,7 +1350,8 @@ fn collect_installations(
                 installation.diagnostics.extend(diagnostics.clone());
             })
             .or_insert_with(|| Installation {
-                canonical_path,
+                identity_path,
+                canonical_probe_path: canonical_path,
                 observed_probe_path: candidate.path,
                 evidence: vec![evidence],
                 path_orders: vec![candidate.path_order],
@@ -1345,7 +1410,7 @@ fn mark_path_default(installations: &mut BTreeMap<String, Installation>) {
             .map(|evidence| PathBuf::from(&evidence.observed_path))
         {
             if let Ok(canonical) = std::fs::canonicalize(&selected) {
-                installation.canonical_path = canonical;
+                installation.canonical_probe_path = canonical;
             }
             installation.observed_probe_path = selected;
         }
@@ -2129,6 +2194,35 @@ mod tests {
         }
     }
 
+    struct CodexFallbackProbe;
+
+    impl ProbeRunner for CodexFallbackProbe {
+        fn run(
+            &self,
+            executable: &Path,
+            _observed_entry: &Path,
+            _probe: &VersionProbe,
+            _environment: &ScanEnvironment,
+        ) -> ProbeOutcome {
+            let runnable = executable
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|directory| directory == "old");
+            ProbeOutcome {
+                runnable,
+                version_raw: runnable.then(|| "codex-cli 1.2.3".to_string()),
+                version_normalized: runnable.then(|| "1.2.3".to_string()),
+                diagnostics: (!runnable)
+                    .then(|| Diagnostic {
+                        reason_code: ReasonCode::ExecutableNotRunnable,
+                        message: "fixture failure".to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
+            }
+        }
+    }
+
     #[cfg(unix)]
     struct ConcurrentProbe {
         active: Arc<AtomicUsize>,
@@ -2313,9 +2407,8 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    #[cfg(windows)]
     #[test]
-    fn native_cmd_wrappers_for_one_target_collapse_to_one_installation() {
+    fn native_cmd_wrappers_keep_the_target_as_the_stable_installation_identity() {
         let root = scratch("native-cmd-wrapper-dedupe");
         let executable = root.join("runtime/opencode.exe");
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
@@ -2347,17 +2440,74 @@ mod tests {
             .unwrap()
             .version_probe;
 
-        let mut installations = collect_installations(candidates.into(), Platform::Windows, probe);
-        mark_path_default(&mut installations);
+        let mut first_scan =
+            collect_installations(candidates.clone().into(), Platform::Windows, probe);
+        mark_path_default(&mut first_scan);
 
-        assert_eq!(installations.len(), 1);
-        let installation = installations.values().next().unwrap();
+        assert_eq!(first_scan.len(), 1);
+        let installation = first_scan.values().next().unwrap();
         assert_eq!(installation.evidence.len(), 2);
         assert_eq!(installation.observed_probe_path, second);
         assert_eq!(
-            installation.canonical_path,
-            std::fs::canonicalize(&installation.observed_probe_path).unwrap()
+            installation.identity_path,
+            std::fs::canonicalize(&executable).unwrap()
         );
+
+        let mut reversed = candidates;
+        reversed[0].path_order = Some(0);
+        reversed[1].path_order = Some(1);
+        let mut second_scan = collect_installations(reversed.into(), Platform::Windows, probe);
+        mark_path_default(&mut second_scan);
+        let rescanned = second_scan.values().next().unwrap();
+        assert_eq!(rescanned.observed_probe_path, first);
+        assert_eq!(rescanned.identity_path, installation.identity_path);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_desktop_candidate_falls_back_to_the_newest_runnable_cli() {
+        let root = scratch("codex-runnable-fallback");
+        let newest = root.join("new/codex.exe");
+        let older = root.join("old/codex.exe");
+        for executable in [&newest, &older] {
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(executable, b"fixture").unwrap();
+        }
+        let candidates = vec![
+            ExecutableCandidate {
+                path: newest,
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            },
+            ExecutableCandidate {
+                path: older.clone(),
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            },
+        ];
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "codex")
+            .unwrap();
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: BTreeSet::new(),
+            child_environment: BTreeMap::new(),
+        };
+
+        let selected = select_windows_codex_desktop_candidate(
+            candidates,
+            descriptor,
+            &context,
+            &CodexFallbackProbe,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, older);
         std::fs::remove_dir_all(root).ok();
     }
 
