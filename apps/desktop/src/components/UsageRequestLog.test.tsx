@@ -351,6 +351,8 @@ describe("UsageRequestLog", () => {
     );
 
     await user.click((await screen.findAllByText("deepseek/deepseek-v4-pro"))[0]);
+    expect(screen.getByRole("tab", { name: "内容" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("tab", { name: "HTTP" })).toBeNull();
     const input = screen.getByRole("region", { name: "明文输入" });
     const output = screen.getByRole("region", { name: "明文输出" });
     const parsedButton = screen.getByRole("button", { name: "解析视图" });
@@ -376,7 +378,7 @@ describe("UsageRequestLog", () => {
     expect(within(parsedOutput).getByText("工具调用 · read_file")).toBeInTheDocument();
   });
 
-  it("shows complete redacted HTTP packets and marks request mutations", async () => {
+  it("groups redacted packets into selectable HTTP conversations with split headers and bodies", async () => {
     const user = userEvent.setup();
     vi.mocked(getRequestReceipts).mockResolvedValue({
       items: [receipt({ stream: false })],
@@ -437,21 +439,26 @@ describe("UsageRequestLog", () => {
     render(<UsageRequestLog since="24h" agentId="" upstream="" model="" refreshKey={0} />);
     await user.click((await screen.findAllByText("deepseek/deepseek-v4-pro"))[0]);
 
-    expect(screen.getByRole("button", { name: "HTTP 链路" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByText("Agent → Token Station")).toBeInTheDocument();
-    expect(screen.getByText("尝试 1 · Token Station → deepseek/deepseek-v4-pro")).toBeInTheDocument();
     const dialog = screen.getByRole("dialog", { name: "请求详情" });
-    const packets = dialog.querySelectorAll("details.http-packet");
-    expect(packets).toHaveLength(4);
-    expect(packets[0]).not.toHaveAttribute("open");
-    expect(packets[1]).not.toHaveAttribute("open");
-    expect(packets[2]).not.toHaveAttribute("open");
-    expect(packets[3]).not.toHaveAttribute("open");
-    expect(dialog.querySelectorAll(".http-packet-disclosure")).toHaveLength(4);
-    expect(within(packets[0] as HTMLElement).getByText("请求头")).toBeInTheDocument();
-    expect(within(packets[0] as HTMLElement).getByText("请求体")).toBeInTheDocument();
-    expect(within(packets[2] as HTMLElement).getByText("响应头")).toBeInTheDocument();
-    expect(within(packets[2] as HTMLElement).getByText("响应体")).toBeInTheDocument();
+    expect(within(dialog).getByRole("tab", { name: "HTTP" })).toHaveAttribute("aria-selected", "true");
+    expect(within(dialog).getByRole("tab", { name: "内容" })).toHaveAttribute("aria-selected", "false");
+    expect(within(dialog).getByRole("tab", { name: "路由" })).toHaveAttribute("aria-selected", "false");
+
+    const conversations = within(dialog).getByRole("listbox", { name: "HTTP 会话" });
+    const clientConversation = within(conversations).getByRole("option", { name: /客户端会话/ });
+    const upstreamConversation = within(conversations).getByRole("option", { name: /上游尝试 1/ });
+    expect(clientConversation).toHaveAttribute("aria-selected", "false");
+    expect(upstreamConversation).toHaveAttribute("aria-selected", "true");
+    expect(within(upstreamConversation).getByText("5 项转换")).toBeInTheDocument();
+
+    const requestTab = within(dialog).getByRole("tab", { name: "请求" });
+    const responseTab = within(dialog).getByRole("tab", { name: "响应" });
+    expect(requestTab).toHaveAttribute("aria-selected", "true");
+    expect(responseTab).toHaveAttribute("aria-selected", "false");
+    expect(within(dialog).getByRole("region", { name: "请求头" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("region", { name: "请求体" })).toBeInTheDocument();
+    expect(within(dialog).getByText("POST https://api.deepseek.com/v1/chat/completions", { exact: false })).toBeInTheDocument();
+    expect(dialog.querySelector(".http-trace-legend")).toBeNull();
 
     const changeSet = dialog.querySelector("details.http-change-list");
     expect(changeSet).not.toBeNull();
@@ -461,9 +468,19 @@ describe("UsageRequestLog", () => {
     expect(changeSet).toHaveAttribute("open");
     expect(screen.getByText("body.model")).toBeInTheDocument();
     expect(screen.getAllByText("<redacted>").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText("https://api.deepseek.com/v1/chat/completions", { exact: false }).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("deepseek → Token Station")).toBeInTheDocument();
-    expect(screen.getByText("Token Station → Agent")).toBeInTheDocument();
+
+    await user.click(responseTab);
+    expect(requestTab).toHaveAttribute("aria-selected", "false");
+    expect(responseTab).toHaveAttribute("aria-selected", "true");
+    expect(within(dialog).getByRole("region", { name: "响应头" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("region", { name: "响应体" })).toBeInTheDocument();
+    expect(dialog.querySelector("details.http-change-list")).toBeNull();
+
+    await user.click(clientConversation);
+    expect(clientConversation).toHaveAttribute("aria-selected", "true");
+    expect(upstreamConversation).toHaveAttribute("aria-selected", "false");
+    expect(within(dialog).getByRole("tab", { name: "请求" })).toHaveAttribute("aria-selected", "true");
+    expect(within(dialog).getAllByText("Agent ↔ Token Station")).toHaveLength(2);
   });
 
   it("uses a compact two-row trace and explains conversion stages in user language", async () => {
@@ -481,6 +498,11 @@ describe("UsageRequestLog", () => {
     const route = (await screen.findAllByText("deepseek/deepseek-v4-pro"))[0];
     await user.click(route);
     const row = screen.getByRole("dialog", { name: "请求详情" });
+
+    const routingTab = within(row).getByRole("tab", { name: "路由" });
+    expect(routingTab).toHaveAttribute("aria-selected", "false");
+    await user.click(routingTab);
+    expect(routingTab).toHaveAttribute("aria-selected", "true");
 
     const summary = within(row).getByLabelText("请求审计摘要");
     expect(summary.tagName).toBe("DL");

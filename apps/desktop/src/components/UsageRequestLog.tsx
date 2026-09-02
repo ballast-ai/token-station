@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ChevronDown, Maximize2 } from "lucide-react";
 import {
   getRequestReceipts,
@@ -214,77 +214,74 @@ function requestChanges(source: HttpRequestView, target: HttpRequestView): HttpC
   return changes;
 }
 
-function HttpPacket({
-  label,
+function HttpPacketInspector({
+  direction,
   request,
   response,
   headerKinds = new Map<string, HttpChangeKind>(),
 }: {
-  label: string;
+  direction: "request" | "response";
   request?: HttpRequestView;
   response?: HttpResponseView;
   headerKinds?: Map<string, HttpChangeKind>;
 }) {
   const { copy } = useLocalizedCopy();
-  const isRequest = Boolean(request);
+  const isRequest = direction === "request";
+  if ((isRequest && !request) || (!isRequest && !response)) {
+    return (
+      <div className="http-packet-empty" role="status">
+        {isRequest
+          ? copy("No request was captured", "未采集到请求", "未擷取到請求", "リクエストは取得されていません")
+          : copy("No response was captured", "未采集到响应", "未擷取到回應", "レスポンスは取得されていません")}
+      </div>
+    );
+  }
   const headers = request?.headers ?? response?.headers ?? [];
   const body = request?.body ?? response?.body ?? "";
   const truncated = request?.body_truncated ?? response?.body_truncated ?? false;
-  const startLine = request
-    ? `${request.method} ${request.url} HTTP`
-    : `HTTP ${response?.status ?? 0}`;
+  const headerLabel = isRequest
+    ? copy("Request headers", "请求头", "請求標頭", "リクエストヘッダー")
+    : copy("Response headers", "响应头", "回應標頭", "レスポンスヘッダー");
+  const bodyLabel = isRequest
+    ? copy("Request body", "请求体", "請求本文", "リクエスト本文")
+    : copy("Response body", "响应体", "回應本文", "レスポンス本文");
   return (
-    <details className="http-packet">
-      <summary>
-        <span className="http-packet-summary-copy">
-          <strong>{label}</strong>
-          <code>{startLine}</code>
-        </span>
-        <span className="http-packet-summary-meta">
+    <div className="http-packet-inspector">
+      <section className="http-packet-section headers" role="region" aria-label={headerLabel}>
+        <div className="http-packet-section-title">
+          <strong>{headerLabel}</strong>
+          <span>{copy(`${headers.length} entries`, `${headers.length} 项`, `${headers.length} 項`, `${headers.length} 件`)}</span>
+        </div>
+        <div className="http-header-list">
+          {headers.length ? headers.map((header, index) => {
+            const kind = header.redacted ? "redacted" : headerKinds.get(header.name.toLowerCase()) ?? "kept";
+            return (
+              <div className={`http-header-row ${kind}`} key={`${header.name}-${index}`}>
+                <code>{header.name}</code>
+                <code>{header.value}</code>
+                {kind !== "kept" && <small>{copy(
+                  kind === "redacted" ? "Redacted" : kind === "added" ? "Added" : kind === "modified" ? "Modified" : "Kept",
+                  kind === "redacted" ? "已脱敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
+                  kind === "redacted" ? "已脫敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
+                  kind === "redacted" ? "編集済み" : kind === "added" ? "追加" : kind === "modified" ? "変更" : "保持",
+                )}</small>}
+              </div>
+            );
+          }) : <span className="http-empty">{isRequest
+            ? copy("No request headers captured", "未采集到请求头", "未擷取到請求標頭", "リクエストヘッダーは取得されていません")
+            : copy("No response headers captured", "未采集到响应头", "未擷取到回應標頭", "レスポンスヘッダーは取得されていません")}</span>}
+        </div>
+      </section>
+      <section className="http-packet-section body" role="region" aria-label={bodyLabel}>
+        <div className="http-packet-section-title">
+          <strong>{bodyLabel}</strong>
           {truncated && <em>{copy("Truncated", "已截断", "已截斷", "切り捨て")}</em>}
-          <span className="http-packet-disclosure" aria-hidden="true"><ChevronDown /></span>
-        </span>
-      </summary>
-      <div className="http-packet-content">
-        <section className="http-packet-section">
-          <div className="http-packet-section-title">
-            <strong>{isRequest
-              ? copy("Request headers", "请求头", "請求標頭", "リクエストヘッダー")
-              : copy("Response headers", "响应头", "回應標頭", "レスポンスヘッダー")}</strong>
-            <span>{headers.length}</span>
-          </div>
-          <div className="http-header-list">
-            {headers.length ? headers.map((header, index) => {
-              const kind = header.redacted ? "redacted" : headerKinds.get(header.name.toLowerCase()) ?? "kept";
-              return (
-                <div className={`http-header-row ${kind}`} key={`${header.name}-${index}`}>
-                  <code>{header.name}</code>
-                  <code>{header.value}</code>
-                  <small>{copy(
-                    kind === "redacted" ? "Redacted" : kind === "added" ? "Added" : kind === "modified" ? "Modified" : "Kept",
-                    kind === "redacted" ? "已脱敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
-                    kind === "redacted" ? "已脫敏" : kind === "added" ? "新增" : kind === "modified" ? "修改" : "保留",
-                    kind === "redacted" ? "編集済み" : kind === "added" ? "追加" : kind === "modified" ? "変更" : "保持",
-                  )}</small>
-                </div>
-              );
-            }) : <span className="http-empty">{isRequest
-              ? copy("No request headers captured", "未采集到请求头", "未擷取到請求標頭", "リクエストヘッダーは取得されていません")
-              : copy("No response headers captured", "未采集到响应头", "未擷取到回應標頭", "レスポンスヘッダーは取得されていません")}</span>}
-          </div>
-        </section>
-        <section className="http-packet-section body">
-          <div className="http-packet-section-title">
-            <strong>{isRequest
-              ? copy("Request body", "请求体", "請求本文", "リクエスト本文")
-              : copy("Response body", "响应体", "回應本文", "レスポンス本文")}</strong>
-          </div>
-          <pre>{body ? formatJsonSource(body) : isRequest
-            ? copy("Empty request body", "请求体为空", "請求本文為空", "リクエスト本文は空です")
-            : copy("Empty response body", "响应体为空", "回應本文為空", "レスポンス本文は空です")}</pre>
-        </section>
-      </div>
-    </details>
+        </div>
+        <pre>{body ? formatJsonSource(body) : isRequest
+          ? copy("Empty request body", "请求体为空", "請求本文為空", "リクエスト本文は空です")
+          : copy("Empty response body", "响应体为空", "回應本文為空", "レスポンス本文は空です")}</pre>
+      </section>
+    </div>
   );
 }
 
@@ -327,65 +324,150 @@ function HttpTraceInspector({ plaintext }: { plaintext: RequestPlaintextView }) 
   const { copy } = useLocalizedCopy();
   const trace = plaintext.http_trace;
   const source = trace?.agent_request;
+  const defaultConversationKey = trace?.upstream_exchanges[0]
+    ? `upstream-${trace.upstream_exchanges[0].ordinal}`
+    : "client";
+  const [selectedConversationKey, setSelectedConversationKey] = useState(defaultConversationKey);
+  const [direction, setDirection] = useState<"request" | "response">("request");
+  useEffect(() => {
+    setSelectedConversationKey(defaultConversationKey);
+    setDirection("request");
+  }, [defaultConversationKey, plaintext.request_id]);
   if (!trace || !source) return null;
+
+  interface HttpConversation {
+    key: string;
+    title: string;
+    peer: string;
+    request: HttpRequestView;
+    response?: HttpResponseView;
+    changes?: HttpChange[];
+    headerKinds?: Map<string, HttpChangeKind>;
+  }
+
+  const conversations: HttpConversation[] = [{
+    key: "client",
+    title: copy("Client conversation", "客户端会话", "用戶端會話", "クライアント会話"),
+    peer: "Agent ↔ Token Station",
+    request: source,
+    response: trace.agent_response ?? undefined,
+  }];
+
+  for (const exchange of trace.upstream_exchanges) {
+    const changes = requestChanges(source, exchange.request);
+    const headerKinds = new Map<string, HttpChangeKind>();
+    for (const change of changes) {
+      if (change.path.startsWith("header.") && change.kind !== "removed") {
+        headerKinds.set(change.path.slice(7), change.kind);
+      }
+    }
+    conversations.push({
+      key: `upstream-${exchange.ordinal}`,
+      title: copy(
+        `Upstream attempt ${exchange.ordinal}`,
+        `上游尝试 ${exchange.ordinal}`,
+        `上游嘗試 ${exchange.ordinal}`,
+        `アップストリーム試行 ${exchange.ordinal}`,
+      ),
+      peer: `Token Station ↔ ${exchange.upstream}`,
+      request: exchange.request,
+      response: exchange.response ?? undefined,
+      changes,
+      headerKinds,
+    });
+  }
+
+  const selected = conversations.find((conversation) => conversation.key === selectedConversationKey)
+    ?? conversations[0];
+  const startLine = direction === "request"
+    ? `${selected.request.method} ${selected.request.url}`
+    : selected.response
+      ? `HTTP ${selected.response.status}`
+      : copy("No response", "暂无响应", "暫無回應", "レスポンスなし");
+
   return (
     <div
       className="http-trace-inspector"
       role="region"
       aria-label={copy("HTTP execution trace", "HTTP 执行链路", "HTTP 執行鏈路", "HTTP 実行トレース")}
     >
-      <div className="http-trace-legend">
-        <span className="modified">{copy("Modified", "修改", "修改", "変更")}</span>
-        <span className="added">{copy("Added", "新增", "新增", "追加")}</span>
-        <span className="removed">{copy("Removed", "删除", "刪除", "削除")}</span>
-        <span className="kept">{copy("Kept", "保留", "保留", "保持")}</span>
-        <span className="redacted">{copy("Secret redacted", "密钥已脱敏", "密鑰已脫敏", "秘密情報は編集済み")}</span>
-      </div>
-      <div className="http-trace-stage">
-        <div className="http-trace-stage-marker">01</div>
-        <HttpPacket label={copy("Agent → Token Station", "Agent → Token Station", "Agent → Token Station", "Agent → Token Station")} request={source} />
-      </div>
-      {trace.upstream_exchanges.map((exchange, index) => {
-        const changes = requestChanges(source, exchange.request);
-        const headerKinds = new Map<string, HttpChangeKind>();
-        for (const change of changes) {
-          if (change.path.startsWith("header.") && change.kind !== "removed") {
-            headerKinds.set(change.path.slice(7), change.kind);
-          }
-        }
-        return (
-          <div className="http-trace-attempt" key={exchange.ordinal}>
-            <HttpChangeList changes={changes} />
-            <div className="http-trace-stage">
-              <div className="http-trace-stage-marker">{String(index + 2).padStart(2, "0")}</div>
-              <div className="http-trace-stage-content">
-                <HttpPacket
-                  label={copy(
-                    `Attempt ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
-                    `尝试 ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
-                    `嘗試 ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
-                    `試行 ${exchange.ordinal} · Token Station → ${exchange.upstream}/${exchange.model}`,
-                  )}
-                  request={exchange.request}
-                  headerKinds={headerKinds}
-                />
-                {exchange.response && (
-                  <HttpPacket
-                    label={copy(`${exchange.upstream} → Token Station`, `${exchange.upstream} → Token Station`, `${exchange.upstream} → Token Station`, `${exchange.upstream} → Token Station`)}
-                    response={exchange.response}
-                  />
-                )}
-              </div>
-            </div>
-          </div>
-        );
-      })}
-      {trace.agent_response && (
-        <div className="http-trace-stage">
-          <div className="http-trace-stage-marker">{String(trace.upstream_exchanges.length + 2).padStart(2, "0")}</div>
-          <HttpPacket label={copy("Token Station → Agent", "Token Station → Agent", "Token Station → Agent", "Token Station → Agent")} response={trace.agent_response} />
+      <div className="http-conversation-workbench">
+        <div
+          className="http-conversation-list"
+          role="listbox"
+          aria-label={copy("HTTP conversations", "HTTP 会话", "HTTP 會話", "HTTP 会話")}
+        >
+          <strong>{copy(
+            `${conversations.length} conversations`,
+            `${conversations.length} 个会话`,
+            `${conversations.length} 個會話`,
+            `${conversations.length} 件の会話`,
+          )}</strong>
+          {conversations.map((conversation) => {
+            const selectedItem = conversation.key === selected.key;
+            const statusClass = conversation.response
+              && conversation.response.status >= 200
+              && conversation.response.status < 400
+              ? "success"
+              : "error";
+            return (
+              <button
+                type="button"
+                role="option"
+                aria-selected={selectedItem}
+                className="http-conversation-item"
+                key={conversation.key}
+                onClick={() => {
+                  setSelectedConversationKey(conversation.key);
+                  setDirection("request");
+                }}
+              >
+                <span>
+                  <strong>{conversation.title}</strong>
+                  <small>{conversation.peer}</small>
+                </span>
+                {conversation.changes?.length ? <small>{copy(
+                  `${conversation.changes.length} transformations`,
+                  `${conversation.changes.length} 项转换`,
+                  `${conversation.changes.length} 項轉換`,
+                  `${conversation.changes.length} 件の変換`,
+                )}</small> : null}
+                <em className={statusClass}>{conversation.response
+                  ? `HTTP ${conversation.response.status}`
+                  : copy("No response", "暂无响应", "暫無回應", "レスポンスなし")}</em>
+              </button>
+            );
+          })}
         </div>
-      )}
+        <div className="http-conversation-detail">
+          <header>
+            <div>
+              <strong>{selected.title}</strong>
+              <span>{selected.peer}</span>
+            </div>
+            <div
+              className="http-direction-tabs"
+              role="tablist"
+              aria-label={copy("HTTP direction", "HTTP 方向", "HTTP 方向", "HTTP 方向")}
+            >
+              <button type="button" role="tab" aria-selected={direction === "request"} onClick={() => setDirection("request")}>
+                {copy("Request", "请求", "請求", "リクエスト")}
+              </button>
+              <button type="button" role="tab" aria-selected={direction === "response"} onClick={() => setDirection("response")}>
+                {copy("Response", "响应", "回應", "レスポンス")}
+              </button>
+            </div>
+          </header>
+          <code className="http-conversation-start-line">{startLine}</code>
+          <HttpPacketInspector
+            direction={direction}
+            request={direction === "request" ? selected.request : undefined}
+            response={direction === "response" ? selected.response : undefined}
+            headerKinds={direction === "request" ? selected.headerKinds : undefined}
+          />
+          {direction === "request" && selected.changes && <HttpChangeList changes={selected.changes} />}
+        </div>
+      </div>
     </div>
   );
 }
@@ -670,13 +752,10 @@ function RequestPlaintext({
   error?: string;
 }) {
   const { copy } = useLocalizedCopy();
-  const hasHttpTrace = Boolean(plaintext?.http_trace?.agent_request);
-  const [viewMode, setViewMode] = useState<"http" | "parsed" | "source">(
-    hasHttpTrace ? "http" : "parsed",
-  );
+  const [viewMode, setViewMode] = useState<"parsed" | "source">("parsed");
   useEffect(() => {
-    setViewMode(plaintext?.http_trace?.agent_request ? "http" : "parsed");
-  }, [plaintext?.request_id, plaintext?.http_trace?.agent_request]);
+    setViewMode("parsed");
+  }, [plaintext?.request_id]);
   if (error) {
     return (
       <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}>
@@ -736,23 +815,14 @@ function RequestPlaintext({
     <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}>
       <header>
         <div className="request-plaintext-title">
-          <strong>{copy("HTTP packets and plaintext", "HTTP 包与明文", "HTTP 封包與明文", "HTTP パケットとプレーンテキスト")}</strong>
-          <span>{copy("Retained for 7 days by default", "默认保留 7 天", "預設保留 7 天", "デフォルトで7日間保持")}</span>
+          <strong>{copy("Content", "内容", "內容", "コンテンツ")}</strong>
+          <span>{copy("Input and output", "输入与输出", "輸入與輸出", "入力と出力")}</span>
         </div>
         <div
           className="request-plaintext-mode"
           role="group"
           aria-label={copy("Body display mode", "正文显示方式", "正文顯示方式", "本文表示モード")}
         >
-          {hasHttpTrace && (
-            <button
-              type="button"
-              aria-pressed={viewMode === "http"}
-              onClick={() => setViewMode("http")}
-            >
-              {copy("HTTP trace", "HTTP 链路", "HTTP 鏈路", "HTTP トレース")}
-            </button>
-          )}
           <button
             type="button"
             aria-pressed={viewMode === "parsed"}
@@ -769,9 +839,7 @@ function RequestPlaintext({
           </button>
         </div>
       </header>
-      {viewMode === "http" && hasHttpTrace ? (
-        <HttpTraceInspector plaintext={plaintext} />
-      ) : <div className="request-plaintext-grid">
+      <div className="request-plaintext-grid">
         {panels.map((panel) => (
           <div className="request-plaintext-panel" key={panel.key}>
             <div className="request-plaintext-label">
@@ -807,7 +875,7 @@ function RequestPlaintext({
             )}
           </div>
         ))}
-      </div>}
+      </div>
     </section>
   );
 }
@@ -860,6 +928,19 @@ function ReceiptDetail({
   const { language, copy } = useLocalizedCopy();
   const cancelled = receipt.status === 499;
   const success = receipt.status >= 200 && receipt.status < 400 && receipt.error_code == null;
+  const hasHttpTrace = Boolean(plaintext?.http_trace?.agent_request);
+  const [activeView, setActiveView] = useState<"content" | "http" | "routing">(
+    hasHttpTrace ? "http" : "content",
+  );
+  const tabPrefix = useId();
+  useEffect(() => {
+    setActiveView(hasHttpTrace ? "http" : "content");
+  }, [hasHttpTrace, receipt.request_id]);
+  const detailViews = [
+    { key: "content" as const, label: copy("Content", "内容", "內容", "コンテンツ") },
+    ...(hasHttpTrace ? [{ key: "http" as const, label: "HTTP" }] : []),
+    { key: "routing" as const, label: copy("Routing", "路由", "路由", "ルーティング") },
+  ];
   return (
     <div className="usage-log-expanded">
       <section className="request-detail-overview" aria-label={copy("Request overview", "请求概览", "請求概覽", "リクエスト概要")}>
@@ -911,8 +992,37 @@ function ReceiptDetail({
           <CostState receipt={receipt} />
         </div>
       </section>
-      <ReceiptDetails receipt={receipt} />
-      <RequestPlaintext plaintext={plaintext} error={plaintextError} />
+      <div className="request-detail-navigation">
+        <div
+          role="tablist"
+          aria-label={copy("Request detail views", "请求详情视图", "請求詳情檢視", "リクエスト詳細ビュー")}
+        >
+          {detailViews.map((view) => (
+            <button
+              type="button"
+              role="tab"
+              id={`${tabPrefix}-${view.key}-tab`}
+              aria-controls={`${tabPrefix}-${view.key}-panel`}
+              aria-selected={activeView === view.key}
+              key={view.key}
+              onClick={() => setActiveView(view.key)}
+            >
+              {view.label}
+            </button>
+          ))}
+        </div>
+        <span>{copy("Retained for 7 days by default", "默认保留 7 天", "預設保留 7 天", "デフォルトで7日間保持")}</span>
+      </div>
+      <section
+        className="request-detail-view"
+        role="tabpanel"
+        id={`${tabPrefix}-${activeView}-panel`}
+        aria-labelledby={`${tabPrefix}-${activeView}-tab`}
+      >
+        {activeView === "content" && <RequestPlaintext plaintext={plaintext} error={plaintextError} />}
+        {activeView === "http" && plaintext && <HttpTraceInspector plaintext={plaintext} />}
+        {activeView === "routing" && <ReceiptDetails receipt={receipt} />}
+      </section>
     </div>
   );
 }
