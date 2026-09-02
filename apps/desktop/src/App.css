@@ -1148,34 +1148,11 @@ body :is(input, textarea, [contenteditable="true"]) {
 }
 
 .request-detail-dialog .receipt-conversion-step {
-  position: relative;
   gap: 9px;
   padding: 0 18px 0 0;
   border: 0;
   border-radius: 0;
   background: transparent;
-}
-
-.request-detail-dialog .receipt-conversion-step:not(:last-child)::after {
-  content: "";
-  position: absolute;
-  z-index: 0;
-  top: 10px;
-  left: 20px;
-  right: 0;
-  height: 1px;
-  background: var(--line-strong);
-}
-
-.request-detail-dialog .receipt-conversion-step > .receipt-event-index,
-.request-detail-dialog .receipt-conversion-step > div {
-  position: relative;
-  z-index: 1;
-}
-
-.request-detail-dialog .receipt-conversion-step > div {
-  padding-right: 2px;
-  background: var(--surface);
 }
 
 .request-detail-dialog .receipt-conversion-step strong { font-size: 10.5px; }
@@ -1515,14 +1492,6 @@ body :is(input, textarea, [contenteditable="true"]) {
   .request-detail-dialog .receipt-timeline { grid-template-columns: 1fr; gap: 20px; }
   .request-detail-dialog .receipt-conversion-flow { grid-template-columns: 1fr; gap: 12px; }
   .request-detail-dialog .receipt-conversion-step { padding: 0; }
-  .request-detail-dialog .receipt-conversion-step:not(:last-child)::after {
-    top: 20px;
-    bottom: -12px;
-    left: 10px;
-    right: auto;
-    width: 1px;
-    height: auto;
-  }
   .request-detail-dialog .request-plaintext-grid { grid-template-columns: 1fr; }
   .request-detail-dialog .request-plaintext-panel + .request-plaintext-panel {
     padding-left: 0;

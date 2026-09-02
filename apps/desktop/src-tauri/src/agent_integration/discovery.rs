@@ -24,6 +24,7 @@ use super::types::{
 
 const CONFIG_READ_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const REGISTRY_SCAN_WORKERS: usize = 3;
+const CODEX_DESKTOP_PROBE_START_BUDGET: Duration = Duration::from_secs(8);
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const OUTPUT_READER_GRACE: Duration = Duration::from_millis(100);
 
@@ -147,9 +148,7 @@ fn run_probe_once(
         }
     };
     command.env("PATH", path);
-    configure_probe_window(&mut command, environment.platform);
-
-    let mut child = match command.group_spawn() {
+    let mut child = match spawn_probe_command(&mut command, environment.platform) {
         Ok(child) => child,
         Err(_) => {
             return broken_probe(ReasonCode::ExecutableNotRunnable, "版本探测进程无法启动");
@@ -273,14 +272,24 @@ fn probe_creation_flags(platform: Platform) -> u32 {
     }
 }
 
-#[cfg(windows)]
-fn configure_probe_window(command: &mut Command, platform: Platform) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(probe_creation_flags(platform));
-}
+fn spawn_probe_command(
+    command: &mut Command,
+    _platform: Platform,
+) -> std::io::Result<command_group::GroupChild> {
+    #[cfg(windows)]
+    if _platform == Platform::Windows {
+        // `CommandGroup::group_spawn()` creates a builder whose default
+        // creation flags overwrite flags previously set on `Command`.
+        // Pass CREATE_NO_WINDOW through that builder so Windows Terminal does
+        // not open a console for every Agent version probe.
+        return command
+            .group()
+            .creation_flags(probe_creation_flags(_platform))
+            .spawn();
+    }
 
-#[cfg(not(windows))]
-fn configure_probe_window(_command: &mut Command, _platform: Platform) {}
+    command.group_spawn()
+}
 
 fn passive_file_probe(executable: &Path, observed_entry: &Path) -> ProbeOutcome {
     let executable = std::fs::canonicalize(executable);
@@ -371,7 +380,7 @@ fn resolve_probe_command(
                     arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
                 });
             }
-            let script = if unsupported_script_shim(executable, environment.platform) {
+            let entry = if unsupported_script_shim(executable, environment.platform) {
                 resolve_npm_shim_entry(&canonical_executable)
                     .map_err(|message| broken_probe(ReasonCode::ExecutableNotRunnable, message))?
             } else {
@@ -381,7 +390,19 @@ fn resolve_probe_command(
                         "版本探测脚本既不是受支持的 npm shim，也不匹配内置 node shebang",
                     ));
                 }
-                canonical_executable.clone()
+                NpmShimEntry::NodeScript(canonical_executable.clone())
+            };
+            if let NpmShimEntry::NativeExecutable(program) = entry {
+                return Ok(ResolvedProbeCommand {
+                    observed_executable: observed_entry.to_path_buf(),
+                    canonical_executable,
+                    observed_program: program.clone(),
+                    canonical_program: program,
+                    arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
+                });
+            }
+            let NpmShimEntry::NodeScript(script) = entry else {
+                unreachable!();
             };
             let (observed_program, canonical_program) = resolve_interpreter(
                 observed_entry,
@@ -405,7 +426,13 @@ fn resolve_probe_command(
     }
 }
 
-fn resolve_npm_shim_entry(shim: &Path) -> Result<PathBuf, &'static str> {
+#[derive(Debug, Eq, PartialEq)]
+enum NpmShimEntry {
+    NodeScript(PathBuf),
+    NativeExecutable(PathBuf),
+}
+
+fn resolve_npm_shim_entry(shim: &Path) -> Result<NpmShimEntry, &'static str> {
     const SHIM_LIMIT: u64 = 64 * 1024;
     const PACKAGE_LIMIT: u64 = 64 * 1024;
 
@@ -416,6 +443,9 @@ fn resolve_npm_shim_entry(shim: &Path) -> Result<PathBuf, &'static str> {
     let text = std::fs::read_to_string(shim).map_err(|_| "npm shim 不是 UTF-8 文本")?;
     if text.contains('\0') || text.lines().count() > 256 {
         return Err("npm shim 超出安全解析边界");
+    }
+    if let Some(executable) = resolve_native_cmd_launcher(shim, &text)? {
+        return Ok(NpmShimEntry::NativeExecutable(executable));
     }
     let parent = shim.parent().ok_or("npm shim 没有父目录")?;
     let node_modules = std::fs::canonicalize(parent.join("node_modules"))
@@ -497,9 +527,6 @@ fn resolve_npm_shim_entry(shim: &Path) -> Result<PathBuf, &'static str> {
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if !matches!(extension.as_str(), "js" | "mjs" | "cjs") {
-        return Err("npm package.json.bin 不是受支持的 node 脚本");
-    }
     let entry = std::fs::canonicalize(package_root.join(bin_path))
         .map_err(|_| "npm package.json.bin 入口不存在")?;
     if !entry.starts_with(&package_root)
@@ -516,7 +543,56 @@ fn resolve_npm_shim_entry(shim: &Path) -> Result<PathBuf, &'static str> {
     if !lower.contains(&declared) {
         return Err("npm shim 与 package.json.bin 不一致");
     }
-    Ok(entry)
+    match extension.as_str() {
+        "js" | "mjs" | "cjs" => Ok(NpmShimEntry::NodeScript(entry)),
+        "exe" if is_native_executable(&entry) => Ok(NpmShimEntry::NativeExecutable(entry)),
+        _ => Err("npm package.json.bin 不是受支持的 node 脚本或原生程序"),
+    }
+}
+
+/// Accept the shell-free subset used by native npm launchers: an optional
+/// `@echo off` followed by one quoted absolute native executable and `%*`.
+/// Token Station executes the resolved PE directly and never invokes cmd.exe.
+fn resolve_native_cmd_launcher(shim: &Path, text: &str) -> Result<Option<PathBuf>, &'static str> {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let command = match lines.as_slice() {
+        [command] => *command,
+        [echo, command] if echo.eq_ignore_ascii_case("@echo off") => *command,
+        _ => return Ok(None),
+    };
+    let Some(quoted) = command.strip_prefix('"') else {
+        return Ok(None);
+    };
+    let Some((program, arguments)) = quoted.split_once('"') else {
+        return Err("原生 npm shim 的引号不完整");
+    };
+    if arguments.trim() != "%*" || program.is_empty() {
+        return Ok(None);
+    }
+    let program = PathBuf::from(program);
+    if !program.is_absolute() {
+        return Err("原生 npm shim 目标不是绝对路径");
+    }
+    let command_name = shim
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or("npm shim 命令名无效")?;
+    let target_name = program
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or("原生 npm shim 目标名称无效")?;
+    if !target_name.eq_ignore_ascii_case(command_name) {
+        return Err("原生 npm shim 目标名称与命令不一致");
+    }
+    let canonical = std::fs::canonicalize(program).map_err(|_| "原生 npm shim 目标不存在")?;
+    if !is_native_executable(&canonical) {
+        return Err("原生 npm shim 目标不是可识别的原生程序");
+    }
+    Ok(Some(canonical))
 }
 
 fn matches_declared_env_shebang(executable: &Path, candidates: &[String]) -> bool {
@@ -751,9 +827,29 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
         descriptor: &AgentDescriptor,
         scanned_at_ms: u64,
     ) -> Vec<DiscoveryRecord> {
-        let mut installations = collect_installations(
+        self.scan_descriptor_candidates(
+            descriptor,
+            scanned_at_ms,
             executable_candidates(descriptor, &self.environment),
+        )
+    }
+
+    fn scan_descriptor_candidates(
+        &self,
+        descriptor: &AgentDescriptor,
+        scanned_at_ms: u64,
+        candidates: Vec<ExecutableCandidate>,
+    ) -> Vec<DiscoveryRecord> {
+        let (candidates, mut prefetched_probe) = select_windows_codex_desktop_candidate(
+            candidates,
+            descriptor,
+            &self.environment,
+            &self.runner,
+        );
+        let mut installations = collect_installations(
+            candidates,
             self.environment.platform,
+            &descriptor.version_probe,
         );
         if installations.is_empty() {
             return Vec::new();
@@ -777,12 +873,24 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                 );
                 let mut diagnostics = installation.diagnostics;
                 let probe = if installation.probe_allowed {
-                    self.runner.run(
-                        &installation.canonical_path,
-                        &installation.observed_probe_path,
-                        &descriptor.version_probe,
-                        &self.environment,
-                    )
+                    let installation_identity =
+                        path_identity(&installation.identity_path, self.environment.platform);
+                    if prefetched_probe
+                        .as_ref()
+                        .is_some_and(|probe| probe.identity == installation_identity)
+                    {
+                        prefetched_probe
+                            .take()
+                            .expect("matching prefetched probe must still be present")
+                            .outcome
+                    } else {
+                        self.runner.run(
+                            &installation.canonical_probe_path,
+                            &installation.observed_probe_path,
+                            &descriptor.version_probe,
+                            &self.environment,
+                        )
+                    }
                 } else {
                     broken_probe(
                         ReasonCode::ExecutableNotRunnable,
@@ -802,17 +910,17 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                     .iter()
                     .any(|evidence| evidence.is_path_default);
                 let (binary_source, upgrade_command) = classify_binary_installation(
-                    &installation.canonical_path,
+                    &installation.identity_path,
                     &installation.evidence,
                 );
-                let (modified_at_ms, binary_sha256) = binary_facts(&installation.canonical_path);
+                let (modified_at_ms, binary_sha256) = binary_facts(&installation.identity_path);
                 DiscoveryRecord {
                     agent_id: descriptor.agent_id.clone(),
                     executable_path: installation
                         .observed_probe_path
                         .to_string_lossy()
                         .into_owned(),
-                    canonical_path: installation.canonical_path.to_string_lossy().into_owned(),
+                    canonical_path: installation.identity_path.to_string_lossy().into_owned(),
                     binary_source,
                     modified_at_ms,
                     binary_sha256,
@@ -832,6 +940,99 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
             })
             .collect()
     }
+}
+
+/// Codex Desktop can retain several update directories. Probe its candidates
+/// newest-first and keep one result before general installation conflict
+/// handling. Preserve the newest failure when none of the candidates run so
+/// discovery still reports a useful broken installation. Return the selected
+/// probe result with its stable identity so record construction never launches
+/// the same candidate a second time or loses a transiently successful result.
+/// Stop starting new candidates after a descriptor-level start budget. Every
+/// started process keeps its own hard timeout. A directory full of stale or
+/// hostile update entries therefore cannot stall the registry scan for minutes.
+struct PrefetchedProbe {
+    identity: String,
+    outcome: ProbeOutcome,
+}
+
+fn select_windows_codex_desktop_candidate<R: ProbeRunner>(
+    candidates: Vec<ExecutableCandidate>,
+    descriptor: &AgentDescriptor,
+    environment: &ScanEnvironment,
+    runner: &R,
+) -> (Vec<ExecutableCandidate>, Option<PrefetchedProbe>) {
+    select_windows_codex_desktop_candidate_with_start_budget(
+        candidates,
+        descriptor,
+        environment,
+        runner,
+        CODEX_DESKTOP_PROBE_START_BUDGET,
+    )
+}
+
+fn select_windows_codex_desktop_candidate_with_start_budget<R: ProbeRunner>(
+    candidates: Vec<ExecutableCandidate>,
+    descriptor: &AgentDescriptor,
+    environment: &ScanEnvironment,
+    runner: &R,
+    probe_start_budget: Duration,
+) -> (Vec<ExecutableCandidate>, Option<PrefetchedProbe>) {
+    if descriptor.agent_id != "codex" || environment.platform != Platform::Windows {
+        return (candidates, None);
+    }
+
+    let mut desktop_candidates = Vec::new();
+    let mut retained = Vec::new();
+    for candidate in candidates {
+        if candidate.source == DiscoverySource::PackageManager {
+            desktop_candidates.push(candidate);
+        } else {
+            retained.push(candidate);
+        }
+    }
+
+    let mut first_failure = None;
+    let mut selected = None;
+    let deadline = Instant::now() + probe_start_budget;
+    for candidate in desktop_candidates {
+        if first_failure.is_some() && Instant::now() >= deadline {
+            break;
+        }
+        let canonical = match std::fs::canonicalize(&candidate.path) {
+            Ok(path) => path,
+            Err(_) => {
+                if first_failure.is_none() {
+                    first_failure = Some((candidate, None));
+                }
+                continue;
+            }
+        };
+        let outcome = runner.run(
+            &canonical,
+            &candidate.path,
+            &descriptor.version_probe,
+            environment,
+        );
+        let prefetched = PrefetchedProbe {
+            identity: path_identity(&canonical, environment.platform),
+            outcome,
+        };
+        if prefetched.outcome.runnable {
+            selected = Some((candidate, Some(prefetched)));
+            break;
+        }
+        if first_failure.is_none() {
+            first_failure = Some((candidate, Some(prefetched)));
+        }
+    }
+
+    let mut prefetched_probe = None;
+    if let Some((candidate, probe)) = selected.or(first_failure) {
+        retained.insert(0, candidate);
+        prefetched_probe = probe;
+    }
+    (retained, prefetched_probe)
 }
 
 fn classify_binary_installation(
@@ -1128,7 +1329,8 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
 }
 
 struct Installation {
-    canonical_path: PathBuf,
+    identity_path: PathBuf,
+    canonical_probe_path: PathBuf,
     observed_probe_path: PathBuf,
     evidence: Vec<DiscoveryEvidence>,
     path_orders: Vec<Option<usize>>,
@@ -1139,6 +1341,7 @@ struct Installation {
 fn collect_installations(
     candidates: Vec<ExecutableCandidate>,
     platform: Platform,
+    probe: &VersionProbe,
 ) -> BTreeMap<String, Installation> {
     let mut installations = BTreeMap::new();
     for candidate in candidates {
@@ -1170,7 +1373,26 @@ fn collect_installations(
             });
         }
 
-        let identity = path_identity(&canonical_path, platform);
+        // npm and package-manager installers may place several cmd wrappers on
+        // PATH for one native executable. They are evidence for one install,
+        // not independent installations. Reuse the same strict, shell-free
+        // resolver used by the probe and collapse only wrappers that resolve to
+        // the exact same native program. Distinct targets remain conflicts.
+        let identity_path = if platform == Platform::Windows
+            && matches!(
+                probe.runtime.as_ref(),
+                Some(ProbeRuntime::NodePackage { .. })
+            )
+            && unsupported_script_shim(&canonical_path, platform)
+        {
+            match resolve_npm_shim_entry(&canonical_path) {
+                Ok(NpmShimEntry::NativeExecutable(target)) => target,
+                _ => canonical_path.clone(),
+            }
+        } else {
+            canonical_path.clone()
+        };
+        let identity = path_identity(&identity_path, platform);
         let evidence = DiscoveryEvidence {
             source: candidate.source,
             observed_path: candidate.path.to_string_lossy().into_owned(),
@@ -1190,7 +1412,8 @@ fn collect_installations(
                 installation.diagnostics.extend(diagnostics.clone());
             })
             .or_insert_with(|| Installation {
-                canonical_path,
+                identity_path,
+                canonical_probe_path: canonical_path,
                 observed_probe_path: candidate.path,
                 evidence: vec![evidence],
                 path_orders: vec![candidate.path_order],
@@ -1248,6 +1471,9 @@ fn mark_path_default(installations: &mut BTreeMap<String, Installation>) {
             })
             .map(|evidence| PathBuf::from(&evidence.observed_path))
         {
+            if let Ok(canonical) = std::fs::canonicalize(&selected) {
+                installation.canonical_probe_path = canonical;
+            }
             installation.observed_probe_path = selected;
         }
     }
@@ -2030,6 +2256,80 @@ mod tests {
         }
     }
 
+    struct CodexFallbackProbe;
+
+    impl ProbeRunner for CodexFallbackProbe {
+        fn run(
+            &self,
+            executable: &Path,
+            _observed_entry: &Path,
+            _probe: &VersionProbe,
+            _environment: &ScanEnvironment,
+        ) -> ProbeOutcome {
+            let runnable = executable
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|directory| directory == "old");
+            ProbeOutcome {
+                runnable,
+                version_raw: runnable.then(|| "codex-cli 1.2.3".to_string()),
+                version_normalized: runnable.then(|| "1.2.3".to_string()),
+                diagnostics: (!runnable)
+                    .then(|| Diagnostic {
+                        reason_code: ReasonCode::ExecutableNotRunnable,
+                        message: "fixture failure".to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
+            }
+        }
+    }
+
+    struct SucceedsOnceProbe {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ProbeRunner for SucceedsOnceProbe {
+        fn run(
+            &self,
+            _executable: &Path,
+            _observed_entry: &Path,
+            _probe: &VersionProbe,
+            _environment: &ScanEnvironment,
+        ) -> ProbeOutcome {
+            let runnable = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            ProbeOutcome {
+                runnable,
+                version_raw: runnable.then(|| "codex-cli 1.2.3".to_string()),
+                version_normalized: runnable.then(|| "1.2.3".to_string()),
+                diagnostics: (!runnable)
+                    .then(|| Diagnostic {
+                        reason_code: ReasonCode::ExecutableNotRunnable,
+                        message: "fixture transient failure".to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
+            }
+        }
+    }
+
+    struct CountingFailureProbe {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ProbeRunner for CountingFailureProbe {
+        fn run(
+            &self,
+            _executable: &Path,
+            _observed_entry: &Path,
+            _probe: &VersionProbe,
+            _environment: &ScanEnvironment,
+        ) -> ProbeOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            broken_probe(ReasonCode::ExecutableNotRunnable, "fixture failure")
+        }
+    }
+
     #[cfg(unix)]
     struct ConcurrentProbe {
         active: Arc<AtomicUsize>,
@@ -2180,7 +2480,7 @@ mod tests {
 
         assert_eq!(
             resolve_npm_shim_entry(&shim).unwrap(),
-            std::fs::canonicalize(&entry).unwrap()
+            NpmShimEntry::NodeScript(std::fs::canonicalize(&entry).unwrap())
         );
 
         std::fs::write(
@@ -2189,6 +2489,234 @@ mod tests {
         )
         .unwrap();
         assert!(resolve_npm_shim_entry(&shim).is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn native_cmd_launcher_resolves_only_a_matching_absolute_binary() {
+        let root = scratch("native-cmd-shim");
+        let executable = root.join("runtime/opencode.exe");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let shim = root.join("opencode.cmd");
+        let body = format!("@echo off\n\"{}\" %*\n", executable.display());
+        std::fs::write(&shim, body).unwrap();
+
+        assert_eq!(
+            resolve_npm_shim_entry(&shim).unwrap(),
+            NpmShimEntry::NativeExecutable(std::fs::canonicalize(&executable).unwrap())
+        );
+
+        let mismatched = root.join("other.cmd");
+        let body = format!("@echo off\n\"{}\" %*\n", executable.display());
+        std::fs::write(&mismatched, body).unwrap();
+        assert!(resolve_npm_shim_entry(&mismatched).is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn native_cmd_wrappers_keep_the_target_as_the_stable_installation_identity() {
+        let root = scratch("native-cmd-wrapper-dedupe");
+        let executable = root.join("runtime/opencode.exe");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let body = format!("@echo off\n\"{}\" %*\n", executable.display());
+        let first = root.join("first/opencode.cmd");
+        let second = root.join("second/opencode.cmd");
+        for shim in [&first, &second] {
+            std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+            std::fs::write(shim, &body).unwrap();
+        }
+        let candidates = [
+            ExecutableCandidate {
+                path: first.clone(),
+                source: DiscoverySource::KnownPath,
+                path_order: None,
+            },
+            ExecutableCandidate {
+                path: second.clone(),
+                source: DiscoverySource::Path,
+                path_order: Some(0),
+            },
+        ];
+        let registry = AgentRegistry::builtin().unwrap();
+        let probe = &registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "opencode")
+            .unwrap()
+            .version_probe;
+
+        let mut first_scan =
+            collect_installations(candidates.clone().into(), Platform::Windows, probe);
+        mark_path_default(&mut first_scan);
+
+        assert_eq!(first_scan.len(), 1);
+        let installation = first_scan.values().next().unwrap();
+        assert_eq!(installation.evidence.len(), 2);
+        assert_eq!(installation.observed_probe_path, second);
+        assert_eq!(
+            installation.identity_path,
+            std::fs::canonicalize(&executable).unwrap()
+        );
+
+        let mut reversed = candidates;
+        reversed[0].path_order = Some(0);
+        reversed[1].path_order = Some(1);
+        let mut second_scan = collect_installations(reversed.into(), Platform::Windows, probe);
+        mark_path_default(&mut second_scan);
+        let rescanned = second_scan.values().next().unwrap();
+        assert_eq!(rescanned.observed_probe_path, first);
+        assert_eq!(rescanned.identity_path, installation.identity_path);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_desktop_candidate_falls_back_to_the_newest_runnable_cli() {
+        let root = scratch("codex-runnable-fallback");
+        let newest = root.join("new/codex.exe");
+        let older = root.join("old/codex.exe");
+        for executable in [&newest, &older] {
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(executable, b"fixture").unwrap();
+        }
+        let candidates = vec![
+            ExecutableCandidate {
+                path: newest,
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            },
+            ExecutableCandidate {
+                path: older.clone(),
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            },
+        ];
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "codex")
+            .unwrap();
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: BTreeSet::new(),
+            child_environment: BTreeMap::new(),
+        };
+
+        let (selected, prefetched) = select_windows_codex_desktop_candidate(
+            candidates,
+            descriptor,
+            &context,
+            &CodexFallbackProbe,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, older);
+        let prefetched = prefetched.expect("the selected candidate must retain its probe result");
+        assert!(prefetched.outcome.runnable);
+        assert_eq!(
+            prefetched.identity,
+            path_identity(
+                &std::fs::canonicalize(&selected[0].path).unwrap(),
+                Platform::Windows
+            )
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_desktop_scan_reuses_the_selected_probe_outcome() {
+        let root = scratch("codex-single-probe");
+        let executable = root.join("current/codex.exe");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"fixture").unwrap();
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "codex")
+            .unwrap();
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: BTreeSet::new(),
+            child_environment: BTreeMap::new(),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scanner = DiscoveryScanner::new(
+            context,
+            SucceedsOnceProbe {
+                calls: Arc::clone(&calls),
+            },
+        );
+
+        let records = scanner.scan_descriptor_candidates(
+            descriptor,
+            1,
+            vec![ExecutableCandidate {
+                path: executable,
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            }],
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].runnable);
+        assert_eq!(records[0].version_normalized.as_deref(), Some("1.2.3"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_desktop_fallback_stops_starting_candidates_after_its_start_budget() {
+        let root = scratch("codex-probe-budget");
+        let first = root.join("first/codex.exe");
+        let second = root.join("second/codex.exe");
+        for executable in [&first, &second] {
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(executable, b"fixture").unwrap();
+        }
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "codex")
+            .unwrap();
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: BTreeSet::new(),
+            child_environment: BTreeMap::new(),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let candidates = [first.clone(), second]
+            .into_iter()
+            .map(|path| ExecutableCandidate {
+                path,
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            })
+            .collect();
+
+        let (selected, prefetched) = select_windows_codex_desktop_candidate_with_start_budget(
+            candidates,
+            descriptor,
+            &context,
+            &CountingFailureProbe {
+                calls: Arc::clone(&calls),
+            },
+            Duration::ZERO,
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, first);
+        assert!(!prefetched.unwrap().outcome.runnable);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3098,6 +3626,68 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_version_probe_helper() {
+        if std::env::var_os("TOKEN_STATION_TEST_VERSION_PROBE").is_some() {
+            // SAFETY: GetConsoleWindow has no preconditions and only returns
+            // the calling process's current console handle, if one exists.
+            let console = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
+            println!(
+                "agent-cli 1.2.3 console={}",
+                if console.is_null() {
+                    "absent"
+                } else {
+                    "present"
+                }
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_agent_probe_does_not_attach_a_console() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let mut child_environment = BTreeMap::from([(
+            "TOKEN_STATION_TEST_VERSION_PROBE".to_string(),
+            "1".to_string(),
+        )]);
+        for name in ["SYSTEMROOT", "WINDIR"] {
+            if let Ok(value) = std::env::var(name) {
+                child_environment.insert(name.to_string(), value);
+            }
+        }
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: Default::default(),
+            child_environment,
+        };
+        let probe = VersionProbe {
+            argv: vec![
+                "agent_integration::discovery::tests::windows_version_probe_helper".to_string(),
+                "--exact".to_string(),
+                "--nocapture".to_string(),
+            ],
+            timeout_ms: 2_000,
+            max_output_bytes: 65_536,
+            output_matcher: VersionOutputMatcher::SemverAnywhere,
+            retry_on_timeout: false,
+            runtime: None,
+        };
+
+        let outcome = run_probe_once(&executable, &executable, &probe, &context);
+
+        assert!(outcome.runnable);
+        assert_eq!(outcome.version_normalized.as_deref(), Some("1.2.3"));
+        assert!(outcome
+            .version_raw
+            .as_deref()
+            .is_some_and(|raw| raw.contains("console=absent")));
+        assert!(outcome.diagnostics.is_empty());
+    }
+
     #[test]
     fn discovery_invalid_utf8_raw_output_stays_within_the_byte_limit() {
         let raw = sanitize_output(&[0xff; 64], 16).unwrap();
@@ -3362,6 +3952,10 @@ mod tests {
         let records = scanner.scan_registry(&registry);
 
         for record in records {
+            if record.agent_id == "opencode" {
+                assert!(record.runnable, "{:?}", record.diagnostics);
+                assert!(record.conflict_group.is_none(), "{:?}", record.diagnostics);
+            }
             assert!(Path::new(&record.executable_path).exists());
             if matches!(record.agent_id.as_str(), "openclaw" | "nous-hermes-agent") {
                 assert!(

@@ -275,6 +275,12 @@ describe("retained page theme styles", () => {
     expect(actionsRule).toMatch(/background:\s*transparent/);
   });
 
+  it("keeps request protocol steps free of decorative connector lines", () => {
+    expect(appCss).not.toMatch(
+      /[^{}]*\.receipt-conversion-(?:flow|step)[^{}]*::(?:before|after)[^{}]*\{/,
+    );
+  });
+
   it("keeps a one-row global route snapshot at the top of its summary card", () => {
     const routeSnapshotRule = appCss.match(
       /\.overview-route-summary \.overview-route-list\s*\{([^}]*)\}/s,
