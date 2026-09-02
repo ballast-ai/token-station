@@ -2725,7 +2725,7 @@ mod tests {
                 DocumentFormat::Json5,
                 "{ models: { providers: {} }, agents: { defaults: {} } }",
             ),
-            ("opencode-v1", DocumentFormat::Json, r#"{"provider":{}}"#),
+            ("opencode-v1", DocumentFormat::Json5, r#"{"provider":{}}"#),
             (
                 "workbuddy-v1",
                 DocumentFormat::Json,
@@ -3334,7 +3334,7 @@ mod tests {
                 primary: LifecycleFileFixture {
                     path: root.join("home/.config/opencode/opencode.json"),
                     baseline: br#"{"provider":null,"keep":"opencode"}"#,
-                    format: DocumentFormat::Json,
+                    format: DocumentFormat::Json5,
                     marker: "opencode",
                 },
                 companions: Vec::new(),

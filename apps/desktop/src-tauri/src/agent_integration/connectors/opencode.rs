@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::{path, ConnectInput, Connector, ConnectorCapabilities};
-use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
+use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
 pub struct OpenCodeConnector;
@@ -11,7 +11,7 @@ pub(super) static CONNECTOR: OpenCodeConnector = OpenCodeConnector;
 static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     connector_id: "opencode-v1",
     agent_id: "opencode",
-    label: "OpenCode opencode.json",
+    label: "OpenCode opencode.json/jsonc",
     adapter_id: "agent-openai",
     base_url_shape: crate::agent_integration::types::BaseUrlShape::OriginV1,
     platforms: &[
@@ -20,7 +20,7 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
         crate::agent_integration::types::Platform::Windows,
         crate::agent_integration::types::Platform::Wsl,
     ],
-    config_format: DocumentFormat::Json,
+    config_format: DocumentFormat::Json5,
     config_path_template: "${HOME}/.config/opencode/opencode.json",
     // Write only provider.tokenstation. The model is selected as tokenstation/auto
     // inside that block, not through the top-level model. owned_fields must match
@@ -43,11 +43,11 @@ impl Connector for OpenCodeConnector {
     }
 
     fn label(&self) -> &'static str {
-        "OpenCode opencode.json"
+        "OpenCode opencode.json/jsonc"
     }
 
     fn format(&self) -> DocumentFormat {
-        DocumentFormat::Json
+        DocumentFormat::Json5
     }
 
     fn config_path(&self, home: &Path) -> PathBuf {
@@ -85,9 +85,10 @@ impl Connector for OpenCodeConnector {
     }
 
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String> {
-        let ConfigDocument::Json(root) = document else {
+        if !matches!(document, ConfigDocument::Json5(_)) {
             return Err("OpenCode 连接器收到错误的配置格式".to_string());
-        };
+        }
+        let root = semantic_json(document)?;
         if root
             .get("provider")
             .is_none_or(|value| value.is_object() || value.is_null())
@@ -148,9 +149,7 @@ impl Connector for OpenCodeConnector {
         input: &ConnectInput<'_>,
     ) -> Result<(), String> {
         self.validate_source(document)?;
-        let ConfigDocument::Json(root) = document else {
-            unreachable!();
-        };
+        let root = semantic_json(document)?;
         let provider = &root["provider"]["tokenstation"];
         let token = input
             .token
@@ -207,6 +206,9 @@ impl Connector for OpenCodeConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_integration::config_codec::{
+        apply_patch, parse_source_bytes, render_document,
+    };
     use crate::agent_integration::connectors::AgentModelMetadata;
 
     #[test]
@@ -236,5 +238,38 @@ mod tests {
         assert!(OpenCodeConnector
             .success_message(&input)
             .contains("输出上限使用安全默认值 8192"));
+    }
+
+    #[test]
+    fn jsonc_connection_preserves_comments_and_unrelated_fields() {
+        let source = br#"{
+          // keep this user comment
+          "theme": "system",
+          "provider": { "existing": { "name": "user" } },
+        }"#;
+        let mut document =
+            parse_source_bytes(Some(source), DocumentFormat::Json5, "OpenCode").unwrap();
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("fixture-local-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        OpenCodeConnector.validate_source(&document).unwrap();
+        apply_patch(
+            &mut document,
+            &OpenCodeConnector.connect_patch(&input).unwrap(),
+        )
+        .unwrap();
+        OpenCodeConnector
+            .validate_projected(&document, &input)
+            .unwrap();
+        let rendered = render_document(&document, "OpenCode").unwrap();
+
+        assert!(rendered.contains("// keep this user comment"));
+        assert!(rendered.contains("\"theme\": \"system\""));
+        assert!(rendered.contains("\"existing\""));
+        assert!(rendered.contains("\"tokenstation\""));
     }
 }

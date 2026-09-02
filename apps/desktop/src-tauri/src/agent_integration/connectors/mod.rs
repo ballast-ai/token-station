@@ -1272,7 +1272,7 @@ mod tests {
             adapter_ready: true,
             model_metadata: Some(&metadata),
         };
-        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json5, "OpenCode").unwrap();
         apply_patch(
             &mut opencode,
             &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),
@@ -1422,7 +1422,7 @@ experimental_bearer_token = "fixture-codex-key"
             adapter_ready: true,
             model_metadata: Some(&metadata),
         };
-        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json5, "OpenCode").unwrap();
         apply_patch(
             &mut opencode,
             &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),
