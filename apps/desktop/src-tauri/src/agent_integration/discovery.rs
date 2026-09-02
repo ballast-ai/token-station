@@ -24,6 +24,7 @@ use super::types::{
 
 const CONFIG_READ_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const REGISTRY_SCAN_WORKERS: usize = 3;
+const CODEX_DESKTOP_PROBE_BUDGET: Duration = Duration::from_secs(8);
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const OUTPUT_READER_GRACE: Duration = Duration::from_millis(100);
 
@@ -826,8 +827,21 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
         descriptor: &AgentDescriptor,
         scanned_at_ms: u64,
     ) -> Vec<DiscoveryRecord> {
-        let candidates = select_windows_codex_desktop_candidate(
+        self.scan_descriptor_candidates(
+            descriptor,
+            scanned_at_ms,
             executable_candidates(descriptor, &self.environment),
+        )
+    }
+
+    fn scan_descriptor_candidates(
+        &self,
+        descriptor: &AgentDescriptor,
+        scanned_at_ms: u64,
+        candidates: Vec<ExecutableCandidate>,
+    ) -> Vec<DiscoveryRecord> {
+        let (candidates, mut prefetched_probe) = select_windows_codex_desktop_candidate(
+            candidates,
             descriptor,
             &self.environment,
             &self.runner,
@@ -859,12 +873,24 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                 );
                 let mut diagnostics = installation.diagnostics;
                 let probe = if installation.probe_allowed {
-                    self.runner.run(
-                        &installation.canonical_probe_path,
-                        &installation.observed_probe_path,
-                        &descriptor.version_probe,
-                        &self.environment,
-                    )
+                    let installation_identity =
+                        path_identity(&installation.identity_path, self.environment.platform);
+                    if prefetched_probe
+                        .as_ref()
+                        .is_some_and(|probe| probe.identity == installation_identity)
+                    {
+                        prefetched_probe
+                            .take()
+                            .expect("matching prefetched probe must still be present")
+                            .outcome
+                    } else {
+                        self.runner.run(
+                            &installation.canonical_probe_path,
+                            &installation.observed_probe_path,
+                            &descriptor.version_probe,
+                            &self.environment,
+                        )
+                    }
                 } else {
                     broken_probe(
                         ReasonCode::ExecutableNotRunnable,
@@ -919,15 +945,41 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
 /// Codex Desktop can retain several update directories. Probe its candidates
 /// newest-first and keep one result before general installation conflict
 /// handling. Preserve the newest failure when none of the candidates run so
-/// discovery still reports a useful broken installation.
+/// discovery still reports a useful broken installation. Return the selected
+/// probe result with its stable identity so record construction never launches
+/// the same candidate a second time or loses a transiently successful result.
+/// Stop starting new candidates after a descriptor-level budget; every started
+/// process keeps its own hard timeout, so a directory full of stale or hostile
+/// update entries cannot stall the entire registry scan for minutes.
+struct PrefetchedProbe {
+    identity: String,
+    outcome: ProbeOutcome,
+}
+
 fn select_windows_codex_desktop_candidate<R: ProbeRunner>(
     candidates: Vec<ExecutableCandidate>,
     descriptor: &AgentDescriptor,
     environment: &ScanEnvironment,
     runner: &R,
-) -> Vec<ExecutableCandidate> {
+) -> (Vec<ExecutableCandidate>, Option<PrefetchedProbe>) {
+    select_windows_codex_desktop_candidate_within(
+        candidates,
+        descriptor,
+        environment,
+        runner,
+        CODEX_DESKTOP_PROBE_BUDGET,
+    )
+}
+
+fn select_windows_codex_desktop_candidate_within<R: ProbeRunner>(
+    candidates: Vec<ExecutableCandidate>,
+    descriptor: &AgentDescriptor,
+    environment: &ScanEnvironment,
+    runner: &R,
+    probe_budget: Duration,
+) -> (Vec<ExecutableCandidate>, Option<PrefetchedProbe>) {
     if descriptor.agent_id != "codex" || environment.platform != Platform::Windows {
-        return candidates;
+        return (candidates, None);
     }
 
     let mut desktop_candidates = Vec::new();
@@ -942,12 +994,16 @@ fn select_windows_codex_desktop_candidate<R: ProbeRunner>(
 
     let mut first_failure = None;
     let mut selected = None;
+    let deadline = Instant::now() + probe_budget;
     for candidate in desktop_candidates {
+        if first_failure.is_some() && Instant::now() >= deadline {
+            break;
+        }
         let canonical = match std::fs::canonicalize(&candidate.path) {
             Ok(path) => path,
             Err(_) => {
                 if first_failure.is_none() {
-                    first_failure = Some(candidate);
+                    first_failure = Some((candidate, None));
                 }
                 continue;
             }
@@ -958,19 +1014,25 @@ fn select_windows_codex_desktop_candidate<R: ProbeRunner>(
             &descriptor.version_probe,
             environment,
         );
-        if outcome.runnable {
-            selected = Some(candidate);
+        let prefetched = PrefetchedProbe {
+            identity: path_identity(&canonical, environment.platform),
+            outcome,
+        };
+        if prefetched.outcome.runnable {
+            selected = Some((candidate, Some(prefetched)));
             break;
         }
         if first_failure.is_none() {
-            first_failure = Some(candidate);
+            first_failure = Some((candidate, Some(prefetched)));
         }
     }
 
-    if let Some(candidate) = selected.or(first_failure) {
+    let mut prefetched_probe = None;
+    if let Some((candidate, probe)) = selected.or(first_failure) {
         retained.insert(0, candidate);
+        prefetched_probe = probe;
     }
-    retained
+    (retained, prefetched_probe)
 }
 
 fn classify_binary_installation(
@@ -2223,6 +2285,51 @@ mod tests {
         }
     }
 
+    struct SucceedsOnceProbe {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ProbeRunner for SucceedsOnceProbe {
+        fn run(
+            &self,
+            _executable: &Path,
+            _observed_entry: &Path,
+            _probe: &VersionProbe,
+            _environment: &ScanEnvironment,
+        ) -> ProbeOutcome {
+            let runnable = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            ProbeOutcome {
+                runnable,
+                version_raw: runnable.then(|| "codex-cli 1.2.3".to_string()),
+                version_normalized: runnable.then(|| "1.2.3".to_string()),
+                diagnostics: (!runnable)
+                    .then(|| Diagnostic {
+                        reason_code: ReasonCode::ExecutableNotRunnable,
+                        message: "fixture transient failure".to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
+            }
+        }
+    }
+
+    struct CountingFailureProbe {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ProbeRunner for CountingFailureProbe {
+        fn run(
+            &self,
+            _executable: &Path,
+            _observed_entry: &Path,
+            _probe: &VersionProbe,
+            _environment: &ScanEnvironment,
+        ) -> ProbeOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            broken_probe(ReasonCode::ExecutableNotRunnable, "fixture failure")
+        }
+    }
+
     #[cfg(unix)]
     struct ConcurrentProbe {
         active: Arc<AtomicUsize>,
@@ -2499,7 +2606,7 @@ mod tests {
             child_environment: BTreeMap::new(),
         };
 
-        let selected = select_windows_codex_desktop_candidate(
+        let (selected, prefetched) = select_windows_codex_desktop_candidate(
             candidates,
             descriptor,
             &context,
@@ -2508,6 +2615,108 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].path, older);
+        let prefetched = prefetched.expect("the selected candidate must retain its probe result");
+        assert!(prefetched.outcome.runnable);
+        assert_eq!(
+            prefetched.identity,
+            path_identity(
+                &std::fs::canonicalize(&selected[0].path).unwrap(),
+                Platform::Windows
+            )
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_desktop_scan_reuses_the_selected_probe_outcome() {
+        let root = scratch("codex-single-probe");
+        let executable = root.join("current/codex.exe");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"fixture").unwrap();
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "codex")
+            .unwrap();
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: BTreeSet::new(),
+            child_environment: BTreeMap::new(),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scanner = DiscoveryScanner::new(
+            context,
+            SucceedsOnceProbe {
+                calls: Arc::clone(&calls),
+            },
+        );
+
+        let records = scanner.scan_descriptor_candidates(
+            descriptor,
+            1,
+            vec![ExecutableCandidate {
+                path: executable,
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            }],
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].runnable);
+        assert_eq!(records[0].version_normalized.as_deref(), Some("1.2.3"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_desktop_fallback_stops_starting_candidates_after_its_budget() {
+        let root = scratch("codex-probe-budget");
+        let first = root.join("first/codex.exe");
+        let second = root.join("second/codex.exe");
+        for executable in [&first, &second] {
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(executable, b"fixture").unwrap();
+        }
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "codex")
+            .unwrap();
+        let context = ScanEnvironment {
+            platform: Platform::Windows,
+            variables: BTreeMap::new(),
+            path_entries: Vec::new(),
+            present_environment: BTreeSet::new(),
+            child_environment: BTreeMap::new(),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let candidates = [first.clone(), second]
+            .into_iter()
+            .map(|path| ExecutableCandidate {
+                path,
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            })
+            .collect();
+
+        let (selected, prefetched) = select_windows_codex_desktop_candidate_within(
+            candidates,
+            descriptor,
+            &context,
+            &CountingFailureProbe {
+                calls: Arc::clone(&calls),
+            },
+            Duration::ZERO,
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, first);
+        assert!(!prefetched.unwrap().outcome.runnable);
         std::fs::remove_dir_all(root).ok();
     }
 
