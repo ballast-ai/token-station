@@ -115,13 +115,15 @@ pub(crate) fn executable_candidates(
 ) -> Vec<ExecutableCandidate> {
     let mut candidates = Vec::new();
     if descriptor.agent_id == "codex" && environment.platform == Platform::Windows {
-        candidates.extend(windows_codex_cli_candidates(environment).into_iter().map(|path| {
-            ExecutableCandidate {
-                path,
-                source: DiscoverySource::PackageManager,
-                path_order: None,
-            }
-        }));
+        candidates.extend(
+            windows_codex_cli_candidates(environment)
+                .into_iter()
+                .map(|path| ExecutableCandidate {
+                    path,
+                    source: DiscoverySource::PackageManager,
+                    path_order: None,
+                }),
+        );
     }
     if descriptor.agent_id == "workbuddy" && environment.platform == Platform::Macos {
         candidates.extend(
@@ -764,7 +766,10 @@ fn prioritize_opencode_candidates(
             .parent()
             .map(|path| path_identity(path, environment.platform))
             .unwrap_or_default();
-        (parent_order.get(&parent).copied().unwrap_or(usize::MAX), rank(candidate))
+        (
+            parent_order.get(&parent).copied().unwrap_or(usize::MAX),
+            rank(candidate),
+        )
     });
 }
 
@@ -976,7 +981,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("Windows must expose {name}"));
             assert_eq!(context.child_environment.get(name), Some(expected));
         }
-        assert!(!context.child_environment.contains_key("TOKEN_STATION_API_KEY"));
+        assert!(!context
+            .child_environment
+            .contains_key("TOKEN_STATION_API_KEY"));
         assert!(!context.child_environment.contains_key("OPENAI_API_KEY"));
     }
 
@@ -998,9 +1005,10 @@ mod tests {
             .find(|descriptor| descriptor.agent_id == "opencode")
             .unwrap();
         let mut context = environment(Platform::Windows);
-        context
-            .variables
-            .insert("USERPROFILE".to_string(), root.to_string_lossy().into_owned());
+        context.variables.insert(
+            "USERPROFILE".to_string(),
+            root.to_string_lossy().into_owned(),
+        );
 
         let missing = config_candidates(descriptor, &context, Path::new("C:/Tools/opencode.exe"));
         assert_eq!(missing.candidates.first().unwrap().path, json);
@@ -1014,9 +1022,10 @@ mod tests {
         assert_eq!(both.candidates.first().unwrap().path, jsonc);
 
         let xdg = root.join("xdg");
-        context
-            .variables
-            .insert("XDG_CONFIG_HOME".to_string(), xdg.to_string_lossy().into_owned());
+        context.variables.insert(
+            "XDG_CONFIG_HOME".to_string(),
+            xdg.to_string_lossy().into_owned(),
+        );
         let xdg_json = xdg.join("opencode/opencode.json");
         let rooted = config_candidates(descriptor, &context, Path::new("C:/Tools/opencode.exe"));
         assert_eq!(rooted.candidates.first().unwrap().path, xdg_json);

@@ -552,10 +552,7 @@ fn resolve_npm_shim_entry(shim: &Path) -> Result<NpmShimEntry, &'static str> {
 /// Accept the shell-free subset used by native npm launchers: an optional
 /// `@echo off` followed by one quoted absolute native executable and `%*`.
 /// Token Station executes the resolved PE directly and never invokes cmd.exe.
-fn resolve_native_cmd_launcher(
-    shim: &Path,
-    text: &str,
-) -> Result<Option<PathBuf>, &'static str> {
+fn resolve_native_cmd_launcher(shim: &Path, text: &str) -> Result<Option<PathBuf>, &'static str> {
     let lines = text
         .lines()
         .map(str::trim)
@@ -1256,7 +1253,10 @@ fn collect_installations(
         // resolver used by the probe and collapse only wrappers that resolve to
         // the exact same native program. Distinct targets remain conflicts.
         let identity_path = if platform == Platform::Windows
-            && matches!(probe.runtime.as_ref(), Some(ProbeRuntime::NodePackage { .. }))
+            && matches!(
+                probe.runtime.as_ref(),
+                Some(ProbeRuntime::NodePackage { .. })
+            )
             && unsupported_script_shim(&canonical_path, platform)
         {
             match resolve_npm_shim_entry(&canonical_path) {
