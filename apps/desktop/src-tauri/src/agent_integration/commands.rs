@@ -23,7 +23,7 @@ use super::config_codec::{
     render_document, DocumentFormat,
 };
 use super::connectors::{
-    builtin_connectors, find_connector, validate_patch_ownership, AgentModelCost,
+    builtin_connectors, find_connector, owned_paths_with_legacy, validate_patch_ownership, AgentModelCost,
     AgentModelMetadata, ConnectInput, Connector,
 };
 use super::discovery::DiscoveryScanner;
@@ -31,7 +31,8 @@ use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
-    build_disconnect_plan, build_metadata_refresh_plan, build_snapshot_restore_plan,
+    build_disconnect_plan, build_metadata_refresh_plan,
+    build_metadata_refresh_plan_with_baseline, build_snapshot_restore_plan,
     companion_document_format, generate_operation_id, read_config_source, ConfigSource,
     PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED, OWNED_VALUES_CHANGED,
 };
@@ -850,7 +851,7 @@ fn prepare_connector_force_strip_owned(
     let removals = connector
         .disconnect_patch_for_document(&document)
         .map_err(AgentCommandError::internal)?;
-    validate_patch_ownership(&removals, &connector.owned_paths())
+    validate_patch_ownership(&removals, &owned_paths_with_legacy(connector))
         .map_err(AgentCommandError::internal)?;
     prepare_force_strip_projection(
         target,
@@ -1194,7 +1195,7 @@ impl AgentCommandState {
                     continue;
                 }
                 let connector = connector_for(&owned.connector_id)?;
-                if !connector.projects_model_metadata() {
+                if !connector.refreshes_managed_configuration() {
                     continue;
                 }
                 if let Some(issue) = runtime.connection_issue(&owned.connector_id) {
@@ -1204,19 +1205,64 @@ impl AgentCommandState {
                 let source = read_config_source(target).map_err(AgentCommandError::internal)?;
                 let input = runtime.input_for(&owned.connector_id)?;
                 let now_ms = self.clock.now_ms();
-                let prepared = build_metadata_refresh_plan(
-                    connector,
-                    record,
-                    &decision,
-                    target,
-                    &source,
-                    &input,
-                    &owned,
-                    snapshot.catalog.sequence,
-                    snapshot.catalog.expires_at_ms,
-                    now_ms,
-                    generate_operation_id().map_err(AgentCommandError::internal)?,
-                )
+                let operation_id =
+                    generate_operation_id().map_err(AgentCommandError::internal)?;
+                let restores_legacy_paths = connector
+                    .legacy_owned_paths()
+                    .iter()
+                    .any(|path| owned.owned_paths.contains(path));
+                let prepared = if restores_legacy_paths {
+                    let baseline = self
+                        .snapshots
+                        .load(&owned.baseline_snapshot_id)
+                        .map_err(AgentCommandError::internal)?;
+                    if baseline.record.snapshot_id != owned.baseline_snapshot_id
+                        || baseline.record.agent_id != owned.agent_id
+                        || baseline.record.target_config_path != owned.target_config_path
+                        || baseline.record.connector_id != owned.connector_id
+                    {
+                        return Err(AgentCommandError::internal(
+                            "legacy Connector baseline snapshot binding is invalid".to_string(),
+                        ));
+                    }
+                    let baseline_source = if baseline.record.original_existed {
+                        ConfigSource::existing(
+                            baseline.exact_bytes.to_vec(),
+                            baseline.record.original_permissions,
+                            baseline.record.original_owner.clone(),
+                        )
+                    } else {
+                        ConfigSource::missing()
+                    };
+                    build_metadata_refresh_plan_with_baseline(
+                        connector,
+                        record,
+                        &decision,
+                        target,
+                        &source,
+                        &baseline_source,
+                        &input,
+                        &owned,
+                        snapshot.catalog.sequence,
+                        snapshot.catalog.expires_at_ms,
+                        now_ms,
+                        operation_id,
+                    )
+                } else {
+                    build_metadata_refresh_plan(
+                        connector,
+                        record,
+                        &decision,
+                        target,
+                        &source,
+                        &input,
+                        &owned,
+                        snapshot.catalog.sequence,
+                        snapshot.catalog.expires_at_ms,
+                        now_ms,
+                        operation_id,
+                    )
+                }
                 .map_err(AgentCommandError::internal)?;
                 let confirmation = ConfirmedOperation {
                     operation_id: prepared.view.operation_id.clone(),

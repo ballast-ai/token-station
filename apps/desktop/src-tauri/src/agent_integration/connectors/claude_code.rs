@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use token_station_cli::config::{CLAUDE_CODE_FABLE_MODEL_ID, HARNESS_LOGICAL_MODEL_IDS};
 
 use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
@@ -15,12 +14,21 @@ const OWNED_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+];
+
+const LEGACY_MODEL_ENV_VALUES: &[(&str, &str)] = &[
+    ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "fast"),
+    ("ANTHROPIC_DEFAULT_SONNET_MODEL", "balanced"),
+    ("ANTHROPIC_DEFAULT_OPUS_MODEL", "power"),
+    ("ANTHROPIC_CUSTOM_MODEL_OPTION", "claude-fable-5-1"),
+    (
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+        "Fable via Token Station",
+    ),
+    (
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        "Route Claude Fable through the configured Token Station pool",
+    ),
 ];
 
 pub(super) static CONNECTOR: ClaudeCodeConnector = ClaudeCodeConnector;
@@ -80,8 +88,19 @@ impl Connector for ClaudeCodeConnector {
             .collect()
     }
 
+    fn legacy_owned_paths(&self) -> Vec<ConfigPath> {
+        LEGACY_MODEL_ENV_VALUES
+            .iter()
+            .map(|(key, _)| path(&["env", key]))
+            .collect()
+    }
+
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
         vec![path(&["env", "ANTHROPIC_AUTH_TOKEN"])]
+    }
+
+    fn refreshes_managed_configuration(&self) -> bool {
+        true
     }
 
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
@@ -126,12 +145,6 @@ impl Connector for ClaudeCodeConnector {
             json!("1"),
             json!("1"),
             json!("1"),
-            json!(HARNESS_LOGICAL_MODEL_IDS[1]),
-            json!(HARNESS_LOGICAL_MODEL_IDS[2]),
-            json!(HARNESS_LOGICAL_MODEL_IDS[3]),
-            json!(CLAUDE_CODE_FABLE_MODEL_ID),
-            json!("Fable via Token Station"),
-            json!("Route Claude Fable through the configured Token Station pool"),
         ];
         Ok(OWNED_ENV_KEYS
             .iter()
@@ -144,15 +157,56 @@ impl Connector for ClaudeCodeConnector {
             .collect())
     }
 
+    fn refresh_patch_for_document(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        let mut operations = self.connect_patch(input)?;
+        operations.extend(legacy_model_migration_patch(
+            document,
+            None,
+            Some(owned_paths),
+        )?);
+        Ok(operations)
+    }
+
+    fn refresh_patch_with_baseline(
+        &self,
+        document: &ConfigDocument,
+        baseline: Option<&ConfigDocument>,
+        input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        let mut operations = self.connect_patch(input)?;
+        operations.extend(legacy_model_migration_patch(
+            document,
+            baseline,
+            Some(owned_paths),
+        )?);
+        Ok(operations)
+    }
+
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
-        self.owned_paths()
-            .into_iter()
+        OWNED_ENV_KEYS
+            .iter()
+            .map(|key| path(&["env", key]))
             .map(|path| PatchOperation {
                 operation: PatchKind::Remove,
                 path,
                 value: None,
             })
             .collect()
+    }
+
+    fn disconnect_patch_for_document(
+        &self,
+        document: &ConfigDocument,
+    ) -> Result<Vec<PatchOperation>, String> {
+        let mut operations = self.disconnect_patch();
+        operations.extend(legacy_model_migration_patch(document, None, None)?);
+        Ok(operations)
     }
 
     fn validate_projected(
@@ -178,12 +232,6 @@ impl Connector for ClaudeCodeConnector {
             "1",
             "1",
             "1",
-            HARNESS_LOGICAL_MODEL_IDS[1],
-            HARNESS_LOGICAL_MODEL_IDS[2],
-            HARNESS_LOGICAL_MODEL_IDS[3],
-            CLAUDE_CODE_FABLE_MODEL_ID,
-            "Fable via Token Station",
-            "Route Claude Fable through the configured Token Station pool",
         ];
         if OWNED_ENV_KEYS
             .iter()
@@ -199,13 +247,52 @@ impl Connector for ClaudeCodeConnector {
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
         format!(
             "Claude Code 已指向 {}(~/.claude/settings.json,已备份)。\
-             Haiku、Sonnet、Opus 分别映射为 fast、balanced、power；\
-             Fable 使用精确模型 claude-fable-5-1；\
+             Claude Code 的模型名称保持不变，模型系列在网关内映射；\
              已关闭当前 Canonical IR 暂不支持的 thinking/beta；\
              使用 /v1/messages，经 agent-anthropic 入站适配器转发。",
             input.base_url
         )
     }
+}
+
+fn legacy_model_migration_patch(
+    document: &ConfigDocument,
+    baseline: Option<&ConfigDocument>,
+    owned_paths: Option<&[ConfigPath]>,
+) -> Result<Vec<PatchOperation>, String> {
+    let ConfigDocument::Json(root) = document else {
+        return Err("Claude Code 连接器收到错误的配置格式".to_string());
+    };
+    let baseline_env = match baseline {
+        Some(ConfigDocument::Json(root)) => root.get("env").and_then(serde_json::Value::as_object),
+        Some(_) => return Err("Claude Code 连接器收到错误的基线配置格式".to_string()),
+        None => None,
+    };
+    let env = root.get("env").and_then(serde_json::Value::as_object);
+    Ok(LEGACY_MODEL_ENV_VALUES
+        .iter()
+        .filter(|(key, value)| {
+            let model_path = path(&["env", key]);
+            let was_owned = owned_paths.is_none_or(|paths| paths.contains(&model_path));
+            was_owned
+                && env
+                    .and_then(|env| env.get(*key))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(*value)
+        })
+        .map(|(key, _)| {
+            let baseline_value = baseline_env.and_then(|env| env.get(*key)).cloned();
+            PatchOperation {
+                operation: if baseline_value.is_some() {
+                    PatchKind::Replace
+                } else {
+                    PatchKind::Remove
+                },
+                path: path(&["env", key]),
+                value: baseline_value,
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -214,15 +301,30 @@ mod tests {
     use crate::agent_integration::config_codec::{apply_patch, parse_source_bytes, semantic_json};
 
     #[test]
-    fn connection_preserves_claude_role_selection_as_logical_models() {
+    fn connection_preserves_claude_model_names_and_existing_model_configuration() {
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
             model_metadata: None,
         };
-        let mut document =
-            parse_source_bytes(None, DocumentFormat::Json, "Claude Code").unwrap();
+        let mut document = parse_source_bytes(
+            Some(
+                br#"{
+                    "env": {
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "user-haiku",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "user-sonnet",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "user-opus",
+                        "ANTHROPIC_CUSTOM_MODEL_OPTION": "user-custom",
+                        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "User model",
+                        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "User description"
+                    }
+                }"#,
+            ),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
 
         apply_patch(
             &mut document,
@@ -237,14 +339,80 @@ mod tests {
 
         assert_eq!(env["ANTHROPIC_BASE_URL"], json!(input.base_url));
         assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], json!("local-virtual-key"));
-        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], json!("fast"));
-        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], json!("balanced"));
-        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], json!("power"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], json!("user-haiku"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], json!("user-sonnet"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], json!("user-opus"));
+        assert_eq!(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], json!("user-custom"));
+        assert_eq!(env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"], json!("User model"));
         assert_eq!(
-            env["ANTHROPIC_CUSTOM_MODEL_OPTION"],
-            json!("claude-fable-5-1")
+            env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"],
+            json!("User description")
         );
         assert!(!env.contains_key("ANTHROPIC_DEFAULT_FABLE_MODEL"));
         assert!(!env.contains_key("CLAUDE_CODE_SUBAGENT_MODEL"));
+        for key in [
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        ] {
+            assert!(
+                !OWNED_ENV_KEYS.contains(&key),
+                "the Connector must not own Claude Code model presentation: {key}"
+            );
+        }
+        assert!(ClaudeCodeConnector.refreshes_managed_configuration());
+        assert!(!ClaudeCodeConnector.projects_model_metadata());
+    }
+
+    #[test]
+    fn managed_refresh_removes_only_the_legacy_token_station_model_overrides() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/claude-code",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut document = parse_source_bytes(
+            Some(
+                br#"{
+                    "env": {
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "fast",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "balanced",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "user-opus",
+                        "ANTHROPIC_CUSTOM_MODEL_OPTION": "claude-fable-5-1",
+                        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Fable via Token Station",
+                        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Route Claude Fable through the configured Token Station pool"
+                    }
+                }"#,
+            ),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
+        let previously_owned = ClaudeCodeConnector
+            .owned_paths()
+            .into_iter()
+            .chain(ClaudeCodeConnector.legacy_owned_paths())
+            .collect::<Vec<_>>();
+
+        let patch = ClaudeCodeConnector
+            .refresh_patch_for_document(&document, &input, &previously_owned)
+            .unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        ClaudeCodeConnector
+            .validate_refresh_projected(&document, &input, &previously_owned)
+            .unwrap();
+        let root = semantic_json(&document).unwrap();
+        let env = root["env"].as_object().unwrap();
+
+        assert!(!env.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"));
+        assert!(!env.contains_key("ANTHROPIC_DEFAULT_SONNET_MODEL"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], json!("user-opus"));
+        assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION"));
+        assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"));
+        assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"));
     }
 }
