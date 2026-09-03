@@ -230,10 +230,11 @@ interface LocalizedAppMessage {
 
 function modelContractGuidance(error: unknown): LocalizedAppMessage | null {
   if (!error || typeof error !== "object") return null;
-  const value = error as { code?: unknown; target?: unknown };
-  const code = typeof value.code === "string" ? value.code : "";
-  const target = typeof value.target === "string" && value.target.length <= 256
-    ? `\`${value.target}\``
+  const code = errorField(error, "code");
+  const targetValue = errorField(error, "target");
+  const safeTarget = sanitizeAppErrorIdentity(targetValue, 256);
+  const target = safeTarget
+    ? `\`${safeTarget}\``
     : null;
   const subject = target ?? "the selected model";
   const zhSubject = target ?? "当前模型";
@@ -263,16 +264,32 @@ function modelContractGuidance(error: unknown): LocalizedAppMessage | null {
       ja: "現在の OpenCode ルートには到達可能なモデルがありません。利用可能な Provider とモデルを追加して、ルートを保存してください。",
     },
     model_contract_unknown_provider: {
-      en: `The OpenCode route references unknown provider ${subject}. Repair the route or restore that provider.`,
-      zh: `OpenCode 路由引用了未知供应商 ${zhSubject}。请修复路由或恢复该供应商。`,
-      zhTW: `OpenCode 路由參照了未知的 Provider ${zhSubject}。請修正路由或復原該 Provider。`,
-      ja: `OpenCode ルートは不明な Provider ${subject} を参照しています。ルートを修正するか、その Provider を復元してください。`,
+      en: target
+        ? `The OpenCode route references unknown provider ${target}. Repair the route or restore that provider.`
+        : "The OpenCode route references a provider that is not available. Repair the route or restore that provider.",
+      zh: target
+        ? `OpenCode 路由引用了未知供应商 ${target}。请修复路由或恢复该供应商。`
+        : "OpenCode 路由引用了不可用的供应商。请修复路由或恢复该供应商。",
+      zhTW: target
+        ? `OpenCode 路由參照了未知的 Provider ${target}。請修正路由或復原該 Provider。`
+        : "OpenCode 路由參照了無法使用的 Provider。請修正路由或復原該 Provider。",
+      ja: target
+        ? `OpenCode ルートは不明な Provider ${target} を参照しています。ルートを修正するか、その Provider を復元してください。`
+        : "OpenCode ルートは利用できない Provider を参照しています。ルートを修正するか、その Provider を復元してください。",
     },
     model_contract_unknown_model: {
-      en: `The OpenCode route references unknown model ${subject}. Repair the route or add that model.`,
-      zh: `OpenCode 路由引用了未知模型 ${zhSubject}。请修复路由或添加该模型。`,
-      zhTW: `OpenCode 路由參照了未知模型 ${zhSubject}。請修正路由或新增該模型。`,
-      ja: `OpenCode ルートは不明なモデル ${subject} を参照しています。ルートを修正するか、そのモデルを追加してください。`,
+      en: target
+        ? `The OpenCode route references unknown model ${target}. Repair the route or add that model.`
+        : "The OpenCode route references a model that is not available. Repair the route or add that model.",
+      zh: target
+        ? `OpenCode 路由引用了未知模型 ${target}。请修复路由或添加该模型。`
+        : "OpenCode 路由引用了不可用的模型。请修复路由或添加该模型。",
+      zhTW: target
+        ? `OpenCode 路由參照了未知模型 ${target}。請修正路由或新增該模型。`
+        : "OpenCode 路由參照了無法使用的模型。請修正路由或新增該模型。",
+      ja: target
+        ? `OpenCode ルートは不明なモデル ${target} を参照しています。ルートを修正するか、そのモデルを追加してください。`
+        : "OpenCode ルートは利用できないモデルを参照しています。ルートを修正するか、そのモデルを追加してください。",
     },
     model_contract_missing_context_window: {
       en: `Model ${subject} has no context-window limit. Complete this model's limits in Providers, then restart the proxy.`,
@@ -299,7 +316,15 @@ function modelContractGuidance(error: unknown): LocalizedAppMessage | null {
 function routerConfigGuidance(raw: string): LocalizedAppMessage | null {
   const emptyPool = raw.match(/pool `([^`\r\n]{1,128})` has no members/i);
   if (emptyPool) {
-    const pool = emptyPool[1];
+    const pool = sanitizeAppErrorIdentity(emptyPool[1]);
+    if (!pool) {
+      return {
+        en: "The selected route pool is empty. Add a provider and model to this pool, then save again.",
+        zh: "当前路由池为空。请为该路由池添加供应商和模型，然后重新保存。",
+        zhTW: "目前的路由集區是空的。請為此路由集區新增 Provider 和模型，然後重新儲存。",
+        ja: "選択したルートプールは空です。このプールに Provider とモデルを追加して、もう一度保存してください。",
+      };
+    }
     return {
       en: `Route pool \`${pool}\` is empty. Add a provider and model to this pool, then save again.`,
       zh: `路由池 \`${pool}\` 为空。请为该路由池添加供应商和模型，然后重新保存。`,
@@ -312,8 +337,16 @@ function routerConfigGuidance(raw: string): LocalizedAppMessage | null {
     /([^\r\n]{1,128}?) routes to pool `([^`\r\n]{1,128})`, which does not exist/i,
   );
   if (unknownPool) {
-    const reference = unknownPool[1].trim();
-    const pool = unknownPool[2];
+    const reference = sanitizeAppErrorIdentity(unknownPool[1]);
+    const pool = sanitizeAppErrorIdentity(unknownPool[2]);
+    if (!reference || !pool) {
+      return {
+        en: "A routing setting points to a missing route pool. Choose an existing pool, then save again.",
+        zh: "一个路由设置指向不存在的路由池。请选择现有路由池，然后重新保存。",
+        zhTW: "一項路由設定指向不存在的路由集區。請選擇現有的路由集區，然後重新儲存。",
+        ja: "ルーティング設定が存在しないルートプールを参照しています。既存のプールを選択して、もう一度保存してください。",
+      };
+    }
     const rule = reference.match(/^rule `([^`\r\n]{1,128})`$/i);
     const englishReference = rule ? `Rule \`${rule[1]}\`` : `Configuration field \`${reference}\``;
     const chineseReference = rule ? `规则 \`${rule[1]}\`` : `配置字段 \`${reference}\``;
@@ -402,7 +435,7 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "ルートの設定が不完全です。そのルートの Provider とモデルの両方を選択して、もう一度保存してください。",
   },
   {
-    matches: /credential|api[ _-]?key|auth(?:entication|orization)?|鉴权|凭据|密钥/i,
+    matches: /(?:\b(?:invalid|expired|rejected|denied|missing|required)\b.{0,48}\b(?:credential|api[ _-]?key|auth(?:entication|orization)?)\b|\b(?:credential|api[ _-]?key|auth(?:entication|orization)?)\b.{0,48}\b(?:invalid|expired|rejected|denied|missing|required)\b|鉴权失败|凭据(?:无效|被拒绝|缺失|不可用)|密钥(?:无效|被拒绝|缺失|不可用))/i,
     en: "The credential could not be used. Check the API key and its permissions, then try again.",
     zh: "凭据无法使用。请检查 API Key 及其权限，然后重试。",
     zhTW: "無法使用此憑證。請檢查 API Key 及其權限，然後重試。",
@@ -437,14 +470,14 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "Agent のバージョン検出がタイムアウトしました。再スキャンし、それでも失敗する場合は Agent が完全にインストールされているか確認してください。",
   },
   {
-    matches: /timed? ?out|timeout|超时/i,
+    matches: /(?:(?:network|request|upstream|connect(?:ion)?|dns|tls).{0,80}(?:timed? ?out|timeout)|(?:timed? ?out|timeout).{0,80}(?:network|request|upstream|connect(?:ion)?|dns|tls)|(?:网络|请求|上游|连接).{0,40}超时|超时.{0,40}(?:网络|请求|上游|连接))/i,
     en: "The operation took too long and was stopped. Check the network connection, then try again.",
     zh: "操作等待时间过长，已停止。请检查网络连接，然后重试。",
     zhTW: "操作耗時過長，已停止。請檢查網路連線，然後重試。",
     ja: "処理に時間がかかりすぎたため停止しました。ネットワーク接続を確認して、再試行してください。",
   },
   {
-    matches: /network|\bconnect(?:ion)?\b|dns|tls|certificate|request failed|网络|连接失败|证书/i,
+    matches: /network|dns|tls|certificate|request failed|connection (?:refused|reset|closed|failed)|connect(?:ion)? error|网络|连接失败|证书/i,
     en: "Token Station could not reach the service. Check the network, Base URL, and proxy settings, then try again.",
     zh: "Token Station 无法连接到服务。请检查网络、Base URL 和代理设置，然后重试。",
     zhTW: "Token Station 無法連線到服務。請檢查網路、Base URL 和代理設定，然後重試。",
@@ -458,7 +491,7 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "アドレスが無効です。完全な HTTP、HTTPS、または SOCKS5 アドレスを入力して、再試行してください。",
   },
   {
-    matches: /address already in use|port.*(?:used|busy)|listener|listen_restore|端口.*占用|监听/i,
+    matches: /address already in use|port.*(?:used|busy)|listener.*(?:bind|address|port)|listen_restore|端口.*占用|监听地址/i,
     en: "The local proxy could not use its configured address. Close the app using that port or choose another port, then restart the proxy.",
     zh: "本地代理无法使用当前监听地址。请关闭占用该端口的应用，或换一个端口，然后重启代理。",
     zhTW: "本機代理無法使用目前設定的位址。請關閉占用該連接埠的應用程式，或選擇其他連接埠，然後重新啟動代理。",
@@ -472,7 +505,7 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "ローカルプロキシが実行されていません。プロキシを起動してから再試行してください。",
   },
   {
-    matches: /generation|proxy.*(?:start|restart)|代理启动|启动代理/i,
+    matches: /proxy.*(?:start|restart)|代理启动|启动代理|ensure_serve_running|gateway_(?:init|restore)|listen_(?:publish|nonblocking)/i,
     en: "The local proxy could not restart safely. Quit and reopen Token Station, then try again.",
     zh: "本地代理无法安全重启。请退出并重新打开 Token Station，然后重试。",
     zhTW: "本機代理無法安全地重新啟動。請結束並重新開啟 Token Station，然後重試。",
@@ -493,7 +526,7 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "サービスから Token Station が安全に処理できる量を超えるデータが返されました。リクエストを絞るか、後でもう一度お試しください。",
   },
   {
-    matches: /model_providers|configuration format|config(?:uration)? file|配置格式|配置结构|JSON5|TOML|YAML/i,
+    matches: /model_providers|configuration (?:format|file.*(?:format|invalid|parse|syntax))|config(?:uration)? file.*(?:format|invalid|parse|syntax)|配置(?:文件)?(?:格式|结构)|JSON5|TOML|YAML/i,
     en: "The configuration file has a format Token Station cannot safely edit. Fix the file syntax or restore a known-good backup, then rescan.",
     zh: "配置文件格式无法安全编辑。请修复文件语法，或恢复可用备份，然后重新扫描。",
     zhTW: "設定檔的格式無法由 Token Station 安全編輯。請修正檔案語法或復原已知可用的備份，然後重新掃描。",
@@ -514,14 +547,14 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "API Key が無効か、このアカウントには Provider のモデルカタログを読み取る権限がありません。",
   },
   {
-    matches: /permission denied|read-only file|权限/i,
+    matches: /(?:(?:file|directory|path|disk|filesystem).*(?:permission denied|read-only)|(?:permission denied|read-only file).*(?:file|directory|path)|(?:文件|目录|路径|磁盘).*(?:权限|只读))/i,
     en: "Token Station could not access the required local file. Check file permissions and available disk space, then try again.",
     zh: "Token Station 无法访问所需的本地文件。请检查文件权限和磁盘空间，然后重试。",
     zhTW: "Token Station 無法存取所需的本機檔案。請檢查檔案權限和可用磁碟空間，然後重試。",
     ja: "Token Station は必要なローカルファイルにアクセスできませんでした。ファイル権限と空きディスク容量を確認して、再試行してください。",
   },
   {
-    matches: /database|sqlite|schema|指标库|数据库/i,
+    matches: /database|sqlite|metrics?.*schema|schema.*metrics?|指标库|数据库/i,
     en: "The local data could not be opened. Update Token Station and try again; if the problem continues, contact support.",
     zh: "无法打开本地数据。请更新 Token Station 后重试；如果仍然失败，请联系支持。",
     zhTW: "無法開啟本機資料。請更新 Token Station 後重試；如果仍然失敗，請聯絡支援。",
@@ -556,14 +589,14 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "Azure のデプロイ名を手動で入力してください。この方言では汎用モデルカタログ要求を使用しません。",
   },
   {
-    matches: /quota|usage|pricing|catalog|额度|用量|价格目录|模型目录/i,
+    matches: /(?:(?:quota|usage|pricing|catalog).{0,80}(?:fetch|refresh|load|read|unavailable|failed|error|down)|(?:fetch|refresh|load|read).{0,80}(?:quota|usage|pricing|catalog)|(?:额度|用量|价格目录|模型目录).{0,40}(?:查询|刷新|读取|获取|失败|不可用)|(?:查询|刷新|读取|获取).{0,40}(?:额度|用量|价格目录|模型目录))/i,
     en: "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
     zh: "暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。",
     zhTW: "目前無法取得最新的 Provider 資料。請保留目前設定，稍後再重新整理。",
     ja: "最新の Provider データを取得できません。現在の設定を維持し、後でもう一度更新してください。",
   },
   {
-    matches: /failed to (?:read|write)|无法(?:读取|写入)/i,
+    matches: /failed to (?:read|write) (?:file|directory|config|cache|database|local)|无法(?:读取|写入).*(?:文件|目录|配置|缓存|数据库|本地)/i,
     en: "Token Station could not access the required local file. Check file permissions and available disk space, then try again.",
     zh: "Token Station 无法访问所需的本地文件。请检查文件权限和磁盘空间，然后重试。",
     zhTW: "Token Station 無法存取所需的本機檔案。請檢查檔案權限和可用磁碟空間，然後重試。",
@@ -598,7 +631,7 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "選択した更新は利用できなくなりました。インストール前にもう一度確認してください。",
   },
   {
-    matches: /update|upgrade|release|检查更新|安装更新|应用更新|可用版本|发布版本/i,
+    matches: /update_(?:in_progress|gateway|manifest|expected|version|download|install)|(?:check|install|apply|download).{0,40}(?:update|upgrade)|(?:update|upgrade).{0,40}(?:failed|unavailable|error|down)|检查更新|安装更新|应用更新|可用版本|发布版本/i,
     en: "Token Station could not check for updates. Check the network connection and try again later.",
     zh: "Token Station 无法检查更新。请检查网络连接，稍后重试。",
     zhTW: "Token Station 無法檢查更新。請檢查網路連線，稍後再試。",
@@ -606,22 +639,94 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
   },
 ];
 
-function appErrorText(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object") {
-    const value = error as {
-      code?: unknown;
-      message?: unknown;
-      suggestion?: unknown;
-      detail?: unknown;
-    };
-    return [value.code, value.message, value.suggestion, value.detail]
-      .filter((part) => part !== null && part !== undefined)
-      .map(String)
-      .join(" ");
+const MAX_APP_ERROR_DETAIL_LENGTH = 320;
+const MAX_APP_ERROR_MATCH_LENGTH = 4_096;
+
+function errorField(error: object, field: string): string {
+  try {
+    const value = (error as Record<string, unknown>)[field];
+    return typeof value === "string" || typeof value === "number" ? String(value) : "";
+  } catch {
+    return "";
   }
-  return String(error ?? "");
+}
+
+function nativeErrorMessage(error: unknown): string | null {
+  try {
+    if (!(error instanceof Error)) return null;
+    return typeof error.message === "string" ? error.message : "";
+  } catch {
+    return null;
+  }
+}
+
+function boundedAppErrorText(value: string): string {
+  return value.slice(0, MAX_APP_ERROR_MATCH_LENGTH);
+}
+
+function appErrorText(error: unknown): string {
+  if (typeof error === "string") return boundedAppErrorText(error);
+  const nativeMessage = nativeErrorMessage(error);
+  if (nativeMessage !== null) return boundedAppErrorText(nativeMessage);
+  if (error && typeof error === "object") {
+    return boundedAppErrorText(["code", "reason_code", "field", "message", "suggestion", "detail"]
+      .map((field) => errorField(error, field))
+      .filter(Boolean)
+      .join(" "));
+  }
+  return boundedAppErrorText(String(error ?? ""));
+}
+
+function appErrorDetail(error: unknown): string {
+  if (typeof error === "string") return error;
+  const nativeMessage = nativeErrorMessage(error);
+  if (nativeMessage !== null) return nativeMessage;
+  if (!error || typeof error !== "object") return "";
+  return ["message", "suggestion", "detail"]
+    .map((field) => errorField(error, field))
+    .find(Boolean) ?? "";
+}
+
+function containsPrivateDiagnostic(raw: string): boolean {
+  return /(?:^|\n)\s*at\s+\S/m.test(raw)
+    || /\b(?:stack backtrace|stack trace|panicked at|panic:|fatal runtime error)\b/i.test(raw)
+    || /\b(?:secret\s+)?internal\s+(?:detail|diagnostic|transaction detail|implementation detail)\b/i.test(raw)
+    || /\bSQLSTATE\b/i.test(raw)
+    || /\b(?:SELECT\s+.+\s+FROM|INSERT\s+INTO|UPDATE\s+.+\s+SET|DELETE\s+FROM)\b/is.test(raw);
+}
+
+function sanitizeAppErrorDetail(error: unknown): string | null {
+  const raw = boundedAppErrorText(appErrorDetail(error)).trim();
+  if (!raw || containsPrivateDiagnostic(raw)) return null;
+
+  let detail = raw
+    .replace(/(\bauthorization\s+bearer\s+)[^\s,;]{8,}/gi, "$1[redacted]")
+    .replace(/(\bauthorization\s*[:=：]\s*)(?:bearer\s+)?[^\s,;]+/gi, "$1[redacted]")
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|token|password|secret|key)=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[redacted]@")
+    .replace(/("(?:api[_ -]?key|access[_ -]?token|token|password|secret|credential|private[_ -]?key|令牌|密码|口令|凭据|密钥)"\s*[:=：]\s*)(?:"[^"]*"|'[^']*'|“[^”]*”|‘[^’]*’|[^\s,;，；}]+)/gi, '$1"[redacted]"')
+    .replace(/((?:\b(?:api[_ -]?key|access[_ -]?token|token|password|secret|credential|private[_ -]?key)\b|(?:令牌|密码|口令|凭据|密钥))\s*[:=：]\s*)(?:"[^"]*"|'[^']*'|“[^”]*”|‘[^’]*’|[^\s,;，；}]+)/gi, "$1[redacted]")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{12,}|eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g, "[redacted]")
+    .replace(/(?:~\/|\/(?:Users|home|private|var|tmp|etc|opt|Library)\/)[^:：\r\n，；。！？]*?\.(?:json5?|toml|ya?ml|sqlite3?|db|log|txt|tsx?|jsx?|mjs|cjs|rs|wasm|lock)(?=[:：,，;；\s]|$)/gi, "[local path]")
+    .replace(/[A-Za-z]:\\[^:：\r\n，；。！？]*?\.(?:json5?|toml|ya?ml|sqlite3?|db|log|txt|tsx?|jsx?|mjs|cjs|rs|wasm|lock)(?=[:：,，;；\s]|$)/gi, "[local path]")
+    .replace(/(?:~\/|\/(?:Users|home|private|var|tmp|etc|opt|Library)\/)[^\s,;)"'`]+/g, "[local path]")
+    .replace(/[A-Za-z]:\\[^\s,;)"'`]+/g, "[local path]")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!detail || /^\[?(?:redacted|local path)\]?$/i.test(detail)) return null;
+  if (detail.length > MAX_APP_ERROR_DETAIL_LENGTH) {
+    detail = `${detail.slice(0, MAX_APP_ERROR_DETAIL_LENGTH - 1).trimEnd()}…`;
+  }
+  return detail;
+}
+
+function sanitizeAppErrorIdentity(value: string, maxLength = 128): string | null {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength) return null;
+  const sanitized = sanitizeAppErrorDetail(trimmed);
+  return sanitized === trimmed ? sanitized : null;
 }
 
 function selectedAppLanguage(language?: Language): Language {
@@ -646,6 +751,16 @@ function genericAppError(language: Language): string {
   );
 }
 
+function detailedAppError(detail: string, language: Language): string {
+  return localizedCopy(
+    language,
+    `Operation failed: ${detail}`,
+    `操作失败：${detail}`,
+    `操作失敗：${detail}`,
+    `操作に失敗しました：${detail}`,
+  );
+}
+
 function appGuidanceForLanguage(
   guidance: LocalizedAppMessage | LocalizedAppError,
   language: Language,
@@ -667,5 +782,7 @@ export function humanizeAppError(error: unknown, language?: Language): string {
   if (modelGuidance) return appGuidanceForLanguage(modelGuidance, selectedLanguage);
   if (routerGuidance) return appGuidanceForLanguage(routerGuidance, selectedLanguage);
   if (guidance) return appGuidanceForLanguage(guidance, selectedLanguage);
+  const detail = sanitizeAppErrorDetail(error);
+  if (detail) return detailedAppError(detail, selectedLanguage);
   return genericAppError(selectedLanguage);
 }

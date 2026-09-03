@@ -2089,7 +2089,7 @@ describe("desktop station navigation", () => {
         running_revision: 2,
         error: "已保存尚未应用：gateway_init: fixture failure",
       }),
-      "已保存尚未应用：gateway_init: fixture failure",
+      "本地代理无法安全重启。请退出并重新打开 Token Station，然后重试。",
     ],
   ])("does not report configuration applied when starting returns to %s", async (_case, terminal, expectedError) => {
     const user = userEvent.setup();
@@ -2132,7 +2132,7 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText(/配置已应用/)).toBeNull();
     if (expectedError) {
       expect(await within(screen.getByTestId("error-toast-viewport")).findByText(
-        "操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。",
+        expectedError,
       )).toBeInTheDocument();
     }
   });
@@ -2311,7 +2311,7 @@ describe("desktop station navigation", () => {
 
     const alerts = within(screen.getByTestId("error-toast-viewport")).getAllByRole("alert");
     expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toHaveTextContent("操作未能完成");
+    expect(alerts[0]).toHaveTextContent("操作失败：runtime poll failed");
   });
 
   it("运行时从未就绪转为就绪时只刷新缓存且不重复扫描", async () => {
@@ -2483,7 +2483,7 @@ describe("desktop station navigation", () => {
 
     await user.click(screen.getByRole("button", { name: "重新扫描" }));
     expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
-      .toHaveTextContent("操作未能完成");
+      .toHaveTextContent("操作失败：manual rescan failed");
     expect(screen.getByRole("button", { name: "Gemini CLI" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新扫描" })).toBeEnabled();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(3);

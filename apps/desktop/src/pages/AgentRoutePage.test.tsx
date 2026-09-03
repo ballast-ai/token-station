@@ -1252,7 +1252,7 @@ describe("AgentRoutePage multi-install admission", () => {
 
     const viewport = screen.getByTestId("error-toast-viewport");
     expect(await within(viewport).findByRole("status")).toHaveTextContent("已恢复备份并断开");
-    expect(within(viewport).getByRole("alert")).toHaveTextContent("操作未能完成");
+    expect(within(viewport).getByRole("alert")).toHaveTextContent("操作失败：refresh failed");
     expect(document.querySelector(".agent-route-page .banner")).toBeNull();
   });
 
@@ -1327,7 +1327,7 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
   });
 
-  it("does not expose a raw compatibility message in English mode", () => {
+  it("shows a sanitized compatibility reason in English mode", () => {
     window.localStorage.setItem("token-station-language", "en");
     const blocked = installation("/opt/homebrew/bin/claude", "1.0.0");
     blocked.discovery.is_path_default = true;
@@ -1386,9 +1386,9 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(screen.getByText(
-      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
+      "Operation failed: 当前版本在阻断列表中：[local path]",
     )).toBeInTheDocument();
-    expect(screen.queryByText(/当前版本在阻断列表/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/Users\/example/)).not.toBeInTheDocument();
   });
 
   it("lets the user connect the exact Claude Code installation they selected", async () => {

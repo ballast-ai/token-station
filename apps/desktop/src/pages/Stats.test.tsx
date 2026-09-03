@@ -404,7 +404,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
     });
     await waitFor(() => expect(refresh).not.toBeDisabled());
     expect(within(screen.getByTestId("error-toast-viewport")).getByText(
-      "操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。",
+      "操作失败：stats failed",
     )).toBeInTheDocument();
   });
 
@@ -601,6 +601,6 @@ describe("usage dashboard and display-only Agent budgets", () => {
     await user.click(screen.getByRole("button", { name: "保存预算" }));
 
     expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
-      .toHaveTextContent("操作未能完成");
+      .toHaveTextContent("操作失败：budget write failed");
   });
 });
