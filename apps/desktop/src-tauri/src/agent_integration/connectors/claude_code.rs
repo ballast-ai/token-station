@@ -89,10 +89,15 @@ impl Connector for ClaudeCodeConnector {
     }
 
     fn legacy_owned_paths(&self) -> Vec<ConfigPath> {
-        LEGACY_MODEL_ENV_VALUES
+        let mut paths = LEGACY_MODEL_ENV_VALUES
             .iter()
             .map(|(key, _)| path(&["env", key]))
-            .collect()
+            .collect::<Vec<_>>();
+        // Claude Code may persist a selection made from the old custom picker.
+        // This path authorizes a one-time alias migration but is never retained
+        // as active Connector ownership.
+        paths.push(path(&["model"]));
+        paths
     }
 
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
@@ -269,7 +274,12 @@ fn legacy_model_migration_patch(
         None => None,
     };
     let env = root.get("env").and_then(serde_json::Value::as_object);
-    Ok(LEGACY_MODEL_ENV_VALUES
+    let had_legacy_model_ownership = owned_paths.is_some_and(|paths| {
+        LEGACY_MODEL_ENV_VALUES
+            .iter()
+            .any(|(key, _)| paths.contains(&path(&["env", key])))
+    });
+    let mut operations = LEGACY_MODEL_ENV_VALUES
         .iter()
         .filter(|(key, value)| {
             let model_path = path(&["env", key]);
@@ -292,7 +302,37 @@ fn legacy_model_migration_patch(
                 value: baseline_value,
             }
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if had_legacy_model_ownership {
+        if let Some(native_model) = root
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .and_then(native_model_selection)
+        {
+            operations.push(PatchOperation {
+                operation: PatchKind::Replace,
+                path: path(&["model"]),
+                value: Some(json!(native_model)),
+            });
+        }
+    }
+    Ok(operations)
+}
+
+fn native_model_selection(model: &str) -> Option<String> {
+    let (family, suffix) = model
+        .strip_suffix("[1m]")
+        .map(|family| (family, "[1m]"))
+        .or_else(|| model.strip_suffix("[2m]").map(|family| (family, "[2m]")))
+        .unwrap_or((model, ""));
+    let native = match family {
+        "fast" => "haiku",
+        "balanced" => "sonnet",
+        "power" => "opus",
+        "claude-fable-5-1" => "fable",
+        _ => return None,
+    };
+    Some(format!("{native}{suffix}"))
 }
 
 #[cfg(test)]
@@ -311,6 +351,7 @@ mod tests {
         let mut document = parse_source_bytes(
             Some(
                 br#"{
+                    "model": "user-model",
                     "env": {
                         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "user-haiku",
                         "ANTHROPIC_DEFAULT_SONNET_MODEL": "user-sonnet",
@@ -339,6 +380,7 @@ mod tests {
 
         assert_eq!(env["ANTHROPIC_BASE_URL"], json!(input.base_url));
         assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], json!("local-virtual-key"));
+        assert_eq!(root["model"], json!("user-model"));
         assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], json!("user-haiku"));
         assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], json!("user-sonnet"));
         assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], json!("user-opus"));
@@ -378,6 +420,7 @@ mod tests {
         let mut document = parse_source_bytes(
             Some(
                 br#"{
+                    "model": "power[1m]",
                     "env": {
                         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "fast",
                         "ANTHROPIC_DEFAULT_SONNET_MODEL": "balanced",
@@ -408,6 +451,7 @@ mod tests {
         let root = semantic_json(&document).unwrap();
         let env = root["env"].as_object().unwrap();
 
+        assert_eq!(root["model"], json!("opus[1m]"));
         assert!(!env.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"));
         assert!(!env.contains_key("ANTHROPIC_DEFAULT_SONNET_MODEL"));
         assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], json!("user-opus"));
