@@ -1230,7 +1230,6 @@ struct PendingContinuation {
     scope: String,
     messages: Vec<Message>,
     created_at_ms: u64,
-    sequence: u64,
     bytes: usize,
 }
 
@@ -1283,41 +1282,17 @@ impl ContinuationStore {
         }
     }
 
-    fn evict_oldest(&mut self) -> bool {
-        let oldest_history = self
+    fn evict_oldest_history(&mut self) -> bool {
+        let Some(key) = self
             .history
             .iter()
-            .map(|(key, entry)| (entry.sequence, key.clone()))
-            .min_by_key(|(sequence, _)| *sequence);
-        let oldest_pending = self
-            .pending
-            .iter()
-            .map(|(key, entry)| (entry.sequence, key.clone()))
-            .min_by_key(|(sequence, _)| *sequence);
-        if oldest_history.is_none() && oldest_pending.is_none() {
+            .min_by_key(|(_, entry)| entry.sequence)
+            .map(|(key, _)| key.clone())
+        else {
             return false;
-        }
-        match (oldest_history, oldest_pending) {
-            (None, None) => unreachable!("empty store returned above"),
-            (Some((_, key)), None) => {
-                if let Some(entry) = self.history.remove(&key) {
-                    self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
-                }
-            }
-            (None, Some((_, key))) => {
-                if let Some(entry) = self.pending.remove(&key) {
-                    self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
-                }
-            }
-            (Some((history_sequence, history_key)), Some((pending_sequence, pending_key))) => {
-                if history_sequence <= pending_sequence {
-                    if let Some(entry) = self.history.remove(&history_key) {
-                        self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
-                    }
-                } else if let Some(entry) = self.pending.remove(&pending_key) {
-                    self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
-                }
-            }
+        };
+        if let Some(entry) = self.history.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
         }
         true
     }
@@ -1334,7 +1309,7 @@ impl ContinuationStore {
             })
     }
 
-    fn begin(&mut self, key: String, scope: String, messages: Vec<Message>) -> Result<(), String> {
+    fn begin(&mut self, key: String, scope: String, messages: &[Message]) -> Result<bool, String> {
         let now_ms = Self::now_ms();
         self.prune(now_ms);
         if self.pending.contains_key(&key) {
@@ -1342,35 +1317,32 @@ impl ContinuationStore {
         }
         let bytes = serde_json::to_vec(&messages).map_err(internal)?.len();
         if bytes > MAX_CONTINUATION_ENTRY_BYTES {
-            return Err(invalid(
-                "continuation request history exceeds the in-memory entry limit",
-            ));
+            // Continuation replay is a compatibility convenience for callers
+            // that later send `previous_response_id`; it is not permission to
+            // reject a complete request that can otherwise reach the upstream.
+            // Omitting the private key prevents render_response from claiming
+            // that this response was retained for a later local replay.
+            return Ok(false);
         }
-        while self.pending.len() >= MAX_PENDING_CONTINUATIONS
+        // A request that has not produced a response must not evict either an
+        // in-flight reservation or a usable history entry. If the optional
+        // cache is full, route the request without promising continuation.
+        if self.pending.len() >= MAX_PENDING_CONTINUATIONS
             || self.total_bytes.saturating_add(bytes) > MAX_CONTINUATION_TOTAL_BYTES
         {
-            if !self.evict_oldest() {
-                break;
-            }
+            return Ok(false);
         }
-        if self.total_bytes.saturating_add(bytes) > MAX_CONTINUATION_TOTAL_BYTES {
-            return Err(invalid(
-                "continuation request history exceeds the in-memory store limit",
-            ));
-        }
-        let sequence = self.allocate_sequence();
         self.total_bytes = self.total_bytes.saturating_add(bytes);
         self.pending.insert(
             key,
             PendingContinuation {
                 scope,
-                messages,
+                messages: messages.to_vec(),
                 created_at_ms: now_ms,
-                sequence,
                 bytes,
             },
         );
-        Ok(())
+        Ok(true)
     }
 
     fn abandon(&mut self, continuation_key: &str) {
@@ -1409,10 +1381,21 @@ impl ContinuationStore {
         if let Some(previous) = self.history.remove(&history_key) {
             self.total_bytes = self.total_bytes.saturating_sub(previous.bytes);
         }
+        let history_bytes = self
+            .history
+            .values()
+            .fold(0usize, |total, entry| total.saturating_add(entry.bytes));
+        let reserved_bytes = self.total_bytes.saturating_sub(history_bytes);
+        if reserved_bytes.saturating_add(encoded.len()) > MAX_CONTINUATION_TOTAL_BYTES {
+            // Other in-flight reservations are not evictable. Keep existing
+            // completed histories intact when evicting all of them still
+            // could not make this result fit.
+            return;
+        }
         while self.history.len() >= MAX_CONTINUATION_ENTRIES
             || self.total_bytes.saturating_add(encoded.len()) > MAX_CONTINUATION_TOTAL_BYTES
         {
-            if !self.evict_oldest() {
+            if !self.evict_oldest_history() {
                 break;
             }
         }
@@ -2214,15 +2197,17 @@ impl Guest for ResponsesClient {
             extensions.insert("responses_reasoning_summary".to_owned(), summary.clone());
         }
         if let Some(continuation_key) = continuation_request_key(&envelope)? {
-            CONTINUATIONS.with(|continuations| {
+            let retained = CONTINUATIONS.with(|continuations| {
                 continuations
                     .borrow_mut()
-                    .begin(continuation_key.clone(), scope, messages.clone())
+                    .begin(continuation_key.clone(), scope, &messages)
             })?;
-            extensions.insert(
-                CONTINUATION_KEY_EXTENSION.to_owned(),
-                json!(continuation_key),
-            );
+            if retained {
+                extensions.insert(
+                    CONTINUATION_KEY_EXTENSION.to_owned(),
+                    json!(continuation_key),
+                );
+            }
         }
         to_output(&ChatRequest {
             model,
@@ -2575,17 +2560,34 @@ impl Guest for ResponsesClient {
                 } => {
                     let mut state = states.remove(stream_id).expect("state inserted");
                     let finish_reason = finish_reason.or(state.pending_finish_reason.take());
-                    if let Some(key) = state.continuation_key.as_deref() {
-                        let assistant_messages = stream_assistant_messages(&state);
+                    let continuation = state.continuation_key.as_ref().map(|key| {
+                        (
+                            key.clone(),
+                            state.response_id.clone(),
+                            stream_assistant_messages(&state),
+                        )
+                    });
+                    let done = match stream_done(state, finish_reason) {
+                        Ok(done) => done,
+                        Err(error) => {
+                            if let Some((key, _, _)) = continuation.as_ref() {
+                                CONTINUATIONS.with(|continuations| {
+                                    continuations.borrow_mut().abandon(key);
+                                });
+                            }
+                            return Err(error);
+                        }
+                    };
+                    if let Some((key, response_id, assistant_messages)) = continuation {
                         CONTINUATIONS.with(|continuations| {
                             continuations.borrow_mut().complete(
-                                key,
-                                &state.response_id,
+                                &key,
+                                &response_id,
                                 assistant_messages,
                             );
                         });
                     }
-                    rendered.push_str(&stream_done(state, finish_reason)?);
+                    rendered.push_str(&done);
                 }
                 StreamEvent::Error { .. } => unreachable!("error handled above"),
             }
@@ -2702,6 +2704,71 @@ mod tests {
             Message::text(Role::Assistant, "first answer")
         );
         assert_eq!(second.messages[2], Message::text(Role::User, "second turn"));
+    }
+
+    #[test]
+    fn oversized_self_contained_request_bypasses_optional_continuation_cache() {
+        let oversized_input = "x".repeat(MAX_CONTINUATION_ENTRY_BYTES + 1);
+        let request: ChatRequest = serde_json::from_str(
+            &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "deepseek-chat",
+                "input": oversized_input,
+                "store": false
+            })))
+            .expect("an optional replay-cache limit must not reject the request"),
+        )
+        .expect("canonical request parses");
+
+        assert_eq!(request.messages.len(), 1);
+        assert!(
+            !request.extensions.contains_key(CONTINUATION_KEY_EXTENSION),
+            "a response that cannot be retained must not advertise continuation state"
+        );
+    }
+
+    #[test]
+    fn cache_admission_never_evicts_pending_or_completed_state() {
+        let mut pending_full = ContinuationStore::default();
+        pending_full.total_bytes = MAX_CONTINUATION_TOTAL_BYTES;
+        pending_full.pending.insert(
+            "held-request".to_owned(),
+            PendingContinuation {
+                scope: "codex:other".to_owned(),
+                messages: vec![Message::text(Role::User, "held")],
+                created_at_ms: ContinuationStore::now_ms(),
+                bytes: MAX_CONTINUATION_TOTAL_BYTES,
+            },
+        );
+        assert!(!pending_full
+            .begin(
+                "new-request".to_owned(),
+                "codex:local".to_owned(),
+                &[Message::text(Role::User, "new")]
+            )
+            .expect("full cache bypasses optional retention"));
+        assert!(pending_full.pending.contains_key("held-request"));
+
+        let mut history_full = ContinuationStore::default();
+        history_full.total_bytes = MAX_CONTINUATION_TOTAL_BYTES;
+        history_full.history.insert(
+            ("codex:other".to_owned(), "resp_held".to_owned()),
+            ContinuationHistory {
+                messages: vec![Message::text(Role::User, "held")],
+                created_at_ms: ContinuationStore::now_ms(),
+                sequence: 1,
+                bytes: MAX_CONTINUATION_TOTAL_BYTES,
+            },
+        );
+        assert!(!history_full
+            .begin(
+                "new-request".to_owned(),
+                "codex:local".to_owned(),
+                &[Message::text(Role::User, "new")]
+            )
+            .expect("full cache bypasses optional retention"));
+        assert!(history_full
+            .history
+            .contains_key(&("codex:other".to_owned(), "resp_held".to_owned())));
     }
 
     #[test]
@@ -3076,6 +3143,60 @@ mod tests {
         assert!(done.contains("response.reasoning_summary_text.done"));
         assert!(done.contains("response.output_item.done"));
         assert!(done.contains("response.completed"));
+    }
+
+    #[test]
+    fn failed_stream_terminal_render_never_commits_continuation_history() {
+        let request: ChatRequest = serde_json::from_str(
+            &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "deepseek-chat",
+                "input": "run a local command",
+                "stream": true
+            })))
+            .expect("stream request normalizes"),
+        )
+        .expect("canonical request parses");
+        let continuation_key = request.extensions[CONTINUATION_KEY_EXTENSION]
+            .as_str()
+            .expect("bounded request reserves continuation state");
+        let context = json!({
+            "stream_id":"failed-terminal-render-stream",
+            "response_id":"resp_failed_terminal_render",
+            "model":"deepseek-chat",
+            CONTINUATION_KEY_EXTENSION: continuation_key
+        })
+        .to_string();
+
+        <ResponsesClient as Guest>::render_stream_event(
+            serde_json::to_string(&StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_invalid".to_owned()),
+                name: Some(LOCAL_SHELL_TOOL_NAME.to_owned()),
+                arguments_delta: "not-json".to_owned(),
+            })
+            .expect("event serializes"),
+            context.clone(),
+        )
+        .expect("tool fragment buffers until the terminal event");
+        let error = <ResponsesClient as Guest>::render_stream_event(
+            serde_json::to_string(&StreamEvent::Done {
+                finish_reason: Some(FinishReason::ToolCalls),
+                stop_sequence: None,
+            })
+            .expect("event serializes"),
+            context,
+        )
+        .expect_err("invalid terminal local-shell output is rejected");
+        assert!(error.contains("invalid arguments"), "{error}");
+
+        let continuation_error =
+            <ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "deepseek-chat",
+                "previous_response_id": "resp_failed_terminal_render",
+                "input": "continue"
+            })))
+            .expect_err("a failed stream must not become replayable history");
+        assert!(continuation_error.contains("continuation_expired"));
     }
 }
 
