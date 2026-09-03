@@ -164,6 +164,70 @@ describe("DirectRoutePanel", () => {
     expect(onApply).toHaveBeenCalledWith("openai-account", "gpt-5.6-mini");
   });
 
+  it("moves a successfully applied provider to the top and persists the new order", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn().mockResolvedValue(true);
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={onApply}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /openai-account/ }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
+
+    await waitFor(() => expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/openai-account/));
+    expect(onApply).toHaveBeenCalledWith("openai-account", "gpt-5.6");
+    expect(JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"))
+      .toEqual(["openai-account", "deepseek-account", "empty-account"]);
+  });
+
+  it("keeps the provider order when apply fails", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn().mockResolvedValue(false);
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={onApply}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /openai-account/ }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
+
+    await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
+    expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/deepseek-account/);
+    expect(JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"))
+      .toEqual(["deepseek-account", "openai-account", "empty-account"]);
+  });
+
+  it("reports whether the selected direct target is still unapplied", async () => {
+    const user = userEvent.setup();
+    const onDraftChange = vi.fn();
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+        onDraftChange={onDraftChange}
+      />,
+    );
+
+    expect(onDraftChange).toHaveBeenLastCalledWith(false);
+    await user.click(screen.getByRole("combobox", { name: "deepseek-account 模型" }));
+    await user.click(screen.getByRole("option", { name: "deepseek-reasoner" }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(true);
+  });
+
   it("keeps an un-applied model selection across an equivalent provider refresh", async () => {
     const user = userEvent.setup();
     const { rerender } = render(
