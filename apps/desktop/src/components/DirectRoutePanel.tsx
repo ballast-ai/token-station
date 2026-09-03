@@ -37,7 +37,8 @@ interface DirectRoutePanelProps {
   busy: boolean;
   applying: boolean;
   agent?: boolean;
-  onApply: (upstream: string, model: string) => void | Promise<void>;
+  onApply: (upstream: string, model: string) => boolean | void | Promise<boolean | void>;
+  onDraftChange?: (hasUnappliedTarget: boolean) => void;
 }
 
 function storedOrder(): string[] {
@@ -199,6 +200,7 @@ export default function DirectRoutePanel({
   applying,
   agent = false,
   onApply,
+  onDraftChange,
 }: DirectRoutePanelProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError } = useErrorToast();
@@ -216,6 +218,8 @@ export default function DirectRoutePanel({
   );
   const targetKey = target ? `${target.upstream}\u0000${target.model ?? ""}` : "";
   const previousTargetKey = useRef(targetKey);
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
   const [sortAnnouncement, setSortAnnouncement] = useState("");
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -351,9 +355,32 @@ export default function DirectRoutePanel({
   const selectedTargetValid = providers.some((provider) => (
     provider.name === selectedProvider && provider.models.includes(selectedModel)
   ));
-  const hasUnappliedTarget = Boolean(target && selectedTargetValid && (
-    selectedProvider !== target.upstream || selectedModel !== (target.model ?? "")
+  const hasUnappliedTarget = Boolean(selectedTargetValid && (
+    !target || selectedProvider !== target.upstream || selectedModel !== (target.model ?? "")
   ));
+
+  useEffect(() => {
+    onDraftChange?.(hasUnappliedTarget);
+  }, [hasUnappliedTarget, onDraftChange]);
+
+  useEffect(() => () => {
+    onDraftChangeRef.current?.(false);
+  }, []);
+
+  const applySelectedTarget = async () => {
+    const applied = await onApply(selectedProvider, selectedModel);
+    if (applied === false) return;
+    setProviderOrder((current) => {
+      const appliedIndex = current.indexOf(selectedProvider);
+      return appliedIndex > 0 ? arrayMove(current, appliedIndex, 0) : current;
+    });
+    setSortAnnouncement(copy(
+      `Applied ${selectedProvider} and moved it to the top of the list.`,
+      `已应用 ${selectedProvider}，并将其移到列表顶部。`,
+      `已應用 ${selectedProvider}，並將其移到清單頂端。`,
+      `${selectedProvider} を適用し、リストの先頭に移動しました。`,
+    ));
+  };
 
   return (
     <section
@@ -400,7 +427,7 @@ export default function DirectRoutePanel({
             type="button"
             data-onboarding-target="route-apply"
             disabled={busy || applying || !selectedTargetValid}
-            onClick={() => void onApply(selectedProvider, selectedModel)}
+            onClick={() => void applySelectedTarget()}
           >
             {applying ? copy("Applying…", "应用中…", "應用中…", "適用中…") : copy("Apply", "应用", "應用", "適用")}
           </Button>
