@@ -2674,6 +2674,7 @@ mod tests {
             .join("tokenstation.json");
         let original_config = br#"model = "user-model"
 model_catalog_json = "user-catalog.json"
+web_search = "live"
 
 [user]
 keep = true
@@ -2707,6 +2708,16 @@ keep = true
             serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
         assert_eq!(connected_catalog["schema"], "keep");
         assert_eq!(connected_catalog["models"][0]["slug"], "auto");
+        let connected_config = std::str::from_utf8(&std::fs::read(&target).unwrap())
+            .unwrap()
+            .parse::<toml_edit::Document>()
+            .unwrap();
+        assert_eq!(
+            connected_config
+                .get("web_search")
+                .and_then(toml_edit::Item::as_str),
+            Some("disabled")
+        );
 
         let ownership_key = OwnershipKey {
             agent_id: "codex".to_string(),
@@ -2772,6 +2783,12 @@ keep = true
                 .get("model_catalog_json")
                 .and_then(toml_edit::Item::as_str),
             Some("user-catalog.json")
+        );
+        assert_eq!(
+            restored_config
+                .get("web_search")
+                .and_then(toml_edit::Item::as_str),
+            Some("live")
         );
         assert_eq!(restored_config["user"]["keep"].as_bool(), Some(true));
         assert_eq!(

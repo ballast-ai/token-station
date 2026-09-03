@@ -140,6 +140,9 @@ pub trait Connector: Sync {
     fn refreshes_managed_configuration(&self) -> bool {
         self.projects_model_metadata()
     }
+    fn refresh_requires_baseline(&self, _owned_paths: &[ConfigPath]) -> bool {
+        false
+    }
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String>;
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String>;
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String>;

@@ -221,6 +221,22 @@ fn tool_choice_of(value: Option<&Value>) -> Result<Option<ToolChoice>, String> {
     }
 }
 
+fn tool_choice_for_tools(
+    value: Option<&Value>,
+    has_tools: bool,
+) -> Result<Option<ToolChoice>, String> {
+    let choice = tool_choice_of(value)?;
+    if has_tools {
+        return Ok(choice);
+    }
+    match choice {
+        None | Some(ToolChoice::Auto | ToolChoice::None) => Ok(None),
+        Some(ToolChoice::Required | ToolChoice::Other(_)) => {
+            Err(invalid("tool_choice requires at least one executable tool"))
+        }
+    }
+}
+
 fn valid_tool_component(value: &str, max_bytes: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_bytes
@@ -1007,9 +1023,14 @@ fn push_tool(
 }
 
 fn tools_of(value: &Value) -> Result<Vec<ToolDef>, String> {
+    let tools = match value {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(tools) => tools,
+        _ => return Err(invalid("tools must be an array")),
+    };
     let mut definitions = Vec::new();
     let mut names = BTreeSet::new();
-    for tool in value.as_array().into_iter().flatten() {
+    for tool in tools {
         let kind = tool
             .get("type")
             .and_then(Value::as_str)
@@ -2167,7 +2188,7 @@ impl Guest for ResponsesClient {
             stop: Vec::new(),
         };
         let tools = tools_of(body.get("tools").unwrap_or(&Value::Null))?;
-        let tool_choice = tool_choice_of(body.get("tool_choice"))?;
+        let tool_choice = tool_choice_for_tools(body.get("tool_choice"), !tools.is_empty())?;
         let mut extensions = request_extensions(body);
         extensions.extend(tool_extensions(body.get("tools").unwrap_or(&Value::Null))?);
         // `parallel_tool_calls` has no first-class Canonical IR field; it rides
@@ -2914,6 +2935,73 @@ mod tests {
             metadata["responses_disabled_provider_tools"][0]["type"],
             json!("web_search")
         );
+    }
+
+    #[test]
+    fn empty_tools_clear_tool_choice_during_normalization() {
+        let request: ChatRequest = serde_json::from_str(
+            &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "auto",
+                "input": "continue after compaction",
+                "tools": [],
+                "tool_choice": "auto"
+            })))
+            .expect("a compacted Codex request normalizes"),
+        )
+        .expect("canonical request parses");
+
+        assert!(request.tools.is_empty());
+        assert_eq!(request.tool_choice, None);
+    }
+
+    #[test]
+    fn empty_tools_reject_a_required_tool_choice() {
+        let error = <ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+            "model": "auto",
+            "input": "continue after compaction",
+            "tools": [],
+            "tool_choice": "required"
+        })))
+        .expect_err("a required choice without tools is malformed");
+
+        assert!(
+            error.contains("tool_choice requires at least one executable tool"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn non_empty_tools_preserve_tool_choice_during_normalization() {
+        let request: ChatRequest = serde_json::from_str(
+            &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "auto",
+                "input": "read the marker",
+                "tools": [{
+                    "type": "function",
+                    "name": "read_marker",
+                    "parameters": {"type": "object"}
+                }],
+                "tool_choice": "required"
+            })))
+            .expect("a tool-bearing Codex request normalizes"),
+        )
+        .expect("canonical request parses");
+
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tool_choice, Some(ToolChoice::Required));
+    }
+
+    #[test]
+    fn malformed_tools_are_rejected_before_empty_tool_normalization() {
+        let error = <ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+            "model": "auto",
+            "input": "continue after compaction",
+            "tools": {"type": "function", "name": "not-an-array"},
+            "tool_choice": "auto"
+        })))
+        .expect_err("tools must remain a typed array boundary");
+
+        assert!(error.contains("tools must be an array"), "{error}");
     }
 
     #[test]
