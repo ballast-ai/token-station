@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use token_station_cli::config::{CLAUDE_CODE_FABLE_MODEL_ID, HARNESS_LOGICAL_MODEL_IDS};
 
 use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
@@ -14,6 +15,12 @@ const OWNED_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
 ];
 
 pub(super) static CONNECTOR: ClaudeCodeConnector = ClaudeCodeConnector;
@@ -119,6 +126,12 @@ impl Connector for ClaudeCodeConnector {
             json!("1"),
             json!("1"),
             json!("1"),
+            json!(HARNESS_LOGICAL_MODEL_IDS[1]),
+            json!(HARNESS_LOGICAL_MODEL_IDS[2]),
+            json!(HARNESS_LOGICAL_MODEL_IDS[3]),
+            json!(CLAUDE_CODE_FABLE_MODEL_ID),
+            json!("Fable via Token Station"),
+            json!("Route Claude Fable through the configured Token Station pool"),
         ];
         Ok(OWNED_ENV_KEYS
             .iter()
@@ -157,7 +170,21 @@ impl Connector for ClaudeCodeConnector {
         let token = input
             .token
             .ok_or_else(|| "Claude Code 接入缺少虚拟 Key".to_string())?;
-        let expected = [input.base_url, token, "0", "1", "1", "1", "1"];
+        let expected = [
+            input.base_url,
+            token,
+            "0",
+            "1",
+            "1",
+            "1",
+            "1",
+            HARNESS_LOGICAL_MODEL_IDS[1],
+            HARNESS_LOGICAL_MODEL_IDS[2],
+            HARNESS_LOGICAL_MODEL_IDS[3],
+            CLAUDE_CODE_FABLE_MODEL_ID,
+            "Fable via Token Station",
+            "Route Claude Fable through the configured Token Station pool",
+        ];
         if OWNED_ENV_KEYS
             .iter()
             .zip(expected)
@@ -172,9 +199,52 @@ impl Connector for ClaudeCodeConnector {
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
         format!(
             "Claude Code 已指向 {}(~/.claude/settings.json,已备份)。\
+             Haiku、Sonnet、Opus 分别映射为 fast、balanced、power；\
+             Fable 使用精确模型 claude-fable-5-1；\
              已关闭当前 Canonical IR 暂不支持的 thinking/beta；\
              使用 /v1/messages，经 agent-anthropic 入站适配器转发。",
             input.base_url
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_integration::config_codec::{apply_patch, parse_source_bytes, semantic_json};
+
+    #[test]
+    fn connection_preserves_claude_role_selection_as_logical_models() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/claude-code",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut document =
+            parse_source_bytes(None, DocumentFormat::Json, "Claude Code").unwrap();
+
+        apply_patch(
+            &mut document,
+            &ClaudeCodeConnector.connect_patch(&input).unwrap(),
+        )
+        .unwrap();
+        ClaudeCodeConnector
+            .validate_projected(&document, &input)
+            .unwrap();
+        let root = semantic_json(&document).unwrap();
+        let env = root["env"].as_object().unwrap();
+
+        assert_eq!(env["ANTHROPIC_BASE_URL"], json!(input.base_url));
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], json!("local-virtual-key"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], json!("fast"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], json!("balanced"));
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], json!("power"));
+        assert_eq!(
+            env["ANTHROPIC_CUSTOM_MODEL_OPTION"],
+            json!("claude-fable-5-1")
+        );
+        assert!(!env.contains_key("ANTHROPIC_DEFAULT_FABLE_MODEL"));
+        assert!(!env.contains_key("CLAUDE_CODE_SUBAGENT_MODEL"));
     }
 }

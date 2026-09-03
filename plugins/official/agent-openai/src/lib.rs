@@ -566,6 +566,34 @@ impl Guest for OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use token_station_protocol::{HeaderDigest, Principal};
+
+    #[test]
+    fn opencode_logical_model_reaches_canonical_request_unchanged() {
+        for model in ["auto", "fast", "balanced", "power"] {
+            let envelope = AgentRequestEnvelope {
+                protocol: "openai-chat-completions".to_owned(),
+                agent_tool: Some("opencode".to_owned()),
+                headers: HeaderDigest::default(),
+                principal: Principal {
+                    subject: "local".to_owned(),
+                    tenant: None,
+                },
+                hints: Vec::new(),
+                body: json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                extensions: Extensions::new(),
+            };
+
+            let normalized =
+                OpenAiClient::normalize_inbound(serde_json::to_string(&envelope).unwrap())
+                    .expect("OpenCode request normalizes");
+            let request: ChatRequest = serde_json::from_str(&normalized).unwrap();
+            assert_eq!(request.model, model);
+        }
+    }
 
     #[test]
     fn chat_completion_content_is_always_text_or_null() {

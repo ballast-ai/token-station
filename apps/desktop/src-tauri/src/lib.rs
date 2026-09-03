@@ -53,7 +53,8 @@ use token_station_cli::bodylog::{valid_request_id, BodyLog, PlaintextExchange};
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
 use token_station_cli::cancel::{CancelReason, CancelToken};
 use token_station_cli::config::{
-    ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
+    harness_request_models, ClientConfig, EgressConfig, PluginsConfig,
+    RoutingMode as HostRoutingMode, CLAUDE_CODE_FABLE_MODEL_ID,
 };
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, Reply, StageStatus};
 use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
@@ -173,6 +174,8 @@ struct AppInner {
     config_state: ConfigState,
     /// In-process editing state for Agent-specific routes. Tiers may be empty but never enter the savable global draft.
     agent_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
+    /// In-process Harness mapping edits commit with the matching Agent tier draft.
+    agent_harness_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
     /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
     /// Free-provider verification sends real upstream requests; an in-memory single-flight set limits duplication and abuse.
@@ -501,12 +504,14 @@ pub fn run() {
             remove_keyword,
             set_agent_route_mode,
             set_agent_tier,
+            set_agent_harness_model_route,
             save_home_route_as_profile,
             mount_agent_profile,
             delete_profile,
             save_config,
             save_agent_routes,
             restart_agent_route,
+            restart_agent_harness_routes,
             apply_home_route_to_all_agents,
             serve_start,
             ensure_serve_running,

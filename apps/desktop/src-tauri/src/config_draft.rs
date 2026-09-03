@@ -240,6 +240,22 @@ pub(crate) fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Pa
                         prune_dangling_tier(&mut route["custom_route"][slot], &valid);
                     }
                 }
+                if let Some(mappings) = route
+                    .get_mut("harness_model_routes")
+                    .and_then(Value::as_object_mut)
+                {
+                    mappings.retain(|_, target| {
+                        let Some(upstream) = target["upstream"].as_str() else {
+                            return false;
+                        };
+                        let Some(model) = target["model"].as_str() else {
+                            return false;
+                        };
+                        valid
+                            .get(upstream)
+                            .is_some_and(|models| models.contains(model))
+                    });
+                }
             }
         }
         if let Some(profiles) = draft.get_mut("profiles").and_then(Value::as_object_mut) {
@@ -498,6 +514,7 @@ impl AppInner {
             load_error,
             config_state,
             agent_route_drafts: BTreeMap::new(),
+            agent_harness_route_drafts: BTreeMap::new(),
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
@@ -970,6 +987,50 @@ impl AppInner {
         }
     }
 
+    pub(crate) fn agent_harness_model_routes(&self, agent_id: &str) -> BTreeMap<String, TierView> {
+        if let Some(routes) = self.agent_harness_route_drafts.get(agent_id) {
+            return routes.clone();
+        }
+        let mut routes: BTreeMap<String, TierView> = harness_request_models(agent_id)
+            .iter()
+            .map(|requested_model| {
+                let slot = if *requested_model == "fast" {
+                    "low"
+                } else if matches!(*requested_model, "auto" | "balanced") {
+                    "mid"
+                } else if *requested_model == "power"
+                    || *requested_model == CLAUDE_CODE_FABLE_MODEL_ID
+                {
+                    "high"
+                } else {
+                    unreachable!("request models come from a closed catalog")
+                };
+                (
+                    (*requested_model).to_owned(),
+                    self.agent_tier(agent_id, slot),
+                )
+            })
+            .collect();
+        if let Some(configured) =
+            self.draft["agent_routes"][agent_id]["harness_model_routes"].as_object()
+        {
+            for (requested_model, target) in configured {
+                if let (Some(upstream), Some(model)) =
+                    (target["upstream"].as_str(), target["model"].as_str())
+                {
+                    routes.insert(
+                        requested_model.clone(),
+                        TierView {
+                            upstream: Some(upstream.to_owned()),
+                            model: Some(model.to_owned()),
+                        },
+                    );
+                }
+            }
+        }
+        routes
+    }
+
     pub(crate) fn agent_profile(&self, agent_id: &str) -> Option<String> {
         (!self.agent_route_drafts.contains_key(agent_id)
             && self.agent_route_mode(agent_id) == "profile")
@@ -1012,6 +1073,16 @@ impl AppInner {
                     .as_ref()
                     .and_then(|target| target.model.as_ref())
                     .is_none();
+                let harness_config_error = self
+                    .agent_harness_model_routes(&agent_id)
+                    .into_iter()
+                    .find_map(|(requested_model, target)| {
+                        (target.upstream.is_some() != target.model.is_some()).then(|| {
+                            format!(
+                                "Agent `{agent_id}` 的 Harness 请求 `{requested_model}` 缺少供应商和模型"
+                            )
+                        })
+                    });
                 let config_error = if routing_mode == "direct" && direct_target_incomplete {
                     Some(format!("Agent `{agent_id}` 的单独路由缺少供应商和模型"))
                 } else if mode == "custom" || mode == "profile" {
@@ -1030,9 +1101,11 @@ impl AppInner {
                         inherits_global,
                         tiers,
                         config_error,
+                        harness_config_error,
                         profile: self.agent_profile(&agent_id),
                         routing_mode,
                         direct_target,
+                        harness_model_routes: self.agent_harness_model_routes(&agent_id),
                     },
                 )
             })
@@ -1499,26 +1572,68 @@ impl AppInner {
     }
 
     pub(crate) fn begin_agent_route_draft(&mut self, agent_id: &str) {
-        if self.agent_route_drafts.contains_key(agent_id) {
-            return;
+        if !self.agent_route_drafts.contains_key(agent_id) {
+            let stored = &self.draft["agent_routes"][agent_id]["custom_route"];
+            let tiers = ["high", "mid", "low"]
+                .into_iter()
+                .map(|slot| {
+                    let target = &stored[slot];
+                    let tier = if stored.is_object() {
+                        TierView {
+                            upstream: target["upstream"].as_str().map(str::to_owned),
+                            model: target["model"].as_str().map(str::to_owned),
+                        }
+                    } else {
+                        self.tier(pool_key(slot).expect("known UI tier slot"))
+                    };
+                    (slot.to_owned(), tier)
+                })
+                .collect();
+            self.agent_route_drafts.insert(agent_id.to_owned(), tiers);
         }
-        let stored = &self.draft["agent_routes"][agent_id]["custom_route"];
-        let tiers = ["high", "mid", "low"]
-            .into_iter()
-            .map(|slot| {
-                let target = &stored[slot];
-                let tier = if stored.is_object() {
-                    TierView {
-                        upstream: target["upstream"].as_str().map(str::to_owned),
-                        model: target["model"].as_str().map(str::to_owned),
-                    }
-                } else {
-                    self.tier(pool_key(slot).expect("known UI tier slot"))
-                };
-                (slot.to_owned(), tier)
-            })
-            .collect();
-        self.agent_route_drafts.insert(agent_id.to_owned(), tiers);
+    }
+
+    pub(crate) fn begin_agent_harness_route_draft(&mut self, agent_id: &str) {
+        if !self.agent_harness_route_drafts.contains_key(agent_id) {
+            let routes = self.agent_harness_model_routes(agent_id);
+            self.agent_harness_route_drafts
+                .insert(agent_id.to_owned(), routes);
+        }
+    }
+
+    pub(crate) fn set_agent_harness_model_route(
+        &mut self,
+        agent_id: &str,
+        requested_model: &str,
+        upstream: Option<String>,
+        model: Option<String>,
+    ) -> Result<(), String> {
+        ensure_known_agent_id(agent_id)?;
+        if !harness_request_models(agent_id).contains(&requested_model) {
+            return Err(format!(
+                "Agent `{agent_id}` 不支持 Harness 请求模型 `{requested_model}`"
+            ));
+        }
+        let target = match (upstream, model) {
+            (Some(upstream), Some(model)) => {
+                self.validate_route_target(&upstream, &model)?;
+                TierView {
+                    upstream: Some(upstream),
+                    model: Some(model),
+                }
+            }
+            (None, None) => TierView {
+                upstream: None,
+                model: None,
+            },
+            _ => return Err("Harness 映射必须同时提供供应商和模型，或同时清空".to_owned()),
+        };
+        self.begin_agent_harness_route_draft(agent_id);
+        self.agent_harness_route_drafts
+            .get_mut(agent_id)
+            .expect("Harness route draft was just initialized")
+            .insert(requested_model.to_owned(), target);
+        Ok(())
     }
 
     pub(crate) fn set_agent_route_draft_tier(
@@ -1580,6 +1695,33 @@ impl AppInner {
         Ok(Value::Object(route))
     }
 
+    pub(crate) fn complete_harness_model_route_draft(
+        agent_id: &str,
+        routes: &BTreeMap<String, TierView>,
+    ) -> Result<Value, String> {
+        let mut complete = serde_json::Map::new();
+        for requested_model in harness_request_models(agent_id) {
+            let target = routes.get(*requested_model);
+            let upstream = target.and_then(|target| target.upstream.as_deref());
+            let model = target.and_then(|target| target.model.as_deref());
+            match (upstream, model) {
+                (Some(upstream), Some(model)) => {
+                    complete.insert(
+                        (*requested_model).to_owned(),
+                        json!({ "upstream": upstream, "model": model }),
+                    );
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(format!(
+                        "Agent `{agent_id}` 的 Harness 请求 `{requested_model}` 缺少供应商和模型"
+                    ));
+                }
+            }
+        }
+        Ok(Value::Object(complete))
+    }
+
     pub(crate) fn promote_agent_route_drafts(&mut self) -> Result<(), String> {
         let routes: BTreeMap<String, Value> = self
             .agent_route_drafts
@@ -1627,6 +1769,26 @@ impl AppInner {
             }
             inner.draft["agent_routes"][agent_id]["mode"] = json!("custom");
             inner.draft["agent_routes"][agent_id]["custom_route"] = route;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn promote_agent_harness_route_draft(
+        &mut self,
+        agent_id: &str,
+    ) -> Result<(), String> {
+        let Some(routes) = self.agent_harness_route_drafts.get(agent_id) else {
+            return Ok(());
+        };
+        let routes = Self::complete_harness_model_route_draft(agent_id, routes)?;
+        self.edit_validated_draft(|inner| {
+            if !inner.draft["agent_routes"].is_object() {
+                inner.draft["agent_routes"] = json!({});
+            }
+            if !inner.draft["agent_routes"][agent_id].is_object() {
+                inner.draft["agent_routes"][agent_id] = json!({ "mode": "inherit" });
+            }
+            inner.draft["agent_routes"][agent_id]["harness_model_routes"] = routes;
             Ok(())
         })
     }

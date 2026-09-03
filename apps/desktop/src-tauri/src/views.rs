@@ -103,12 +103,15 @@ pub(crate) struct AgentRouteView {
     pub(crate) inherits_global: bool,
     pub(crate) tiers: std::collections::BTreeMap<String, TierView>,
     pub(crate) config_error: Option<String>,
+    pub(crate) harness_config_error: Option<String>,
     pub(crate) profile: Option<String>,
     /// Effective routing philosophy for this Agent: its own override if set,
     /// otherwise the Home default. Drives the per-Agent top-bar toggle and which
     /// page body (three-tier vs quota-first) the Agent renders.
     pub(crate) routing_mode: String,
     pub(crate) direct_target: Option<DirectTargetView>,
+    /// Effective request-model mappings, including unsaved independent edits.
+    pub(crate) harness_model_routes: std::collections::BTreeMap<String, TierView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
