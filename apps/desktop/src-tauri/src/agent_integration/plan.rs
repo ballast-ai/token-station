@@ -1802,6 +1802,7 @@ mod tests {
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source = ConfigSource::existing(
             br#"{
+                "model": "claude-fable-5-1",
                 "env": {
                     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/agents/claude-code",
                     "ANTHROPIC_AUTH_TOKEN": "fixture-claude-virtual-key",
@@ -1887,6 +1888,9 @@ mod tests {
 
         for path in &legacy_paths {
             assert!(!prepared.view.owned_paths.contains(path));
+            if path.segments == ["model"] {
+                continue;
+            }
             let key = &path.segments[1];
             if key == "ANTHROPIC_DEFAULT_HAIKU_MODEL" {
                 assert_eq!(env[key], json!("user-haiku"));
@@ -1896,6 +1900,7 @@ mod tests {
                 assert!(!env.contains_key(key));
             }
         }
+        assert_eq!(projected["model"], json!("fable"));
         assert_eq!(prepared.view.owned_paths, active_paths);
     }
 
