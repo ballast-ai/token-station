@@ -16,6 +16,7 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
+  restartAgentHarnessRoutes,
   restartAgentRoute,
   restoreCursorProvider,
   setAgentRouteMode,
@@ -36,9 +37,11 @@ vi.mock("../api", () => ({
   openAgentBackupDirectory: vi.fn(),
   planAgentConnection: vi.fn(),
   planAgentDisconnect: vi.fn(),
+  restartAgentHarnessRoutes: vi.fn(),
   restartAgentRoute: vi.fn(),
   restoreCursorProvider: vi.fn(),
   setAgentRouteMode: vi.fn(),
+  setAgentHarnessModelRoute: vi.fn(),
   setAgentTier: vi.fn(),
 }));
 
@@ -103,6 +106,7 @@ describe("AgentRoutePage multi-install admission", () => {
     vi.mocked(mountAgentProfile).mockReset().mockResolvedValue({} as never);
     vi.mocked(openAgentBackupDirectory).mockReset().mockResolvedValue("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots");
     vi.mocked(restartAgentRoute).mockReset().mockResolvedValue({} as never);
+    vi.mocked(restartAgentHarnessRoutes).mockReset().mockResolvedValue({} as never);
     vi.mocked(restoreCursorProvider).mockReset().mockResolvedValue({
       state: "disconnected",
       message: "已恢复 Cursor 官方配置并断开",
@@ -1931,6 +1935,8 @@ describe("AgentRoutePage split page modes", () => {
     render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="routing" embedded /></ErrorToastProvider>);
 
     expect(screen.getByText("跟随全局路由")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Harness 模型映射" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Haiku 供应商" })).toBeEnabled();
     expect(screen.queryByRole("tablist", { name: "Agent 路由策略" })).toBeNull();
     expect(screen.queryByText("选择请求如何分配")).toBeNull();
     expect(screen.queryByRole("button", { name: "预览并接入" })).toBeNull();

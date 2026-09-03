@@ -419,6 +419,7 @@ export interface RouteContextView {
 }
 
 export type AgentRouteMode = "inherit" | "custom" | "profile";
+export type HarnessModelTarget = TierView;
 
 export interface AgentRouteView {
   mode: AgentRouteMode;
@@ -426,11 +427,14 @@ export interface AgentRouteView {
   inherits_global?: boolean;
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
+  harness_config_error?: string | null;
   profile: string | null;
   /** Effective routing mode for this Agent: its override first, otherwise the home default. */
   routing_mode: RoutingMode;
   /** Effective exact target for Direct mode; absent/null means configuration is incomplete. */
   direct_target?: DirectRouteTarget | null;
+  /** Effective request-model mappings, including unsaved independent edits. */
+  harness_model_routes?: Record<string, HarnessModelTarget>;
 }
 
 export interface QuotaAccount {
@@ -1120,6 +1124,21 @@ export const setAgentTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
+
+export const setAgentHarnessModelRoute = (
+  agentId: AgentId,
+  requestedModel: string,
+  upstream: string | null,
+  model: string | null,
+) => invoke<StateView>("set_agent_harness_model_route", {
+  agentId,
+  requestedModel,
+  upstream,
+  model,
+});
+
+export const restartAgentHarnessRoutes = (agentId: AgentId) =>
+  invoke<StateView>("restart_agent_harness_routes", { agentId });
 
 export const saveHomeRouteAsProfile = (name: string) =>
   invoke<StateView>("save_home_route_as_profile", { name });

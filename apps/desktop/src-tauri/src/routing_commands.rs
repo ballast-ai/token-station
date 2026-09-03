@@ -398,6 +398,20 @@ pub(crate) fn set_agent_tier(
 }
 
 #[tauri::command]
+pub(crate) fn set_agent_harness_model_route(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    requested_model: String,
+    upstream: Option<String>,
+    model: Option<String>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.set_agent_harness_model_route(&agent_id, &requested_model, upstream, model)?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
 pub(crate) fn save_home_route_as_profile(
     state: State<'_, AppStateManaged>,
     name: String,
@@ -477,10 +491,11 @@ pub(crate) fn restart_agent_route(
         // which would split the durable route from the running Gateway.
         let config = inner.materialize()?;
         let router = config.custom_router_for_agent(&agent_id)?;
+        let harness = config.harness_router_for_agent(&agent_id)?;
         let prepared = match &inner.server {
             ServerLifecycle::Running { server, .. } => Some(
                 server
-                    .prepare_agent_router_reload(&agent_id, router)
+                    .prepare_agent_router_reload(&agent_id, router, harness)
                     .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?,
             ),
             ServerLifecycle::Stopped { .. }
@@ -512,6 +527,48 @@ pub(crate) fn restart_agent_route(
     Ok(snapshot)
 }
 
+/// Save one Agent's Harness model mappings without changing its routing mode
+/// or tier source. Hot-reload the Agent router when the proxy is running.
+#[tauri::command]
+pub(crate) fn restart_agent_harness_routes(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    ensure_known_agent_id(&agent_id)?;
+    if matches!(
+        inner.server,
+        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
+    ) {
+        return Err("apply_in_progress: 配置正在应用，请完成后再保存 Harness 映射".to_owned());
+    }
+    inner.begin_agent_harness_route_draft(&agent_id);
+    inner.promote_agent_harness_route_draft(&agent_id)?;
+    let config = inner.materialize()?;
+    let router = config.custom_router_for_agent(&agent_id)?;
+    let harness = config.harness_router_for_agent(&agent_id)?;
+    let prepared = match &inner.server {
+        ServerLifecycle::Running { server, .. } => Some(
+            server
+                .prepare_agent_router_reload(&agent_id, router, harness)
+                .map_err(|error| format!("热重启 Harness 映射失败：{error}"))?,
+        ),
+        ServerLifecycle::Stopped { .. }
+        | ServerLifecycle::Failed { .. }
+        | ServerLifecycle::Stopping { .. } => None,
+        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
+            unreachable!("transitional lifecycles were rejected before editing")
+        }
+    };
+    inner.save_draft()?;
+    inner.agent_harness_route_drafts.remove(&agent_id);
+    if let (Some(prepared), ServerLifecycle::Running { server, .. }) = (prepared, &mut inner.server)
+    {
+        server.install_prevalidated_agent_router(prepared);
+    }
+    Ok(inner.snapshot())
+}
+
 #[tauri::command]
 pub(crate) fn apply_home_route_to_all_agents(
     state: State<'_, AppStateManaged>,
@@ -534,12 +591,15 @@ pub(crate) fn apply_home_route_to_all_agents(
             }
             Ok(())
         })?;
+        let config = inner.materialize()?;
         let prepared = match &inner.server {
             ServerLifecycle::Running { server, .. } => supported_agent_ids()
                 .into_iter()
                 .map(|agent_id| {
+                    let router = config.custom_router_for_agent(&agent_id)?;
+                    let harness = config.harness_router_for_agent(&agent_id)?;
                     server
-                        .prepare_agent_router_reload(&agent_id, None)
+                        .prepare_agent_router_reload(&agent_id, router, harness)
                         .map_err(|error| format!("Failed to hot-reload the Agent route: {error}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?,

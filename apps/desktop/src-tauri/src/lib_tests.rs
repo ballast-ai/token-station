@@ -2475,6 +2475,43 @@ fn provider_model_updates_protect_inactive_agent_route_drafts() {
 }
 
 #[test]
+fn provider_model_updates_protect_saved_and_unsaved_harness_mappings() {
+    let root = scratch_home("model-update-harness-mapping");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["provider"] = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://example.com/v1",
+        "models": [
+            {"model": "keep"},
+            {"model": "saved"},
+            {"model": "editing"}
+        ]
+    });
+    draft["agent_routes"]["opencode"] = json!({
+        "mode": "inherit",
+        "harness_model_routes": {
+            "fast": {"upstream": "provider", "model": "saved"}
+        }
+    });
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    inner
+        .set_agent_harness_model_route(
+            "claude-code",
+            "balanced",
+            Some("provider".to_owned()),
+            Some("editing".to_owned()),
+        )
+        .unwrap();
+
+    let error = replace_provider_models(&mut inner, "provider", vec!["keep".to_owned()])
+        .expect_err("Harness mappings protect their concrete target models");
+    assert!(error.contains("Harness 映射"), "{error}");
+    assert!(error.contains("opencode/fast"), "{error}");
+    assert!(error.contains("claude-code/balanced"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn provider_model_updates_protect_unsaved_agent_route_editors() {
     let root = scratch_home("model-update-agent-editor");
     let mut inner = AppInner::new(
@@ -2954,6 +2991,121 @@ fn completing_and_saving_an_agent_editor_commits_one_valid_custom_route() {
         assert_eq!(target.upstream.as_str(), "provider");
         assert_eq!(target.model, "model");
     }
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
+    let root = scratch_home("agent-harness-mapping-save");
+    let config_path = root.join("token-station.json");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        config_path.clone(),
+        template_for_test(&root),
+        None,
+    )))));
+    add_provider(
+        app.state(),
+        "provider".to_owned(),
+        "https://example.com/v1".to_owned(),
+        vec!["model".to_owned()],
+        None,
+        false,
+    )
+    .unwrap();
+    set_agent_route_mode(app.state(), "claude-code".to_owned(), "custom".to_owned()).unwrap();
+    for slot in ["high", "mid", "low"] {
+        set_agent_tier(
+            app.state(),
+            "claude-code".to_owned(),
+            slot.to_owned(),
+            Some("provider".to_owned()),
+            Some("model".to_owned()),
+        )
+        .unwrap();
+    }
+
+    let mut editing = None;
+    for requested_model in ["fast", "balanced", "power", "claude-fable-5-1"] {
+        editing = Some(
+            set_agent_harness_model_route(
+                app.state(),
+                "claude-code".to_owned(),
+                requested_model.to_owned(),
+                Some("provider".to_owned()),
+                Some("model".to_owned()),
+            )
+            .unwrap(),
+        );
+    }
+    let editing = editing.expect("the final mapping edit returns a snapshot");
+    assert_eq!(
+        editing.agent_routes["claude-code"].harness_model_routes["claude-fable-5-1"].upstream,
+        Some("provider".to_owned())
+    );
+
+    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    let config = ClientConfig::load(&config_path).unwrap();
+    assert_eq!(
+        config.agent_routes["claude-code"].harness_model_routes["claude-fable-5-1"].model,
+        "model"
+    );
+    let router = config
+        .harness_router_for_agent("claude-code")
+        .unwrap()
+        .unwrap()
+        .router;
+    let rule = router
+        .rules
+        .iter()
+        .find(|rule| rule.matcher.requested_model.as_deref() == Some("claude-fable-5-1"))
+        .expect("Fable has an exact route");
+    assert_eq!(
+        router.pools[&rule.route_to][0].upstream.as_str(),
+        "provider"
+    );
+    assert_eq!(router.pools[&rule.route_to][0].model, "model");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn harness_mapping_save_does_not_change_the_agent_route_mode_or_tiers() {
+    let root = scratch_home("agent-harness-mapping-independent");
+    let config_path = root.join("token-station.json");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        config_path.clone(),
+        template_for_test(&root),
+        None,
+    )))));
+    add_provider(
+        app.state(),
+        "provider".to_owned(),
+        "https://example.com/v1".to_owned(),
+        vec!["model".to_owned()],
+        None,
+        false,
+    )
+    .unwrap();
+
+    set_agent_harness_model_route(
+        app.state(),
+        "opencode".to_owned(),
+        "fast".to_owned(),
+        Some("provider".to_owned()),
+        Some("model".to_owned()),
+    )
+    .unwrap();
+    restart_agent_harness_routes(app.state(), "opencode".to_owned()).unwrap();
+
+    let config = ClientConfig::load(&config_path).unwrap();
+    let route = &config.agent_routes["opencode"];
+    assert_eq!(
+        route.mode,
+        token_station_cli::config::AgentRouteMode::Inherit
+    );
+    assert!(route.custom_route.is_none());
+    assert_eq!(route.harness_model_routes["fast"].upstream, "provider");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -3541,7 +3693,10 @@ fn applying_home_routes_replaces_running_agent_overrides() {
     custom_draft["agent_routes"]["opencode"] = json!({
         "mode": "inherit",
         "routing_mode": "direct",
-        "direct_target": {"upstream": "local", "model": "small"}
+        "direct_target": {"upstream": "local", "model": "small"},
+        "harness_model_routes": {
+            "fast": {"upstream": "local", "model": "small"}
+        }
     });
     let custom_config: ClientConfig = serde_json::from_value(custom_draft.clone()).unwrap();
     custom_config.save(&config_path).unwrap();
@@ -3549,8 +3704,9 @@ fn applying_home_routes_replaces_running_agent_overrides() {
         .custom_router_for_agent("opencode")
         .unwrap()
         .expect("the fixture has one custom Agent router");
+    let harness_router = custom_config.harness_router_for_agent("opencode").unwrap();
     let prepared = running
-        .prepare_agent_router_reload("opencode", Some(custom_router))
+        .prepare_agent_router_reload("opencode", Some(custom_router), harness_router)
         .unwrap();
     running.install_prevalidated_agent_router(prepared);
 
@@ -3575,9 +3731,17 @@ fn applying_home_routes_replaces_running_agent_overrides() {
             .map(|router| router.cloned()),
         _ => panic!("applying Home routes must leave the proxy running"),
     };
-    assert_eq!(override_after, Some(None));
     let persisted = ClientConfig::load(&config_path).unwrap();
+    assert_eq!(override_after, Some(None));
     assert_eq!(persisted.custom_router_for_agent("opencode").unwrap(), None);
+    assert_eq!(
+        persisted.agent_routes["opencode"].harness_model_routes["fast"].model,
+        "small"
+    );
+    assert!(persisted
+        .harness_router_for_agent("opencode")
+        .unwrap()
+        .is_some());
     let lifecycle = std::mem::replace(
         &mut inner.server,
         ServerLifecycle::Stopped { generation: 8 },

@@ -1597,6 +1597,39 @@ pub(crate) fn replace_provider_models(
         ));
     }
 
+    let mut harness_blocked = Vec::new();
+    if let Some(agent_routes) = inner.draft["agent_routes"].as_object() {
+        for (agent_id, route) in agent_routes {
+            if let Some(mappings) = route["harness_model_routes"].as_object() {
+                for (requested_model, target) in mappings {
+                    if removed_reference(target) {
+                        harness_blocked.push(format!("{agent_id}/{requested_model}"));
+                    }
+                }
+            }
+        }
+    }
+    for (agent_id, mappings) in &inner.agent_harness_route_drafts {
+        for (requested_model, target) in mappings {
+            let refers_to_provider = target.upstream.as_deref() == Some(name);
+            let retained = target
+                .model
+                .as_deref()
+                .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+            if refers_to_provider && !retained {
+                harness_blocked.push(format!("{agent_id}/{requested_model}"));
+            }
+        }
+    }
+    harness_blocked.sort();
+    harness_blocked.dedup();
+    if !harness_blocked.is_empty() {
+        return Err(format!(
+            "不能移除 Harness 映射 {} 正在使用的模型，请先调整对应映射",
+            harness_blocked.join("、")
+        ));
+    }
+
     // Strategy groups (profiles) pin a provider+model per tier; a model still used
     // by one must not be silently removed, or the profile is left dangling.
     let mut profile_blocked = Vec::new();
@@ -1874,6 +1907,13 @@ pub(crate) fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
             if route["direct_target"]["upstream"].as_str() == Some(name) {
                 references.push(format!("Agent/{agent_id}/单独路由"));
             }
+            if let Some(mappings) = route["harness_model_routes"].as_object() {
+                for (requested_model, target) in mappings {
+                    if target["upstream"].as_str() == Some(name) {
+                        references.push(format!("Agent/{agent_id}/Harness/{requested_model}"));
+                    }
+                }
+            }
         }
     }
     for (pool, label) in [
@@ -1905,6 +1945,13 @@ pub(crate) fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
         for (slot, target) in tiers {
             if target.upstream.as_deref() == Some(name) {
                 references.push(format!("Agent/{agent_id}/{slot}"));
+            }
+        }
+    }
+    for (agent_id, mappings) in &inner.agent_harness_route_drafts {
+        for (requested_model, target) in mappings {
+            if target.upstream.as_deref() == Some(name) {
+                references.push(format!("Agent/{agent_id}/Harness/{requested_model}"));
             }
         }
     }

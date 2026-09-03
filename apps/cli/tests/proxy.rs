@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use token_station_cli::config::ClientConfig;
+use token_station_cli::config::{ClientConfig, HarnessRouterConfig};
 use token_station_cli::gateway::{FeatureLayer, Gateway, Reply, StageStatus};
 use token_station_cli::server;
 
@@ -2564,6 +2564,10 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
         std::collections::BTreeSet::from(["agent-model".to_owned()])
     );
     assert_eq!(
+        model_ids("/agents/claude-code/v1/models"),
+        std::collections::BTreeSet::from(["claude-fable-5-1".to_owned()])
+    );
+    assert_eq!(
         model_ids("/v1/models"),
         std::collections::BTreeSet::from(["home-model".to_owned()])
     );
@@ -2667,12 +2671,96 @@ fn scoped_models_switch_on_the_next_request_after_router_reload() {
     .expect("replacement Agent router parses");
     proxy
         .gateway
-        .reload_agent_router("opencode", Some(replacement))
+        .reload_agent_router("opencode", Some(replacement), None)
         .expect("Agent router reloads");
     assert_eq!(
         model_ids(),
         std::collections::BTreeSet::from(["agent-model".to_owned()])
     );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn harness_mapping_runs_before_quota_priority_fallback() {
+    let answer = |id: &str, model: &str| {
+        json!({
+            "id": id,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        })
+    };
+    let home = MockUpstream::start(vec![vec![http_json(
+        200,
+        &answer("chatcmpl-home", "home-model").to_string(),
+    )]]);
+    let mapped = MockUpstream::start(vec![vec![http_json(
+        200,
+        &answer("chatcmpl-mapped", "agent-model").to_string(),
+    )]]);
+    let key = key_file("harness-before-quota", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &mapped, &key);
+    let quota = serde_json::from_value(json!({
+        "version": 1,
+        "routing_mode": "quota_first",
+        "quota_accounts": [
+            { "upstream": "home_upstream", "model": "home-model" }
+        ]
+    }))
+    .expect("quota fallback parses");
+    let harness = HarnessRouterConfig {
+        router: serde_json::from_value(json!({
+            "version": 1,
+            "pools": {
+                "mapped": [{ "upstream": "agent_upstream", "model": "agent-model" }]
+            },
+            "rules": [{
+                "id": "opencode-fast",
+                "when": { "requested_model": "fast" },
+                "route_to": "mapped"
+            }],
+            "default_pool": "mapped"
+        }))
+        .expect("Harness overlay parses"),
+        requested_models: vec!["fast".to_owned()],
+    };
+    proxy
+        .gateway
+        .reload_agent_router("opencode", Some(quota), Some(harness))
+        .expect("Agent routers reload");
+
+    let fast = json!({
+        "model": "fast",
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/opencode/v1/chat/completions",
+        &fast,
+        &proxy.virtual_key,
+        false,
+    );
+    assert_eq!(status, 200);
+
+    let balanced = json!({
+        "model": "balanced",
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/opencode/v1/chat/completions",
+        &balanced,
+        &proxy.virtual_key,
+        false,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(mapped.hits(), 1, "the exact Harness mapping wins");
+    assert_eq!(home.hits(), 1, "an unmapped request uses quota fallback");
 
     std::fs::remove_file(key).ok();
 }

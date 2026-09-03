@@ -22,9 +22,11 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
+  restartAgentHarnessRoutes,
   restartAgentRoute,
   restoreCursorProvider,
   setAgentRouteMode,
+  setAgentHarnessModelRoute,
   setAgentTier,
   type AgentInstallationView,
   type ConfigPlanView,
@@ -40,6 +42,7 @@ import {
   type TierSlot,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
+import HarnessModelMapping from "../components/HarnessModelMapping";
 import InstallationPicker from "../components/InstallationPicker";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import RoutingModeSelector from "../components/RoutingModeSelector";
@@ -807,6 +810,13 @@ export default function AgentRoutePage({
       : copy("Custom routing saved", "独立路由已保存", "獨立路由已儲存", "カスタムルーティングが保存されました"),
   );
 
+  const saveHarnessRoutes = () => runState(
+    () => restartAgentHarnessRoutes(metadata.agent_id),
+    serveRunning
+      ? copy("Harness mappings saved and restarted", "Harness 映射已保存并生效", "Harness 映射已儲存並生效", "Harness マッピングを保存して適用しました")
+      : copy("Harness mappings saved", "Harness 映射已保存", "Harness 映射已儲存", "Harness マッピングを保存しました"),
+  );
+
   // In Follow Home mode, apply the current home tiers to this Agent immediately.
   // Restarting an inherited route clears the Agent-specific route and hot-applies the home configuration.
   const applyHomeRoute = () => runState(
@@ -1254,6 +1264,25 @@ export default function AgentRoutePage({
       </AlertDialog>
         </>
       )}
+      {pageMode !== "connection" && ["claude-code", "opencode"].includes(metadata.agent_id) ? (
+        <HarnessModelMapping
+          agentId={metadata.agent_id}
+          providers={providers}
+          routes={route.harness_model_routes}
+          disabled={busy}
+          saveDisabled={Boolean(route.harness_config_error)}
+          error={route.harness_config_error}
+          onChange={(requestedModel, target) => runState(() =>
+            setAgentHarnessModelRoute(
+              metadata.agent_id,
+              requestedModel,
+              target.upstream,
+              target.model,
+            )
+          )}
+          onSave={saveHarnessRoutes}
+        />
+      ) : null}
       {pageMode !== "connection" && (
         !independentEditorOpen ? (
           <section
@@ -1282,7 +1311,10 @@ export default function AgentRoutePage({
               className="agent-route-inheritance-action"
               variant="outline"
               type="button"
-              onClick={() => setIndependentEditorOpen(true)}
+              onClick={() => {
+                setIndependentEditorOpen(true);
+                void switchMode("custom");
+              }}
             >
               <SlidersHorizontal data-icon="inline-start" aria-hidden="true" />
               {copy("Set independent routing", "设置独立路由", "設定獨立路由", "独立ルーティングを設定")}
