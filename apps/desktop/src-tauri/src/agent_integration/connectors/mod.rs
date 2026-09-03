@@ -1190,7 +1190,7 @@ mod tests {
             .unwrap();
         assert!(CodexConnector
             .success_message(&codex_input)
-            .contains("已同步安全上下文窗口和自动压缩阈值"));
+            .contains("safe context and automatic compaction limits were synchronized"));
         let codex = semantic_json(&codex).unwrap();
         assert_eq!(codex["model_context_window"], json!(257_550));
         assert_eq!(
