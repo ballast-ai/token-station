@@ -229,6 +229,7 @@ impl Connector for OpenCodeConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_integration::config_codec::{apply_patch, parse_source_bytes};
     use crate::agent_integration::connectors::AgentModelMetadata;
 
     #[test]
