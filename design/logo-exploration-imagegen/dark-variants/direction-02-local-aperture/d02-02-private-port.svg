@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <g id="mark">
+    <path fill="#EEF2F8" fill-rule="evenodd" d="M136 88h288v272l-64 64H88V152l48-64Zm52 336h44V274h104v-56h-66l-82 82v124Z"/>
+    <polygon fill="#5368E8" points="232,326 278,280 278,376 232,422"/>
+  </g>
+</svg>

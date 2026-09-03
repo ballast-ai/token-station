@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <g id="mark">
+    <rect x="228" y="80" width="56" height="352" fill="#182133" transform="rotate(12 256 256)"/>
+    <rect x="256" y="112" width="176" height="56" fill="#182133" transform="rotate(-12 344 140)"/>
+    <rect x="248" y="328" width="144" height="56" fill="#182133" transform="rotate(-12 320 356)"/>
+    <rect x="80" y="228" width="184" height="56" fill="#D89A2B" transform="rotate(-12 172 256)"/>
+  </g>
+</svg>

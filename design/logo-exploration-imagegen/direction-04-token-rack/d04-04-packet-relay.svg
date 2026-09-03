@@ -1,0 +1,7 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="mark">
+    <path fill="#182133" d="M72 288H160V344H216V416H72Z"/>
+    <path fill="#F04B2F" d="M180 196H268V252H324V324H180Z"/>
+    <path fill="#182133" d="M288 96H384V152H440V232H288Z"/>
+  </g>
+</svg>

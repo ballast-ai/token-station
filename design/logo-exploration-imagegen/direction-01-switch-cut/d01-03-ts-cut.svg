@@ -1,0 +1,7 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="mark">
+    <path fill="#15181B" d="M88 104H424V158L352 212H282V176H88Z"/>
+    <path fill="#15181B" d="M88 224H200L258 270L218 310H174V408H88Z"/>
+    <polygon fill="#F04B2F" points="300,230 424,230 424,310 252,310"/>
+  </g>
+</svg>
