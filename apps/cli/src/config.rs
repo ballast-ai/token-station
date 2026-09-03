@@ -1726,7 +1726,7 @@ mod tests {
     fn harness_model_routes_survive_config_load_and_save() {
         let mut value = example();
         value["agent_routes"] = serde_json::json!({
-            "codex": {
+            "claude-code": {
                 "mode": "inherit",
                 "harness_model_routes": {
                     "balanced": {
@@ -1742,7 +1742,7 @@ mod tests {
         config.validate().expect("Harness mapping config validates");
         let saved = serde_json::to_value(config).expect("Harness mapping config serializes");
         assert_eq!(
-            saved["agent_routes"]["codex"]["harness_model_routes"]["balanced"],
+            saved["agent_routes"]["claude-code"]["harness_model_routes"]["balanced"],
             serde_json::json!({
                 "upstream": "openai_personal",
                 "model": "gpt-5.5"
@@ -1752,7 +1752,7 @@ mod tests {
             .expect("saved Harness mapping reloads");
 
         let mut unknown = saved;
-        unknown["agent_routes"]["codex"]["future_route_typo"] = serde_json::json!({});
+        unknown["agent_routes"]["claude-code"]["future_route_typo"] = serde_json::json!({});
         let error = serde_json::from_value::<ClientConfig>(unknown)
             .expect_err("unrelated unknown fields remain rejected");
         assert!(error.to_string().contains("future_route_typo"), "{error}");
