@@ -201,7 +201,7 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
-        let sequence = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+        let sequence = NEXT_RENDER_ID.fetch_add(1, Ordering::Relaxed);
         let mut render_context = json!({
             "protocol": record.protocol,
             "stream_id": format!("stream-{sequence}"),
@@ -340,9 +340,15 @@ impl Gateway {
             None,
         );
         record.usage = Some(chat_response.usage);
+        let response_id = if agent.protocol == "openai-responses" {
+            let sequence = NEXT_RENDER_ID.fetch_add(1, Ordering::Relaxed);
+            format!("resp_token_station_{sequence}")
+        } else {
+            chat_response.id.clone()
+        };
         let mut render_context = json!({
             "protocol": record.protocol,
-            "response_id": chat_response.id,
+            "response_id": response_id,
             "model": chat_response.model,
             "inbound_tools": inbound_tools,
         });

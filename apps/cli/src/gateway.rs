@@ -148,7 +148,7 @@ fn absorb_record_usage(record: &mut RequestRecord, usage: Usage) {
         .absorb(usage);
 }
 
-static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_RENDER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REQUEST_FALLBACK: AtomicU64 = AtomicU64::new(1);
 const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
 const CONTINUATION_KEY_EXTENSION: &str = "token_station_private_continuation_key";

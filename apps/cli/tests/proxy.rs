@@ -125,6 +125,8 @@ struct MockUpstream {
     hanging_worker: Option<std::thread::JoinHandle<()>>,
 }
 
+type RequestValidator = fn(&Seen) -> Option<Vec<Vec<u8>>>;
+
 /// A bounded local endpoint that distinguishes a direct TLS connection from
 /// an environment-proxy CONNECT without allowing either path onto the network.
 struct ConnectionTrap {
@@ -223,6 +225,13 @@ impl MockUpstream {
     /// TCP segments to force awkward split points (`Vec<Vec<u8>>` per
     /// response).
     fn start(responses: Vec<Vec<Vec<u8>>>) -> Self {
+        Self::start_with_validator(responses, None)
+    }
+
+    fn start_with_validator(
+        responses: Vec<Vec<Vec<u8>>>,
+        validator: Option<RequestValidator>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
         let port = listener.local_addr().expect("bound").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -236,10 +245,13 @@ impl MockUpstream {
             for (index, stream) in listener.incoming().enumerate() {
                 let Ok(mut stream) = stream else { break };
                 let request = read_http_request(&mut stream);
+                let validation_response = validator.and_then(|validate| validate(&request));
                 record.lock().expect("recorder").push(request);
                 counter.fetch_add(1, Ordering::SeqCst);
 
-                let script = responses.get(index.min(responses.len().saturating_sub(1)));
+                let script = validation_response
+                    .as_ref()
+                    .or_else(|| responses.get(index.min(responses.len().saturating_sub(1))));
                 if let Some(segments) = script {
                     for segment in segments {
                         stream.write_all(segment).expect("mock writes");
@@ -561,6 +573,18 @@ fn http_json(status: u16, body: &str) -> Vec<u8> {
         body.len()
     )
     .into_bytes()
+}
+
+fn reject_tool_options_without_tools(request: &Seen) -> Option<Vec<Vec<u8>>> {
+    (request.body.get("tools").is_none()
+        && (request.body.get("tool_choice").is_some()
+            || request.body.get("parallel_tool_calls").is_some()))
+    .then(|| {
+        vec![http_json(
+            400,
+            r#"{"error":{"message":"tool options require tools"}}"#,
+        )]
+    })
 }
 
 fn http_json_with_headers(status: u16, body: &str, headers: &[(&str, &str)]) -> Vec<u8> {
@@ -1502,6 +1526,14 @@ fn message_text(content: &Value) -> String {
             .join(""),
         other => panic!("message content is neither text nor parts: {other}"),
     }
+}
+
+fn responses_input_message(text: impl Into<String>) -> Value {
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text.into()}]
+    })
 }
 
 fn key_file(name: &str, contents: &str) -> PathBuf {
@@ -3099,7 +3131,7 @@ fn an_unknown_responses_continuation_fails_explicitly_before_the_upstream() {
 #[test]
 fn responses_previous_response_id_replays_history_through_the_provider_pipeline() {
     let first_answer = json!({
-        "id": "chatcmpl-continuation-1",
+        "id": "chatcmpl-provider-reused-id",
         "model": "gpt-5.5",
         "choices": [{
             "index": 0,
@@ -3109,7 +3141,7 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
         "usage": {"prompt_tokens": 3, "completion_tokens": 2}
     });
     let second_answer = json!({
-        "id": "chatcmpl-continuation-2",
+        "id": "chatcmpl-provider-reused-id",
         "model": "gpt-5.5",
         "choices": [{
             "index": 0,
@@ -3133,19 +3165,29 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
     );
     assert_eq!(first_status, 200, "{first_body}");
     let first_body: Value = serde_json::from_str(&first_body).expect("first response is JSON");
-    assert_eq!(first_body["id"], json!("chatcmpl-continuation-1"));
+    let first_response_id = first_body["id"]
+        .as_str()
+        .expect("translated Responses output has an id");
+    assert!(first_response_id.starts_with("resp_token_station_"));
+    assert_ne!(first_response_id, "chatcmpl-provider-reused-id");
 
     let (second_status, _, second_body) = send_responses(
         &proxy,
         &json!({
             "model": "auto",
             "input": "second turn",
-            "previous_response_id": "chatcmpl-continuation-1",
+            "previous_response_id": first_response_id,
             "store": false
         }),
         &token,
     );
     assert_eq!(second_status, 200, "{second_body}");
+    let second_body: Value = serde_json::from_str(&second_body).expect("second response is JSON");
+    let second_response_id = second_body["id"]
+        .as_str()
+        .expect("continued Responses output has an id");
+    assert!(second_response_id.starts_with("resp_token_station_"));
+    assert_ne!(second_response_id, first_response_id);
     let seen = mock.seen();
     assert_eq!(seen.len(), 2);
     let messages = seen[1].body["messages"]
@@ -3155,6 +3197,108 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
     assert_eq!(messages[0]["content"], json!("first turn"));
     assert_eq!(messages[1]["content"], json!("first answer"));
     assert_eq!(messages[2]["content"], json!("second turn"));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn oversized_responses_history_reaches_upstream_without_optional_continuation_state() {
+    let compaction_answer = json!({
+        "id": "chatcmpl-oversized-history",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "compacted"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2}
+    });
+    let continued_answer = json!({
+        "id": "chatcmpl-compacted-turn",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "continued"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+    });
+    let mock = MockUpstream::start_with_validator(
+        vec![
+            vec![http_json(200, &compaction_answer.to_string())],
+            vec![http_json(200, &continued_answer.to_string())],
+        ],
+        Some(reject_tool_options_without_tools),
+    );
+    let key = key_file("responses-oversized-history", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let token = proxy.virtual_key.clone();
+    let oversized_input = "x".repeat(2 * 1024 * 1024 + 1);
+
+    let (status, _, body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": [responses_input_message(oversized_input)],
+            "store": false,
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false
+        }),
+        &token,
+    );
+    assert_eq!(status, 200, "{body}");
+    let body: Value = serde_json::from_str(&body).expect("the compaction response is JSON");
+    let uncached_response_id = body["id"]
+        .as_str()
+        .expect("translated Responses output has an id");
+    assert!(uncached_response_id.starts_with("resp_token_station_"));
+    assert_eq!(mock.hits(), 1, "the cache ceiling must not gate routing");
+    let seen = mock.seen();
+    assert_eq!(
+        message_text(&seen[0].body["messages"][0]["content"]).len(),
+        2 * 1024 * 1024 + 1
+    );
+    assert!(seen[0].body.get("tools").is_none());
+    assert!(seen[0].body.get("tool_choice").is_none());
+
+    let (continued_status, _, continued_body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": "continue",
+            "previous_response_id": uncached_response_id,
+            "store": false
+        }),
+        &token,
+    );
+    assert_eq!(continued_status, 400, "{continued_body}");
+    assert!(continued_body.contains("continuation_expired"));
+    assert_eq!(
+        mock.hits(),
+        1,
+        "an uncached continuation must fail explicitly before routing"
+    );
+
+    let (post_compaction_status, _, post_compaction_body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": [responses_input_message("compacted summary and next turn")],
+            "store": false,
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false
+        }),
+        &token,
+    );
+    assert_eq!(post_compaction_status, 200, "{post_compaction_body}");
+    assert_eq!(mock.hits(), 2, "the compacted turn reaches the upstream");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].body.get("tools").is_none());
+    assert!(seen[1].body.get("tool_choice").is_none());
+    assert!(seen[1].body.get("parallel_tool_calls").is_none());
 
     std::fs::remove_file(key).ok();
 }
