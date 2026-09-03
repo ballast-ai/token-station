@@ -983,17 +983,55 @@ describe("model selection and provider model management", () => {
     )).toBeInTheDocument();
   });
 
-  it("目录中未配置的模型不提供必然失败的限制保存入口", () => {
+  it("最大输出缺失时仍可以单独保存上下文上限", async () => {
+    const provider: ProviderView = {
+      name: "deepseek", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["deepseek-v4"], has_auth: true,
+      model_capabilities: [{
+        model: "deepseek-v4", tool: "unknown", vision: "unknown", json_schema: "unknown",
+        context_window: 128000, max_output_tokens: 0,
+      }],
+    };
+    vi.mocked(setProviderModelLimits).mockResolvedValue(state);
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    const context = screen.getByRole("spinbutton", { name: "deepseek-v4 上下文上限" });
+    expect(screen.getByRole("spinbutton", { name: "deepseek-v4 最大输出 Token" })).toHaveValue(null);
+
+    await user.clear(context);
+    await user.type(context, "256000");
+    await user.click(screen.getByRole("button", { name: "保存 deepseek-v4 模型限制" }));
+
+    await waitFor(() => expect(setProviderModelLimits).toHaveBeenCalledWith(
+      "deepseek",
+      "deepseek-v4",
+      256000,
+      0,
+    ));
+  });
+
+  it("高级模型设置只显示当前已选择的模型", async () => {
     const provider: ProviderView = {
       name: "catalog-only", provider: "openai-compatible", base_url: "https://api.example/v1",
       models: ["configured"], has_auth: true,
       catalog: [{ model: "catalog-only-model", tool: "unknown", vision: "unknown", json_schema: "unknown", source: "live", last_seen_ms: 1, catalog_state: "active" }],
     };
 
-    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    const { container } = render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    const ledger = container.querySelector(".model-ledger");
+    const user = userEvent.setup();
 
-    expect(screen.queryByRole("button", { name: "保存 catalog-only-model 模型限制" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/catalog-only-model.*OpenCode/)).not.toBeInTheDocument();
+    expect(ledger).not.toBeNull();
+    expect(within(ledger as HTMLElement).getByText("configured")).toBeInTheDocument();
+    expect(within(ledger as HTMLElement).queryByText("catalog-only-model")).not.toBeInTheDocument();
+
+    await user.type(screen.getByRole("textbox", { name: "手动输入模型 ID" }), "catalog-only-model");
+    await user.click(screen.getByRole("button", { name: "加入列表" }));
+    expect(within(ledger as HTMLElement).getByText("catalog-only-model")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /✓configured/ }));
+    expect(within(ledger as HTMLElement).queryByText("configured")).not.toBeInTheDocument();
   });
 
   it("保留已下架模型并展示本次目录差异", async () => {

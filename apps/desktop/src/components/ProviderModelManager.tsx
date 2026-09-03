@@ -177,13 +177,13 @@ export default function ProviderModelManager({
   const modelRows = useMemo(() => {
     const catalogByModel = new Map(catalog.map((entry) => [entry.model, entry]));
     const capByModel = new Map(capabilities.map((cap) => [cap.model, cap]));
-    return mergeModels(catalog.map((c) => c.model), capabilities.map((c) => c.model)).map((model) => ({
+    return selected.map((model) => ({
       model,
       configured: provider.models.includes(model),
       catalog: catalogByModel.get(model) ?? null,
       cap: capByModel.get(model) ?? unknownCapabilities(model),
     }));
-  }, [catalog, capabilities, provider.models]);
+  }, [catalog, capabilities, provider.models, selected]);
   const operationDisabled = disabled || refreshing || saving || testing || editing
     || capabilitySaving !== null || limitSaving !== null;
   const taskOrder = ["models", "connection", "diagnostics"] as const;
@@ -355,13 +355,19 @@ export default function ProviderModelManager({
   const saveLimits = async (model: string) => {
     const draft = limitDrafts[model] ?? { context: "", output: "" };
     const context = Number(draft.context);
-    const output = Number(draft.output);
+    const outputBlank = draft.output.trim() === "";
+    const output = outputBlank ? 0 : Number(draft.output);
     let error = "";
-    if (!Number.isSafeInteger(context) || !Number.isSafeInteger(output)
-      || context <= 0 || output <= 0 || context > 0xffff_ffff || output > 0xffff_ffff) {
+    if (!Number.isSafeInteger(context) || context <= 0 || context > 0xffff_ffff) {
       error = copy(
-        "Context and maximum output tokens must be positive integers.",
-        "上下文上限和最大输出 Token 必须是大于 0 的整数。", "上下文上限和最大輸出 Token 必須是大於 0 的整數。", "コンテキスト上限と最大出力トークンは0より大きい整数でなければなりません。"
+        "The context window must be a positive integer.",
+        "上下文上限必须是大于 0 的整数。", "上下文上限必須是大於 0 的整數。", "コンテキスト上限は0より大きい整数でなければなりません。"
+      );
+    } else if (!outputBlank && (!Number.isSafeInteger(output)
+      || output <= 0 || output > 0xffff_ffff)) {
+      error = copy(
+        "Maximum output tokens must be blank or a positive integer.",
+        "最大输出 Token 可留空，或填写大于 0 的整数。", "最大輸出 Token 可留空，或填寫大於 0 的整數。", "最大出力トークンは空欄にするか、0より大きい整数を入力してください。"
       );
     } else if (output > context) {
       error = copy(
