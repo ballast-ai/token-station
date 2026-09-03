@@ -1795,11 +1795,8 @@ pub(crate) fn replace_provider_model_limits(
     if name.is_empty() || model.is_empty() {
         return Err("供应商和模型 ID 不能为空".to_owned());
     }
-    if context_window == 0 || max_output_tokens == 0 {
-        return Err("上下文上限和最大输出 Token 必须大于 0".to_owned());
-    }
-    if max_output_tokens > context_window {
-        return Err("最大输出 Token 不能大于上下文上限".to_owned());
+    if context_window == 0 {
+        return Err("上下文上限必须大于 0".to_owned());
     }
     ensure_generic_provider_mutation_allowed(inner, name)?;
 
@@ -1817,10 +1814,23 @@ pub(crate) fn replace_provider_model_limits(
         .iter_mut()
         .find(|candidate| candidate["model"].as_str() == Some(model))
         .ok_or_else(|| format!("供应商 `{name}` 未配置模型 `{model}`"))?;
+    let effective_max_output_tokens = if max_output_tokens > 0 {
+        max_output_tokens
+    } else {
+        capability["max_output_tokens"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or_default()
+    };
+    if effective_max_output_tokens > context_window {
+        return Err("最大输出 Token 不能大于上下文上限".to_owned());
+    }
     capability["context_window"] = json!(context_window);
-    capability["max_output_tokens"] = json!(max_output_tokens);
     capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
-    capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
+    if max_output_tokens > 0 {
+        capability["max_output_tokens"] = json!(max_output_tokens);
+        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
+    }
 
     let save = inner.observe_draft().and_then(|()| inner.save_draft());
     if let Err(error) = save {

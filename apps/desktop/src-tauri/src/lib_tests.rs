@@ -1988,7 +1988,7 @@ fn provider_model_vision_declaration_updates_the_public_state() {
 }
 
 #[test]
-fn provider_model_limits_require_a_positive_output_within_context_and_persist_atomically() {
+fn provider_model_limits_allow_missing_output_and_persist_atomically() {
     let root = scratch_home("model-limits");
     let mut draft = template_for_test(&root);
     draft["upstreams"]["provider"] = json!({
@@ -2001,12 +2001,19 @@ fn provider_model_limits_require_a_positive_output_within_context_and_persist_at
         }]
     });
     let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
-    let before = inner.draft.clone();
 
-    let error = replace_provider_model_limits(&mut inner, "provider", "bounded-model", 128_000, 0)
-        .expect_err("a missing maximum output remains unproven");
-    assert!(error.contains("大于 0"), "{error}");
-    assert_eq!(inner.draft, before);
+    replace_provider_model_limits(&mut inner, "provider", "bounded-model", 256_000, 0)
+        .expect("context can be saved while maximum output remains unknown");
+    let model = &inner.draft["upstreams"]["provider"]["models"][0];
+    assert_eq!(model["context_window"], json!(256_000));
+    assert!(model.get("max_output_tokens").is_none());
+    assert_eq!(
+        model[CONTEXT_WINDOW_SOURCE_KEY],
+        json!(LIMIT_SOURCE_OPERATOR)
+    );
+    assert!(model.get(MAX_OUTPUT_TOKENS_SOURCE_KEY).is_none());
+
+    let before = inner.draft.clone();
 
     let error =
         replace_provider_model_limits(&mut inner, "provider", "bounded-model", 128_000, 128_001)
