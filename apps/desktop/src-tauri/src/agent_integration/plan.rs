@@ -324,10 +324,8 @@ fn build_connection_or_refresh_plan(
     let owned_paths = ownership.map_or_else(
         || owned_paths_touched_by(&declared_owned_paths, &operations),
         |record| {
-            let previous = normalized_legacy_owned_paths(
-                &record.owned_paths,
-                &authorized_owned_paths,
-            );
+            let previous =
+                normalized_legacy_owned_paths(&record.owned_paths, &authorized_owned_paths);
             declared_owned_paths
                 .iter()
                 .filter(|path| previous.contains(path) || owned_path_is_touched(path, &operations))

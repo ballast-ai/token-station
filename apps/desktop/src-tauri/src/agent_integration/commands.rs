@@ -23,18 +23,18 @@ use super::config_codec::{
     render_document, DocumentFormat,
 };
 use super::connectors::{
-    builtin_connectors, find_connector, owned_paths_with_legacy, validate_patch_ownership, AgentModelCost,
-    AgentModelMetadata, ConnectInput, Connector,
+    builtin_connectors, find_connector, owned_paths_with_legacy, validate_patch_ownership,
+    AgentModelCost, AgentModelMetadata, ConnectInput, Connector,
 };
 use super::discovery::DiscoveryScanner;
 use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
-    build_disconnect_plan, build_metadata_refresh_plan,
-    build_metadata_refresh_plan_with_baseline, build_snapshot_restore_plan,
-    companion_document_format, generate_operation_id, read_config_source, ConfigSource,
-    PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED, OWNED_VALUES_CHANGED,
+    build_disconnect_plan, build_metadata_refresh_plan, build_metadata_refresh_plan_with_baseline,
+    build_snapshot_restore_plan, companion_document_format, generate_operation_id,
+    read_config_source, ConfigSource, PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED,
+    OWNED_VALUES_CHANGED,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
@@ -1215,8 +1215,7 @@ impl AgentCommandState {
                 let source = read_config_source(target).map_err(AgentCommandError::internal)?;
                 let input = runtime.input_for(&owned.connector_id)?;
                 let now_ms = self.clock.now_ms();
-                let operation_id =
-                    generate_operation_id().map_err(AgentCommandError::internal)?;
+                let operation_id = generate_operation_id().map_err(AgentCommandError::internal)?;
                 let restores_legacy_paths = connector
                     .legacy_owned_paths()
                     .iter()

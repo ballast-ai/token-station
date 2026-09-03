@@ -1472,7 +1472,7 @@ mod tests {
     use crate::agent_integration::config_codec::DocumentFormat;
     use crate::agent_integration::connectors::{
         find_connector, AgentModelMetadata, ClaudeCodeConnector, ClaudeDesktopConnector,
-        ConnectInput, HermesConnector, OpenClawConnector, WorkBuddyConnector,
+        CodexConnector, ConnectInput, HermesConnector, OpenClawConnector, WorkBuddyConnector,
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
     use crate::agent_integration::plan::{
@@ -1896,6 +1896,51 @@ mod tests {
             None,
             1_000,
             "0d".repeat(16),
+        )
+        .unwrap()
+    }
+
+    fn codex_discovery(target: &Path) -> DiscoveryRecord {
+        let mut record = discovery(target);
+        record.agent_id = "codex".to_string();
+        record.executable_path = "/opt/codex".to_string();
+        record.canonical_path = record.executable_path.clone();
+        record
+    }
+
+    fn codex_verified() -> CompatibilityDecision {
+        let mut decision = verified();
+        decision.agent_id = "codex".to_string();
+        decision.installation_path = Some("/opt/codex".to_string());
+        decision.connector_id = Some("codex-v1".to_string());
+        decision
+    }
+
+    fn prepare_codex(target: &Path, secret: &str) -> PreparedChangePlan {
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        build_connection_plan(
+            &CodexConnector,
+            &codex_discovery(target),
+            &codex_verified(),
+            target,
+            &read_config_source(target).unwrap(),
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/codex/v1",
+                token: Some(secret),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            },
+            1,
+            None,
+            1_000,
+            "6c".repeat(16),
         )
         .unwrap()
     }
@@ -2615,6 +2660,202 @@ mod tests {
             .is_none());
         assert_eq!(disconnected["agents"], Value::Null);
         assert_eq!(disconnected["unowned"], "keep");
+        assert!(ownership.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_config_and_existing_model_catalog_restore_together_on_disconnect() {
+        let root = scratch("codex-model-catalog-disconnect");
+        let target = root.join(".codex").join("config.toml");
+        let catalog = root
+            .join(".codex")
+            .join("model-catalogs")
+            .join("tokenstation.json");
+        let original_config = br#"model = "user-model"
+model_catalog_json = "user-catalog.json"
+
+[user]
+keep = true
+"#;
+        let original_catalog = br#"{
+  "schema": "keep",
+  "models": [{"slug": "user-model"}]
+}
+"#;
+        write_initial(&target, original_config);
+        write_initial(&catalog, original_catalog);
+        let plan = prepare_codex(&target, "vk-codex-catalog");
+        assert_eq!(plan.view.related_config_paths, [catalog.to_string_lossy()]);
+
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&plan, &confirmation(&plan), &admission(), 1_002)
+            .unwrap();
+
+        let connected_catalog: Value =
+            serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+        assert_eq!(connected_catalog["schema"], "keep");
+        assert_eq!(connected_catalog["models"][0]["slug"], "auto");
+
+        let ownership_key = OwnershipKey {
+            agent_id: "codex".to_string(),
+            installation_path: "/opt/codex".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let owned = ownership.load(&ownership_key).unwrap().unwrap();
+        assert_eq!(owned.companion_files.len(), 1);
+        let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let current = read_config_source(&target).unwrap();
+        let master_key = keys.load().unwrap();
+        let mut disconnect = build_disconnect_plan(
+            &CodexConnector,
+            &codex_discovery(&target),
+            &codex_verified(),
+            &target,
+            &current,
+            &owned,
+            &baseline.record,
+            &baseline_source,
+            &master_key,
+            1,
+            None,
+            1_003,
+            "6d".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_disconnect_companions(
+            &mut disconnect,
+            &CodexConnector,
+            &owned,
+            &snapshots,
+            &master_key,
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 1_003),
+                &admission(),
+                1_004,
+            )
+            .unwrap();
+
+        let restored_config = std::str::from_utf8(&std::fs::read(&target).unwrap())
+            .unwrap()
+            .parse::<toml_edit::Document>()
+            .unwrap();
+        assert_eq!(
+            restored_config
+                .get("model")
+                .and_then(toml_edit::Item::as_str),
+            Some("user-model")
+        );
+        assert_eq!(
+            restored_config
+                .get("model_catalog_json")
+                .and_then(toml_edit::Item::as_str),
+            Some("user-catalog.json")
+        );
+        assert_eq!(restored_config["user"]["keep"].as_bool(), Some(true));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&catalog).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(original_catalog).unwrap()
+        );
+        assert!(ownership.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_disconnect_removes_a_model_catalog_created_by_the_connector() {
+        let root = scratch("codex-new-model-catalog-disconnect");
+        let target = root.join(".codex").join("config.toml");
+        let catalog = root
+            .join(".codex")
+            .join("model-catalogs")
+            .join("tokenstation.json");
+        write_initial(&target, b"[user]\nkeep = true\n");
+        let plan = prepare_codex(&target, "vk-codex-new-catalog");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&plan, &confirmation(&plan), &admission(), 1_002)
+            .unwrap();
+        assert!(catalog.exists());
+
+        let ownership_key = OwnershipKey {
+            agent_id: "codex".to_string(),
+            installation_path: "/opt/codex".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let owned = ownership.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let master_key = keys.load().unwrap();
+        let mut disconnect = build_disconnect_plan(
+            &CodexConnector,
+            &codex_discovery(&target),
+            &codex_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &owned,
+            &baseline.record,
+            &baseline_source,
+            &master_key,
+            1,
+            None,
+            1_003,
+            "6e".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_disconnect_companions(
+            &mut disconnect,
+            &CodexConnector,
+            &owned,
+            &snapshots,
+            &master_key,
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 1_003),
+                &admission(),
+                1_004,
+            )
+            .unwrap();
+
+        assert!(!catalog.exists());
         assert!(ownership.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
     }
