@@ -125,11 +125,20 @@ pub trait Connector: Sync {
     fn config_path(&self, home: &Path) -> PathBuf;
     fn create_dir_error(&self) -> &'static str;
     fn owned_paths(&self) -> Vec<ConfigPath>;
+    /// Paths owned only by an earlier Connector version. New connections do
+    /// not claim them. Refresh and force-forget can clean up matching legacy
+    /// values while an old ownership record still names the paths.
+    fn legacy_owned_paths(&self) -> Vec<ConfigPath> {
+        Vec::new()
+    }
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
         Vec::new()
     }
     fn projects_model_metadata(&self) -> bool {
         false
+    }
+    fn refreshes_managed_configuration(&self) -> bool {
+        self.projects_model_metadata()
     }
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String>;
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String>;
@@ -151,6 +160,15 @@ pub trait Connector: Sync {
         _owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
         self.connect_patch_for_document(document, input)
+    }
+    fn refresh_patch_with_baseline(
+        &self,
+        document: &ConfigDocument,
+        _baseline: Option<&ConfigDocument>,
+        input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        self.refresh_patch_for_document(document, input, owned_paths)
     }
     fn companion_projections(
         &self,
@@ -239,6 +257,12 @@ pub(super) fn validate_patch_ownership(
         }
     }
     Ok(())
+}
+
+pub(super) fn owned_paths_with_legacy(connector: &dyn Connector) -> Vec<ConfigPath> {
+    let mut paths = connector.owned_paths();
+    paths.extend(connector.legacy_owned_paths());
+    paths
 }
 
 pub(super) fn path(segments: &[&str]) -> ConfigPath {

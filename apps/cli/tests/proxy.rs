@@ -2565,7 +2565,8 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
     );
     assert_eq!(
         model_ids("/agents/claude-code/v1/models"),
-        std::collections::BTreeSet::from(["claude-fable-5-1".to_owned()])
+        std::collections::BTreeSet::new(),
+        "Claude Code keeps its built-in model names without a discovery overlay"
     );
     assert_eq!(
         model_ids("/v1/models"),
@@ -2761,6 +2762,113 @@ fn harness_mapping_runs_before_quota_priority_fallback() {
     assert_eq!(status, 200);
     assert_eq!(mapped.hits(), 1, "the exact Harness mapping wins");
     assert_eq!(home.hits(), 1, "an unmapped request uses quota fallback");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn claude_code_native_model_names_select_logical_harness_routes() {
+    let answer = |id: &str, model: &str| {
+        json!({
+            "id": id,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        })
+    };
+    let home = MockUpstream::start(vec![vec![http_json(
+        200,
+        &answer("chatcmpl-home", "home-model").to_string(),
+    )]]);
+    let mapped_responses = (0..8)
+        .map(|index| {
+            vec![http_json(
+                200,
+                &answer(&format!("chatcmpl-mapped-{index}"), "agent-model").to_string(),
+            )]
+        })
+        .collect();
+    let mapped = MockUpstream::start(mapped_responses);
+    let key = key_file("claude-native-harness-models", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &mapped, &key);
+    let harness = HarnessRouterConfig {
+        router: serde_json::from_value(json!({
+            "version": 1,
+            "pools": {
+                "fast": [{ "upstream": "agent_upstream", "model": "agent-model" }],
+                "balanced": [{ "upstream": "agent_upstream", "model": "agent-model" }],
+                "power": [{ "upstream": "agent_upstream", "model": "agent-model" }],
+                "fable": [{ "upstream": "agent_upstream", "model": "agent-model" }]
+            },
+            "rules": [
+                { "id": "claude-fast", "when": { "requested_model": "fast" }, "route_to": "fast" },
+                { "id": "claude-balanced", "when": { "requested_model": "balanced" }, "route_to": "balanced" },
+                { "id": "claude-power", "when": { "requested_model": "power" }, "route_to": "power" },
+                { "id": "claude-fable", "when": { "requested_model": "claude-fable-5-1" }, "route_to": "fable" }
+            ],
+            "default_pool": "balanced"
+        }))
+        .expect("Claude Harness overlay parses"),
+        requested_models: vec![
+            "fast".to_owned(),
+            "balanced".to_owned(),
+            "power".to_owned(),
+            "claude-fable-5-1".to_owned(),
+        ],
+    };
+    proxy
+        .gateway
+        .reload_agent_router("claude-code", None, Some(harness))
+        .expect("Claude Harness router reloads");
+
+    for model in [
+        "haiku",
+        "claude-haiku-4-5-20251001",
+        "sonnet",
+        "claude-3-7-sonnet-20250219",
+        "opus",
+        "claude-opus-5",
+        "fable",
+        "claude-fable-5",
+    ] {
+        let request = json!({
+            "model": model,
+            "max_tokens": 16,
+            "messages": [{ "role": "user", "content": "hi" }]
+        });
+        let (status, body) = post_scoped(
+            &proxy,
+            "/agents/claude-code/v1/messages",
+            &request,
+            &proxy.virtual_key,
+            true,
+        );
+        assert_eq!(status, 200, "{model}: {body}");
+    }
+
+    let unknown = json!({
+        "model": "user-owned-model-name",
+        "max_tokens": 16,
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/claude-code/v1/messages",
+        &unknown,
+        &proxy.virtual_key,
+        true,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        mapped.hits(),
+        8,
+        "recognized Claude families use Harness mappings"
+    );
+    assert_eq!(home.hits(), 1, "unknown names use the normal Agent route");
 
     std::fs::remove_file(key).ok();
 }

@@ -197,6 +197,48 @@ fn requested_model_from_body(body: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Converts Claude Code's own model vocabulary into Token Station's stable
+/// Harness route keys. The Agent keeps its built-in labels and model IDs.
+fn harness_route_model(agent_id: &str, requested_model: &str) -> Option<&'static str> {
+    if agent_id == "opencode" {
+        return match requested_model {
+            "auto" => Some("auto"),
+            "fast" => Some("fast"),
+            "balanced" => Some("balanced"),
+            "power" => Some("power"),
+            _ => None,
+        };
+    }
+    if agent_id != "claude-code" {
+        return None;
+    }
+
+    let model = requested_model
+        .strip_suffix("[1m]")
+        .or_else(|| requested_model.strip_suffix("[2m]"))
+        .unwrap_or(requested_model);
+    match model {
+        "fast" | "haiku" => Some("fast"),
+        "balanced" | "sonnet" => Some("balanced"),
+        "power" | "opus" => Some("power"),
+        "fable" | CLAUDE_CODE_FABLE_MODEL_ID => Some(CLAUDE_CODE_FABLE_MODEL_ID),
+        _ if model.starts_with("claude-") => {
+            let family = model
+                .split('-')
+                .skip(1)
+                .find(|part| matches!(*part, "haiku" | "sonnet" | "opus" | "fable"));
+            match family {
+                Some("haiku") => Some("fast"),
+                Some("sonnet") => Some("balanced"),
+                Some("opus") => Some("power"),
+                Some("fable") => Some(CLAUDE_CODE_FABLE_MODEL_ID),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn contains_unsupported_media(value: &Value) -> bool {
     let Value::Object(object) = value else {
         return false;
@@ -1536,7 +1578,6 @@ fn retain_free_fallbacks(decision: &mut Decision, free_upstreams: &BTreeSet<Stri
 /// Token Station virtual model: the Agent router still selects the real
 /// upstream and model for each request.
 const CLAUDE_DESKTOP_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[{"id":"claude-sonnet-4-6","object":"model","owned_by":"token-station","display_name":"Token Station Auto","anthropic_family_tier":"sonnet","is_family_default":true}]}"#;
-const CLAUDE_CODE_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[{"id":"claude-fable-5-1","object":"model","owned_by":"token-station","display_name":"Claude Fable 5.1 via Token Station"}]}"#;
 const EMPTY_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[]}"#;
 
 /// The assembled data plane.
@@ -2112,7 +2153,10 @@ impl Gateway {
             return Some(CLAUDE_DESKTOP_MODELS_DOCUMENT.to_owned());
         }
         if agent_id == Some("claude-code") {
-            return Some(CLAUDE_CODE_MODELS_DOCUMENT.to_owned());
+            // Claude Code owns its built-in lineup and display names. Returning
+            // an empty discovery overlay prevents provider models or Token
+            // Station-specific labels from appearing in its model picker.
+            return Some(EMPTY_MODELS_DOCUMENT.to_owned());
         }
         let routers = self.agent_routers.read().ok()?;
         let router = agent_id
@@ -3119,6 +3163,7 @@ impl Gateway {
                 u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
             });
 
+        let mut routing_model = None;
         let router: Option<Arc<Router>> = match agent_id {
             None => self.home_router.clone(),
             Some(agent_id) if self.supported_agent_ids.contains(agent_id) => {
@@ -3132,12 +3177,19 @@ impl Gateway {
                 let requested_model = requested_model_from_body(body);
                 routers
                     .harness
-                    .filter(|harness| {
-                        requested_model.as_ref().is_some_and(|requested_model| {
-                            harness.requested_models.contains(requested_model)
-                        })
+                    .and_then(|harness| {
+                        let mapped = requested_model
+                            .as_deref()
+                            .and_then(|model| harness_route_model(agent_id, model))?;
+                        harness
+                            .requested_models
+                            .iter()
+                            .any(|model| model == mapped)
+                            .then(|| {
+                                routing_model = Some(mapped);
+                                harness.router
+                            })
                     })
-                    .map(|harness| harness.router)
                     .or(routers.fallback)
                     .or_else(|| self.home_router.clone())
             }
@@ -3301,6 +3353,7 @@ impl Gateway {
                     path,
                     headers,
                     body,
+                    routing_model,
                     &mut capturing_emit,
                     &mut record,
                 ) {
@@ -3569,6 +3622,7 @@ impl Gateway {
         path: &str,
         headers: &[(String, String)],
         body: &[u8],
+        routing_model: Option<&str>,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
@@ -3581,8 +3635,16 @@ impl Gateway {
         // the IR cannot carry, a tool the upstream executes itself, takes the
         // verbatim route. The decision runs on a minimal request (model only).
         if agent.protocol == "anthropic-messages"
-            && let Some(served) =
-                self.try_anthropic_passthrough(ctx, agent, router, headers, body, emit, record)?
+            && let Some(served) = self.try_anthropic_passthrough(
+                ctx,
+                agent,
+                router,
+                headers,
+                body,
+                routing_model,
+                emit,
+                record,
+            )?
         {
             return Ok(served);
         }
@@ -3598,6 +3660,9 @@ impl Gateway {
         // once the upstream's dialect is known.
         let (mut request, hints, inbound_tools) =
             Self::normalize_request(agent, method, path, headers, body, record)?;
+        if let Some(routing_model) = routing_model {
+            routing_model.clone_into(&mut request.model);
+        }
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self

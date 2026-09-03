@@ -8,7 +8,9 @@ use super::config_codec::{
     parse_source_bytes, prepare_owned_paths_for_write_with_reverse, project_owned_paths,
     render_document, semantic_json, ConfigDocument, DocumentFormat,
 };
-use super::connectors::{validate_patch_ownership, ConnectInput, Connector};
+use super::connectors::{
+    owned_paths_with_legacy, validate_patch_ownership, ConnectInput, Connector,
+};
 use super::ownership::{
     compute_owned_value_macs, legacy_widened_ownership_matches, normalized_legacy_owned_paths,
     ownership_matches, CompanionOwnership, OwnershipRecord,
@@ -163,6 +165,7 @@ pub fn build_connection_plan(
         compatibility,
         target_path,
         source,
+        None,
         input,
         None,
         compatibility_sequence,
@@ -192,6 +195,38 @@ pub fn build_metadata_refresh_plan(
         compatibility,
         target_path,
         source,
+        None,
+        input,
+        Some(ownership),
+        compatibility_sequence,
+        compatibility_expires_at_ms,
+        now_ms,
+        operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_metadata_refresh_plan_with_baseline(
+    connector: &dyn Connector,
+    discovery: &DiscoveryRecord,
+    compatibility: &CompatibilityDecision,
+    target_path: &Path,
+    source: &ConfigSource,
+    baseline: &ConfigSource,
+    input: &ConnectInput<'_>,
+    ownership: &OwnershipRecord,
+    compatibility_sequence: u64,
+    compatibility_expires_at_ms: Option<u64>,
+    now_ms: u64,
+    operation_id: String,
+) -> Result<PreparedChangePlan, String> {
+    build_connection_or_refresh_plan(
+        connector,
+        discovery,
+        compatibility,
+        target_path,
+        source,
+        Some(baseline),
         input,
         Some(ownership),
         compatibility_sequence,
@@ -208,6 +243,7 @@ fn build_connection_or_refresh_plan(
     compatibility: &CompatibilityDecision,
     target_path: &Path,
     source: &ConfigSource,
+    baseline: Option<&ConfigSource>,
     input: &ConnectInput<'_>,
     ownership: Option<&OwnershipRecord>,
     compatibility_sequence: u64,
@@ -257,19 +293,41 @@ fn build_connection_or_refresh_plan(
     }
     let baseline_semantic = semantic_json(&document)?;
     let operations = if let Some(record) = ownership {
-        connector.refresh_patch_for_document(&document, input, &record.owned_paths)?
+        let baseline_document = baseline
+            .map(|source| {
+                parse_source_bytes(
+                    source.existed.then_some(source.exact_bytes.as_slice()),
+                    connector.format(),
+                    connector.label(),
+                )
+            })
+            .transpose()?;
+        connector.refresh_patch_with_baseline(
+            &document,
+            baseline_document.as_ref(),
+            input,
+            &record.owned_paths,
+        )?
     } else {
         connector.connect_patch_for_document(&document, input)?
     };
     let declared_owned_paths = connector.owned_paths();
+    let authorized_owned_paths = if ownership.is_some() {
+        owned_paths_with_legacy(connector)
+    } else {
+        declared_owned_paths.clone()
+    };
     validate_owned_paths(&declared_owned_paths)?;
-    validate_patch_ownership(&operations, &declared_owned_paths)?;
+    validate_owned_paths(&authorized_owned_paths)?;
+    validate_patch_ownership(&operations, &authorized_owned_paths)?;
     let reverse_operations = apply_patch_with_reverse(&mut document, &operations)?;
     let owned_paths = ownership.map_or_else(
         || owned_paths_touched_by(&declared_owned_paths, &operations),
         |record| {
-            let previous =
-                normalized_legacy_owned_paths(&record.owned_paths, &declared_owned_paths);
+            let previous = normalized_legacy_owned_paths(
+                &record.owned_paths,
+                &authorized_owned_paths,
+            );
             declared_owned_paths
                 .iter()
                 .filter(|path| previous.contains(path) || owned_path_is_touched(path, &operations))
@@ -1663,7 +1721,6 @@ mod tests {
             Some(0o600),
             None,
         );
-
         let prepared = build_connection_plan(
             &CodexConnector,
             &codex_discovery,
@@ -1735,6 +1792,111 @@ mod tests {
                 [field] if field == "model_context_window" || field == "model_auto_compact_token_limit"
             )
         }));
+    }
+
+    #[test]
+    fn claude_refresh_retires_legacy_model_ownership_after_cleanup() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\\tmp\\token-station-plan\\settings.json");
+        #[cfg(not(windows))]
+        let target = Path::new("/tmp/token-station-plan/settings.json");
+        let source = ConfigSource::existing(
+            br#"{
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/agents/claude-code",
+                    "ANTHROPIC_AUTH_TOKEN": "fixture-claude-virtual-key",
+                    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+                    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+                    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "fast",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "balanced",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "power",
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION": "claude-fable-5-1",
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Fable via Token Station",
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Route Claude Fable through the configured Token Station pool"
+                }
+            }"#
+            .to_vec(),
+            Some(0o600),
+            None,
+        );
+        let baseline = ConfigSource::existing(
+            br#"{
+                "env": {
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "user-haiku",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "user-opus"
+                }
+            }"#
+            .to_vec(),
+            Some(0o600),
+            None,
+        );
+        let active_paths = ClaudeCodeConnector.owned_paths();
+        let legacy_paths = ClaudeCodeConnector.legacy_owned_paths();
+        let ownership = OwnershipRecord {
+            schema_version: 1,
+            revision: 1,
+            agent_id: "claude-code".to_string(),
+            installation_path: "/opt/claude".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+            connector_id: "claude-code-v1".to_string(),
+            baseline_snapshot_id: "01".repeat(16),
+            last_transaction_snapshot_id: "02".repeat(16),
+            before_hash: "a".repeat(64),
+            managed_after_hash: "b".repeat(64),
+            owned_paths: active_paths
+                .iter()
+                .chain(legacy_paths.iter())
+                .cloned()
+                .collect(),
+            owned_value_macs: std::collections::BTreeMap::new(),
+            companion_files: Vec::new(),
+            acquired_at_ms: 1,
+            updated_at_ms: 1,
+        };
+
+        let prepared = build_metadata_refresh_plan_with_baseline(
+            &ClaudeCodeConnector,
+            &discovery(target),
+            &verified(),
+            target,
+            &source,
+            &baseline,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/claude-code",
+                token: Some("fixture-claude-virtual-key"),
+                adapter_ready: true,
+                model_metadata: None,
+            },
+            &ownership,
+            1,
+            None,
+            10,
+            "18".repeat(16),
+        )
+        .unwrap();
+        let projected = parse_source_bytes(
+            Some(prepared.projected_bytes.as_slice()),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
+        let projected = semantic_json(&projected).unwrap();
+        let env = projected["env"].as_object().unwrap();
+
+        for path in &legacy_paths {
+            assert!(!prepared.view.owned_paths.contains(path));
+            let key = &path.segments[1];
+            if key == "ANTHROPIC_DEFAULT_HAIKU_MODEL" {
+                assert_eq!(env[key], json!("user-haiku"));
+            } else if key == "ANTHROPIC_DEFAULT_OPUS_MODEL" {
+                assert_eq!(env[key], json!("user-opus"));
+            } else {
+                assert!(!env.contains_key(key));
+            }
+        }
+        assert_eq!(prepared.view.owned_paths, active_paths);
     }
 
     #[test]
