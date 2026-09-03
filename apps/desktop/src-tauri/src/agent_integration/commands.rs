@@ -266,6 +266,12 @@ struct ScanSnapshot {
     records: Vec<DiscoveryRecord>,
 }
 
+fn exact_installation_selection(record: &DiscoveryRecord) -> DiscoveryRecord {
+    let mut selected = record.clone();
+    selected.conflict_group = None;
+    selected
+}
+
 impl ScanSnapshot {
     fn selected(
         &self,
@@ -294,10 +300,10 @@ impl ScanSnapshot {
                 "安装实例不属于最近一次服务端扫描，请重新扫描",
             ));
         }
-        let mut selected = matches.into_iter().next().expect("length checked");
+        let selected = matches.into_iter().next().expect("length checked");
         // Every row in a multi-install scan carries the conflict group. Exact
         // lookup above is the only trusted transition to a selected instance.
-        selected.conflict_group = None;
+        let selected = exact_installation_selection(&selected);
         let decision = evaluate_discovery(&self.catalog, descriptor, &selected);
         Ok((selected, decision))
     }
@@ -1183,12 +1189,16 @@ impl AgentCommandState {
                 .iter()
                 .find(|descriptor| descriptor.agent_id == record.agent_id)
                 .ok_or_else(|| AgentCommandError::boundary("unknown_agent", "未知 Agent"))?;
-            let decision = evaluate_discovery(&snapshot.catalog, descriptor, record);
             let ownership = self
                 .ownership
                 .list_agent_installation(&record.agent_id, &record.canonical_path)
                 .map_err(AgentCommandError::internal)?;
             for owned in ownership {
+                // Durable ownership resolves a multi-install discovery conflict
+                // to this exact canonical installation, just as an explicit UI
+                // selection does. Other discovered installations remain untouched.
+                let selected = exact_installation_selection(record);
+                let decision = evaluate_discovery(&snapshot.catalog, descriptor, &selected);
                 if decision.status != CompatibilityStatus::DetectedVerified
                     || decision.connector_id.as_deref() != Some(owned.connector_id.as_str())
                 {
@@ -1236,7 +1246,7 @@ impl AgentCommandState {
                     };
                     build_metadata_refresh_plan_with_baseline(
                         connector,
-                        record,
+                        &selected,
                         &decision,
                         target,
                         &source,
@@ -1251,7 +1261,7 @@ impl AgentCommandState {
                 } else {
                     build_metadata_refresh_plan(
                         connector,
-                        record,
+                        &selected,
                         &decision,
                         target,
                         &source,
@@ -2958,6 +2968,30 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
         )
+    }
+
+    #[test]
+    fn owned_exact_installation_resolves_multi_install_refresh_selection() {
+        let registry = AgentRegistry::builtin().unwrap();
+        let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
+        let target = Path::new("/tmp/token-station-owned-claude/settings.json");
+        let conflicted = record(target, true);
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "claude-code")
+            .unwrap();
+
+        assert_eq!(
+            evaluate_discovery(&catalog, descriptor, &conflicted).status,
+            CompatibilityStatus::MultipleInstallations
+        );
+        let selected = exact_installation_selection(&conflicted);
+        let decision = evaluate_discovery(&catalog, descriptor, &selected);
+
+        assert_eq!(selected.canonical_path, conflicted.canonical_path);
+        assert_eq!(decision.status, CompatibilityStatus::DetectedVerified);
+        assert_eq!(decision.connector_id.as_deref(), Some("claude-code-v1"));
     }
 
     #[test]
