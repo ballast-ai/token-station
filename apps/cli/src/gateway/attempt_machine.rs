@@ -261,6 +261,14 @@ pub(super) enum AttemptPayload<'a> {
         /// client that already sent the request.
         last_upstream_error: &'a RefCell<Option<RawUpstreamError>>,
     },
+    /// The caller's OpenAI Responses body, forwarded verbatim except for the
+    /// routed model name.
+    ResponsesNative {
+        body: &'a Value,
+        headers: &'a SafeHeaders,
+        stream: bool,
+        last_upstream_error: &'a RefCell<Option<RawUpstreamError>>,
+    },
 }
 
 /// An upstream's own error response, kept out of the envelope on purpose.
@@ -651,6 +659,27 @@ impl Gateway {
                 last_upstream_error,
             } => {
                 return self.native_attempt(
+                    ctx,
+                    target,
+                    headers,
+                    body,
+                    *stream,
+                    attempt_timeout,
+                    attempt_deadline,
+                    emit,
+                    record,
+                    upstream_http_status,
+                    provider_call_engine,
+                    last_upstream_error,
+                );
+            }
+            AttemptPayload::ResponsesNative {
+                body,
+                headers,
+                stream,
+                last_upstream_error,
+            } => {
+                return self.responses_native_attempt(
                     ctx,
                     target,
                     headers,

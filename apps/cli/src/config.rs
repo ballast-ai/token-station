@@ -317,6 +317,15 @@ pub struct AgentRouteConfig {
     /// consulted only when the effective routing mode is direct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_target: Option<UpstreamModel>,
+    /// Compatibility state written by builds that expose per-Harness logical
+    /// model mapping. Builds without that editor still preserve the mappings
+    /// instead of treating the complete configuration as unreadable.
+    #[serde(
+        default,
+        deserialize_with = "null_to_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub harness_model_routes: BTreeMap<String, UpstreamModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,8 +571,10 @@ pub struct UpstreamConfig {
     /// is forwarded verbatim to `base_url` + `/messages`, because the IR has no
     /// way to say "the upstream runs this tool". Every other request to the
     /// upstream takes the translated path through the Anthropic provider
-    /// component, so the upstream must be `provider: anthropic`. `base_url`
-    /// must end at the version segment, e.g.
+    /// component, so the upstream must be `provider: anthropic`.
+    /// `responses-native` provides the same escape hatch for OpenAI Responses
+    /// Web Search and requires `provider: openai-compatible`.
+    /// `base_url` must end at the version segment, e.g.
     /// `https://api.deepseek.com/anthropic/v1`, so the resolved URL is
     /// `…/anthropic/v1/messages`.
     #[serde(default, skip_serializing_if = "ApiDialect::is_default")]
@@ -597,6 +608,9 @@ pub enum ApiDialect {
     /// Forward the caller's original Anthropic Messages body verbatim to
     /// `base_url` + `/messages`, bypassing the Canonical IR.
     AnthropicNative,
+    /// Forward an OpenAI Responses body with active Web Search verbatim to
+    /// `base_url` + `/responses`, bypassing the Canonical IR.
+    ResponsesNative,
 }
 
 impl ApiDialect {
@@ -1107,18 +1121,7 @@ impl ClientConfig {
             token_station_router_core::UpstreamRef::new(name.clone())
                 .map_err(|error| error.to_string())?;
             validate_local_identity(name, upstream)?;
-            // The escape hatch forwards Anthropic Messages verbatim; every other
-            // request to the same upstream is rendered by the Anthropic provider
-            // component, so the dialect must be one it speaks.
-            if upstream.api_dialect == ApiDialect::AnthropicNative
-                && upstream.provider != "anthropic"
-            {
-                return Err(format!(
-                    "upstream `{name}` is `api_dialect: anthropic-native` but speaks `{}`; an \
-                     anthropic-native upstream must be `provider: anthropic`",
-                    upstream.provider
-                ));
-            }
+            validate_api_dialect(name, upstream)?;
             if !upstream.base_url.uses_https() && !upstream.base_url.is_loopback() {
                 return Err(format!(
                     "upstream `{name}` must use HTTPS unless its endpoint is loopback"
@@ -1181,6 +1184,22 @@ impl ClientConfig {
 
         Ok(())
     }
+}
+
+fn validate_api_dialect(name: &str, upstream: &UpstreamConfig) -> Result<(), String> {
+    let (dialect, required_provider, article) = match upstream.api_dialect {
+        ApiDialect::Translated => return Ok(()),
+        ApiDialect::AnthropicNative => ("anthropic-native", "anthropic", "an"),
+        ApiDialect::ResponsesNative => ("responses-native", "openai-compatible", "a"),
+    };
+    if upstream.provider == required_provider {
+        return Ok(());
+    }
+    Err(format!(
+        "upstream `{name}` is `api_dialect: {dialect}` but speaks `{}`; {article} \
+         {dialect} upstream must be `provider: {required_provider}`",
+        upstream.provider
+    ))
 }
 
 fn validate_local_identity(name: &str, upstream: &UpstreamConfig) -> Result<(), String> {
@@ -1276,6 +1295,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&native).expect("serializes")["api_dialect"],
             serde_json::json!("anthropic-native")
+        );
+
+        let responses_native: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "api_dialect": "responses-native",
+            "base_url": "https://api.openai.com/v1",
+            "models": [{ "model": "gpt-5.5" }]
+        }))
+        .expect("responses-native upstream parses");
+        assert_eq!(responses_native.api_dialect, ApiDialect::ResponsesNative);
+        assert_eq!(
+            serde_json::to_value(&responses_native).expect("serializes")["api_dialect"],
+            serde_json::json!("responses-native")
         );
     }
 
@@ -1536,6 +1568,57 @@ mod tests {
             .remove("auth");
         let anonymous: ClientConfig = serde_json::from_value(anonymous).unwrap();
         assert!(anonymous.validate().unwrap_err().contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn responses_native_requires_the_openai_compatible_provider() {
+        let mut value = example();
+        value["upstreams"]["openai_personal"]["api_dialect"] =
+            serde_json::json!("responses-native");
+        value["upstreams"]["openai_personal"]["provider"] = serde_json::json!("anthropic");
+        let config: ClientConfig = serde_json::from_value(value).expect("config parses");
+
+        let error = config
+            .validate()
+            .expect_err("Responses passthrough requires its matching provider dialect");
+        assert!(error.contains("responses-native"), "{error}");
+        assert!(error.contains("openai-compatible"), "{error}");
+    }
+
+    #[test]
+    fn harness_model_routes_survive_config_load_and_save() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "codex": {
+                "mode": "inherit",
+                "harness_model_routes": {
+                    "balanced": {
+                        "upstream": "openai_personal",
+                        "model": "gpt-5.5"
+                    }
+                }
+            }
+        });
+
+        let config: ClientConfig =
+            serde_json::from_value(value).expect("known Harness mappings remain readable");
+        config.validate().expect("Harness mapping config validates");
+        let saved = serde_json::to_value(config).expect("Harness mapping config serializes");
+        assert_eq!(
+            saved["agent_routes"]["codex"]["harness_model_routes"]["balanced"],
+            serde_json::json!({
+                "upstream": "openai_personal",
+                "model": "gpt-5.5"
+            })
+        );
+        serde_json::from_value::<ClientConfig>(saved.clone())
+            .expect("saved Harness mapping reloads");
+
+        let mut unknown = saved;
+        unknown["agent_routes"]["codex"]["future_route_typo"] = serde_json::json!({});
+        let error = serde_json::from_value::<ClientConfig>(unknown)
+            .expect_err("unrelated unknown fields remain rejected");
+        assert!(error.to_string().contains("future_route_typo"), "{error}");
     }
 
     #[test]

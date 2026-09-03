@@ -45,9 +45,18 @@ make_fixture() {
     "$installed_app/Contents/MacOS" \
     "$state" \
     "$fake_bin"
-  touch "$built_app/Contents/Info.plist" "$built_app/Contents/MacOS/token-station"
+  touch "$built_app/Contents/Info.plist"
   touch "$installed_app/Contents/Info.plist" "$installed_app/Contents/MacOS/token-station"
   echo "old" > "$installed_app/old.version"
+
+  cat > "$built_app/Contents/MacOS/token-station" <<'SCRIPT'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--self-test-config" ]]; then
+  [[ "${CANDIDATE_CONFIG_COMPATIBLE:-1}" == "1" ]]
+  exit
+fi
+exit 0
+SCRIPT
 
   sed \
     -e "s|/Applications/token-station.app|$installed_app|g" \
@@ -134,7 +143,10 @@ fi
 exit 1
 SCRIPT
 
-  chmod +x "$repo/scripts/build-desktop.sh" "$fake_bin"/*
+  chmod +x \
+    "$repo/scripts/build-desktop.sh" \
+    "$built_app/Contents/MacOS/token-station" \
+    "$fake_bin"/*
 }
 
 run_installer() {
@@ -145,6 +157,8 @@ run_installer() {
     FAIL_INSTALLED_CODESIGN="${FAIL_INSTALLED_CODESIGN:-0}" \
     RUNNING_AFTER_OPEN="${RUNNING_AFTER_OPEN:-0}" \
     OPEN_FAILURES_BEFORE_SUCCESS="${OPEN_FAILURES_BEFORE_SUCCESS:-0}" \
+    CANDIDATE_CONFIG_COMPATIBLE="${CANDIDATE_CONFIG_COMPATIBLE:-1}" \
+    TOKEN_STATION_DESKTOP_CONFIG="$fixture/token-station.json" \
     WAIT_BUILD="${WAIT_BUILD:-0}" \
     TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS=0 \
     TOKEN_STATION_LAUNCH_CHECK_SAMPLES=2 \
@@ -173,6 +187,21 @@ test_immediate_exit_restores_old_app() {
     || fail "launch failure did not restore the old App"
   ! grep -q "installed and launched" "$fixture/output" \
     || fail "launch failure printed the success message"
+}
+
+test_incompatible_candidate_preserves_old_app() {
+  make_fixture "config-incompatible"
+  echo '{"version":1}' > "$fixture/token-station.json"
+
+  if CANDIDATE_CONFIG_COMPATIBLE=0 run_installer >"$fixture/output" 2>&1; then
+    fail "a candidate that cannot read the current config unexpectedly installed"
+  fi
+  [[ -f "$installed_app/old.version" ]] \
+    || fail "config preflight failure replaced the working App"
+  [[ ! -e "$state/opened" ]] \
+    || fail "config preflight failure launched the incompatible candidate"
+  grep -q "cannot read the current desktop configuration" "$fixture/output" \
+    || fail "config preflight failure did not report the compatibility reason"
 }
 
 test_concurrent_install_has_single_owner() {
@@ -265,6 +294,7 @@ test_a_launch_that_never_succeeds_still_rolls_back() {
 
 test_copy_failure_preserves_old_app
 test_immediate_exit_restores_old_app
+test_incompatible_candidate_preserves_old_app
 test_concurrent_install_has_single_owner
 test_stable_launch_succeeds
 test_a_transient_launch_refusal_is_retried_not_rolled_back
