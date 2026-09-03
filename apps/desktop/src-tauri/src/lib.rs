@@ -107,7 +107,7 @@ use provider_commands::*;
 use provider_discovery::*;
 use recovery_commands::*;
 use routing_commands::*;
-pub use self_test::run_installed_self_test;
+pub use self_test::{run_config_compatibility_check, run_installed_self_test};
 use serve_supervisor::*;
 use stats_commands::*;
 use views::*;

@@ -645,6 +645,102 @@ fn start_proxy_with_agent(
     start_proxy_with_agents(upstream, key_file, metrics, &[agent_plugin])
 }
 
+fn start_native_responses_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-native-responses-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai-responses"],
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+        },
+        "upstreams": {
+            "responses_native": {
+                "provider": "openai-compatible",
+                "api_dialect": "responses-native",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [{
+                    "model": "gpt-5.5",
+                    "tool": true,
+                    "tool_state": "verified",
+                    "context_window": 400_000
+                }]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "responses_native", "model": "gpt-5.5" }
+            ] },
+            "default_pool": "main"
+        }
+    }))
+    .expect("native Responses config parses");
+    spawn_proxy(&config)
+}
+
+fn start_mixed_responses_proxy(
+    native: &MockUpstream,
+    translated: &MockUpstream,
+    key_file: &Path,
+) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-mixed-responses-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let upstream = |base_url: String, dialect: Option<&str>| {
+        let mut value = json!({
+            "provider": "openai-compatible",
+            "base_url": base_url,
+            "auth": { "slot": "provider_api_key", "file": key_file },
+            "models": [{
+                "model": "gpt-5.5",
+                "tool": true,
+                "tool_state": "verified",
+                "context_window": 400_000
+            }]
+        });
+        if let Some(dialect) = dialect {
+            value["api_dialect"] = json!(dialect);
+        }
+        value
+    };
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai-responses"],
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+        },
+        "upstreams": {
+            "native": upstream(native.base_url(), Some("responses-native")),
+            "translated": upstream(translated.base_url(), None)
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "translated", "model": "gpt-5.5" },
+                { "upstream": "native", "model": "gpt-5.5" }
+            ] },
+            "default_pool": "main"
+        }
+    }))
+    .expect("mixed Responses config parses");
+    spawn_proxy(&config)
+}
+
 fn start_proxy_with_agents(
     upstream: &MockUpstream,
     key_file: &Path,
@@ -3444,6 +3540,179 @@ fn translated_responses_hosted_tool_fails_before_upstream_with_receipt_reason() 
         );
         assert_eq!(conversion["reason_detail"], json!(expected_detail));
     }
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_responses_web_search_relays_json_without_translation() {
+    let upstream_body = json!({
+        "id": "resp_native_1",
+        "object": "response",
+        "status": "completed",
+        "model": "gpt-5.5",
+        "output": [{
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "Token Station"}
+        }],
+        "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+    })
+    .to_string();
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_body)]]);
+    let key = key_file("native-responses-web-search", "sk-native-responses");
+    let proxy = start_native_responses_proxy(&mock, &key);
+    let request = json!({
+        "model": "auto",
+        "input": "Find current information.",
+        "tools": [{"type": "web_search"}],
+        "include": ["web_search_call.action.sources"],
+        "metadata": {"trace": "preserve-me"},
+        "stream": false
+    });
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &request,
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, upstream_body, "native response body is relayed");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "one native upstream request");
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some("Bearer sk-native-responses")
+    );
+    assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
+    assert_eq!(seen[0].body["tools"], request["tools"]);
+    assert_eq!(seen[0].body["include"], request["include"]);
+    assert_eq!(seen[0].body["metadata"], request["metadata"]);
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_responses_web_search_relays_sse_without_translation() {
+    let sse = concat!(
+        "event: response.web_search_call.in_progress\n",
+        "data: {\"type\":\"response.web_search_call.in_progress\",\"item_id\":\"ws_1\",\"output_index\":0}\n\n",
+        "event: response.web_search_call.completed\n",
+        "data: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"ws_1\",\"output_index\":0}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_stream\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"output_tokens\":5,\"total_tokens\":18}}}\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("native-responses-web-search-sse", "sk-native-responses");
+    let proxy = start_native_responses_proxy(&mock, &key);
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": "Find current information.",
+            "tools": [{"type": "web_search"}],
+            "stream": true
+        }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, sse, "native SSE frames are relayed byte for byte");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(seen[0].body["stream"], json!(true));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_responses_never_falls_back_to_a_translated_upstream() {
+    let native_error = json!({"error": {"message": "native unavailable"}}).to_string();
+    let native = MockUpstream::start(vec![vec![http_json(503, &native_error)]]);
+    let translated = MockUpstream::start(vec![vec![http_json(
+        200,
+        &json!({"unexpected": true}).to_string(),
+    )]]);
+    let key = key_file("native-responses-mixed-fallback", "sk-native-responses");
+    let proxy = start_mixed_responses_proxy(&native, &translated, &key);
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": "Find current information.",
+            "tools": [{"type": "web_search"}],
+            "stream": false
+        }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body, native_error);
+    assert_eq!(native.hits(), 1);
+    assert_eq!(
+        translated.hits(),
+        0,
+        "raw Responses bodies must not reach translated fallbacks"
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn disabled_responses_web_access_keeps_the_translated_path() {
+    let translated_answer = json!({
+        "id": "chatcmpl-cached-search",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "No live search."},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 3, "total_tokens": 9}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &translated_answer.to_string())]]);
+    let key = key_file(
+        "disabled-native-responses-web-search",
+        "sk-native-responses",
+    );
+    let proxy = start_native_responses_proxy(&mock, &key);
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": "Use only cached knowledge.",
+            "tools": [{"type": "web_search", "external_web_access": false}],
+            "stream": false
+        }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert!(seen[0].body.get("tools").is_none());
 
     std::fs::remove_file(key).ok();
 }

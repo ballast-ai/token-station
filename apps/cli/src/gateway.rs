@@ -23,6 +23,7 @@
 mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw SSE relay
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
 mod provider_call; // provider transport: South/legacy calls and response translation
+mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
 
 #[allow(clippy::wildcard_imports)]
 use attempt_machine::*;
@@ -3514,6 +3515,12 @@ impl Gateway {
         if agent.protocol == "anthropic-messages"
             && let Some(served) =
                 self.try_anthropic_passthrough(ctx, agent, router, headers, body, emit, record)?
+        {
+            return Ok(served);
+        }
+        if agent.protocol == "openai-responses"
+            && let Some(served) =
+                self.try_responses_passthrough(ctx, agent, router, headers, body, emit, record)?
         {
             return Ok(served);
         }
