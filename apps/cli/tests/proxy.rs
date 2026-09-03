@@ -2983,6 +2983,8 @@ fn a_responses_request_round_trips_through_the_existing_provider_pipeline() {
         seen[0].authorization.as_deref(),
         Some("Bearer sk-test-key-abc")
     );
+    assert!(seen[0].body.get("tools").is_none());
+    assert!(seen[0].body.get("tool_choice").is_none());
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
     assert_eq!(seen[0].body["messages"][0]["role"], json!("system"));
     assert_eq!(

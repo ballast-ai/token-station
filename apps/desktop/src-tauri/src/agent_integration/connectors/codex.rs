@@ -42,6 +42,7 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
         "model_context_window",
         "model_auto_compact_token_limit",
         "model_catalog_json",
+        "web_search",
         "model_providers.tokenstation",
     ],
     requires_virtual_key: true,
@@ -83,6 +84,7 @@ impl Connector for CodexConnector {
             path(&["model_context_window"]),
             path(&["model_auto_compact_token_limit"]),
             path(MODEL_CATALOG_JSON),
+            path(&["web_search"]),
             path(&["model_providers", "tokenstation"]),
         ]
     }
@@ -97,6 +99,10 @@ impl Connector for CodexConnector {
 
     fn projects_model_metadata(&self) -> bool {
         true
+    }
+
+    fn refresh_requires_baseline(&self, owned_paths: &[ConfigPath]) -> bool {
+        !owned_paths.contains(&path(&["web_search"]))
     }
 
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
@@ -134,6 +140,7 @@ impl Connector for CodexConnector {
             replace(&["model"], json!("auto")),
             replace(&["model_provider"], json!("tokenstation")),
             replace(MODEL_CATALOG_JSON, json!(MODEL_CATALOG_RELATIVE_PATH)),
+            replace(&["web_search"], json!("disabled")),
             replace(
                 &["model_providers", "tokenstation", "base_url"],
                 json!(input.base_url),
@@ -227,6 +234,13 @@ impl Connector for CodexConnector {
     ) -> Result<Vec<PatchOperation>, String> {
         let mut operations = self.connect_patch(input)?;
         let semantic = semantic_json(document)?;
+        let web_search_path = path(&["web_search"]);
+        if !owned_paths.contains(&web_search_path) {
+            return Err(
+                "Codex Web Search is not owned by this legacy connection and requires its disconnect baseline before refreshing."
+                    .to_string(),
+            );
+        }
         let context_path = path(&["model_context_window"]);
         let compact_path = path(&["model_auto_compact_token_limit"]);
         if input
@@ -264,6 +278,34 @@ impl Connector for CodexConnector {
         Ok(operations)
     }
 
+    fn refresh_patch_with_baseline(
+        &self,
+        document: &ConfigDocument,
+        baseline: Option<&ConfigDocument>,
+        input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        let web_search_path = path(&["web_search"]);
+        if owned_paths.contains(&web_search_path) {
+            return self.refresh_patch_for_document(document, input, owned_paths);
+        }
+
+        let baseline = baseline.ok_or_else(|| {
+            "Codex Web Search is not owned by this legacy connection and its baseline is unavailable; disconnect and reconnect Codex before refreshing."
+                .to_string()
+        })?;
+        if !same_top_level_toml_field(document, baseline, "web_search")? {
+            return Err(
+                "Codex Web Search changed after the legacy connection; disconnect and reconnect Codex to preserve the user value."
+                    .to_string(),
+            );
+        }
+
+        let mut migrated_owned_paths = owned_paths.to_vec();
+        migrated_owned_paths.push(web_search_path);
+        self.refresh_patch_for_document(document, input, &migrated_owned_paths)
+    }
+
     fn validate_refresh_projected(
         &self,
         document: &ConfigDocument,
@@ -278,7 +320,11 @@ impl Connector for CodexConnector {
             adapter_ready: input.adapter_ready,
             model_metadata: owns_metadata.then_some(input.model_metadata).flatten(),
         };
-        self.validate_projected(document, &validation_input)
+        validate_codex_projection(
+            document,
+            &validation_input,
+            owned_paths.contains(&path(&["web_search"])),
+        )
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
@@ -297,55 +343,7 @@ impl Connector for CodexConnector {
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
     ) -> Result<(), String> {
-        self.validate_source(document)?;
-        let ConfigDocument::Toml(document) = document else {
-            unreachable!();
-        };
-        let root = document.as_table();
-        let provider = root
-            .get("model_providers")
-            .and_then(toml_edit::Item::as_table_like)
-            .and_then(|providers| providers.get("tokenstation"))
-            .and_then(toml_edit::Item::as_table_like)
-            .ok_or_else(|| "Codex 写入前复验缺少 tokenstation provider".to_string())?;
-        let valid = root.get("model").and_then(toml_edit::Item::as_str) == Some("auto")
-            && root.get("model_provider").and_then(toml_edit::Item::as_str) == Some("tokenstation")
-            && root
-                .get("model_catalog_json")
-                .and_then(toml_edit::Item::as_str)
-                == Some(MODEL_CATALOG_RELATIVE_PATH)
-            && provider.get("base_url").and_then(toml_edit::Item::as_str) == Some(input.base_url);
-        if !valid {
-            return Err("Codex 写入前复验失败".to_string());
-        }
-        let token = input
-            .token
-            .ok_or_else(|| "Codex 写入前复验缺少本地虚拟 Key".to_string())?;
-        for (field, expected) in provider_fields(token) {
-            if !item_matches_json(provider.get(field), &expected) {
-                return Err(format!("Codex 写入前复验字段 {field} 失败"));
-            }
-        }
-        if provider.get("env_key").is_some() {
-            return Err("Codex 写入前复验遗留 env_key".to_string());
-        }
-        if let Some((expected_context, output)) = input
-            .model_metadata
-            .and_then(AgentModelMetadata::safe_limits)
-        {
-            let context = root
-                .get("model_context_window")
-                .and_then(toml_edit::Item::as_integer);
-            let compact = root
-                .get("model_auto_compact_token_limit")
-                .and_then(toml_edit::Item::as_integer);
-            if context != Some(i64::from(expected_context))
-                || compact != Some(i64::from(expected_context - output))
-            {
-                return Err("Codex 写入前复验模型上下文或自动压缩阈值失败".to_string());
-            }
-        }
-        Ok(())
+        validate_codex_projection(document, input, true)
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
@@ -359,10 +357,93 @@ impl Connector for CodexConnector {
             "route limits are unknown, so the existing top-level context settings were preserved"
         };
         format!(
-            "Codex now uses the Responses API at {} (~/.codex/config.toml and the Token Station model catalog are backed up; {}). Quit and reopen Codex to load Token Station Auto.",
+            "Codex now uses the Responses API at {} (~/.codex/config.toml and the Token Station model catalog are backed up; {}; hosted web search is disabled because dynamic translated routes cannot execute it). Quit and reopen Codex to load Token Station Auto.",
             input.base_url, metadata
         )
     }
+}
+
+fn same_top_level_toml_field(
+    current: &ConfigDocument,
+    baseline: &ConfigDocument,
+    field: &str,
+) -> Result<bool, String> {
+    let ConfigDocument::Toml(current) = current else {
+        return Err("Codex current configuration is not TOML".to_string());
+    };
+    let ConfigDocument::Toml(baseline) = baseline else {
+        return Err("Codex baseline configuration is not TOML".to_string());
+    };
+    match (
+        current.as_table().get_key_value(field),
+        baseline.as_table().get_key_value(field),
+    ) {
+        (None, None) => Ok(true),
+        (Some((current_key, current_item)), Some((baseline_key, baseline_item))) => Ok(
+            current_key.display_repr() == baseline_key.display_repr()
+                && current_key.decor() == baseline_key.decor()
+                && current_item.to_string() == baseline_item.to_string(),
+        ),
+        _ => Ok(false),
+    }
+}
+
+fn validate_codex_projection(
+    document: &ConfigDocument,
+    input: &ConnectInput<'_>,
+    require_web_search_disabled: bool,
+) -> Result<(), String> {
+    CodexConnector.validate_source(document)?;
+    let ConfigDocument::Toml(document) = document else {
+        unreachable!();
+    };
+    let root = document.as_table();
+    let provider = root
+        .get("model_providers")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|providers| providers.get("tokenstation"))
+        .and_then(toml_edit::Item::as_table_like)
+        .ok_or_else(|| "Codex 写入前复验缺少 tokenstation provider".to_string())?;
+    let valid = root.get("model").and_then(toml_edit::Item::as_str) == Some("auto")
+        && root.get("model_provider").and_then(toml_edit::Item::as_str) == Some("tokenstation")
+        && root
+            .get("model_catalog_json")
+            .and_then(toml_edit::Item::as_str)
+            == Some(MODEL_CATALOG_RELATIVE_PATH)
+        && (!require_web_search_disabled
+            || root.get("web_search").and_then(toml_edit::Item::as_str) == Some("disabled"))
+        && provider.get("base_url").and_then(toml_edit::Item::as_str) == Some(input.base_url);
+    if !valid {
+        return Err("Codex 写入前复验失败".to_string());
+    }
+    let token = input
+        .token
+        .ok_or_else(|| "Codex 写入前复验缺少本地虚拟 Key".to_string())?;
+    for (field, expected) in provider_fields(token) {
+        if !item_matches_json(provider.get(field), &expected) {
+            return Err(format!("Codex 写入前复验字段 {field} 失败"));
+        }
+    }
+    if provider.get("env_key").is_some() {
+        return Err("Codex 写入前复验遗留 env_key".to_string());
+    }
+    if let Some((expected_context, output)) = input
+        .model_metadata
+        .and_then(AgentModelMetadata::safe_limits)
+    {
+        let context = root
+            .get("model_context_window")
+            .and_then(toml_edit::Item::as_integer);
+        let compact = root
+            .get("model_auto_compact_token_limit")
+            .and_then(toml_edit::Item::as_integer);
+        if context != Some(i64::from(expected_context))
+            || compact != Some(i64::from(expected_context - output))
+        {
+            return Err("Codex 写入前复验模型上下文或自动压缩阈值失败".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn replace(segments: &[&str], value: serde_json::Value) -> PatchOperation {
@@ -562,6 +643,203 @@ mod tests {
             "experimental_bearer_token",
         ])));
         assert!(CodexConnector.capabilities().requires_virtual_key);
+    }
+
+    #[test]
+    fn codex_connection_disables_hosted_web_search_for_dynamic_routes() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        let operations = CodexConnector.connect_patch(&input).unwrap();
+
+        assert!(CodexConnector
+            .owned_paths()
+            .contains(&path(&["web_search"])));
+        assert!(operations.iter().any(|operation| {
+            operation.path == path(&["web_search"]) && operation.value == Some(json!("disabled"))
+        }));
+
+        let mut projected = parse_source_bytes(None, DocumentFormat::Toml, "Codex").unwrap();
+        apply_patch(&mut projected, &operations).unwrap();
+        CodexConnector
+            .validate_projected(&projected, &input)
+            .unwrap();
+
+        apply_patch(&mut projected, &[replace(&["web_search"], json!("live"))]).unwrap();
+        assert!(CodexConnector
+            .validate_projected(&projected, &input)
+            .is_err());
+    }
+
+    #[test]
+    fn codex_legacy_refresh_claims_unchanged_web_search_from_baseline() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let source = b"web_search = \"live\"\n";
+        let baseline = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+        let mut document =
+            parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+        let mut legacy_operations = CodexConnector.connect_patch(&input).unwrap();
+        legacy_operations.retain(|operation| operation.path != path(&["web_search"]));
+        apply_patch(&mut document, &legacy_operations).unwrap();
+        let legacy_owned_paths = CodexConnector
+            .owned_paths()
+            .into_iter()
+            .filter(|owned| owned != &path(&["web_search"]))
+            .collect::<Vec<_>>();
+
+        let operations = CodexConnector
+            .refresh_patch_with_baseline(
+                &document,
+                Some(&baseline),
+                &input,
+                &legacy_owned_paths,
+            )
+            .unwrap();
+
+        assert!(operations.iter().any(|operation| {
+            operation.path == path(&["web_search"])
+                && operation.value == Some(json!("disabled"))
+        }));
+        apply_patch(&mut document, &operations).unwrap();
+        let mut migrated_owned_paths = legacy_owned_paths;
+        migrated_owned_paths.push(path(&["web_search"]));
+        CodexConnector
+            .validate_refresh_projected(&document, &input, &migrated_owned_paths)
+            .unwrap();
+        assert_eq!(
+            semantic_json(&document).unwrap()["web_search"],
+            json!("disabled")
+        );
+    }
+
+    #[test]
+    fn codex_legacy_refresh_rejects_web_search_changed_after_connection() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let source = b"web_search = \"live\"\n";
+        let baseline = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+        let mut document =
+            parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+        apply_patch(
+            &mut document,
+            &CodexConnector.connect_patch(&input).unwrap(),
+        )
+        .unwrap();
+        apply_patch(&mut document, &[replace(&["web_search"], json!("cached"))]).unwrap();
+        let legacy_owned_paths = CodexConnector
+            .owned_paths()
+            .into_iter()
+            .filter(|owned| owned != &path(&["web_search"]))
+            .collect::<Vec<_>>();
+
+        let error = match CodexConnector.refresh_patch_with_baseline(
+                &document,
+                Some(&baseline),
+                &input,
+                &legacy_owned_paths,
+            ) {
+            Ok(_) => panic!("a user-edited setting must not be claimed by refresh"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("changed after the legacy connection"), "{error}");
+    }
+
+    #[test]
+    fn codex_legacy_refresh_rejects_web_search_deleted_after_connection() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let source = b"web_search = \"live\"\n";
+        let baseline = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+        let mut document =
+            parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+        apply_patch(
+            &mut document,
+            &CodexConnector.connect_patch(&input).unwrap(),
+        )
+        .unwrap();
+        apply_patch(
+            &mut document,
+            &[PatchOperation {
+                operation: PatchKind::Remove,
+                path: path(&["web_search"]),
+                value: None,
+            }],
+        )
+        .unwrap();
+        let legacy_owned_paths = CodexConnector
+            .owned_paths()
+            .into_iter()
+            .filter(|owned| owned != &path(&["web_search"]))
+            .collect::<Vec<_>>();
+
+        let error = match CodexConnector.refresh_patch_with_baseline(
+            &document,
+            Some(&baseline),
+            &input,
+            &legacy_owned_paths,
+        ) {
+            Ok(_) => panic!("a deleted user setting must not be reclaimed by refresh"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("changed after the legacy connection"), "{error}");
+    }
+
+    #[test]
+    fn codex_legacy_refresh_rejects_web_search_decoration_changed_after_connection() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let baseline = parse_source_bytes(
+            Some(b"web_search = \"live\" # original\n"),
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+        let document = parse_source_bytes(
+            Some(b"web_search = \"live\" # user edit\n"),
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+        let legacy_owned_paths = CodexConnector
+            .owned_paths()
+            .into_iter()
+            .filter(|owned| owned != &path(&["web_search"]))
+            .collect::<Vec<_>>();
+
+        let error = match CodexConnector.refresh_patch_with_baseline(
+            &document,
+            Some(&baseline),
+            &input,
+            &legacy_owned_paths,
+        ) {
+            Ok(_) => panic!("a decoration-only user edit must not be reclaimed by refresh"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("changed after the legacy connection"), "{error}");
     }
 
     #[test]

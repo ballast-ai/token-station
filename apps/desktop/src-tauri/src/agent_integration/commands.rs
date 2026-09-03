@@ -1216,11 +1216,7 @@ impl AgentCommandState {
                 let input = runtime.input_for(&owned.connector_id)?;
                 let now_ms = self.clock.now_ms();
                 let operation_id = generate_operation_id().map_err(AgentCommandError::internal)?;
-                let restores_legacy_paths = connector
-                    .legacy_owned_paths()
-                    .iter()
-                    .any(|path| owned.owned_paths.contains(path));
-                let prepared = if restores_legacy_paths {
+                let prepared = if refresh_requires_baseline(connector, &owned.owned_paths) {
                     let baseline = self
                         .snapshots
                         .load(&owned.baseline_snapshot_id)
@@ -2244,6 +2240,14 @@ impl AgentCommandState {
         };
         result.map_err(AgentCommandError::from)
     }
+}
+
+fn refresh_requires_baseline(connector: &dyn Connector, owned_paths: &[ConfigPath]) -> bool {
+    connector.refresh_requires_baseline(owned_paths)
+        || connector
+            .legacy_owned_paths()
+            .iter()
+            .any(|path| owned_paths.contains(path))
 }
 
 fn commit_force_strips(
@@ -4374,6 +4378,22 @@ mod tests {
         assert_eq!(boundary.code, "write_failed");
         assert_eq!(boundary.stage, Some(TransactionStage::TargetWrite));
         assert_eq!(boundary.recovery, Some(RecoveryStatus::RepairRequired));
+    }
+
+    #[test]
+    fn codex_legacy_refresh_loads_the_disconnect_baseline_for_ownership_widening() {
+        let connector = connector_for("codex-v1").unwrap();
+        let legacy_owned_paths = connector
+            .owned_paths()
+            .into_iter()
+            .filter(|owned| owned.segments != ["web_search"])
+            .collect::<Vec<_>>();
+
+        assert!(refresh_requires_baseline(connector, &legacy_owned_paths));
+        assert!(!refresh_requires_baseline(
+            connector,
+            &connector.owned_paths()
+        ));
     }
 
     #[test]

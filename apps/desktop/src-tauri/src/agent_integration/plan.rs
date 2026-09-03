@@ -1956,13 +1956,22 @@ experimental_bearer_token = "fixture-codex-virtual-key"
             acquired_at_ms: 1,
             updated_at_ms: 1,
         };
+        let baseline = ConfigSource::existing(
+            br#"model_context_window = 64000
+model_auto_compact_token_limit = 48000
+"#
+            .to_vec(),
+            Some(0o600),
+            None,
+        );
 
-        let prepared = build_metadata_refresh_plan(
+        let prepared = build_metadata_refresh_plan_with_baseline(
             &CodexConnector,
             &codex_discovery,
             &codex_compatibility,
             target,
             &source,
+            &baseline,
             &ConnectInput {
                 base_url: "http://127.0.0.1:8787/agents/codex/v1",
                 token: Some("fixture-codex-virtual-key"),
