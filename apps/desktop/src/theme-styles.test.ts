@@ -466,6 +466,9 @@ describe("retained page theme styles", () => {
     const pointerHoverRule = appCss.match(
       /\.settings-subnav\[data-input-mode="pointer"\] \[data-slot="button"\]\.settings-subnav-item:hover\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const navigationItemRule = appCss.match(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(workspaceRule).toMatch(/overflow:\s*hidden/);
     expect(pageRule).toMatch(/height:\s*100%/);
@@ -475,7 +478,12 @@ describe("retained page theme styles", () => {
     expect(sidebarRule).toMatch(/align-content:\s*start/);
     expect(sidebarRule).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\)/);
     const subnavRule = appCss.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(subnavRule).toMatch(/display:\s*flex/);
+    expect(subnavRule).toMatch(/flex-direction:\s*column/);
+    expect(subnavRule).toMatch(/align-items:\s*stretch/);
     expect(subnavRule).toMatch(/overflow-y:\s*auto/);
+    expect(navigationItemRule).toMatch(/height:\s*40px/);
+    expect(navigationItemRule).toMatch(/min-height:\s*40px/);
     expect(pressedNavigationRule).toMatch(/transform:\s*none/);
     expect(pointerHoverRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(appCss).not.toMatch(
@@ -537,6 +545,9 @@ describe("retained page theme styles", () => {
       /\.settings-page \.settings-content\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const subnavRule = narrowRules.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const navigationItemRule = narrowRules.match(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(workspaceRule).toMatch(/overflow:\s*auto/);
     expect(pageRule).toMatch(/height:\s*auto/);
@@ -544,8 +555,11 @@ describe("retained page theme styles", () => {
     expect(contentRule).toMatch(/overflow-y:\s*visible/);
     expect(contentRule).toMatch(/overscroll-behavior:\s*auto/);
     expect(contentRule).toMatch(/scrollbar-gutter:\s*auto/);
+    expect(subnavRule).toMatch(/flex-direction:\s*row/);
     expect(subnavRule).toMatch(/border:\s*0/);
     expect(subnavRule).toMatch(/background:\s*transparent/);
+    expect(navigationItemRule).toMatch(/min-width:\s*max-content/);
+    expect(navigationItemRule).toMatch(/height:\s*40px/);
   });
 
   it("uses theme tokens for router JSON code blocks", () => {
