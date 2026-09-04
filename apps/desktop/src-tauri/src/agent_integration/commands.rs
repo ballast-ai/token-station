@@ -579,10 +579,8 @@ pub(crate) fn transition_model_metadata(
     current: &AgentModelMetadata,
     next: &AgentModelMetadata,
 ) -> AgentModelMetadata {
-    let (context, output, max_input) = match (
-        current.connection_limits(),
-        next.connection_limits(),
-    ) {
+    let (context, output, max_input) = match (current.connection_limits(), next.connection_limits())
+    {
         (Some((current_context, current_output)), Some((next_context, next_output))) => (
             current_context.min(next_context),
             current_output.min(next_output),
@@ -637,7 +635,9 @@ fn agent_model_metadata_for_router(
                     .find(|capability| capability.model == candidate.model)
             });
         let Some(capability) = capability else {
-            return Err(format!("Agent route references unknown model `{candidate}`"));
+            return Err(format!(
+                "Agent route references unknown model `{candidate}`"
+            ));
         };
         if capability.context_window > 0
             && capability.max_output_tokens > 0
@@ -658,9 +658,10 @@ fn agent_model_metadata_for_router(
             reasoning: false,
             cost: None,
         };
-        let (candidate_context, candidate_output) = candidate_metadata
-            .connection_limits()
-            .ok_or_else(|| format!("Agent route model `{candidate}` has invalid capacity limits"))?;
+        let (candidate_context, candidate_output) =
+            candidate_metadata.connection_limits().ok_or_else(|| {
+                format!("Agent route model `{candidate}` has invalid capacity limits")
+            })?;
         uses_compatibility_limits |= candidate_metadata.has_compatibility_limits();
         let candidate_max_input = candidate_metadata
             .connection_max_input()

@@ -572,16 +572,6 @@ fn honor_exact_fails_over_within_the_same_model_across_providers() {
     );
 }
 
-#[test]
-fn honor_exact_treats_auto_as_the_dynamic_routing_sentinel() {
-    let decision = exact_router()
-        .route(&ask_model("auto", "prove this"), &[], &candidates())
-        .expect("auto selects the configured route instead of a literal model");
-
-    assert_ne!(decision.chosen.model, "auto");
-    assert!(!decision.pool.is_empty());
-}
-
 // -- P1-4: RecoveryPolicy separates tier selection from failover --------------
 
 fn ordered_router(backup: &[&str]) -> Router {

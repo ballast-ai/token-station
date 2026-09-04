@@ -1504,7 +1504,10 @@ fn newly_added_provider_refresh_persists_reported_model_limits() {
     let model = &state.providers[0].model_capabilities[0];
     assert_eq!(model.context_window, 257_550);
     assert_eq!(model.max_output_tokens, 32_768);
-    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     assert_eq!(
         model.max_output_tokens_source.as_deref(),
         Some(LIMIT_SOURCE_PROVIDER)
@@ -1588,13 +1591,10 @@ fn builtin_preset_does_not_reintroduce_context_conflicting_with_provider_output(
 
 #[test]
 fn partial_limit_refresh_prefers_fresh_fact_over_conflicting_cached_fact() {
-    const OUTPUT_ONLY: &str =
-        r#"{"data":[{"id":"partial-model","max_output_tokens":200000}]}"#;
-    const CONTEXT_ONLY: &str =
-        r#"{"data":[{"id":"partial-model","context_window":128000}]}"#;
+    const OUTPUT_ONLY: &str = r#"{"data":[{"id":"partial-model","max_output_tokens":200000}]}"#;
+    const CONTEXT_ONLY: &str = r#"{"data":[{"id":"partial-model","context_window":128000}]}"#;
     let root = scratch_home("partial-limit-refresh");
-    let (base_url, server) =
-        serve_model_catalog(vec![(200, OUTPUT_ONLY), (200, CONTEXT_ONLY)]);
+    let (base_url, server) = serve_model_catalog(vec![(200, OUTPUT_ONLY), (200, CONTEXT_ONLY)]);
     let app = tauri::test::mock_app();
     assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
         root.join("token-station.json"),
@@ -1644,8 +1644,7 @@ fn partial_limit_refresh_prefers_fresh_fact_over_conflicting_cached_fact() {
 
 #[test]
 fn complete_limit_refresh_replaces_older_provider_sourced_values() {
-    const OUTPUT_ONLY: &str =
-        r#"{"data":[{"id":"changing-model","max_output_tokens":200000}]}"#;
+    const OUTPUT_ONLY: &str = r#"{"data":[{"id":"changing-model","max_output_tokens":200000}]}"#;
     const COMPLETE: &str = r#"{"data":[{
         "id":"changing-model",
         "context_window":128000,
@@ -1681,7 +1680,10 @@ fn complete_limit_refresh_replaces_older_provider_sourced_values() {
     let model = &state.providers[0].model_capabilities[0];
     assert_eq!(model.context_window, 128_000);
     assert_eq!(model.max_output_tokens, 8_000);
-    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     assert_eq!(
         model.max_output_tokens_source.as_deref(),
         Some(LIMIT_SOURCE_PROVIDER)
@@ -1740,7 +1742,10 @@ fn add_provider_consumes_only_the_exact_live_catalog_revision() {
     let model = &state.providers[0].model_capabilities[0];
     assert_eq!(model.context_window, 257_550);
     assert_eq!(model.max_output_tokens, 32_768);
-    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     assert_eq!(
         model.max_output_tokens_source.as_deref(),
         Some(LIMIT_SOURCE_PROVIDER)
@@ -1779,7 +1784,10 @@ fn add_provider_consumes_only_the_exact_live_catalog_revision() {
         .and_then(|provider| provider.model_capabilities.first())
         .expect("the fallback Provider is still created");
     assert_eq!(fallback.max_output_tokens, 0);
-    assert_ne!(fallback.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_ne!(
+        fallback.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     server.join().expect("model catalog fixture exits");
     std::fs::remove_dir_all(root).ok();
 }

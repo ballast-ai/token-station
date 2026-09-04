@@ -294,11 +294,8 @@ pub(crate) fn apply_discovered_model_limits(
         let Some(fact) = facts.get(model).copied() else {
             continue;
         };
-        changed |= apply_provider_reported_limits(
-            capability,
-            fact.context_window,
-            fact.max_output_tokens,
-        );
+        changed |=
+            apply_provider_reported_limits(capability, fact.context_window, fact.max_output_tokens);
     }
     if !changed {
         return Ok(false);
@@ -341,14 +338,7 @@ pub(crate) async fn discover_provider_model_limits(
     name: String,
     base_url: String,
 ) -> Result<ModelDiscoveryView, String> {
-    discover_provider_models_impl(
-        state,
-        name,
-        base_url,
-        None,
-        DiscoveryMutation::LimitsOnly,
-    )
-    .await
+    discover_provider_models_impl(state, name, base_url, None, DiscoveryMutation::LimitsOnly).await
 }
 
 #[tauri::command]

@@ -939,8 +939,7 @@ mod tests {
         catalog_for_provider, discover_with_cache, discover_with_cache_egress, fetch_models,
         merge_live_catalog, parse_models, read_cached_entry, remove_provider, status_message,
         unknown_catalog_model, write_cache, CacheEntry, CatalogSource, CatalogState,
-        MAX_MODELS_PER_PROVIDER,
-        MAX_MODEL_ID_BYTES,
+        MAX_MODELS_PER_PROVIDER, MAX_MODEL_ID_BYTES,
     };
     use serde_json::json;
     use std::io::{Read, Write};
@@ -1124,7 +1123,10 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert!(error.contains("最大输出 8192 必须小于上下文 8192"), "{error}");
+        assert!(
+            error.contains("最大输出 8192 必须小于上下文 8192"),
+            "{error}"
+        );
     }
 
     #[test]

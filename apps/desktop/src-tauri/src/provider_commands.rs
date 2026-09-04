@@ -811,9 +811,8 @@ pub(crate) fn apply_provider_reported_limits(
                 && configured_output > 0
                 && (source_is_default(output_source)
                     || output_source == Some(LIMIT_SOURCE_PROVIDER));
-            let protected_conflict = configured_output >= u64::from(context)
-                && configured_output > 0
-                && !stale_output;
+            let protected_conflict =
+                configured_output >= u64::from(context) && configured_output > 0 && !stale_output;
             if !protected_conflict {
                 if stale_output {
                     capability
@@ -868,9 +867,7 @@ pub(crate) fn apply_provider_reported_limits(
         && u64::from(output) >= effective_context
         && matches!(
             json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY),
-            Some(
-                LIMIT_SOURCE_BUILTIN_PRESET | LIMIT_SOURCE_HEURISTIC | LIMIT_SOURCE_PROVIDER
-            )
+            Some(LIMIT_SOURCE_BUILTIN_PRESET | LIMIT_SOURCE_HEURISTIC | LIMIT_SOURCE_PROVIDER)
         )
     {
         capability
@@ -921,7 +918,8 @@ pub(crate) fn apply_builtin_model_limits_to_upstream(upstream: &mut Value) -> bo
             && context_source
                 .as_deref()
                 .is_none_or(|source| source == LIMIT_SOURCE_HEURISTIC);
-        let provider_output_blocks_context = output_source.as_deref() == Some(LIMIT_SOURCE_PROVIDER)
+        let provider_output_blocks_context = output_source.as_deref()
+            == Some(LIMIT_SOURCE_PROVIDER)
             && output >= u64::from(preset.context_window);
 
         if (context == 0 || legacy_heuristic || source_is_default(context_source.as_deref()))
@@ -1346,12 +1344,7 @@ pub(crate) fn add_provider_impl(
     let discovered_limits = catalog_revision
         .filter(|_| provider_dialect == "openai-compatible")
         .and_then(|revision| {
-            model_catalog::live_catalog_at_revision(
-                &data_dir,
-                &name,
-                &base_url,
-                revision,
-            )
+            model_catalog::live_catalog_at_revision(&data_dir, &name, &base_url, revision)
         })
         .unwrap_or_default();
     let discovered_by_model: std::collections::BTreeMap<&str, &model_catalog::CatalogModelView> =

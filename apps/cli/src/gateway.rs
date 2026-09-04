@@ -1599,6 +1599,10 @@ pub struct Gateway {
     /// gateway remains available for Agent setup and rejects model traffic
     /// until the user applies a personal or enterprise route.
     home_router: Option<Arc<Router>>,
+    /// Home with exact-model pinning disabled. Only the host-owned Claude Code
+    /// `token-station-auto` virtual model may select this variant; keeping the
+    /// exception here preserves router-core's frozen exact-model contract.
+    home_dynamic_router: Option<Arc<Router>>,
     /// Per-Agent fallback routers and exact Harness overlays. Missing fallback
     /// entries use Home. Harness overlays run before every fallback strategy.
     ///
@@ -1663,13 +1667,34 @@ struct HarnessRouter {
 #[derive(Clone, Default)]
 struct AgentRouters {
     fallback: Option<Arc<Router>>,
+    dynamic_fallback: Option<Arc<Router>>,
     harness: Option<HarnessRouter>,
 }
 
 impl AgentRouters {
     fn is_empty(&self) -> bool {
-        self.fallback.is_none() && self.harness.is_none()
+        self.fallback.is_none() && self.dynamic_fallback.is_none() && self.harness.is_none()
     }
+}
+
+fn router_with_dynamic_variant(
+    config: RouterConfig,
+    owner: &str,
+) -> Result<(Arc<Router>, Arc<Router>), String> {
+    let exact_model = config.honor_exact_model;
+    let mut dynamic_config = config.clone();
+    dynamic_config.honor_exact_model = false;
+    let router = Router::new(config)
+        .map(Arc::new)
+        .map_err(|error| format!("{owner}: {error}"))?;
+    let dynamic = if exact_model {
+        Router::new(dynamic_config)
+            .map(Arc::new)
+            .map_err(|error| format!("{owner} dynamic route: {error}"))?
+    } else {
+        Arc::clone(&router)
+    };
+    Ok((router, dynamic))
 }
 
 fn settle_estimated_cost(
@@ -2074,23 +2099,23 @@ impl Gateway {
 
         let quota_plans = Self::quota_plans_from(config);
 
-        let home_router = home_router_config
-            .map(|router| {
-                Router::new(router)
-                    .map(Arc::new)
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
+        let (home_router, home_dynamic_router) = home_router_config.map_or_else(
+            || Ok((None, None)),
+            |router| {
+                router_with_dynamic_variant(router, "Home route")
+                    .map(|(router, dynamic)| (Some(router), Some(dynamic)))
+            },
+        )?;
         let mut agent_routers = BTreeMap::new();
         for agent_id in &supported_agent_ids {
-            let fallback = config
+            let (fallback, dynamic_fallback) = config
                 .custom_router_for_agent(agent_id)?
                 .map(|router| {
-                    Router::new(router)
-                        .map(Arc::new)
-                        .map_err(|error| format!("Agent `{agent_id}` route: {error}"))
+                    router_with_dynamic_variant(router, &format!("Agent `{agent_id}` route"))
+                        .map(|(router, dynamic)| (Some(router), Some(dynamic)))
                 })
-                .transpose()?;
+                .transpose()?
+                .unwrap_or((None, None));
             let harness = config
                 .harness_router_for_agent(agent_id)?
                 .map(|overlay| {
@@ -2103,7 +2128,11 @@ impl Gateway {
                         .map_err(|error| format!("Agent `{agent_id}` Harness route: {error}"))
                 })
                 .transpose()?;
-            let routers = AgentRouters { fallback, harness };
+            let routers = AgentRouters {
+                fallback,
+                dynamic_fallback,
+                harness,
+            };
             if !routers.is_empty() {
                 agent_routers.insert(agent_id.clone(), routers);
             }
@@ -2113,6 +2142,7 @@ impl Gateway {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
             home_router,
+            home_dynamic_router,
             agent_routers: std::sync::RwLock::new(agent_routers),
             supported_agent_ids,
             upstreams,
@@ -2193,13 +2223,13 @@ impl Gateway {
         router: Option<RouterConfig>,
         harness: Option<HarnessRouterConfig>,
     ) -> Result<PrevalidatedAgentRouter, String> {
-        let fallback = router
+        let (fallback, dynamic_fallback) = router
             .map(|config| {
-                Router::new(config)
-                    .map(Arc::new)
-                    .map_err(|error| format!("Agent `{agent_id}` route: {error}"))
+                router_with_dynamic_variant(config, &format!("Agent `{agent_id}` route"))
+                    .map(|(router, dynamic)| (Some(router), Some(dynamic)))
             })
-            .transpose()?;
+            .transpose()?
+            .unwrap_or((None, None));
         let harness = harness
             .map(|overlay| {
                 Router::new(overlay.router)
@@ -2211,7 +2241,11 @@ impl Gateway {
                     .map_err(|error| format!("Agent `{agent_id}` Harness route: {error}"))
             })
             .transpose()?;
-        let routers = AgentRouters { fallback, harness };
+        let routers = AgentRouters {
+            fallback,
+            dynamic_fallback,
+            harness,
+        };
         Ok(PrevalidatedAgentRouter {
             agent_id: agent_id.to_owned(),
             routers: (!routers.is_empty()).then_some(routers),
@@ -3200,9 +3234,15 @@ impl Gateway {
                             })
                     })
                 };
-                harness_router
-                    .or(routers.fallback)
-                    .or_else(|| self.home_router.clone())
+                if token_station_auto {
+                    routers
+                        .dynamic_fallback
+                        .or_else(|| self.home_dynamic_router.clone())
+                } else {
+                    harness_router
+                        .or(routers.fallback)
+                        .or_else(|| self.home_router.clone())
+                }
             }
             Some(agent_id) => {
                 let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
