@@ -155,6 +155,29 @@ describe("SettingsHub clipboard feedback", () => {
     expect(general).toHaveFocus();
   });
 
+  it("keeps category descriptions in the Settings heading instead of navigation rows", () => {
+    render(
+      <ErrorToastProvider>
+        <SettingsHub
+          settings={settings}
+          serve={serve}
+          registry={registry}
+          visibleAgentIds={new Set()}
+          onAgentVisibilityChange={vi.fn()}
+          onOpenFirstRunGuide={vi.fn()}
+          onSaved={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    const navigation = screen.getByRole("navigation", { name: "设置分类" });
+    const about = within(navigation).getByRole("button", { name: "关于" });
+
+    expect(within(about).queryByText("版本与更新")).toBeNull();
+    expect(navigation.querySelector("small")).toBeNull();
+    expect(screen.getByText("版本与更新")).toBeInTheDocument();
+  });
+
   it("keeps pointer-selected Settings navigation under keyboard control in WebView", async () => {
     const user = userEvent.setup();
     render(
@@ -210,7 +233,7 @@ describe("SettingsHub clipboard feedback", () => {
     expect(screen.getByRole("heading", { name: "API Key 鉴权" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: /虚拟 Key 鉴权/ })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "代理与数据" })).toBeNull();
-    expect(screen.getAllByText("本机 Agent 访问凭据")).toHaveLength(2);
+    expect(screen.getAllByText("本机 Agent 访问凭据")).toHaveLength(1);
 
     await user.click(screen.getByRole("button", { name: /关于/ }));
     await user.click(screen.getByRole("button", { name: /运行信息/ }));
