@@ -922,6 +922,7 @@ export const addProvider = (
   credential_source: "store" | "env" | "file" | "none" = api_key ? "store" : "none",
   credential_reference: string | null = null,
   provider_dialect: "openai-compatible" | "azure-openai-v1" = "openai-compatible",
+  catalog_revision: number | null = null,
 ) =>
   invoke<StateView>("add_provider_with_credential", {
     name,
@@ -932,6 +933,7 @@ export const addProvider = (
     credentialSource: credential_source,
     credentialReference: credential_reference,
     providerDialect: provider_dialect,
+    catalogRevision: catalog_revision,
   });
 
 export const addManagedEnterpriseRoute = (
@@ -1050,6 +1052,14 @@ export const discoverProviderModels = (
     baseUrl: base_url,
     apiKey: api_key,
   });
+
+export const discoverProviderModelLimits = (
+  name: string,
+  base_url: string,
+) => invoke<ModelDiscoveryView>("discover_provider_model_limits", {
+  name,
+  baseUrl: base_url,
+});
 
 export const verifyEnterpriseRoute = (
   base_url: string,

@@ -1464,6 +1464,327 @@ fn enterprise_verification_uses_the_submitted_endpoint_when_the_first_id_is_occu
 }
 
 #[test]
+fn newly_added_provider_refresh_persists_reported_model_limits() {
+    const CATALOG: &str = r#"{
+        "data": [{
+            "id": "reported-model",
+            "context_window": 257550,
+            "max_output_tokens": 32768,
+            "architecture": {"input_modalities": ["text", "image"]},
+            "cost": {"input": 0.2, "output": 0.6}
+        }]
+    }"#;
+    let root = scratch_home("new-provider-model-limits");
+    let (base_url, server) = serve_model_catalog(vec![(200, CATALOG)]);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    add_provider(
+        app.state(),
+        "reported".to_owned(),
+        base_url.clone(),
+        vec!["reported-model".to_owned()],
+        Some("pending-secret".to_owned()),
+        true,
+    )
+    .expect("the Provider is created before optional discovery");
+    let result = tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.state(),
+        "reported".to_owned(),
+        base_url,
+    ))
+    .expect("post-create discovery can use the Provider key pending in the draft");
+
+    assert!(result.capabilities_updated);
+    let state = get_state(app.state());
+    let model = &state.providers[0].model_capabilities[0];
+    assert_eq!(model.context_window, 257_550);
+    assert_eq!(model.max_output_tokens, 32_768);
+    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.max_output_tokens_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
+    assert_eq!(
+        model.vision,
+        CapabilityState::Unknown,
+        "automatic refresh imports only requested limit facts"
+    );
+    server.join().expect("model catalog fixture exits");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn newly_added_provider_preserves_output_only_fact_over_heuristic_context() {
+    const CATALOG: &str = r#"{
+        "data": [{
+            "id": "output-only-model",
+            "max_output_tokens": 200000
+        }]
+    }"#;
+    let root = scratch_home("new-provider-output-only-limit");
+    let (base_url, server) = serve_model_catalog(vec![(200, CATALOG)]);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    add_provider(
+        app.state(),
+        "output_only".to_owned(),
+        base_url.clone(),
+        vec!["output-only-model".to_owned()],
+        Some("pending-secret".to_owned()),
+        true,
+    )
+    .expect("the Provider is created before optional discovery");
+    tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.state(),
+        "output_only".to_owned(),
+        base_url,
+    ))
+    .expect("output-only discovery succeeds");
+
+    let state = get_state(app.state());
+    let model = &state.providers[0].model_capabilities[0];
+    assert_eq!(model.context_window, 0);
+    assert_eq!(model.context_window_source, None);
+    assert_eq!(model.max_output_tokens, 200_000);
+    assert_eq!(
+        model.max_output_tokens_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
+    server.join().expect("model catalog fixture exits");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn builtin_preset_does_not_reintroduce_context_conflicting_with_provider_output() {
+    let mut upstream = json!({
+        "provider": "openai-compatible",
+        "base_url": "https://api.moonshot.cn/v1",
+        "models": [{
+            "model": "kimi-k2.6",
+            "max_output_tokens": 300000,
+            MAX_OUTPUT_TOKENS_SOURCE_KEY: LIMIT_SOURCE_PROVIDER
+        }]
+    });
+
+    assert!(!apply_builtin_model_limits_to_upstream(&mut upstream));
+    let model = &upstream["models"][0];
+    assert_eq!(model["context_window"], Value::Null);
+    assert_eq!(model["max_output_tokens"], json!(300_000));
+    assert_eq!(
+        model[MAX_OUTPUT_TOKENS_SOURCE_KEY],
+        json!(LIMIT_SOURCE_PROVIDER)
+    );
+}
+
+#[test]
+fn partial_limit_refresh_prefers_fresh_fact_over_conflicting_cached_fact() {
+    const OUTPUT_ONLY: &str =
+        r#"{"data":[{"id":"partial-model","max_output_tokens":200000}]}"#;
+    const CONTEXT_ONLY: &str =
+        r#"{"data":[{"id":"partial-model","context_window":128000}]}"#;
+    let root = scratch_home("partial-limit-refresh");
+    let (base_url, server) =
+        serve_model_catalog(vec![(200, OUTPUT_ONLY), (200, CONTEXT_ONLY)]);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+    add_provider(
+        app.state(),
+        "partial".to_owned(),
+        base_url.clone(),
+        vec!["partial-model".to_owned()],
+        Some("pending-secret".to_owned()),
+        true,
+    )
+    .unwrap();
+
+    tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.state(),
+        "partial".to_owned(),
+        base_url.clone(),
+    ))
+    .unwrap();
+    let first = get_state(app.state());
+    let first_model = &first.providers[0].model_capabilities[0];
+    assert_eq!(first_model.context_window, 0);
+    assert_eq!(first_model.max_output_tokens, 200_000);
+
+    tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.state(),
+        "partial".to_owned(),
+        base_url,
+    ))
+    .unwrap();
+    let second = get_state(app.state());
+    let second_model = &second.providers[0].model_capabilities[0];
+    assert_eq!(second_model.context_window, 128_000);
+    assert_eq!(
+        second_model.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
+    assert_eq!(second_model.max_output_tokens, 0);
+    assert_eq!(second_model.max_output_tokens_source, None);
+
+    server.join().expect("model catalog fixture exits");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn complete_limit_refresh_replaces_older_provider_sourced_values() {
+    const OUTPUT_ONLY: &str =
+        r#"{"data":[{"id":"changing-model","max_output_tokens":200000}]}"#;
+    const COMPLETE: &str = r#"{"data":[{
+        "id":"changing-model",
+        "context_window":128000,
+        "max_output_tokens":8000
+    }]}"#;
+    let root = scratch_home("complete-limit-refresh");
+    let (base_url, server) = serve_model_catalog(vec![(200, OUTPUT_ONLY), (200, COMPLETE)]);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+    add_provider(
+        app.state(),
+        "changing".to_owned(),
+        base_url.clone(),
+        vec!["changing-model".to_owned()],
+        Some("pending-secret".to_owned()),
+        true,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        tauri::async_runtime::block_on(discover_provider_model_limits(
+            app.state(),
+            "changing".to_owned(),
+            base_url.clone(),
+        ))
+        .unwrap();
+    }
+
+    let state = get_state(app.state());
+    let model = &state.providers[0].model_capabilities[0];
+    assert_eq!(model.context_window, 128_000);
+    assert_eq!(model.max_output_tokens, 8_000);
+    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.max_output_tokens_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
+
+    server.join().expect("model catalog fixture exits");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn add_provider_consumes_only_the_exact_live_catalog_revision() {
+    const CATALOG: &str = r#"{
+        "data": [{
+            "id": "reported-model",
+            "context_window": 257550,
+            "max_output_tokens": 32768
+        }, {
+            "id": "output-only-model",
+            "max_output_tokens": 200000
+        }]
+    }"#;
+    let root = scratch_home("add-provider-exact-catalog-revision");
+    let (base_url, server) = serve_model_catalog(vec![(200, CATALOG)]);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+
+    let discovery = tauri::async_runtime::block_on(discover_provider_models(
+        app.state(),
+        "reported".to_owned(),
+        base_url.clone(),
+        Some("one-time-secret".to_owned()),
+    ))
+    .expect("a live pre-create catalog is cached under its Provider identity");
+    assert_eq!(discovery.source, "live");
+    assert!(discovery.revision > 0);
+
+    let state = add_provider_impl(
+        app.state(),
+        "reported".to_owned(),
+        base_url,
+        vec!["reported-model".to_owned(), "output-only-model".to_owned()],
+        Some("pending-secret".to_owned()),
+        true,
+        "store",
+        None,
+        "openai-compatible",
+        false,
+        Some(discovery.revision),
+    )
+    .expect("Add Provider consumes the matching catalog revision before invalidating its cache");
+
+    let model = &state.providers[0].model_capabilities[0];
+    assert_eq!(model.context_window, 257_550);
+    assert_eq!(model.max_output_tokens, 32_768);
+    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.max_output_tokens_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
+    let output_only = state.providers[0]
+        .model_capabilities
+        .iter()
+        .find(|model| model.model == "output-only-model")
+        .expect("the exact catalog preserves an output-only Provider fact");
+    assert_eq!(output_only.context_window, 0);
+    assert_eq!(output_only.context_window_source, None);
+    assert_eq!(output_only.max_output_tokens, 200_000);
+    assert_eq!(
+        output_only.max_output_tokens_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
+
+    let mismatched = add_provider_impl(
+        app.state(),
+        "other".to_owned(),
+        "http://127.0.0.1:9".to_owned(),
+        vec!["reported-model".to_owned()],
+        None,
+        true,
+        "none",
+        None,
+        "openai-compatible",
+        false,
+        Some(discovery.revision),
+    )
+    .expect("a mismatched catalog revision is ignored instead of blocking Provider creation");
+    let fallback = mismatched
+        .providers
+        .iter()
+        .find(|provider| provider.name == "other")
+        .and_then(|provider| provider.model_capabilities.first())
+        .expect("the fallback Provider is still created");
+    assert_eq!(fallback.max_output_tokens, 0);
+    assert_ne!(fallback.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    server.join().expect("model catalog fixture exits");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn repeated_model_discovery_only_updates_the_catalog_cache() {
     const CATALOG: &str = r#"{"data":[{"id":"model-b"},{"id":"model-a"}]}"#;
 
@@ -4082,6 +4403,7 @@ fn enterprise_route_apply_replaces_a_waiting_gateway() {
         Some("ENTERPRISE_API_KEY"),
         "openai-compatible",
         true,
+        None,
     )
     .expect("enterprise route becomes the complete Direct target");
     assert_eq!(
@@ -4766,6 +5088,7 @@ fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
         Some("ENTERPRISE_API_KEY"),
         "openai-compatible",
         true,
+        None,
     )
     .expect("the managed provider and Direct target are valid together");
 
@@ -5489,6 +5812,7 @@ fn provider_credentials_default_to_store_and_advanced_sources_save_only_referenc
         "env".to_owned(),
         Some("DEEPSEEK_API_KEY".to_owned()),
         None,
+        None,
     )
     .expect("an environment credential reference is accepted");
     let env_provider = env_view
@@ -5509,6 +5833,7 @@ fn provider_credentials_default_to_store_and_advanced_sources_save_only_referenc
         false,
         "file".to_owned(),
         Some(credential_file.to_string_lossy().into_owned()),
+        None,
         None,
     )
     .expect("an absolute credential file reference is accepted");
@@ -5533,6 +5858,7 @@ fn provider_credentials_default_to_store_and_advanced_sources_save_only_referenc
         "env".to_owned(),
         Some("EXAMPLE_API_KEY".to_owned()),
         None,
+        None,
     ) {
         Err(error) => error,
         Ok(_) => panic!("env/file sources cannot accept plaintext API keys"),
@@ -5548,6 +5874,7 @@ fn provider_credentials_default_to_store_and_advanced_sources_save_only_referenc
         "env".to_owned(),
         Some("1INVALID".to_owned()),
         None,
+        None,
     ) {
         Err(error) => error,
         Ok(_) => panic!("invalid environment names are rejected"),
@@ -5562,6 +5889,7 @@ fn provider_credentials_default_to_store_and_advanced_sources_save_only_referenc
         false,
         "file".to_owned(),
         Some("relative.key".to_owned()),
+        None,
         None,
     ) {
         Err(error) => error,
@@ -5609,6 +5937,7 @@ fn provider_creation_persists_only_the_closed_dialect_catalog() {
         "env".to_owned(),
         Some("AZURE_OPENAI_API_KEY".to_owned()),
         Some("azure-openai-v1".to_owned()),
+        None,
     )
     .expect("the Azure OpenAI v1 dialect is accepted");
     let provider = view
@@ -5629,6 +5958,7 @@ fn provider_creation_persists_only_the_closed_dialect_catalog() {
         "env".to_owned(),
         Some("AZURE_OPENAI_API_KEY".to_owned()),
         Some("azure-openai-v1".to_owned()),
+        None,
     ) {
         Err(error) => error,
         Ok(_) => panic!("Azure OpenAI v1 requires the exact /openai/v1 API root"),
@@ -5675,6 +6005,7 @@ fn provider_creation_persists_only_the_closed_dialect_catalog() {
         "env".to_owned(),
         Some("UNKNOWN_API_KEY".to_owned()),
         Some("future-header-provider".to_owned()),
+        None,
     ) {
         Err(error) => error,
         Ok(_) => panic!("unknown provider dialects must fail closed"),
@@ -5696,6 +6027,7 @@ fn provider_creation_persists_only_the_closed_dialect_catalog() {
         false,
         "env".to_owned(),
         Some("REMOTE_HTTP_API_KEY".to_owned()),
+        None,
         None,
     ) {
         Err(error) => error,

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   addProvider,
+  discoverProviderModelLimits,
   discoverProviderModels,
   getState,
   importModelPricesForProvider,
@@ -169,6 +170,7 @@ export default function AddProviderPage({
   const [extraModels, setExtraModels] = useState<string[]>([]);
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
   const [discovery, setDiscovery] = useState<ModelDiscoveryView | null>(null);
+  const [discoveryIdentity, setDiscoveryIdentity] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [saving, setSaving] = useState(false);
   const [local, setLocal] = useState(false);
@@ -357,6 +359,7 @@ export default function AddProviderPage({
     setExtraModels([]);
     setDiscoveredModels([]);
     setDiscovery(null);
+    setDiscoveryIdentity(null);
     setError("");
     onProviderSelected?.();
   };
@@ -386,6 +389,7 @@ export default function AddProviderPage({
     setPicked((current) => current.filter((model) => !discoveredModels.includes(model)));
     setDiscoveredModels([]);
     setDiscovery(null);
+    setDiscoveryIdentity(null);
     setProviderDialect(next);
     if (next === "azure-openai-v1") setImportPublicPrices(false);
   };
@@ -432,9 +436,11 @@ export default function AddProviderPage({
     try {
       const result = await discoverProviderModels(name.trim(), url.trim(), needsKey ? key : null);
       setDiscovery(result);
+      setDiscoveryIdentity(`${name.trim()}\u0000${url.trim().replace(/\/$/, "")}`);
       setDiscoveredModels((current) => [...new Set([...current, ...result.models])]);
     } catch (caught) {
       setDiscovery({ models: [], source: "none", fetched_at_ms: null, warning: String(caught) });
+      setDiscoveryIdentity(null);
       showError(humanizeAppError(caught), `provider-model-discovery:${name.trim()}`);
     } finally {
       setDiscovering(false);
@@ -470,6 +476,13 @@ export default function AddProviderPage({
     setSaving(true);
     setError("");
     try {
+      const currentDiscoveryIdentity = `${name.trim()}\u0000${url.trim().replace(/\/$/, "")}`;
+      const liveCatalogRevision = discoveryIdentity === currentDiscoveryIdentity
+        && discovery?.source === "live"
+        && typeof discovery.revision === "number"
+        && discovery.revision > 0
+        ? discovery.revision
+        : null;
       const next = await addProvider(
         name.trim(),
         url.trim(),
@@ -479,6 +492,7 @@ export default function AddProviderPage({
         needsKey ? credentialSource : "none",
         needsKey && credentialSource !== "store" ? credentialReference.trim() : null,
         providerDialect,
+        liveCatalogRevision,
       );
       onAdded(
         next,
@@ -486,6 +500,23 @@ export default function AddProviderPage({
           ? copy(`Provider "${name.trim()}" updated`, `供应商“${name.trim()}”已更新`, `供應商 "${name.trim()}" 已更新`, `プロバイダー "${name.trim()}" が更新されました`)
           : copy("Provider added", "供应商已添加", "供應商已新增", "プロバイダーが追加されました"),
       );
+      const importedLiveLimit = next.providers
+        ?.find((provider) => provider.name === name.trim())
+        ?.model_capabilities
+        ?.some((model) => picked.includes(model.model)
+          && (model.context_window_source === "provider"
+            || model.max_output_tokens_source === "provider"))
+        ?? false;
+      if (providerDialect === "openai-compatible"
+        && (liveCatalogRevision === null || !importedLiveLimit)) {
+        try {
+          const limits = await discoverProviderModelLimits(name.trim(), url.trim());
+          if (limits.capabilities_updated) onStateChanged?.(await getState());
+        } catch {
+          // Model catalogs are optional. Provider creation and Agent access use
+          // conservative compatibility limits when live metadata is unavailable.
+        }
+      }
       if (importPublicPrices && publicPriceImportAvailable) {
         try {
           const imported = await importModelPricesForProvider(
@@ -986,7 +1017,10 @@ export default function AddProviderPage({
                       placeholder={copy("Stored in local secrets.json", "保存在本机 secrets.json", "儲存在本機 secrets.json", "ローカルの secrets.json に保存")}
                       value={key}
                       disabled={disabled}
-                      onChange={(event) => setKey(event.target.value)}
+                      onChange={(event) => {
+                        setKey(event.target.value);
+                        setDiscoveryIdentity(null);
+                      }}
                     />
                   </label>
                 )}
@@ -1001,6 +1035,7 @@ export default function AddProviderPage({
                         setCredentialSource(value as typeof credentialSource);
                         setKey("");
                         setCredentialReference("");
+                        setDiscoveryIdentity(null);
                       }}
                     >
                       <SelectTrigger
@@ -1037,7 +1072,10 @@ export default function AddProviderPage({
                         value={credentialReference}
                         disabled={disabled}
                         placeholder={credentialSource === "env" ? "DEEPSEEK_API_KEY" : "/absolute/path/provider.key"}
-                        onChange={(event) => setCredentialReference(event.target.value)}
+                        onChange={(event) => {
+                          setCredentialReference(event.target.value);
+                          setDiscoveryIdentity(null);
+                        }}
                       />
                     </label>
                   )}

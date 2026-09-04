@@ -579,13 +579,27 @@ pub(crate) fn transition_model_metadata(
     current: &AgentModelMetadata,
     next: &AgentModelMetadata,
 ) -> AgentModelMetadata {
+    let (context, output, max_input) = match (
+        current.connection_limits(),
+        next.connection_limits(),
+    ) {
+        (Some((current_context, current_output)), Some((next_context, next_output))) => (
+            current_context.min(next_context),
+            current_output.min(next_output),
+            current
+                .connection_max_input()
+                .zip(next.connection_max_input())
+                .map_or(0, |(current, next)| current.min(next)),
+        ),
+        (None, _) => (current.context, current.output, 0),
+        (_, None) => (next.context, next.output, 0),
+    };
     AgentModelMetadata {
-        context: current.context.min(next.context),
-        output: current.output.min(next.output),
-        max_input: current
-            .safe_max_input()
-            .zip(next.safe_max_input())
-            .map_or(0, |(current, next)| current.min(next)),
+        context,
+        output,
+        max_input,
+        uses_compatibility_limits: current.has_compatibility_limits()
+            || next.has_compatibility_limits(),
         vision: current.vision && next.vision,
         tools: current.tools && next.tools,
         reasoning: current.reasoning && next.reasoning,
@@ -604,9 +618,10 @@ fn agent_model_metadata_for_router(
         return Ok(None);
     }
 
-    let mut context = Some(u32::MAX);
-    let mut output = Some(u32::MAX);
-    let mut max_input = Some(u32::MAX);
+    let mut context = None;
+    let mut output = None;
+    let mut max_input = None;
+    let mut uses_compatibility_limits = false;
     let mut vision = true;
     let mut tools = true;
     let mut reasoning = true;
@@ -622,22 +637,43 @@ fn agent_model_metadata_for_router(
                     .find(|capability| capability.model == candidate.model)
             });
         let Some(capability) = capability else {
-            return Ok(None);
+            return Err(format!("Agent route references unknown model `{candidate}`"));
         };
-        let max_output = (capability.max_output_tokens > 0).then_some(capability.max_output_tokens);
-        max_input = max_input.and_then(|current| {
-            max_output.and_then(|output| {
-                capability
-                    .context_window
-                    .checked_sub(output)
-                    .filter(|input| *input > 0)
-                    .map(|input| current.min(input))
-            })
-        });
-        context = context.and_then(|current| {
-            (capability.context_window > 0).then_some(current.min(capability.context_window))
-        });
-        output = output.and_then(|current| max_output.map(|value| current.min(value)));
+        if capability.context_window > 0
+            && capability.max_output_tokens > 0
+            && capability.max_output_tokens >= capability.context_window
+        {
+            return Err(format!(
+                "Agent route model `{candidate}` has max output {} that is not smaller than context {}",
+                capability.max_output_tokens, capability.context_window
+            ));
+        }
+        let candidate_metadata = AgentModelMetadata {
+            context: capability.context_window,
+            output: capability.max_output_tokens,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let (candidate_context, candidate_output) = candidate_metadata
+            .connection_limits()
+            .ok_or_else(|| format!("Agent route model `{candidate}` has invalid capacity limits"))?;
+        uses_compatibility_limits |= candidate_metadata.has_compatibility_limits();
+        let candidate_max_input = candidate_metadata
+            .connection_max_input()
+            .expect("validated candidate limits always have an input budget");
+        context = Some(context.map_or(candidate_context, |current: u32| {
+            current.min(candidate_context)
+        }));
+        output = Some(output.map_or(candidate_output, |current: u32| {
+            current.min(candidate_output)
+        }));
+        max_input = Some(max_input.map_or(candidate_max_input, |current: u32| {
+            current.min(candidate_max_input)
+        }));
         vision &= capability.vision_state().is_supported();
         tools &= capability.tool_state().is_supported();
         reasoning &= capability.supported_parameters.contains("reasoning_effort");
@@ -673,6 +709,7 @@ fn agent_model_metadata_for_router(
         context,
         output,
         max_input,
+        uses_compatibility_limits,
         vision,
         tools,
         reasoning,
@@ -732,25 +769,15 @@ fn opencode_connection_issue(
                 Some(target.to_string()),
             ));
         };
-        if capability.context_window == 0 {
-            return Some(connection_issue(
-                "model_contract_missing_context_window",
-                format!(
-                    "模型 `{target}` 缺少可信 context window；不会使用路由假定值代替供应商事实"
-                ),
-                Some(target.to_string()),
-            ));
-        }
-        let projected_output = if capability.max_output_tokens == 0 {
-            super::connectors::OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
-        } else {
-            capability.max_output_tokens
-        };
-        if projected_output >= capability.context_window {
+        if capability.context_window > 0
+            && capability.max_output_tokens > 0
+            && capability.max_output_tokens >= capability.context_window
+        {
             return Some(connection_issue(
                 "model_contract_invalid_limits",
                 format!(
-                    "模型 `{target}` 的 OpenCode 输出预算 {projected_output} 必须小于 context window"
+                    "模型 `{target}` 的 OpenCode 输出预算 {} 必须小于 context window",
+                    capability.max_output_tokens
                 ),
                 Some(target.to_string()),
             ));
@@ -1026,6 +1053,7 @@ fn validate_force_forget_reconnect(
         context: 131_072,
         output: 8_192,
         max_input: 0,
+        uses_compatibility_limits: false,
         vision: true,
         tools: true,
         reasoning: true,
@@ -3033,6 +3061,7 @@ mod tests {
             context: 200_000,
             output: 32_000,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: false,
@@ -3380,7 +3409,7 @@ mod tests {
         let metadata = agent_model_metadata(&config, "opencode")
             .unwrap()
             .expect("independently verified metadata remains available");
-        assert_eq!(metadata.safe_limits(), None);
+        assert_eq!(metadata.safe_limits(), Some((257_550, 8_192)));
         assert!(metadata.vision);
         assert!(metadata.tools);
         assert!(metadata.reasoning);
@@ -3388,8 +3417,71 @@ mod tests {
     }
 
     #[test]
-    fn opencode_refuses_assumed_context_and_reports_the_exact_missing_target() {
-        let root = scratch("opencode-fail-closed-limits");
+    fn unknown_route_limits_never_raise_a_smaller_known_route_limit() {
+        let root = scratch("mixed-known-and-unknown-limits");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
+        draft["upstreams"]["known"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://known.example/v1",
+            "models": [{
+                "model": "model",
+                "context_window": 16_000,
+                "max_output_tokens": 4_000
+            }]
+        });
+        draft["upstreams"]["unknown"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://unknown.example/v1",
+            "models": [{"model": "model", "context_window": 0}]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [
+                {"upstream": "known", "model": "model"},
+                {"upstream": "unknown", "model": "model"}
+            ]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
+        assert_eq!(metadata.connection_limits(), Some((16_000, 4_000)));
+        assert!(metadata.has_compatibility_limits());
+    }
+
+    #[test]
+    fn transition_keeps_known_limits_when_the_other_revision_is_unknown() {
+        let known = AgentModelMetadata {
+            context: 16_000,
+            output: 4_000,
+            max_input: 12_000,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let unknown = AgentModelMetadata {
+            context: 0,
+            output: 0,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+
+        let metadata = transition_model_metadata(&known, &unknown);
+        assert_eq!(metadata.connection_limits(), Some((16_000, 4_000)));
+        assert_eq!(metadata.connection_max_input(), Some(12_000));
+        assert!(metadata.has_compatibility_limits());
+    }
+
+    #[test]
+    fn opencode_accepts_assumed_context_without_publishing_a_blocking_issue() {
+        let root = scratch("opencode-assumed-limits");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
         draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider"] = json!({
@@ -3409,12 +3501,11 @@ mod tests {
         let config: token_station_cli::config::ClientConfig =
             serde_json::from_value(draft).unwrap();
 
-        let issue = opencode_connection_issue(&config, &config.router)
-            .expect("an assumed context is not a trustworthy provider fact");
-
-        assert_eq!(issue.code, "model_contract_missing_context_window");
-        assert_eq!(issue.target.as_deref(), Some("provider/unknown-context"));
-        assert!(issue.message.contains("不会使用路由假定值"));
+        assert_eq!(opencode_connection_issue(&config, &config.router), None);
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("the route remains available with incomplete provider metadata");
+        assert_eq!(metadata.connection_limits(), Some((128_000, 8_192)));
     }
 
     #[test]
@@ -3441,7 +3532,7 @@ mod tests {
         let metadata = agent_model_metadata(&config, "opencode")
             .unwrap()
             .expect("trusted context remains available");
-        assert_eq!(metadata.safe_limits(), None);
+        assert_eq!(metadata.safe_limits(), Some((128_000, 8_192)));
         assert_eq!(metadata.opencode_limits(), Some((128_000, 8_192)));
     }
 
@@ -3481,8 +3572,8 @@ mod tests {
     }
 
     #[test]
-    fn opencode_rejects_the_safe_default_when_it_leaves_no_input_budget() {
-        let root = scratch("opencode-default-output-too-large");
+    fn opencode_clamps_the_default_output_to_leave_input_budget() {
+        let root = scratch("opencode-clamped-default-output");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
         draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider"] = json!({
@@ -3500,12 +3591,11 @@ mod tests {
         let config: token_station_cli::config::ClientConfig =
             serde_json::from_value(draft).unwrap();
 
-        let issue = opencode_connection_issue(&config, &config.router)
-            .expect("the default output must leave a positive input budget");
-
-        assert_eq!(issue.code, "model_contract_invalid_limits");
-        assert_eq!(issue.target.as_deref(), Some("provider/tiny-context"));
-        assert!(issue.message.contains("8192"));
+        assert_eq!(opencode_connection_issue(&config, &config.router), None);
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("the tiny route remains connectable");
+        assert_eq!(metadata.connection_limits(), Some((8_192, 4_096)));
     }
 
     struct LifecycleFileFixture {

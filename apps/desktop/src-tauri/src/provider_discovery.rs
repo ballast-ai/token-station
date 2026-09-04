@@ -230,51 +230,11 @@ pub(crate) fn apply_discovered_model_capabilities(
                     changed = true;
                 }
             }
-            if let Some(context) = fact.context_window {
-                let source = json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY);
-                if (capability["context_window"].as_u64().unwrap_or_default() == 0
-                    || source_is_default(source))
-                    && (capability["context_window"].as_u64() != Some(u64::from(context))
-                        || source != Some(LIMIT_SOURCE_PROVIDER))
-                {
-                    capability["context_window"] = json!(context);
-                    capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
-                    changed = true;
-                }
-            }
-            let effective_context = capability["context_window"].as_u64().unwrap_or_default();
-            let configured_output = capability["max_output_tokens"].as_u64().unwrap_or_default();
-            if configured_output > effective_context
-                && source_is_default(json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY))
-            {
-                capability
-                    .as_object_mut()
-                    .expect("model capability is an object")
-                    .remove("max_output_tokens");
-                capability
-                    .as_object_mut()
-                    .expect("model capability is an object")
-                    .remove(MAX_OUTPUT_TOKENS_SOURCE_KEY);
-                changed = true;
-            }
-            if let Some(output) = fact.max_output_tokens {
-                let source = json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY);
-                if capability["max_output_tokens"].as_u64().unwrap_or_default() == 0
-                    || source_is_default(source)
-                {
-                    let effective_context = capability["context_window"]
-                        .as_u64()
-                        .and_then(|value| u32::try_from(value).ok());
-                    if effective_context.is_some_and(|context| output <= context)
-                        && (capability["max_output_tokens"].as_u64() != Some(u64::from(output))
-                            || source != Some(LIMIT_SOURCE_PROVIDER))
-                    {
-                        capability["max_output_tokens"] = json!(output);
-                        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
-                        changed = true;
-                    }
-                }
-            }
+            changed |= apply_provider_reported_limits(
+                capability,
+                fact.context_window,
+                fact.max_output_tokens,
+            );
             if let Some(cost) = &fact.cost {
                 let serialized = serde_json::to_value(cost)
                     .map_err(|error| format!("序列化模型价格失败：{error}"))?;
@@ -304,6 +264,60 @@ pub(crate) fn apply_discovered_model_capabilities(
     Ok(true)
 }
 
+/// Persist only capacity facts needed by Agent projections. Automatic post-create refreshes use
+/// this narrower mutation so optional discovery cannot import prices or unrelated capabilities.
+pub(crate) fn apply_discovered_model_limits(
+    inner: &mut AppInner,
+    name: &str,
+    catalog: &[model_catalog::CatalogModelView],
+) -> Result<bool, String> {
+    let previous = inner.draft["upstreams"][name]["models"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 的模型配置无效"))?;
+    let facts: std::collections::BTreeMap<&str, &model_catalog::CatalogModelView> = catalog
+        .iter()
+        .filter(|model| model.catalog_state == model_catalog::CatalogState::Active)
+        .filter(|model| model.context_window.is_some() || model.max_output_tokens.is_some())
+        .map(|model| (model.model.as_str(), model))
+        .collect();
+    inner.ensure_editable()?;
+    let previous_state = inner.config_state.clone();
+    let models = inner.draft["upstreams"][name]["models"]
+        .as_array_mut()
+        .expect("model configuration was validated above");
+    let mut changed = false;
+    for capability in models {
+        let Some(model) = capability["model"].as_str() else {
+            continue;
+        };
+        let Some(fact) = facts.get(model).copied() else {
+            continue;
+        };
+        changed |= apply_provider_reported_limits(
+            capability,
+            fact.context_window,
+            fact.max_output_tokens,
+        );
+    }
+    if !changed {
+        return Ok(false);
+    }
+    if let Err(error) = inner.observe_draft().and_then(|()| inner.save_draft()) {
+        inner.draft["upstreams"][name]["models"] = json!(previous);
+        inner.config_state = previous_state;
+        return Err(format!("保存模型目录上限失败：{error}"));
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiscoveryMutation {
+    None,
+    AllCapabilities,
+    LimitsOnly,
+}
+
 #[tauri::command]
 pub(crate) async fn discover_provider_models(
     state: State<'_, AppStateManaged>,
@@ -311,7 +325,30 @@ pub(crate) async fn discover_provider_models(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<ModelDiscoveryView, String> {
-    discover_provider_models_impl(state, name, base_url, api_key, true).await
+    discover_provider_models_impl(
+        state,
+        name,
+        base_url,
+        api_key,
+        DiscoveryMutation::AllCapabilities,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn discover_provider_model_limits(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+) -> Result<ModelDiscoveryView, String> {
+    discover_provider_models_impl(
+        state,
+        name,
+        base_url,
+        None,
+        DiscoveryMutation::LimitsOnly,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -324,16 +361,22 @@ pub(crate) async fn verify_enterprise_route(
         let inner = state.0.lock().unwrap();
         next_managed_enterprise_provider_id(&inner)?
     };
-    discover_provider_models_impl(state, verification_provider, base_url, Some(api_key), false)
-        .await
+    discover_provider_models_impl(
+        state,
+        verification_provider,
+        base_url,
+        Some(api_key),
+        DiscoveryMutation::None,
+    )
+    .await
 }
 
-pub(crate) async fn discover_provider_models_impl(
+async fn discover_provider_models_impl(
     state: State<'_, AppStateManaged>,
     name: String,
     base_url: String,
     api_key: Option<String>,
-    persist_derived_state: bool,
+    mutation: DiscoveryMutation,
 ) -> Result<ModelDiscoveryView, String> {
     let name = name.trim().to_owned();
     let base_url = base_url.trim().trim_end_matches('/').to_owned();
@@ -345,7 +388,15 @@ pub(crate) async fn discover_provider_models_impl(
         .map_err(|error| format!("Base URL 不合法：{error}"))?;
     let base_url = endpoint.as_str();
 
-    let (data_dir, credential, egress, egress_secrets, expected_target, mutate_derived_state) = {
+    let (
+        data_dir,
+        credential,
+        pending_key,
+        egress,
+        egress_secrets,
+        expected_target,
+        mutate_derived_state,
+    ) = {
         let mut inner = state.0.lock().unwrap();
         if inner.pending_provider_discoveries.contains(&name) {
             return Err(format!(
@@ -358,15 +409,26 @@ pub(crate) async fn discover_provider_models_impl(
         }
         let credential =
             prepare_discovery_credential(&inner, &name, &base_url, api_key.as_deref())?;
+        // A newly added Provider keeps its key in memory until the draft is saved. Model
+        // discovery runs before that save, so prefer the pending value over Keychain for the
+        // configured Provider slot. It remains a stored credential semantically, which means a
+        // successful discovery may safely persist capabilities for this Provider.
+        let pending_key = match &credential {
+            DiscoveryCredential::Stored { provider, slot } if slot == "provider_api_key" => {
+                inner.pending_provider_keys.get(provider).cloned()
+            }
+            _ => None,
+        };
         let config = inner.materialize()?;
         ensure_credential_transport(&endpoint, &config.egress)?;
         let expected_target = begin_provider_discovery_target(&mut inner, &name);
-        let mutate_derived_state = persist_derived_state
+        let mutate_derived_state = mutation != DiscoveryMutation::None
             && (expected_target.upstream.is_none() || !credential.is_explicit_secret());
         inner.pending_provider_discoveries.insert(name.clone());
         (
             inner.data_dir(),
             credential,
+            pending_key,
             config.egress.clone(),
             secrets::SecretStore::from_config(&config, &inner.data_dir()),
             expected_target,
@@ -382,17 +444,18 @@ pub(crate) async fn discover_provider_models_impl(
     let task_base_url = base_url.clone();
     let task_data_dir = data_dir.clone();
     let mut result = tauri::async_runtime::spawn_blocking(move || {
-        let resolved_key = match credential {
-            DiscoveryCredential::Explicit(key) => key,
-            DiscoveryCredential::Stored { provider, slot } => {
-                Some(egress_secrets.resolve(&provider, &slot)?)
-            }
+        let resolved_key: Option<Zeroizing<String>> = match credential {
+            DiscoveryCredential::Explicit(key) => key.map(Zeroizing::new),
+            DiscoveryCredential::Stored { provider, slot } => match pending_key {
+                Some(key) => Some(key),
+                None => Some(Zeroizing::new(egress_secrets.resolve(&provider, &slot)?)),
+            },
         };
         model_catalog::discover_candidate_with_cache_egress(
             &task_data_dir,
             &task_name,
             &task_base_url,
-            resolved_key.as_deref(),
+            resolved_key.as_ref().map(|key| key.as_str()),
             &egress,
             &egress_secrets,
         )
@@ -407,8 +470,15 @@ pub(crate) async fn discover_provider_models_impl(
         {
             result.warning = Some(error);
         }
-        result.capabilities_updated =
-            apply_discovered_model_capabilities(&mut inner, &name, &result.catalog)?;
+        result.capabilities_updated = match mutation {
+            DiscoveryMutation::None => false,
+            DiscoveryMutation::AllCapabilities => {
+                apply_discovered_model_capabilities(&mut inner, &name, &result.catalog)?
+            }
+            DiscoveryMutation::LimitsOnly => {
+                apply_discovered_model_limits(&mut inner, &name, &result.catalog)?
+            }
+        };
     }
     if result.source == "none"
         && inner.draft["upstreams"]

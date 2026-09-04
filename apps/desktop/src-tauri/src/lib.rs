@@ -488,6 +488,7 @@ pub fn run() {
             edit_provider,
             edit_provider_with_credential,
             discover_provider_models,
+            discover_provider_model_limits,
             verify_enterprise_route,
             test_provider,
             test_model_chat_stream,

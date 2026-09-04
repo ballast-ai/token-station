@@ -47,13 +47,25 @@ pub struct AgentModelMetadata {
     /// target. Zero means an older/manual fixture that should derive the value
     /// from the aggregate safe limits.
     pub max_input: u32,
+    /// True when at least one reachable target needed an Agent-only capacity
+    /// fallback. This preserves provenance after safe limits are aggregated.
+    #[serde(skip)]
+    pub uses_compatibility_limits: bool,
     pub vision: bool,
     pub tools: bool,
     pub reasoning: bool,
     pub cost: Option<AgentModelCost>,
 }
 
-pub const OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS: u32 = 8_192;
+pub const AGENT_COMPATIBILITY_CONTEXT_WINDOW: u32 = 128_000;
+pub const AGENT_COMPATIBILITY_OUTPUT_TOKENS: u32 = 8_192;
+
+fn compatibility_limits() -> (u32, u32) {
+    (
+        AGENT_COMPATIBILITY_CONTEXT_WINDOW,
+        AGENT_COMPATIBILITY_OUTPUT_TOKENS,
+    )
+}
 
 impl AgentModelMetadata {
     pub fn safe_limits(&self) -> Option<(u32, u32)> {
@@ -74,12 +86,38 @@ impl AgentModelMetadata {
     }
 
     pub fn opencode_limits(&self) -> Option<(u32, u32)> {
+        self.connection_limits()
+    }
+
+    /// Limits that an Agent can use when Provider capacity metadata is
+    /// incomplete. Compatibility defaults are not Provider facts and are never
+    /// written back to the Provider model capability.
+    pub fn connection_limits(&self) -> Option<(u32, u32)> {
+        if self.context == 0 {
+            return Some(compatibility_limits());
+        }
+        if self.context <= 1 {
+            return None;
+        }
         let output = if self.output == 0 {
-            OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
+            AGENT_COMPATIBILITY_OUTPUT_TOKENS.min(self.context / 2)
         } else {
             self.output
         };
-        (self.context > 0 && output < self.context).then_some((self.context, output))
+        (output < self.context).then_some((self.context, output))
+    }
+
+    pub fn connection_max_input(&self) -> Option<u32> {
+        let (context, output) = self.connection_limits()?;
+        if self.context == context && self.max_input > 0 && self.max_input < context {
+            Some(self.max_input)
+        } else {
+            Some(context - output)
+        }
+    }
+
+    pub fn has_compatibility_limits(&self) -> bool {
+        self.uses_compatibility_limits || self.context == 0 || self.output == 0
     }
 }
 
@@ -88,6 +126,18 @@ pub struct ConnectInput<'a> {
     pub token: Option<&'a str>,
     pub adapter_ready: bool,
     pub model_metadata: Option<&'a AgentModelMetadata>,
+}
+
+impl ConnectInput<'_> {
+    pub fn connection_limits(&self) -> Option<(u32, u32)> {
+        self.model_metadata
+            .and_then(AgentModelMetadata::connection_limits)
+    }
+
+    pub fn connection_max_input(&self) -> Option<u32> {
+        self.model_metadata
+            .and_then(AgentModelMetadata::connection_max_input)
+    }
 }
 
 /// A second configuration file that must commit with a Connector's primary
@@ -309,6 +359,7 @@ mod tests {
             context: 128_000,
             output: 8_192,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: false,
@@ -431,6 +482,7 @@ mod tests {
             context: 131_072,
             output: 8_192,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -497,6 +549,7 @@ mod tests {
             context: 131_072,
             output: 8_192,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -549,6 +602,7 @@ mod tests {
             context: 131_072,
             output: 8_192,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -604,7 +658,44 @@ mod tests {
     }
 
     #[test]
-    fn kimi_code_connector_refuses_unknown_context_limits_before_writing() {
+    fn kimi_code_connector_uses_compatibility_limits_when_route_limits_are_unknown() {
+        let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
+        let metadata = AgentModelMetadata {
+            context: 0,
+            output: 0,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
+            token: Some("fixture-kimi-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+
+        connector
+            .validate_preconditions(&input)
+            .expect("missing optional Provider metadata must not block connection");
+        let mut document = parse_source_bytes(None, connector.format(), connector.label()).unwrap();
+        apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(
+            semantic["models"]["tokenstation-auto"]["max_context_size"],
+            json!(128_000)
+        );
+        assert_eq!(
+            semantic["models"]["tokenstation-auto"]["max_output_size"],
+            json!(8_192)
+        );
+    }
+
+    #[test]
+    fn kimi_code_connector_rejects_a_route_without_reachable_models() {
         let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
@@ -613,11 +704,8 @@ mod tests {
             model_metadata: None,
         };
 
-        let error = connector
-            .validate_preconditions(&input)
-            .expect_err("Kimi Code requires a known positive context limit");
-
-        assert!(error.contains("context"), "{error}");
+        let error = connector.validate_preconditions(&input).unwrap_err();
+        assert!(error.contains("reachable route model"), "{error}");
     }
 
     #[test]
@@ -628,6 +716,7 @@ mod tests {
                 context,
                 output,
                 max_input: 0,
+                uses_compatibility_limits: false,
                 vision: false,
                 tools: true,
                 reasoning: true,
@@ -649,6 +738,7 @@ mod tests {
             context: u32::MAX,
             output: u32::MAX - 1,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -673,6 +763,7 @@ mod tests {
             context: 131_072,
             output: 8_192,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -716,6 +807,7 @@ mod tests {
             context: 131_072,
             output: 8_192,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -1046,6 +1138,7 @@ mod tests {
                 context: 257_550,
                 output: 32_768,
                 max_input: 0,
+                uses_compatibility_limits: false,
                 vision: true,
                 tools: true,
                 reasoning: true,
@@ -1098,6 +1191,7 @@ mod tests {
             context: 257_550,
             output: 32_768,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1145,6 +1239,7 @@ mod tests {
                 context: 257_550,
                 output: 32_768,
                 max_input: 0,
+                uses_compatibility_limits: false,
                 vision: true,
                 tools: true,
                 reasoning: true,
@@ -1204,6 +1299,7 @@ mod tests {
             context: 257_550,
             output: 32_768,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1322,6 +1418,7 @@ mod tests {
             context: 0,
             output: 0,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1352,7 +1449,10 @@ mod tests {
         let opencode_model = &opencode["provider"]["tokenstation"]["models"]["auto"];
         assert_eq!(opencode_model["attachment"], json!(true));
         assert_eq!(opencode_model["cost"]["output"], json!(0.6));
-        assert!(opencode_model.get("limit").is_none());
+        assert_eq!(
+            opencode_model["limit"],
+            json!({"context": 128_000, "output": 8_192})
+        );
 
         let workbuddy_input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
@@ -1479,6 +1579,7 @@ experimental_bearer_token = "fixture-codex-key"
             context: 128_000,
             output: 16_384,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: false,
             reasoning: false,
