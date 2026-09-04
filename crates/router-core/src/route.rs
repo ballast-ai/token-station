@@ -145,8 +145,9 @@ impl Router {
     ) -> Result<Decision, NoRoute> {
         let features = RequestFeatures::extract(request, hints);
 
-        // Exact-model Agents pin the caller's model instead of tier-routing it.
-        if self.config.honor_exact_model {
+        // Exact-model Agents pin a concrete caller model. `auto` is the host's
+        // explicit dynamic-routing sentinel, not a literal upstream model.
+        if self.config.honor_exact_model && request.model != "auto" {
             return self.route_exact(request, features, candidates);
         }
 

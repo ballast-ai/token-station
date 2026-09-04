@@ -238,6 +238,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 0,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: false,
@@ -299,6 +300,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 16_384,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -338,6 +340,7 @@ mod tests {
         let initial = AgentModelMetadata {
             context: 128_000,
             output: 8_192,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: false,
@@ -346,6 +349,7 @@ mod tests {
         let refreshed = AgentModelMetadata {
             context: 256_000,
             output: 32_768,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,

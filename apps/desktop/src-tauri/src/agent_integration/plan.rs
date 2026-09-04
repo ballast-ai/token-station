@@ -1566,6 +1566,7 @@ mod tests {
         AgentModelMetadata {
             context: 200_000,
             output: 32_000,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: false,

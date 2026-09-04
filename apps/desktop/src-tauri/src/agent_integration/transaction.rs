@@ -1920,6 +1920,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 8_192,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -2091,6 +2092,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 200_000,
             output: 32_000,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: false,
@@ -2382,6 +2384,7 @@ mod tests {
         let first_metadata = AgentModelMetadata {
             context: 257_550,
             output: 32_768,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -2452,6 +2455,7 @@ mod tests {
         let refreshed_metadata = AgentModelMetadata {
             context: 128_000,
             output: 8_192,
+            max_input: 0,
             vision: false,
             tools: false,
             reasoning: false,
@@ -2554,6 +2558,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 8_192,
+            max_input: 0,
             vision: false,
             tools: false,
             reasoning: false,
@@ -3622,7 +3627,7 @@ keep = true
     fn transaction_disconnect_restores_only_owned_paths_and_preserves_later_user_fields() {
         let root = scratch("disconnect");
         let target = root.join("settings.json");
-        let initial = br#"{"unowned":"keep","env":{"USER_VALUE":"original","ANTHROPIC_CUSTOM_MODEL_OPTION":"user-model","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"User model","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"User description"}}"#;
+        let initial = br#"{"unowned":"keep","env":{"USER_VALUE":"original","ANTHROPIC_CUSTOM_MODEL_OPTION":"user-model","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"User model","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"User description","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"777777","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"700000"}}"#;
         write_initial(&target, initial);
         let connect = prepare(&target, "vk-disconnect-secret");
         let keys = Arc::new(TestKeys::available());
@@ -3700,6 +3705,8 @@ keep = true
             restored["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"],
             "User description"
         );
+        assert_eq!(restored["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "777777");
+        assert_eq!(restored["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "700000");
         assert!(restored["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
         assert!(ownership_store.load(&ownership_key).unwrap().is_none());
         let records = snapshots
@@ -4539,6 +4546,7 @@ keep = true
         let metadata = AgentModelMetadata {
             context: 257_550,
             output: 32_768,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -4664,6 +4672,7 @@ keep = true
         let metadata = AgentModelMetadata {
             context: 257_550,
             output: 32_768,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
