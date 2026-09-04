@@ -1512,7 +1512,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::agent_integration::connectors::{ClaudeCodeConnector, CodexConnector};
+    use crate::agent_integration::connectors::{
+        AgentModelMetadata, ClaudeCodeConnector, CodexConnector,
+    };
     use crate::agent_integration::types::{
         BinarySource, Diagnostic, DiscoveryEvidence, DiscoverySource, Platform, ReasonCode,
     };
@@ -1557,6 +1559,17 @@ mod tests {
                 AllowedAction::ViewDetails,
                 AllowedAction::PreviewConnect,
             ]),
+        }
+    }
+
+    fn claude_metadata() -> AgentModelMetadata {
+        AgentModelMetadata {
+            context: 200_000,
+            output: 32_000,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
         }
     }
 
@@ -1621,6 +1634,7 @@ mod tests {
             Some(0o640),
             Some("501:20".to_string()),
         );
+        let metadata = claude_metadata();
         let prepared = build_connection_plan(
             &ClaudeCodeConnector,
             &discovery(target),
@@ -1631,7 +1645,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
-                model_metadata: None,
+                model_metadata: Some(&metadata),
             },
             7,
             Some(20_000),
@@ -1675,6 +1689,7 @@ mod tests {
         let source =
             ConfigSource::existing(br#"{"env":null,"keep":"user"}"#.to_vec(), Some(0o600), None);
 
+        let metadata = claude_metadata();
         let prepared = build_connection_plan(
             &ClaudeCodeConnector,
             &discovery(target),
@@ -1685,7 +1700,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some("fixture-null-reverse-secret"),
                 adapter_ready: true,
-                model_metadata: None,
+                model_metadata: Some(&metadata),
             },
             1,
             None,
@@ -1793,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_refresh_retires_legacy_model_ownership_after_cleanup() {
+    fn claude_refresh_retires_legacy_alias_ownership_and_adds_token_station_auto() {
         #[cfg(windows)]
         let target = Path::new(r"C:\\tmp\\token-station-plan\\settings.json");
         #[cfg(not(windows))]
@@ -1855,6 +1870,7 @@ mod tests {
             updated_at_ms: 1,
         };
 
+        let metadata = claude_metadata();
         let prepared = build_metadata_refresh_plan_with_baseline(
             &ClaudeCodeConnector,
             &discovery(target),
@@ -1866,7 +1882,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787/agents/claude-code",
                 token: Some("fixture-claude-virtual-key"),
                 adapter_ready: true,
-                model_metadata: None,
+                model_metadata: Some(&metadata),
             },
             &ownership,
             1,
@@ -1894,11 +1910,14 @@ mod tests {
                 assert_eq!(env[key], json!("user-haiku"));
             } else if key == "ANTHROPIC_DEFAULT_OPUS_MODEL" {
                 assert_eq!(env[key], json!("user-opus"));
-            } else {
-                assert!(!env.contains_key(key));
             }
         }
-        assert_eq!(projected["model"], json!("fable"));
+        assert_eq!(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], json!("auto"));
+        assert_eq!(
+            env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"],
+            json!("Token Station Auto")
+        );
+        assert_eq!(projected["model"], json!("auto"));
         assert_eq!(prepared.view.owned_paths, active_paths);
     }
 

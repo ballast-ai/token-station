@@ -2938,6 +2938,14 @@ mod tests {
 
     fn prepared(target: &Path, secret: &str, now_ms: u64) -> PreparedChangePlan {
         let source = read_config_source(target).unwrap();
+        let metadata = AgentModelMetadata {
+            context: 200_000,
+            output: 32_000,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
         build_connection_plan(
             connector_for("claude-code-v1").unwrap(),
             &record(target, false),
@@ -2948,7 +2956,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
-                model_metadata: None,
+                model_metadata: Some(&metadata),
             },
             1,
             None,
@@ -2963,12 +2971,24 @@ mod tests {
             .iter()
             .map(|connector| (connector.capabilities().adapter_id.to_string(), true))
             .collect();
+        let metadata = AgentModelMetadata {
+            context: 200_000,
+            output: 32_000,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
+        let model_metadata = builtin_connectors()
+            .iter()
+            .map(|connector| (connector.agent_id().to_string(), metadata.clone()))
+            .collect();
         AgentProxyRuntime::new(
             "fixture-runtime".to_string(),
             "http://127.0.0.1:8787",
             token.to_string(),
             adapter_readiness,
-            BTreeMap::new(),
+            model_metadata,
             BTreeMap::new(),
         )
     }
@@ -3035,6 +3055,12 @@ mod tests {
         assert!(metadata.tools);
         assert!(metadata.reasoning);
         assert_eq!(metadata.cost.as_ref().map(|cost| cost.input), Some(0.2));
+
+        let claude = agent_model_metadata(&config, "claude-code")
+            .unwrap()
+            .expect("Claude Code inherits the same effective home route");
+        assert_eq!(claude.context, 128_000);
+        assert_eq!(claude.output, 16_384);
 
         draft["agent_routes"]["workbuddy"] = json!({
             "mode": "custom",

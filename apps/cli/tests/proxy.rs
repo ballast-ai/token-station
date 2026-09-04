@@ -2714,27 +2714,28 @@ fn scoped_models_switch_on_the_next_request_after_router_reload() {
     std::fs::remove_file(key).ok();
 }
 
+fn harness_routing_answer(id: &str, model: &str) -> Value {
+    json!({
+        "id": id,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    })
+}
+
 #[test]
 fn harness_mapping_runs_before_quota_priority_fallback() {
-    let answer = |id: &str, model: &str| {
-        json!({
-            "id": id,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": { "role": "assistant", "content": "ok" },
-                "finish_reason": "stop"
-            }],
-            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
-        })
-    };
     let home = MockUpstream::start(vec![vec![http_json(
         200,
-        &answer("chatcmpl-home", "home-model").to_string(),
+        &harness_routing_answer("chatcmpl-home", "home-model").to_string(),
     )]]);
     let mapped = MockUpstream::start(vec![vec![http_json(
         200,
-        &answer("chatcmpl-mapped", "agent-model").to_string(),
+        &harness_routing_answer("chatcmpl-mapped", "agent-model").to_string(),
     )]]);
     let key = key_file("harness-before-quota", "sk-test-key-abc");
     let proxy = start_scoped_proxy(&home, &mapped, &key);
@@ -2800,27 +2801,16 @@ fn harness_mapping_runs_before_quota_priority_fallback() {
 
 #[test]
 fn claude_code_native_model_names_select_logical_harness_routes() {
-    let answer = |id: &str, model: &str| {
-        json!({
-            "id": id,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": { "role": "assistant", "content": "ok" },
-                "finish_reason": "stop"
-            }],
-            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
-        })
-    };
     let home = MockUpstream::start(vec![vec![http_json(
         200,
-        &answer("chatcmpl-home", "home-model").to_string(),
+        &harness_routing_answer("chatcmpl-home", "home-model").to_string(),
     )]]);
     let mapped_responses = (0..8)
         .map(|index| {
             vec![http_json(
                 200,
-                &answer(&format!("chatcmpl-mapped-{index}"), "agent-model").to_string(),
+                &harness_routing_answer(&format!("chatcmpl-mapped-{index}"), "agent-model")
+                    .to_string(),
             )]
         })
         .collect();
@@ -2882,15 +2872,15 @@ fn claude_code_native_model_names_select_logical_harness_routes() {
         assert_eq!(status, 200, "{model}: {body}");
     }
 
-    let unknown = json!({
-        "model": "user-owned-model-name",
+    let token_station_auto = json!({
+        "model": "auto",
         "max_tokens": 16,
         "messages": [{ "role": "user", "content": "hi" }]
     });
     let (status, body) = post_scoped(
         &proxy,
         "/agents/claude-code/v1/messages",
-        &unknown,
+        &token_station_auto,
         &proxy.virtual_key,
         true,
     );
@@ -2900,7 +2890,11 @@ fn claude_code_native_model_names_select_logical_harness_routes() {
         8,
         "recognized Claude families use Harness mappings"
     );
-    assert_eq!(home.hits(), 1, "unknown names use the normal Agent route");
+    assert_eq!(
+        home.hits(),
+        1,
+        "Token Station Auto uses the normal Agent route"
+    );
 
     std::fs::remove_file(key).ok();
 }

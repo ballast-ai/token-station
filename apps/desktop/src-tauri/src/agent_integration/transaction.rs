@@ -2088,6 +2088,14 @@ mod tests {
 
     fn prepare(target: &Path, secret: &str) -> PreparedChangePlan {
         let source = read_config_source(target).unwrap();
+        let metadata = AgentModelMetadata {
+            context: 200_000,
+            output: 32_000,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
         build_connection_plan(
             &ClaudeCodeConnector,
             &discovery(target),
@@ -2098,7 +2106,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
-                model_metadata: None,
+                model_metadata: Some(&metadata),
             },
             1,
             None,
@@ -3614,7 +3622,7 @@ keep = true
     fn transaction_disconnect_restores_only_owned_paths_and_preserves_later_user_fields() {
         let root = scratch("disconnect");
         let target = root.join("settings.json");
-        let initial = br#"{"unowned":"keep","env":{"USER_VALUE":"original"}}"#;
+        let initial = br#"{"unowned":"keep","env":{"USER_VALUE":"original","ANTHROPIC_CUSTOM_MODEL_OPTION":"user-model","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"User model","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"User description"}}"#;
         write_initial(&target, initial);
         let connect = prepare(&target, "vk-disconnect-secret");
         let keys = Arc::new(TestKeys::available());
@@ -3680,6 +3688,18 @@ keep = true
         assert_eq!(restored["unowned"], "keep");
         assert_eq!(restored["later_user_field"]["enabled"], true);
         assert_eq!(restored["env"]["USER_VALUE"], "original");
+        assert_eq!(
+            restored["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION"],
+            "user-model"
+        );
+        assert_eq!(
+            restored["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"],
+            "User model"
+        );
+        assert_eq!(
+            restored["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"],
+            "User description"
+        );
         assert!(restored["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
         assert!(ownership_store.load(&ownership_key).unwrap().is_none());
         let records = snapshots
