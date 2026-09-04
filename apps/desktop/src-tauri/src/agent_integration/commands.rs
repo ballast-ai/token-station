@@ -489,6 +489,19 @@ impl AgentProxyRuntime {
             self.model_metadata.remove(agent_id);
         }
     }
+
+    fn replace_connection_issue(
+        &mut self,
+        connector_id: &str,
+        issue: Option<AgentConnectionIssueView>,
+    ) {
+        if let Some(issue) = issue {
+            self.connection_issues
+                .insert(connector_id.to_string(), issue);
+        } else {
+            self.connection_issues.remove(connector_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -510,6 +523,50 @@ fn configured_router_for_agent(
     }
 }
 
+fn reachable_model_targets(
+    config: &token_station_cli::config::ClientConfig,
+    router: &token_station_router_core::RouterConfig,
+) -> BTreeSet<token_station_router_core::UpstreamModel> {
+    use token_station_router_core::{RecoveryPolicy, RoutingMode};
+
+    let mut targets = BTreeSet::new();
+    if router.routing_mode == RoutingMode::QuotaFirst {
+        targets.extend(router.quota_accounts.iter().cloned());
+    } else {
+        let mut reachable_pools = BTreeSet::from([router.default_pool.clone()]);
+        reachable_pools.extend(router.rules.iter().map(|rule| rule.route_to.clone()));
+        reachable_pools.extend(
+            router
+                .hint_routes
+                .iter()
+                .map(|route| route.route_to.clone()),
+        );
+        if let Some(heuristic) = &router.heuristic {
+            reachable_pools.insert(heuristic.above.clone());
+            reachable_pools.insert(heuristic.below.clone());
+            reachable_pools.extend(heuristic.bands.iter().map(|band| band.pool.clone()));
+        }
+        if let RecoveryPolicy::Ordered { pools } = &router.recovery {
+            reachable_pools.extend(pools.iter().cloned());
+        }
+        targets.extend(
+            reachable_pools
+                .into_iter()
+                .flat_map(|pool| router.pools.get(&pool).into_iter().flatten().cloned()),
+        );
+    }
+
+    if router.local_only && !router.allow_cloud_fallback {
+        targets.retain(|target| {
+            config
+                .upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| upstream.local)
+        });
+    }
+    targets
+}
+
 pub(crate) fn model_metadata_for_config(
     config: &token_station_cli::config::ClientConfig,
     agent_id: &str,
@@ -518,29 +575,31 @@ pub(crate) fn model_metadata_for_config(
     agent_model_metadata_for_router(config, &router)
 }
 
+pub(crate) fn transition_model_metadata(
+    current: &AgentModelMetadata,
+    next: &AgentModelMetadata,
+) -> AgentModelMetadata {
+    AgentModelMetadata {
+        context: current.context.min(next.context),
+        output: current.output.min(next.output),
+        max_input: current
+            .safe_max_input()
+            .zip(next.safe_max_input())
+            .map_or(0, |(current, next)| current.min(next)),
+        vision: current.vision && next.vision,
+        tools: current.tools && next.tools,
+        reasoning: current.reasoning && next.reasoning,
+        cost: (current.cost == next.cost)
+            .then(|| current.cost.clone())
+            .flatten(),
+    }
+}
+
 fn agent_model_metadata_for_router(
     config: &token_station_cli::config::ClientConfig,
     router: &token_station_router_core::RouterConfig,
 ) -> Result<Option<AgentModelMetadata>, String> {
-    use token_station_router_core::RoutingMode;
-
-    let mut candidates = BTreeSet::new();
-    if router.routing_mode == RoutingMode::QuotaFirst && !router.quota_accounts.is_empty() {
-        candidates.extend(router.quota_accounts.iter().cloned());
-    } else if router.routing_mode == RoutingMode::QuotaFirst {
-        for (upstream, entry) in &config.upstreams {
-            let reference = token_station_router_core::UpstreamRef::new(upstream.clone())
-                .map_err(|error| error.to_string())?;
-            candidates.extend(entry.models.iter().map(|capability| {
-                token_station_router_core::UpstreamModel::new(
-                    reference.clone(),
-                    capability.model.clone(),
-                )
-            }));
-        }
-    } else {
-        candidates.extend(router.pools.values().flatten().cloned());
-    }
+    let candidates = reachable_model_targets(config, router);
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -645,59 +704,7 @@ fn opencode_connection_issue(
         ));
     }
 
-    let mut targets = if router.routing_mode == token_station_router_core::RoutingMode::QuotaFirst
-        && !router.quota_accounts.is_empty()
-    {
-        router.quota_accounts.clone()
-    } else if router.routing_mode == token_station_router_core::RoutingMode::QuotaFirst {
-        config
-            .upstreams
-            .iter()
-            .flat_map(|(upstream, entry)| {
-                entry.models.iter().filter_map(move |capability| {
-                    token_station_router_core::UpstreamRef::new(upstream.clone())
-                        .ok()
-                        .map(|upstream| {
-                            token_station_router_core::UpstreamModel::new(
-                                upstream,
-                                capability.model.clone(),
-                            )
-                        })
-                })
-            })
-            .collect()
-    } else {
-        let mut reachable_pools = BTreeSet::from([router.default_pool.clone()]);
-        reachable_pools.extend(router.rules.iter().map(|rule| rule.route_to.clone()));
-        reachable_pools.extend(
-            router
-                .hint_routes
-                .iter()
-                .map(|route| route.route_to.clone()),
-        );
-        if let Some(heuristic) = &router.heuristic {
-            reachable_pools.insert(heuristic.above.clone());
-            reachable_pools.insert(heuristic.below.clone());
-            reachable_pools.extend(heuristic.bands.iter().map(|band| band.pool.clone()));
-        }
-        if let token_station_router_core::RecoveryPolicy::Ordered { pools } = &router.recovery {
-            reachable_pools.extend(pools.iter().cloned());
-        }
-        reachable_pools
-            .into_iter()
-            .flat_map(|pool| router.pools.get(&pool).into_iter().flatten().cloned())
-            .collect()
-    };
-    if router.local_only && !router.allow_cloud_fallback {
-        targets.retain(|target| {
-            config
-                .upstreams
-                .get(target.upstream.as_str())
-                .is_some_and(|upstream| upstream.local)
-        });
-    }
-    targets.sort();
-    targets.dedup();
+    let targets = reachable_model_targets(config, router);
     if targets.is_empty() {
         return Some(connection_issue(
             "model_contract_no_reachable_model",
@@ -2546,6 +2553,40 @@ fn hash_field(hash: &mut Sha256, value: &[u8]) {
     hash.update(value);
 }
 
+pub(crate) fn transition_runtime_for_config(
+    current: &AgentProxyRuntime,
+    config: &token_station_cli::config::ClientConfig,
+) -> Result<AgentProxyRuntime, String> {
+    let mut transition = current.clone();
+    let mut projected_agents = BTreeSet::new();
+    for connector in builtin_connectors() {
+        let agent_id = connector.agent_id();
+        if !projected_agents.insert(agent_id) {
+            continue;
+        }
+        let next = if config.home_route_is_unconfigured() {
+            None
+        } else {
+            model_metadata_for_config(config, agent_id)?
+        };
+        let safe = current
+            .model_metadata(agent_id)
+            .zip(next.as_ref())
+            .map(|(current, next)| transition_model_metadata(current, next))
+            .or(next);
+        transition.replace_model_metadata(agent_id, safe);
+    }
+
+    let opencode_issue = if config.home_route_is_unconfigured() {
+        None
+    } else {
+        let router = configured_router_for_agent(config, "opencode")?;
+        opencode_connection_issue(config, &router)
+    };
+    transition.replace_connection_issue("opencode-v1", opencode_issue);
+    Ok(transition)
+}
+
 pub(crate) fn runtime_from_app(
     state: &AppStateManaged,
 ) -> Result<AgentProxyRuntime, AgentCommandError> {
@@ -3081,6 +3122,10 @@ mod tests {
             "tier_low": [{"upstream": "provider_b", "model": "glm-5.2"}]
         });
         draft["router"]["default_pool"] = json!("tier_low");
+        draft["router"]["recovery"] = json!({
+            "policy": "ordered",
+            "pools": ["tier_high"]
+        });
         let config: token_station_cli::config::ClientConfig =
             serde_json::from_value(draft.clone()).unwrap();
 
@@ -3128,6 +3173,121 @@ mod tests {
         assert!(!mixed.vision);
         assert!(!mixed.tools);
         assert!(!mixed.reasoning);
+    }
+
+    #[test]
+    fn agent_projection_counts_only_targets_reachable_by_the_active_route() {
+        let root = scratch("reachable-model-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
+        for (name, context, local) in [
+            ("local_default", 200_000, true),
+            ("cloud_recovery", 128_000, false),
+            ("orphan", 32_000, false),
+        ] {
+            draft["upstreams"][name] = json!({
+                "provider": "openai-compatible",
+                "base_url": format!("https://{name}.example/v1"),
+                "local": local,
+                "models": [{
+                    "model": "model",
+                    "context_window": context,
+                    "max_output_tokens": 16_000
+                }]
+            });
+        }
+        draft["router"]["pools"] = json!({
+            "default": [{"upstream": "local_default", "model": "model"}],
+            "recovery": [{"upstream": "cloud_recovery", "model": "model"}],
+            "orphan": [{"upstream": "orphan", "model": "model"}]
+        });
+        draft["router"]["default_pool"] = json!("default");
+        draft["router"]["rules"] = json!([]);
+        draft["router"]["hint_routes"] = json!([]);
+        draft["router"]["heuristic"] = json!(null);
+        draft["router"]["recovery"] = json!({
+            "policy": "ordered",
+            "pools": ["recovery"]
+        });
+        draft["router"]["local_only"] = json!(true);
+        draft["router"]["allow_cloud_fallback"] = json!(false);
+
+        let local_config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+        let local = agent_model_metadata(&local_config, "claude-code")
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.context, 200_000);
+        assert_eq!(local.max_input, 184_000);
+
+        draft["router"]["local_only"] = json!(false);
+        let cloud_config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+        let cloud = agent_model_metadata(&cloud_config, "claude-code")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cloud.context, 128_000,
+            "the referenced recovery pool is reachable"
+        );
+        assert_eq!(cloud.max_input, 112_000);
+    }
+
+    #[test]
+    fn empty_quota_route_has_no_model_contract() {
+        let root = scratch("empty-quota-model-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("quota_first");
+        draft["upstreams"]["configured_but_unreachable"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "models": [{
+                "model": "model",
+                "context_window": 200_000,
+                "max_output_tokens": 16_000
+            }]
+        });
+        draft["router"]["routing_mode"] = json!("quota_first");
+        draft["router"]["quota_accounts"] = json!([]);
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        assert_eq!(agent_model_metadata(&config, "claude-code").unwrap(), None);
+        let issue = opencode_connection_issue(&config, &config.router)
+            .expect("an empty quota route cannot support an auto model");
+        assert_eq!(issue.code, "model_contract_no_reachable_model");
+    }
+
+    #[test]
+    fn full_proxy_transition_projects_the_minimum_old_and_pending_budget() {
+        let root = scratch("full-proxy-transition-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
+        draft["upstreams"]["pending"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://pending.example/v1",
+            "models": [{
+                "model": "model",
+                "context_window": 128_000,
+                "max_output_tokens": 32_000
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "default": [{"upstream": "pending", "model": "model"}]
+        });
+        draft["router"]["default_pool"] = json!("default");
+        draft["router"]["rules"] = json!([]);
+        draft["router"]["hint_routes"] = json!([]);
+        draft["router"]["heuristic"] = json!(null);
+        draft["router"]["recovery"] = json!({"policy": "strict"});
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let transition = transition_runtime_for_config(&runtime("secret"), &config).unwrap();
+        let claude = transition.model_metadata("claude-code").unwrap();
+        assert_eq!(claude.context, 128_000);
+        assert_eq!(claude.output, 32_000);
+        assert_eq!(claude.max_input, 96_000);
     }
 
     #[test]

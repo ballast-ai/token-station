@@ -4061,7 +4061,9 @@ fn enterprise_route_apply_replaces_a_waiting_gateway() {
     let applied = wait_for_serve_phase(&app, ServePhase::Running);
     assert_ne!(
         applied.serve.instance_id.as_deref(),
-        Some(waiting_instance.as_str())
+        Some(waiting_instance.as_str()),
+        "replacement failed: {:?}",
+        applied.serve.error
     );
     assert_eq!(applied.serve.running_revision, Some(applied.saved_revision));
     assert!(applied.serve.listener_reachable);
@@ -4544,7 +4546,11 @@ fn save_and_apply_hands_new_requests_to_the_new_revision() {
     assert_eq!(applying.serve.running_revision, Some(revision_a));
     let second =
         wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
-    assert!(second.serve.running_revision.unwrap() > revision_a);
+    assert!(
+        second.serve.running_revision.unwrap() > revision_a,
+        "replacement failed: {:?}",
+        second.serve.error
+    );
     assert_eq!(second.serve.running_revision, Some(second.saved_revision));
     assert_ne!(
         second.serve.instance_id.as_deref(),

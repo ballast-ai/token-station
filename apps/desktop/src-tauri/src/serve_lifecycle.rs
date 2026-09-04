@@ -362,6 +362,10 @@ impl PreparedServer {
         &self.listen
     }
 
+    pub(crate) fn serving_config(&self) -> &ClientConfig {
+        &self.serving_config
+    }
+
     /// Reserves the configured listener. This can retry for up to one second,
     /// so callers must execute it without holding the global App state lock.
     pub(crate) fn bind(self) -> Result<BoundPreparedServer, StartFailure> {
