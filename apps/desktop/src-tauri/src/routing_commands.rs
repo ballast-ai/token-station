@@ -1,5 +1,6 @@
-use crate::agent_integration::commands::{model_metadata_for_config, runtime_from_app};
-use crate::agent_integration::connectors::AgentModelMetadata;
+use crate::agent_integration::commands::{
+    model_metadata_for_config, runtime_from_app, transition_model_metadata,
+};
 use crate::*;
 
 /// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
@@ -37,26 +38,6 @@ pub(crate) const TIER_ORDER: [(&str, &str, &str); 3] = [
 /// at_least, with a final zero fallback. Evaluation will calibrate these defaults later.
 pub(crate) const CUT_HIGH: u32 = 55;
 pub(crate) const CUT_MID: u32 = 22;
-
-fn transition_model_metadata(
-    current: &AgentModelMetadata,
-    next: &AgentModelMetadata,
-) -> AgentModelMetadata {
-    AgentModelMetadata {
-        context: current.context.min(next.context),
-        output: current.output.min(next.output),
-        max_input: current
-            .safe_max_input()
-            .zip(next.safe_max_input())
-            .map_or(0, |(current, next)| current.min(next)),
-        vision: current.vision && next.vision,
-        tools: current.tools && next.tools,
-        reasoning: current.reasoning && next.reasoning,
-        cost: (current.cost == next.cost)
-            .then(|| current.cost.clone())
-            .flatten(),
-    }
-}
 
 pub(crate) fn pool_key(slot: &str) -> Result<&'static str, String> {
     match slot {
@@ -714,6 +695,7 @@ pub(crate) fn apply_home_route_to_all_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_integration::connectors::AgentModelMetadata;
 
     fn metadata(context: u32, output: u32, max_input: u32) -> AgentModelMetadata {
         AgentModelMetadata {
