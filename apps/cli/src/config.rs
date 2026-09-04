@@ -37,6 +37,9 @@ pub const HARNESS_LOGICAL_MODEL_IDS: [&str; 4] = ["auto", "fast", "balanced", "p
 /// Claude Code's stable first-party Fable request model.
 pub const CLAUDE_CODE_FABLE_MODEL_ID: &str = "claude-fable-5-1";
 
+/// Public Claude Code picker ID for Token Station's dynamic Agent route.
+pub const CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID: &str = "token-station-auto";
+
 /// The host-level routing philosophies exposed by Token Station. Direct is
 /// compiled into an ordinary one-member router-core tier so the protected core
 /// contract remains two-state and independently reusable.

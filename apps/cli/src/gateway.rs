@@ -69,8 +69,8 @@ use crate::south_component::ProviderAdapter;
 use crate::sse::SseFrameDecoder;
 
 use crate::config::{
-    ApiDialect, AuthConfig, CLAUDE_CODE_FABLE_MODEL_ID, ClientConfig, EgressConfig,
-    HARNESS_LOGICAL_MODEL_IDS, HarnessRouterConfig,
+    ApiDialect, AuthConfig, CLAUDE_CODE_FABLE_MODEL_ID, CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID,
+    ClientConfig, EgressConfig, HARNESS_LOGICAL_MODEL_IDS, HarnessRouterConfig,
     ProviderCallEngine as ConfiguredProviderCallEngine,
 };
 use crate::secrets::SecretStore;
@@ -197,6 +197,10 @@ fn requested_model_from_body(body: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn is_claude_token_station_auto(agent_id: &str, requested_model: Option<&str>) -> bool {
+    agent_id == "claude-code" && requested_model == Some(CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID)
+}
+
 /// Converts Claude Code's own model vocabulary into Token Station's stable
 /// Harness route keys. The Agent keeps its built-in labels and model IDs.
 fn harness_route_model(agent_id: &str, requested_model: &str) -> Option<&'static str> {
@@ -218,6 +222,7 @@ fn harness_route_model(agent_id: &str, requested_model: &str) -> Option<&'static
         .or_else(|| requested_model.strip_suffix("[2m]"))
         .unwrap_or(requested_model);
     match model {
+        CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID => Some("auto"),
         "fast" | "haiku" => Some("fast"),
         "balanced" | "sonnet" => Some("balanced"),
         "power" | "opus" => Some("power"),
@@ -3175,9 +3180,13 @@ impl Gateway {
                     .cloned()
                     .unwrap_or_default();
                 let requested_model = requested_model_from_body(body);
-                routers
-                    .harness
-                    .and_then(|harness| {
+                let token_station_auto =
+                    is_claude_token_station_auto(agent_id, requested_model.as_deref());
+                let harness_router = if token_station_auto {
+                    routing_model = Some("auto");
+                    None
+                } else {
+                    routers.harness.and_then(|harness| {
                         let mapped = requested_model
                             .as_deref()
                             .and_then(|model| harness_route_model(agent_id, model))?;
@@ -3190,6 +3199,8 @@ impl Gateway {
                                 harness.router
                             })
                     })
+                };
+                harness_router
                     .or(routers.fallback)
                     .or_else(|| self.home_router.clone())
             }
@@ -4373,6 +4384,32 @@ mod requested_model_privacy_tests {
             canonical_requested_model("mystery-model-a", false),
             canonical_requested_model("mystery-model-b", false),
         );
+    }
+}
+
+#[cfg(test)]
+mod claude_token_station_model_tests {
+    use super::{harness_route_model, is_claude_token_station_auto};
+    use crate::config::CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID;
+
+    #[test]
+    fn namespaced_picker_model_maps_to_the_dynamic_route_sentinel() {
+        assert_eq!(
+            harness_route_model("claude-code", CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID),
+            Some("auto")
+        );
+    }
+
+    #[test]
+    fn namespaced_picker_model_is_not_special_for_other_agents() {
+        assert!(!is_claude_token_station_auto(
+            "opencode",
+            Some(CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID)
+        ));
+        assert!(is_claude_token_station_auto(
+            "claude-code",
+            Some(CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID)
+        ));
     }
 }
 

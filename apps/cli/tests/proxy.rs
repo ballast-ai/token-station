@@ -1666,6 +1666,20 @@ fn post_scoped(
     (status, body)
 }
 
+fn post_claude_model(proxy: &Proxy, model: &str) -> (u16, String) {
+    post_scoped(
+        proxy,
+        "/agents/claude-code/v1/messages",
+        &json!({
+            "model": model,
+            "max_tokens": 16,
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+        &proxy.virtual_key,
+        true,
+    )
+}
+
 fn sse_events(body: &str) -> Vec<Value> {
     body.split("\n\n")
         .filter_map(|frame| {
@@ -2842,9 +2856,18 @@ fn claude_code_native_model_names_select_logical_harness_routes() {
             "claude-fable-5-1".to_owned(),
         ],
     };
+    let exact_fallback = serde_json::from_value(json!({
+        "version": 1,
+        "honor_exact_model": true,
+        "pools": {
+            "default": [{ "upstream": "home_upstream", "model": "home-model" }]
+        },
+        "default_pool": "default"
+    }))
+    .expect("exact-model fallback parses");
     proxy
         .gateway
-        .reload_agent_router("claude-code", None, Some(harness))
+        .reload_agent_router("claude-code", Some(exact_fallback), Some(harness))
         .expect("Claude Harness router reloads");
 
     for model in [
@@ -2857,33 +2880,11 @@ fn claude_code_native_model_names_select_logical_harness_routes() {
         "fable",
         "claude-fable-5",
     ] {
-        let request = json!({
-            "model": model,
-            "max_tokens": 16,
-            "messages": [{ "role": "user", "content": "hi" }]
-        });
-        let (status, body) = post_scoped(
-            &proxy,
-            "/agents/claude-code/v1/messages",
-            &request,
-            &proxy.virtual_key,
-            true,
-        );
+        let (status, body) = post_claude_model(&proxy, model);
         assert_eq!(status, 200, "{model}: {body}");
     }
 
-    let token_station_auto = json!({
-        "model": "auto",
-        "max_tokens": 16,
-        "messages": [{ "role": "user", "content": "hi" }]
-    });
-    let (status, body) = post_scoped(
-        &proxy,
-        "/agents/claude-code/v1/messages",
-        &token_station_auto,
-        &proxy.virtual_key,
-        true,
-    );
+    let (status, body) = post_claude_model(&proxy, "token-station-auto");
     assert_eq!(status, 200, "{body}");
     assert_eq!(
         mapped.hits(),
@@ -2893,7 +2894,7 @@ fn claude_code_native_model_names_select_logical_harness_routes() {
     assert_eq!(
         home.hits(),
         1,
-        "Token Station Auto uses the normal Agent route"
+        "Token Station Auto becomes the dynamic sentinel even under exact-model mode"
     );
 
     std::fs::remove_file(key).ok();
