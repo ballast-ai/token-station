@@ -23,7 +23,8 @@ interface HomePageProps {
   routingMode: RoutingMode;
   directTarget?: DirectRouteTarget | null;
   onSetRoutingMode: (mode: RoutingMode) => void;
-  onApplyDirect: (upstream: string, model: string) => void;
+  onApplyDirect: (upstream: string, model: string) => boolean | void | Promise<boolean | void>;
+  onDirectDraftChange?: (hasUnappliedTarget: boolean) => void;
   quotaAccounts: QuotaAccount[];
   onSaveQuota: (accounts: QuotaAccount[]) => void;
   onSaveQuotaPlan: (
@@ -56,6 +57,7 @@ export default function HomePage({
   directTarget,
   onSetRoutingMode,
   onApplyDirect,
+  onDirectDraftChange,
   quotaAccounts,
   onSaveQuota,
   onSaveQuotaPlan,
@@ -124,6 +126,7 @@ export default function HomePage({
           busy={busy}
           applying={applying}
           onApply={onApplyDirect}
+          onDraftChange={onDirectDraftChange}
         />
       ) : routingMode === "quota_first" ? (
         <QuotaPriorityPanel

@@ -259,12 +259,16 @@ impl RunningServer {
         &self,
         agent_id: &str,
         router: Option<token_station_router_core::RouterConfig>,
+        harness: Option<token_station_cli::config::HarnessRouterConfig>,
     ) -> Result<PreparedAgentRouterReload, String> {
         if let Some(router) = router.as_ref() {
             self.validate_agent_router_targets(router)?;
         }
+        if let Some(harness) = harness.as_ref() {
+            self.validate_agent_router_targets(&harness.router)?;
+        }
         let applied_router = router.clone();
-        let gateway_plan = Gateway::prepare_agent_router_reload(agent_id, router)?;
+        let gateway_plan = Gateway::prepare_agent_router_reload(agent_id, router, harness)?;
         Ok(PreparedAgentRouterReload {
             agent_id: agent_id.to_owned(),
             router: applied_router,
@@ -356,6 +360,10 @@ impl RunningServer {
 impl PreparedServer {
     pub(crate) fn listen(&self) -> &str {
         &self.listen
+    }
+
+    pub(crate) fn serving_config(&self) -> &ClientConfig {
+        &self.serving_config
     }
 
     /// Reserves the configured listener. This can retry for up to one second,
@@ -614,7 +622,7 @@ mod tests {
             .expect("the draft compiles a per-Agent router");
 
         let prepared = running
-            .prepare_agent_router_reload("opencode", Some(router.clone()))
+            .prepare_agent_router_reload("opencode", Some(router.clone()), None)
             .unwrap();
         running.install_prevalidated_agent_router(prepared);
 

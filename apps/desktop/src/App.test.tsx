@@ -1779,6 +1779,79 @@ describe("desktop station navigation", () => {
     expect(within(modeTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("warns before leaving a changed Direct route and lets the user keep or discard it", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture({
+      providers: [{
+        name: "deepseek",
+        brand_id: "deepseek",
+        provider: "openai-compatible",
+        base_url: "https://api.deepseek.com/v1",
+        models: ["deepseek-chat", "deepseek-reasoner"],
+        has_auth: true,
+      }],
+      routing_mode: "direct",
+      direct_target: { upstream: "deepseek", model: "deepseek-chat" },
+    });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "get_runtime_state") return initial.serve;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openRouting(user);
+    await user.click(screen.getByRole("combobox", { name: "deepseek 模型" }));
+    await user.click(screen.getByRole("option", { name: "deepseek-reasoner" }));
+    await user.click(navigation().getByRole("button", { name: "用量" }));
+
+    const warning = await screen.findByRole("alertdialog", { name: "所选模型尚未应用" });
+    expect(warning).toHaveTextContent("你选择的模型尚未应用");
+
+    await user.click(within(warning).getByRole("button", { name: "继续编辑" }));
+    expect(screen.queryByRole("alertdialog", { name: "所选模型尚未应用" })).toBeNull();
+    expect(screen.getByRole("combobox", { name: "deepseek 模型" })).toHaveTextContent("deepseek-reasoner");
+
+    await user.click(navigation().getByRole("button", { name: "用量" }));
+    await user.click(within(await screen.findByRole("alertdialog", { name: "所选模型尚未应用" }))
+      .getByRole("button", { name: "不应用并离开" }));
+
+    expect(navigation().getByRole("button", { name: "用量" })).toHaveAttribute("aria-current", "page");
+    expect(invokeMock).not.toHaveBeenCalledWith("set_direct_route", expect.anything());
+  });
+
+  it("leaves an unchanged Direct route without showing a warning", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture({
+      providers: [{
+        name: "deepseek",
+        brand_id: "deepseek",
+        provider: "openai-compatible",
+        base_url: "https://api.deepseek.com/v1",
+        models: ["deepseek-chat"],
+        has_auth: true,
+      }],
+      routing_mode: "direct",
+      direct_target: { upstream: "deepseek", model: "deepseek-chat" },
+    });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "get_runtime_state") return initial.serve;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openRouting(user);
+    await user.click(navigation().getByRole("button", { name: "用量" }));
+
+    expect(navigation().getByRole("button", { name: "用量" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("alertdialog", { name: "所选模型尚未应用" })).toBeNull();
+  });
+
   it("merges keyword routing into the three smart-routing rows", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -2016,7 +2089,7 @@ describe("desktop station navigation", () => {
         running_revision: 2,
         error: "已保存尚未应用：gateway_init: fixture failure",
       }),
-      "已保存尚未应用：gateway_init: fixture failure",
+      "本地代理无法安全重启。请退出并重新打开 Token Station，然后重试。",
     ],
   ])("does not report configuration applied when starting returns to %s", async (_case, terminal, expectedError) => {
     const user = userEvent.setup();
@@ -2059,7 +2132,7 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText(/配置已应用/)).toBeNull();
     if (expectedError) {
       expect(await within(screen.getByTestId("error-toast-viewport")).findByText(
-        "操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。",
+        expectedError,
       )).toBeInTheDocument();
     }
   });
@@ -2238,7 +2311,7 @@ describe("desktop station navigation", () => {
 
     const alerts = within(screen.getByTestId("error-toast-viewport")).getAllByRole("alert");
     expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toHaveTextContent("操作未能完成");
+    expect(alerts[0]).toHaveTextContent("操作失败：runtime poll failed");
   });
 
   it("运行时从未就绪转为就绪时只刷新缓存且不重复扫描", async () => {
@@ -2410,7 +2483,7 @@ describe("desktop station navigation", () => {
 
     await user.click(screen.getByRole("button", { name: "重新扫描" }));
     expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
-      .toHaveTextContent("操作未能完成");
+      .toHaveTextContent("操作失败：manual rescan failed");
     expect(screen.getByRole("button", { name: "Gemini CLI" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新扫描" })).toBeEnabled();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(3);

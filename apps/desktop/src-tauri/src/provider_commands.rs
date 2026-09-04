@@ -706,6 +706,9 @@ pub(crate) fn known_context_window(model: &str) -> u64 {
     if name.contains("claude") {
         return 200_000;
     }
+    if name == "glm-5.2" {
+        return 1_000_000;
+    }
     128_000
 }
 
@@ -724,6 +727,19 @@ pub(crate) struct BuiltinModelLimits {
 
 pub(crate) fn builtin_model_limits(base_url: &str, model: &str) -> Option<BuiltinModelLimits> {
     let endpoint = base_url.trim().trim_end_matches('/');
+    if model == "glm-5.2"
+        && matches!(
+            endpoint,
+            "https://open.bigmodel.cn/api/paas/v4"
+                | "https://api.z.ai/api/paas/v4"
+                | "https://open.wecoding.ai/v1"
+        )
+    {
+        return Some(BuiltinModelLimits {
+            context_window: 1_000_000,
+            max_output_tokens: 131_072,
+        });
+    }
     if !matches!(
         endpoint,
         "https://api.moonshot.cn/v1" | "https://api.moonshot.ai/v1"
@@ -771,6 +787,112 @@ pub(crate) fn source_is_default(source: Option<&str>) -> bool {
     )
 }
 
+/// Merge Provider-reported capacity facts without treating built-in presets or
+/// name-based heuristics as Provider truth. An output-only report may invalidate
+/// a default context; preserve the reported output and leave context unknown so
+/// Agent projections can use their own compatibility budget.
+pub(crate) fn apply_provider_reported_limits(
+    capability: &mut Value,
+    reported_context: Option<u32>,
+    reported_output: Option<u32>,
+) -> bool {
+    let mut changed = false;
+    if let Some(context) = reported_context {
+        let source = json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY);
+        if (capability["context_window"].as_u64().unwrap_or_default() == 0
+            || source_is_default(source)
+            || source == Some(LIMIT_SOURCE_PROVIDER))
+            && (capability["context_window"].as_u64() != Some(u64::from(context))
+                || source != Some(LIMIT_SOURCE_PROVIDER))
+        {
+            let configured_output = capability["max_output_tokens"].as_u64().unwrap_or_default();
+            let output_source = json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY);
+            let stale_output = configured_output >= u64::from(context)
+                && configured_output > 0
+                && (source_is_default(output_source)
+                    || output_source == Some(LIMIT_SOURCE_PROVIDER));
+            let protected_conflict =
+                configured_output >= u64::from(context) && configured_output > 0 && !stale_output;
+            if !protected_conflict {
+                if stale_output {
+                    capability
+                        .as_object_mut()
+                        .expect("model capability is an object")
+                        .remove("max_output_tokens");
+                    capability
+                        .as_object_mut()
+                        .expect("model capability is an object")
+                        .remove(MAX_OUTPUT_TOKENS_SOURCE_KEY);
+                }
+                capability["context_window"] = json!(context);
+                capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+                changed = true;
+            }
+        }
+    }
+
+    let effective_context = capability["context_window"].as_u64().unwrap_or_default();
+    let configured_output = capability["max_output_tokens"].as_u64().unwrap_or_default();
+    if effective_context > 0
+        && configured_output >= effective_context
+        && configured_output > 0
+        && source_is_default(json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY))
+    {
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove("max_output_tokens");
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove(MAX_OUTPUT_TOKENS_SOURCE_KEY);
+        changed = true;
+    }
+
+    let Some(output) = reported_output else {
+        return changed;
+    };
+    let output_source =
+        json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY).map(str::to_owned);
+    if capability["max_output_tokens"].as_u64().unwrap_or_default() > 0
+        && !source_is_default(output_source.as_deref())
+        && output_source.as_deref() != Some(LIMIT_SOURCE_PROVIDER)
+    {
+        return changed;
+    }
+
+    let mut effective_context = capability["context_window"].as_u64().unwrap_or_default();
+    if reported_context.is_none()
+        && effective_context > 0
+        && u64::from(output) >= effective_context
+        && matches!(
+            json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY),
+            Some(LIMIT_SOURCE_BUILTIN_PRESET | LIMIT_SOURCE_HEURISTIC | LIMIT_SOURCE_PROVIDER)
+        )
+    {
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove("context_window");
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove(CONTEXT_WINDOW_SOURCE_KEY);
+        effective_context = 0;
+        changed = true;
+    }
+
+    if (effective_context == 0 || u64::from(output) < effective_context)
+        && (capability["max_output_tokens"].as_u64() != Some(u64::from(output))
+            || output_source.as_deref() != Some(LIMIT_SOURCE_PROVIDER))
+    {
+        capability["max_output_tokens"] = json!(output);
+        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+        changed = true;
+    }
+    changed
+}
+
 pub(crate) fn apply_builtin_model_limits_to_upstream(upstream: &mut Value) -> bool {
     let base_url = upstream["base_url"].as_str().unwrap_or_default().to_owned();
     let Some(models) = upstream["models"].as_array_mut() else {
@@ -796,8 +918,12 @@ pub(crate) fn apply_builtin_model_limits_to_upstream(upstream: &mut Value) -> bo
             && context_source
                 .as_deref()
                 .is_none_or(|source| source == LIMIT_SOURCE_HEURISTIC);
+        let provider_output_blocks_context = output_source.as_deref()
+            == Some(LIMIT_SOURCE_PROVIDER)
+            && output >= u64::from(preset.context_window);
 
         if (context == 0 || legacy_heuristic || source_is_default(context_source.as_deref()))
+            && !provider_output_blocks_context
             && (context != u64::from(preset.context_window)
                 || context_source.as_deref() != Some(LIMIT_SOURCE_BUILTIN_PRESET))
         {
@@ -859,6 +985,7 @@ pub(crate) fn add_provider(
         None,
         "openai-compatible",
         false,
+        None,
     )
 }
 
@@ -874,6 +1001,7 @@ pub(crate) fn add_provider_with_credential(
     credential_source: String,
     credential_reference: Option<String>,
     provider_dialect: Option<String>,
+    catalog_revision: Option<u64>,
 ) -> Result<StateView, String> {
     let provider_dialect = provider_dialect.as_deref().unwrap_or("openai-compatible");
     add_provider_impl(
@@ -887,6 +1015,7 @@ pub(crate) fn add_provider_with_credential(
         credential_reference.as_deref(),
         provider_dialect,
         false,
+        catalog_revision,
     )
 }
 
@@ -961,6 +1090,7 @@ pub(crate) fn add_managed_enterprise_route(
             None,
             "openai-compatible",
             true,
+            None,
         );
         if result.is_ok() {
             return result;
@@ -1137,6 +1267,7 @@ pub(crate) fn add_provider_impl(
     credential_reference: Option<&str>,
     provider_dialect: &str,
     managed_route: bool,
+    catalog_revision: Option<u64>,
 ) -> Result<StateView, String> {
     if !matches!(provider_dialect, "openai-compatible" | "azure-openai-v1") {
         return Err("Provider dialect 不受支持".to_owned());
@@ -1210,9 +1341,31 @@ pub(crate) fn add_provider_impl(
     };
     let models = normalize_provider_model_ids(models)?;
     let managed_model = managed_route.then(|| models[0].clone());
+    let discovered_limits = catalog_revision
+        .filter(|_| provider_dialect == "openai-compatible")
+        .and_then(|revision| {
+            model_catalog::live_catalog_at_revision(&data_dir, &name, &base_url, revision)
+        })
+        .unwrap_or_default();
+    let discovered_by_model: std::collections::BTreeMap<&str, &model_catalog::CatalogModelView> =
+        discovered_limits
+            .iter()
+            .filter(|model| model.catalog_state == model_catalog::CatalogState::Active)
+            .map(|model| (model.model.as_str(), model))
+            .collect();
     let model_objs: Vec<Value> = models
         .iter()
-        .map(|model| provider_model_capability(&base_url, model, managed_route))
+        .map(|model| {
+            let mut capability = provider_model_capability(&base_url, model, managed_route);
+            if let Some(discovered) = discovered_by_model.get(model.as_str()) {
+                apply_provider_reported_limits(
+                    &mut capability,
+                    discovered.context_window,
+                    discovered.max_output_tokens,
+                );
+            }
+            capability
+        })
         .collect();
     // A previous interrupted removal may have left only derived catalog data.
     // New Provider identity must never inherit it, even with the same name/URL.
@@ -1597,6 +1750,39 @@ pub(crate) fn replace_provider_models(
         ));
     }
 
+    let mut harness_blocked = Vec::new();
+    if let Some(agent_routes) = inner.draft["agent_routes"].as_object() {
+        for (agent_id, route) in agent_routes {
+            if let Some(mappings) = route["harness_model_routes"].as_object() {
+                for (requested_model, target) in mappings {
+                    if removed_reference(target) {
+                        harness_blocked.push(format!("{agent_id}/{requested_model}"));
+                    }
+                }
+            }
+        }
+    }
+    for (agent_id, mappings) in &inner.agent_harness_route_drafts {
+        for (requested_model, target) in mappings {
+            let refers_to_provider = target.upstream.as_deref() == Some(name);
+            let retained = target
+                .model
+                .as_deref()
+                .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+            if refers_to_provider && !retained {
+                harness_blocked.push(format!("{agent_id}/{requested_model}"));
+            }
+        }
+    }
+    harness_blocked.sort();
+    harness_blocked.dedup();
+    if !harness_blocked.is_empty() {
+        return Err(format!(
+            "不能移除 Harness 映射 {} 正在使用的模型，请先调整对应映射",
+            harness_blocked.join("、")
+        ));
+    }
+
     // Strategy groups (profiles) pin a provider+model per tier; a model still used
     // by one must not be silently removed, or the profile is left dangling.
     let mut profile_blocked = Vec::new();
@@ -1795,11 +1981,8 @@ pub(crate) fn replace_provider_model_limits(
     if name.is_empty() || model.is_empty() {
         return Err("供应商和模型 ID 不能为空".to_owned());
     }
-    if context_window == 0 || max_output_tokens == 0 {
-        return Err("上下文上限和最大输出 Token 必须大于 0".to_owned());
-    }
-    if max_output_tokens > context_window {
-        return Err("最大输出 Token 不能大于上下文上限".to_owned());
+    if context_window == 0 {
+        return Err("上下文上限必须大于 0".to_owned());
     }
     ensure_generic_provider_mutation_allowed(inner, name)?;
 
@@ -1817,10 +2000,23 @@ pub(crate) fn replace_provider_model_limits(
         .iter_mut()
         .find(|candidate| candidate["model"].as_str() == Some(model))
         .ok_or_else(|| format!("供应商 `{name}` 未配置模型 `{model}`"))?;
+    let effective_max_output_tokens = if max_output_tokens > 0 {
+        max_output_tokens
+    } else {
+        capability["max_output_tokens"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or_default()
+    };
+    if effective_max_output_tokens > context_window {
+        return Err("最大输出 Token 不能大于上下文上限".to_owned());
+    }
     capability["context_window"] = json!(context_window);
-    capability["max_output_tokens"] = json!(max_output_tokens);
     capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
-    capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
+    if max_output_tokens > 0 {
+        capability["max_output_tokens"] = json!(max_output_tokens);
+        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
+    }
 
     let save = inner.observe_draft().and_then(|()| inner.save_draft());
     if let Err(error) = save {
@@ -1864,6 +2060,13 @@ pub(crate) fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
             if route["direct_target"]["upstream"].as_str() == Some(name) {
                 references.push(format!("Agent/{agent_id}/单独路由"));
             }
+            if let Some(mappings) = route["harness_model_routes"].as_object() {
+                for (requested_model, target) in mappings {
+                    if target["upstream"].as_str() == Some(name) {
+                        references.push(format!("Agent/{agent_id}/Harness/{requested_model}"));
+                    }
+                }
+            }
         }
     }
     for (pool, label) in [
@@ -1895,6 +2098,13 @@ pub(crate) fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
         for (slot, target) in tiers {
             if target.upstream.as_deref() == Some(name) {
                 references.push(format!("Agent/{agent_id}/{slot}"));
+            }
+        }
+    }
+    for (agent_id, mappings) in &inner.agent_harness_route_drafts {
+        for (requested_model, target) in mappings {
+            if target.upstream.as_deref() == Some(name) {
+                references.push(format!("Agent/{agent_id}/Harness/{requested_model}"));
             }
         }
     }

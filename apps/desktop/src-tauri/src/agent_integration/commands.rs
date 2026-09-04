@@ -23,17 +23,18 @@ use super::config_codec::{
     render_document, DocumentFormat,
 };
 use super::connectors::{
-    builtin_connectors, find_connector, validate_patch_ownership, AgentModelCost,
-    AgentModelMetadata, ConnectInput, Connector,
+    builtin_connectors, find_connector, owned_paths_with_legacy, validate_patch_ownership,
+    AgentModelCost, AgentModelMetadata, ConnectInput, Connector,
 };
 use super::discovery::DiscoveryScanner;
 use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
-    build_disconnect_plan, build_metadata_refresh_plan, build_snapshot_restore_plan,
-    companion_document_format, generate_operation_id, read_config_source, ConfigSource,
-    PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED, OWNED_VALUES_CHANGED,
+    build_disconnect_plan, build_metadata_refresh_plan, build_metadata_refresh_plan_with_baseline,
+    build_snapshot_restore_plan, companion_document_format, generate_operation_id,
+    read_config_source, ConfigSource, PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED,
+    OWNED_VALUES_CHANGED,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
@@ -265,6 +266,12 @@ struct ScanSnapshot {
     records: Vec<DiscoveryRecord>,
 }
 
+fn exact_installation_selection(record: &DiscoveryRecord) -> DiscoveryRecord {
+    let mut selected = record.clone();
+    selected.conflict_group = None;
+    selected
+}
+
 impl ScanSnapshot {
     fn selected(
         &self,
@@ -293,10 +300,10 @@ impl ScanSnapshot {
                 "安装实例不属于最近一次服务端扫描，请重新扫描",
             ));
         }
-        let mut selected = matches.into_iter().next().expect("length checked");
+        let selected = matches.into_iter().next().expect("length checked");
         // Every row in a multi-install scan carries the conflict group. Exact
         // lookup above is the only trusted transition to a selected instance.
-        selected.conflict_group = None;
+        let selected = exact_installation_selection(&selected);
         let decision = evaluate_discovery(&self.catalog, descriptor, &selected);
         Ok((selected, decision))
     }
@@ -344,6 +351,7 @@ struct CommandSession {
     plans: HashMap<String, StoredPlan>,
 }
 
+#[derive(Clone)]
 pub struct AgentProxyRuntime {
     instance_id: String,
     connector_base_urls: BTreeMap<String, String>,
@@ -465,6 +473,35 @@ impl AgentProxyRuntime {
     fn connection_issue(&self, connector_id: &str) -> Option<&AgentConnectionIssueView> {
         self.connection_issues.get(connector_id)
     }
+
+    pub(crate) fn model_metadata(&self, agent_id: &str) -> Option<&AgentModelMetadata> {
+        self.model_metadata.get(agent_id)
+    }
+
+    pub(crate) fn replace_model_metadata(
+        &mut self,
+        agent_id: &str,
+        metadata: Option<AgentModelMetadata>,
+    ) {
+        if let Some(metadata) = metadata {
+            self.model_metadata.insert(agent_id.to_string(), metadata);
+        } else {
+            self.model_metadata.remove(agent_id);
+        }
+    }
+
+    fn replace_connection_issue(
+        &mut self,
+        connector_id: &str,
+        issue: Option<AgentConnectionIssueView>,
+    ) {
+        if let Some(issue) = issue {
+            self.connection_issues
+                .insert(connector_id.to_string(), issue);
+        } else {
+            self.connection_issues.remove(connector_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -486,35 +523,103 @@ fn configured_router_for_agent(
     }
 }
 
+fn reachable_model_targets(
+    config: &token_station_cli::config::ClientConfig,
+    router: &token_station_router_core::RouterConfig,
+) -> BTreeSet<token_station_router_core::UpstreamModel> {
+    use token_station_router_core::{RecoveryPolicy, RoutingMode};
+
+    let mut targets = BTreeSet::new();
+    if router.routing_mode == RoutingMode::QuotaFirst {
+        targets.extend(router.quota_accounts.iter().cloned());
+    } else {
+        let mut reachable_pools = BTreeSet::from([router.default_pool.clone()]);
+        reachable_pools.extend(router.rules.iter().map(|rule| rule.route_to.clone()));
+        reachable_pools.extend(
+            router
+                .hint_routes
+                .iter()
+                .map(|route| route.route_to.clone()),
+        );
+        if let Some(heuristic) = &router.heuristic {
+            reachable_pools.insert(heuristic.above.clone());
+            reachable_pools.insert(heuristic.below.clone());
+            reachable_pools.extend(heuristic.bands.iter().map(|band| band.pool.clone()));
+        }
+        if let RecoveryPolicy::Ordered { pools } = &router.recovery {
+            reachable_pools.extend(pools.iter().cloned());
+        }
+        targets.extend(
+            reachable_pools
+                .into_iter()
+                .flat_map(|pool| router.pools.get(&pool).into_iter().flatten().cloned()),
+        );
+    }
+
+    if router.local_only && !router.allow_cloud_fallback {
+        targets.retain(|target| {
+            config
+                .upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| upstream.local)
+        });
+    }
+    targets
+}
+
+pub(crate) fn model_metadata_for_config(
+    config: &token_station_cli::config::ClientConfig,
+    agent_id: &str,
+) -> Result<Option<AgentModelMetadata>, String> {
+    let router = configured_router_for_agent(config, agent_id)?;
+    agent_model_metadata_for_router(config, &router)
+}
+
+pub(crate) fn transition_model_metadata(
+    current: &AgentModelMetadata,
+    next: &AgentModelMetadata,
+) -> AgentModelMetadata {
+    let (context, output, max_input) = match (current.connection_limits(), next.connection_limits())
+    {
+        (Some((current_context, current_output)), Some((next_context, next_output))) => (
+            current_context.min(next_context),
+            current_output.min(next_output),
+            current
+                .connection_max_input()
+                .zip(next.connection_max_input())
+                .map_or(0, |(current, next)| current.min(next)),
+        ),
+        (None, _) => (current.context, current.output, 0),
+        (_, None) => (next.context, next.output, 0),
+    };
+    AgentModelMetadata {
+        context,
+        output,
+        max_input,
+        uses_compatibility_limits: current.has_compatibility_limits()
+            || next.has_compatibility_limits(),
+        vision: current.vision && next.vision,
+        tools: current.tools && next.tools,
+        reasoning: current.reasoning && next.reasoning,
+        cost: (current.cost == next.cost)
+            .then(|| current.cost.clone())
+            .flatten(),
+    }
+}
+
 fn agent_model_metadata_for_router(
     config: &token_station_cli::config::ClientConfig,
     router: &token_station_router_core::RouterConfig,
 ) -> Result<Option<AgentModelMetadata>, String> {
-    use token_station_router_core::RoutingMode;
-
-    let mut candidates = BTreeSet::new();
-    if router.routing_mode == RoutingMode::QuotaFirst && !router.quota_accounts.is_empty() {
-        candidates.extend(router.quota_accounts.iter().cloned());
-    } else if router.routing_mode == RoutingMode::QuotaFirst {
-        for (upstream, entry) in &config.upstreams {
-            let reference = token_station_router_core::UpstreamRef::new(upstream.clone())
-                .map_err(|error| error.to_string())?;
-            candidates.extend(entry.models.iter().map(|capability| {
-                token_station_router_core::UpstreamModel::new(
-                    reference.clone(),
-                    capability.model.clone(),
-                )
-            }));
-        }
-    } else {
-        candidates.extend(router.pools.values().flatten().cloned());
-    }
+    let candidates = reachable_model_targets(config, router);
     if candidates.is_empty() {
         return Ok(None);
     }
 
-    let mut context = Some(u32::MAX);
-    let mut output = Some(u32::MAX);
+    let mut context = None;
+    let mut output = None;
+    let mut max_input = None;
+    let mut uses_compatibility_limits = false;
     let mut vision = true;
     let mut tools = true;
     let mut reasoning = true;
@@ -530,13 +635,46 @@ fn agent_model_metadata_for_router(
                     .find(|capability| capability.model == candidate.model)
             });
         let Some(capability) = capability else {
-            return Ok(None);
+            return Err(format!(
+                "Agent route references unknown model `{candidate}`"
+            ));
         };
-        let max_output = (capability.max_output_tokens > 0).then_some(capability.max_output_tokens);
-        context = context.and_then(|current| {
-            (capability.context_window > 0).then_some(current.min(capability.context_window))
-        });
-        output = output.and_then(|current| max_output.map(|value| current.min(value)));
+        if capability.context_window > 0
+            && capability.max_output_tokens > 0
+            && capability.max_output_tokens >= capability.context_window
+        {
+            return Err(format!(
+                "Agent route model `{candidate}` has max output {} that is not smaller than context {}",
+                capability.max_output_tokens, capability.context_window
+            ));
+        }
+        let candidate_metadata = AgentModelMetadata {
+            context: capability.context_window,
+            output: capability.max_output_tokens,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let (candidate_context, candidate_output) =
+            candidate_metadata.connection_limits().ok_or_else(|| {
+                format!("Agent route model `{candidate}` has invalid capacity limits")
+            })?;
+        uses_compatibility_limits |= candidate_metadata.has_compatibility_limits();
+        let candidate_max_input = candidate_metadata
+            .connection_max_input()
+            .expect("validated candidate limits always have an input budget");
+        context = Some(context.map_or(candidate_context, |current: u32| {
+            current.min(candidate_context)
+        }));
+        output = Some(output.map_or(candidate_output, |current: u32| {
+            current.min(candidate_output)
+        }));
+        max_input = Some(max_input.map_or(candidate_max_input, |current: u32| {
+            current.min(candidate_max_input)
+        }));
         vision &= capability.vision_state().is_supported();
         tools &= capability.tool_state().is_supported();
         reasoning &= capability.supported_parameters.contains("reasoning_effort");
@@ -567,9 +705,12 @@ fn agent_model_metadata_for_router(
     });
     let context = context.unwrap_or(0);
     let output = output.unwrap_or(0);
+    let max_input = max_input.unwrap_or(0);
     Ok(Some(AgentModelMetadata {
         context,
         output,
+        max_input,
+        uses_compatibility_limits,
         vision,
         tools,
         reasoning,
@@ -601,59 +742,7 @@ fn opencode_connection_issue(
         ));
     }
 
-    let mut targets = if router.routing_mode == token_station_router_core::RoutingMode::QuotaFirst
-        && !router.quota_accounts.is_empty()
-    {
-        router.quota_accounts.clone()
-    } else if router.routing_mode == token_station_router_core::RoutingMode::QuotaFirst {
-        config
-            .upstreams
-            .iter()
-            .flat_map(|(upstream, entry)| {
-                entry.models.iter().filter_map(move |capability| {
-                    token_station_router_core::UpstreamRef::new(upstream.clone())
-                        .ok()
-                        .map(|upstream| {
-                            token_station_router_core::UpstreamModel::new(
-                                upstream,
-                                capability.model.clone(),
-                            )
-                        })
-                })
-            })
-            .collect()
-    } else {
-        let mut reachable_pools = BTreeSet::from([router.default_pool.clone()]);
-        reachable_pools.extend(router.rules.iter().map(|rule| rule.route_to.clone()));
-        reachable_pools.extend(
-            router
-                .hint_routes
-                .iter()
-                .map(|route| route.route_to.clone()),
-        );
-        if let Some(heuristic) = &router.heuristic {
-            reachable_pools.insert(heuristic.above.clone());
-            reachable_pools.insert(heuristic.below.clone());
-            reachable_pools.extend(heuristic.bands.iter().map(|band| band.pool.clone()));
-        }
-        if let token_station_router_core::RecoveryPolicy::Ordered { pools } = &router.recovery {
-            reachable_pools.extend(pools.iter().cloned());
-        }
-        reachable_pools
-            .into_iter()
-            .flat_map(|pool| router.pools.get(&pool).into_iter().flatten().cloned())
-            .collect()
-    };
-    if router.local_only && !router.allow_cloud_fallback {
-        targets.retain(|target| {
-            config
-                .upstreams
-                .get(target.upstream.as_str())
-                .is_some_and(|upstream| upstream.local)
-        });
-    }
-    targets.sort();
-    targets.dedup();
+    let targets = reachable_model_targets(config, router);
     if targets.is_empty() {
         return Some(connection_issue(
             "model_contract_no_reachable_model",
@@ -681,25 +770,15 @@ fn opencode_connection_issue(
                 Some(target.to_string()),
             ));
         };
-        if capability.context_window == 0 {
-            return Some(connection_issue(
-                "model_contract_missing_context_window",
-                format!(
-                    "模型 `{target}` 缺少可信 context window；不会使用路由假定值代替供应商事实"
-                ),
-                Some(target.to_string()),
-            ));
-        }
-        let projected_output = if capability.max_output_tokens == 0 {
-            super::connectors::OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
-        } else {
-            capability.max_output_tokens
-        };
-        if projected_output >= capability.context_window {
+        if capability.context_window > 0
+            && capability.max_output_tokens > 0
+            && capability.max_output_tokens >= capability.context_window
+        {
             return Some(connection_issue(
                 "model_contract_invalid_limits",
                 format!(
-                    "模型 `{target}` 的 OpenCode 输出预算 {projected_output} 必须小于 context window"
+                    "模型 `{target}` 的 OpenCode 输出预算 {} 必须小于 context window",
+                    capability.max_output_tokens
                 ),
                 Some(target.to_string()),
             ));
@@ -836,6 +915,7 @@ fn prepare_force_strip_owned(
 fn prepare_connector_force_strip_owned(
     target: &Path,
     connector: &dyn Connector,
+    owned_paths: &[ConfigPath],
 ) -> Result<Option<PreparedForceStrip>, AgentCommandError> {
     let source = read_config_source(target).map_err(AgentCommandError::internal)?;
     if !source.existed {
@@ -850,8 +930,18 @@ fn prepare_connector_force_strip_owned(
     let removals = connector
         .disconnect_patch_for_document(&document)
         .map_err(AgentCommandError::internal)?;
-    validate_patch_ownership(&removals, &connector.owned_paths())
+    validate_patch_ownership(&removals, &owned_paths_with_legacy(connector))
         .map_err(AgentCommandError::internal)?;
+    let removals = removals
+        .into_iter()
+        .filter(|operation| {
+            owned_paths.iter().any(|owned| {
+                operation.path.segments.len() >= owned.segments.len()
+                    && operation.path.segments[..owned.segments.len()] == owned.segments
+            })
+        })
+        .collect::<Vec<_>>();
+    validate_patch_ownership(&removals, owned_paths).map_err(AgentCommandError::internal)?;
     prepare_force_strip_projection(
         target,
         source,
@@ -963,6 +1053,8 @@ fn validate_force_forget_reconnect(
     let metadata = AgentModelMetadata {
         context: 131_072,
         output: 8_192,
+        max_input: 0,
+        uses_compatibility_limits: false,
         vision: true,
         tools: true,
         reasoning: true,
@@ -1182,19 +1274,23 @@ impl AgentCommandState {
                 .iter()
                 .find(|descriptor| descriptor.agent_id == record.agent_id)
                 .ok_or_else(|| AgentCommandError::boundary("unknown_agent", "未知 Agent"))?;
-            let decision = evaluate_discovery(&snapshot.catalog, descriptor, record);
             let ownership = self
                 .ownership
                 .list_agent_installation(&record.agent_id, &record.canonical_path)
                 .map_err(AgentCommandError::internal)?;
             for owned in ownership {
+                // Durable ownership resolves a multi-install discovery conflict
+                // to this exact canonical installation, just as an explicit UI
+                // selection does. Other discovered installations remain untouched.
+                let selected = exact_installation_selection(record);
+                let decision = evaluate_discovery(&snapshot.catalog, descriptor, &selected);
                 if decision.status != CompatibilityStatus::DetectedVerified
                     || decision.connector_id.as_deref() != Some(owned.connector_id.as_str())
                 {
                     continue;
                 }
                 let connector = connector_for(&owned.connector_id)?;
-                if !connector.projects_model_metadata() {
+                if !connector.refreshes_managed_configuration() {
                     continue;
                 }
                 if let Some(issue) = runtime.connection_issue(&owned.connector_id) {
@@ -1204,19 +1300,59 @@ impl AgentCommandState {
                 let source = read_config_source(target).map_err(AgentCommandError::internal)?;
                 let input = runtime.input_for(&owned.connector_id)?;
                 let now_ms = self.clock.now_ms();
-                let prepared = build_metadata_refresh_plan(
-                    connector,
-                    record,
-                    &decision,
-                    target,
-                    &source,
-                    &input,
-                    &owned,
-                    snapshot.catalog.sequence,
-                    snapshot.catalog.expires_at_ms,
-                    now_ms,
-                    generate_operation_id().map_err(AgentCommandError::internal)?,
-                )
+                let operation_id = generate_operation_id().map_err(AgentCommandError::internal)?;
+                let prepared = if refresh_requires_baseline(connector, &owned.owned_paths) {
+                    let baseline = self
+                        .snapshots
+                        .load(&owned.baseline_snapshot_id)
+                        .map_err(AgentCommandError::internal)?;
+                    if baseline.record.snapshot_id != owned.baseline_snapshot_id
+                        || baseline.record.agent_id != owned.agent_id
+                        || baseline.record.target_config_path != owned.target_config_path
+                        || baseline.record.connector_id != owned.connector_id
+                    {
+                        return Err(AgentCommandError::internal(
+                            "legacy Connector baseline snapshot binding is invalid".to_string(),
+                        ));
+                    }
+                    let baseline_source = if baseline.record.original_existed {
+                        ConfigSource::existing(
+                            baseline.exact_bytes.to_vec(),
+                            baseline.record.original_permissions,
+                            baseline.record.original_owner.clone(),
+                        )
+                    } else {
+                        ConfigSource::missing()
+                    };
+                    build_metadata_refresh_plan_with_baseline(
+                        connector,
+                        &selected,
+                        &decision,
+                        target,
+                        &source,
+                        &baseline_source,
+                        &input,
+                        &owned,
+                        snapshot.catalog.sequence,
+                        snapshot.catalog.expires_at_ms,
+                        now_ms,
+                        operation_id,
+                    )
+                } else {
+                    build_metadata_refresh_plan(
+                        connector,
+                        &selected,
+                        &decision,
+                        target,
+                        &source,
+                        &input,
+                        &owned,
+                        snapshot.catalog.sequence,
+                        snapshot.catalog.expires_at_ms,
+                        now_ms,
+                        operation_id,
+                    )
+                }
                 .map_err(AgentCommandError::internal)?;
                 let confirmation = ConfirmedOperation {
                     operation_id: prepared.view.operation_id.clone(),
@@ -1600,7 +1736,9 @@ impl AgentCommandState {
             // Main config: regular connectors use fixed Remove operations, while
             // WorkBuddy filters dynamically by model ID so force disconnect does
             // not remove models the user added later.
-            if let Some(prepared) = prepare_connector_force_strip_owned(target, connector)? {
+            if let Some(prepared) =
+                prepare_connector_force_strip_owned(target, connector, &ownership.owned_paths)?
+            {
                 prepared_strips.push(prepared);
             }
             // Companion config: parse the persisted format or a connector's
@@ -2191,6 +2329,14 @@ impl AgentCommandState {
     }
 }
 
+fn refresh_requires_baseline(connector: &dyn Connector, owned_paths: &[ConfigPath]) -> bool {
+    connector.refresh_requires_baseline(owned_paths)
+        || connector
+            .legacy_owned_paths()
+            .iter()
+            .any(|path| owned_paths.contains(path))
+}
+
 fn commit_force_strips(
     prepared: &[PreparedForceStrip],
     writer: &dyn AtomicConfigWriter,
@@ -2447,6 +2593,40 @@ fn lower_hex(bytes: &[u8]) -> String {
 fn hash_field(hash: &mut Sha256, value: &[u8]) {
     hash.update((value.len() as u64).to_be_bytes());
     hash.update(value);
+}
+
+pub(crate) fn transition_runtime_for_config(
+    current: &AgentProxyRuntime,
+    config: &token_station_cli::config::ClientConfig,
+) -> Result<AgentProxyRuntime, String> {
+    let mut transition = current.clone();
+    let mut projected_agents = BTreeSet::new();
+    for connector in builtin_connectors() {
+        let agent_id = connector.agent_id();
+        if !projected_agents.insert(agent_id) {
+            continue;
+        }
+        let next = if config.home_route_is_unconfigured() {
+            None
+        } else {
+            model_metadata_for_config(config, agent_id)?
+        };
+        let safe = current
+            .model_metadata(agent_id)
+            .zip(next.as_ref())
+            .map(|(current, next)| transition_model_metadata(current, next))
+            .or(next);
+        transition.replace_model_metadata(agent_id, safe);
+    }
+
+    let opencode_issue = if config.home_route_is_unconfigured() {
+        None
+    } else {
+        let router = configured_router_for_agent(config, "opencode")?;
+        opencode_connection_issue(config, &router)
+    };
+    transition.replace_connection_issue("opencode-v1", opencode_issue);
+    Ok(transition)
 }
 
 pub(crate) fn runtime_from_app(
@@ -2877,8 +3057,22 @@ mod tests {
         }
     }
 
+    fn fixture_model_metadata() -> AgentModelMetadata {
+        AgentModelMetadata {
+            context: 200_000,
+            output: 32_000,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        }
+    }
+
     fn prepared(target: &Path, secret: &str, now_ms: u64) -> PreparedChangePlan {
         let source = read_config_source(target).unwrap();
+        let metadata = fixture_model_metadata();
         build_connection_plan(
             connector_for("claude-code-v1").unwrap(),
             &record(target, false),
@@ -2889,7 +3083,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
-                model_metadata: None,
+                model_metadata: Some(&metadata),
             },
             1,
             None,
@@ -2904,14 +3098,43 @@ mod tests {
             .iter()
             .map(|connector| (connector.capabilities().adapter_id.to_string(), true))
             .collect();
+        let metadata = fixture_model_metadata();
+        let model_metadata = builtin_connectors()
+            .iter()
+            .map(|connector| (connector.agent_id().to_string(), metadata.clone()))
+            .collect();
         AgentProxyRuntime::new(
             "fixture-runtime".to_string(),
             "http://127.0.0.1:8787",
             token.to_string(),
             adapter_readiness,
-            BTreeMap::new(),
+            model_metadata,
             BTreeMap::new(),
         )
+    }
+
+    #[test]
+    fn owned_exact_installation_resolves_multi_install_refresh_selection() {
+        let registry = AgentRegistry::builtin().unwrap();
+        let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
+        let target = Path::new("/tmp/token-station-owned-claude/settings.json");
+        let conflicted = record(target, true);
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "claude-code")
+            .unwrap();
+
+        assert_eq!(
+            evaluate_discovery(&catalog, descriptor, &conflicted).status,
+            CompatibilityStatus::MultipleInstallations
+        );
+        let selected = exact_installation_selection(&conflicted);
+        let decision = evaluate_discovery(&catalog, descriptor, &selected);
+
+        assert_eq!(selected.canonical_path, conflicted.canonical_path);
+        assert_eq!(decision.status, CompatibilityStatus::DetectedVerified);
+        assert_eq!(decision.connector_id.as_deref(), Some("claude-code-v1"));
     }
 
     #[test]
@@ -2920,8 +3143,8 @@ mod tests {
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
         draft["routing"]["mode"] = json!("tiered");
         for (name, context, output) in [
-            ("provider_a", 257_550, 32_768),
-            ("provider_b", 128_000, 16_384),
+            ("provider_a", 128_000, 64_000),
+            ("provider_b", 200_000, 16_384),
         ] {
             draft["upstreams"][name] = json!({
                 "provider": "openai-compatible",
@@ -2942,16 +3165,28 @@ mod tests {
             "tier_low": [{"upstream": "provider_b", "model": "glm-5.2"}]
         });
         draft["router"]["default_pool"] = json!("tier_low");
+        draft["router"]["recovery"] = json!({
+            "policy": "ordered",
+            "pools": ["tier_high"]
+        });
         let config: token_station_cli::config::ClientConfig =
             serde_json::from_value(draft.clone()).unwrap();
 
         let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
         assert_eq!(metadata.context, 128_000);
         assert_eq!(metadata.output, 16_384);
+        assert_eq!(metadata.max_input, 64_000);
         assert!(metadata.vision);
         assert!(metadata.tools);
         assert!(metadata.reasoning);
         assert_eq!(metadata.cost.as_ref().map(|cost| cost.input), Some(0.2));
+
+        let claude = agent_model_metadata(&config, "claude-code")
+            .unwrap()
+            .expect("Claude Code inherits the same effective home route");
+        assert_eq!(claude.context, 128_000);
+        assert_eq!(claude.output, 16_384);
+        assert_eq!(claude.max_input, 64_000);
 
         draft["agent_routes"]["workbuddy"] = json!({
             "mode": "custom",
@@ -2967,8 +3202,9 @@ mod tests {
         let workbuddy = agent_model_metadata(&workbuddy_config, "workbuddy")
             .unwrap()
             .unwrap();
-        assert_eq!(workbuddy.context, 257_550);
-        assert_eq!(workbuddy.output, 32_768);
+        assert_eq!(workbuddy.context, 128_000);
+        assert_eq!(workbuddy.output, 64_000);
+        assert_eq!(workbuddy.max_input, 64_000);
 
         draft["upstreams"]["provider_b"]["models"][0]["catalog_cost"]["output"] = json!(0.7);
         draft["upstreams"]["provider_b"]["models"][0]["vision"] = json!(false);
@@ -2980,6 +3216,121 @@ mod tests {
         assert!(!mixed.vision);
         assert!(!mixed.tools);
         assert!(!mixed.reasoning);
+    }
+
+    #[test]
+    fn agent_projection_counts_only_targets_reachable_by_the_active_route() {
+        let root = scratch("reachable-model-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
+        for (name, context, local) in [
+            ("local_default", 200_000, true),
+            ("cloud_recovery", 128_000, false),
+            ("orphan", 32_000, false),
+        ] {
+            draft["upstreams"][name] = json!({
+                "provider": "openai-compatible",
+                "base_url": format!("https://{name}.example/v1"),
+                "local": local,
+                "models": [{
+                    "model": "model",
+                    "context_window": context,
+                    "max_output_tokens": 16_000
+                }]
+            });
+        }
+        draft["router"]["pools"] = json!({
+            "default": [{"upstream": "local_default", "model": "model"}],
+            "recovery": [{"upstream": "cloud_recovery", "model": "model"}],
+            "orphan": [{"upstream": "orphan", "model": "model"}]
+        });
+        draft["router"]["default_pool"] = json!("default");
+        draft["router"]["rules"] = json!([]);
+        draft["router"]["hint_routes"] = json!([]);
+        draft["router"]["heuristic"] = json!(null);
+        draft["router"]["recovery"] = json!({
+            "policy": "ordered",
+            "pools": ["recovery"]
+        });
+        draft["router"]["local_only"] = json!(true);
+        draft["router"]["allow_cloud_fallback"] = json!(false);
+
+        let local_config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+        let local = agent_model_metadata(&local_config, "claude-code")
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.context, 200_000);
+        assert_eq!(local.max_input, 184_000);
+
+        draft["router"]["local_only"] = json!(false);
+        let cloud_config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+        let cloud = agent_model_metadata(&cloud_config, "claude-code")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cloud.context, 128_000,
+            "the referenced recovery pool is reachable"
+        );
+        assert_eq!(cloud.max_input, 112_000);
+    }
+
+    #[test]
+    fn empty_quota_route_has_no_model_contract() {
+        let root = scratch("empty-quota-model-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("quota_first");
+        draft["upstreams"]["configured_but_unreachable"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "models": [{
+                "model": "model",
+                "context_window": 200_000,
+                "max_output_tokens": 16_000
+            }]
+        });
+        draft["router"]["routing_mode"] = json!("quota_first");
+        draft["router"]["quota_accounts"] = json!([]);
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        assert_eq!(agent_model_metadata(&config, "claude-code").unwrap(), None);
+        let issue = opencode_connection_issue(&config, &config.router)
+            .expect("an empty quota route cannot support an auto model");
+        assert_eq!(issue.code, "model_contract_no_reachable_model");
+    }
+
+    #[test]
+    fn full_proxy_transition_projects_the_minimum_old_and_pending_budget() {
+        let root = scratch("full-proxy-transition-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
+        draft["upstreams"]["pending"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://pending.example/v1",
+            "models": [{
+                "model": "model",
+                "context_window": 128_000,
+                "max_output_tokens": 32_000
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "default": [{"upstream": "pending", "model": "model"}]
+        });
+        draft["router"]["default_pool"] = json!("default");
+        draft["router"]["rules"] = json!([]);
+        draft["router"]["hint_routes"] = json!([]);
+        draft["router"]["heuristic"] = json!(null);
+        draft["router"]["recovery"] = json!({"policy": "strict"});
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let transition = transition_runtime_for_config(&runtime("secret"), &config).unwrap();
+        let claude = transition.model_metadata("claude-code").unwrap();
+        assert_eq!(claude.context, 128_000);
+        assert_eq!(claude.output, 32_000);
+        assert_eq!(claude.max_input, 96_000);
     }
 
     #[test]
@@ -3059,7 +3410,7 @@ mod tests {
         let metadata = agent_model_metadata(&config, "opencode")
             .unwrap()
             .expect("independently verified metadata remains available");
-        assert_eq!(metadata.safe_limits(), None);
+        assert_eq!(metadata.safe_limits(), Some((257_550, 8_192)));
         assert!(metadata.vision);
         assert!(metadata.tools);
         assert!(metadata.reasoning);
@@ -3067,8 +3418,71 @@ mod tests {
     }
 
     #[test]
-    fn opencode_refuses_assumed_context_and_reports_the_exact_missing_target() {
-        let root = scratch("opencode-fail-closed-limits");
+    fn unknown_route_limits_never_raise_a_smaller_known_route_limit() {
+        let root = scratch("mixed-known-and-unknown-limits");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
+        draft["upstreams"]["known"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://known.example/v1",
+            "models": [{
+                "model": "model",
+                "context_window": 16_000,
+                "max_output_tokens": 4_000
+            }]
+        });
+        draft["upstreams"]["unknown"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://unknown.example/v1",
+            "models": [{"model": "model", "context_window": 0}]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [
+                {"upstream": "known", "model": "model"},
+                {"upstream": "unknown", "model": "model"}
+            ]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
+        assert_eq!(metadata.connection_limits(), Some((16_000, 4_000)));
+        assert!(metadata.has_compatibility_limits());
+    }
+
+    #[test]
+    fn transition_keeps_known_limits_when_the_other_revision_is_unknown() {
+        let known = AgentModelMetadata {
+            context: 16_000,
+            output: 4_000,
+            max_input: 12_000,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let unknown = AgentModelMetadata {
+            context: 0,
+            output: 0,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+
+        let metadata = transition_model_metadata(&known, &unknown);
+        assert_eq!(metadata.connection_limits(), Some((16_000, 4_000)));
+        assert_eq!(metadata.connection_max_input(), Some(12_000));
+        assert!(metadata.has_compatibility_limits());
+    }
+
+    #[test]
+    fn opencode_accepts_assumed_context_without_publishing_a_blocking_issue() {
+        let root = scratch("opencode-assumed-limits");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
         draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider"] = json!({
@@ -3088,12 +3502,11 @@ mod tests {
         let config: token_station_cli::config::ClientConfig =
             serde_json::from_value(draft).unwrap();
 
-        let issue = opencode_connection_issue(&config, &config.router)
-            .expect("an assumed context is not a trustworthy provider fact");
-
-        assert_eq!(issue.code, "model_contract_missing_context_window");
-        assert_eq!(issue.target.as_deref(), Some("provider/unknown-context"));
-        assert!(issue.message.contains("不会使用路由假定值"));
+        assert_eq!(opencode_connection_issue(&config, &config.router), None);
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("the route remains available with incomplete provider metadata");
+        assert_eq!(metadata.connection_limits(), Some((128_000, 8_192)));
     }
 
     #[test]
@@ -3120,7 +3533,7 @@ mod tests {
         let metadata = agent_model_metadata(&config, "opencode")
             .unwrap()
             .expect("trusted context remains available");
-        assert_eq!(metadata.safe_limits(), None);
+        assert_eq!(metadata.safe_limits(), Some((128_000, 8_192)));
         assert_eq!(metadata.opencode_limits(), Some((128_000, 8_192)));
     }
 
@@ -3160,8 +3573,8 @@ mod tests {
     }
 
     #[test]
-    fn opencode_rejects_the_safe_default_when_it_leaves_no_input_budget() {
-        let root = scratch("opencode-default-output-too-large");
+    fn opencode_clamps_the_default_output_to_leave_input_budget() {
+        let root = scratch("opencode-clamped-default-output");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
         draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider"] = json!({
@@ -3179,12 +3592,11 @@ mod tests {
         let config: token_station_cli::config::ClientConfig =
             serde_json::from_value(draft).unwrap();
 
-        let issue = opencode_connection_issue(&config, &config.router)
-            .expect("the default output must leave a positive input budget");
-
-        assert_eq!(issue.code, "model_contract_invalid_limits");
-        assert_eq!(issue.target.as_deref(), Some("provider/tiny-context"));
-        assert!(issue.message.contains("8192"));
+        assert_eq!(opencode_connection_issue(&config, &config.router), None);
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("the tiny route remains connectable");
+        assert_eq!(metadata.connection_limits(), Some((8_192, 4_096)));
     }
 
     struct LifecycleFileFixture {
@@ -4298,6 +4710,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_legacy_refresh_loads_the_disconnect_baseline_for_ownership_widening() {
+        let connector = connector_for("codex-v1").unwrap();
+        let legacy_owned_paths = connector
+            .owned_paths()
+            .into_iter()
+            .filter(|owned| owned.segments != ["web_search"])
+            .collect::<Vec<_>>();
+
+        assert!(refresh_requires_baseline(connector, &legacy_owned_paths));
+        assert!(!refresh_requires_baseline(
+            connector,
+            &connector.owned_paths()
+        ));
+    }
+
+    #[test]
     fn commands_views_publish_runtime_adapter_readiness() {
         let state = state("adapter-readiness-view");
         let target = scratch("adapter-readiness-view-target").join("settings.json");
@@ -4677,7 +5105,11 @@ mod tests {
         let root = scratch("force-forget-target");
         let target = root.join("settings.json");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&target, br#"{"unowned":"keep"}"#).unwrap();
+        std::fs::write(
+            &target,
+            br#"{"unowned":"keep","model":"opus[1m]","modelPicker":{"options":[{"model":"user-gateway","label":"User gateway"}],"replaceBuiltInOptions":true,"userExtension":"keep"}}"#,
+        )
+        .unwrap();
         let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
         install_scan(&state, catalog, vec![record(&target, false)]);
 
@@ -4736,6 +5168,14 @@ mod tests {
             after_connect.contains("ANTHROPIC_BASE_URL"),
             "接管应写入受管字段"
         );
+        let mut connected_json: serde_json::Value = serde_json::from_str(&after_connect).unwrap();
+        assert!(connected_json["modelPicker"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["model"] == "user-gateway"));
+        connected_json["model"] = serde_json::json!("opus[1m]");
+        std::fs::write(&target, serde_json::to_vec_pretty(&connected_json).unwrap()).unwrap();
         assert_eq!(
             state
                 .ownership
@@ -4757,6 +5197,17 @@ mod tests {
             "受管字段应被删除"
         );
         assert!(after_forget.contains("keep"), "用户自己的字段必须保留");
+        let after_forget_json: serde_json::Value = serde_json::from_str(&after_forget).unwrap();
+        assert_eq!(after_forget_json["model"], "opus[1m]");
+        assert!(after_forget_json["modelPicker"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["model"] == "user-gateway"));
+        assert_eq!(after_forget_json["modelPicker"]["userExtension"], "keep");
+        assert!(after_forget_json["modelPicker"]
+            .get("replaceBuiltInOptions")
+            .is_none());
         assert!(
             state
                 .ownership
@@ -4769,6 +5220,63 @@ mod tests {
             state.force_forget("claude-code", "/opt/claude").is_err(),
             "已无归属时再次强制断开应报错"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn legacy_claude_force_forget_preserves_the_unowned_user_model() {
+        let state = state("legacy-claude-force-forget");
+        let root = scratch("legacy-claude-force-forget-target");
+        let target = root.join("settings.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &target,
+            br#"{"model":"opus[1m]","modelPicker":{"options":[{"model":"user-gateway","label":"User gateway"}]},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8787/agents/claude-code"}}"#,
+        )
+        .unwrap();
+        let legacy_owned_path = ConfigPath {
+            segments: vec!["env".to_string(), "ANTHROPIC_BASE_URL".to_string()],
+        };
+        state
+            .ownership
+            .commit(
+                crate::agent_integration::ownership::OwnershipRecord {
+                    schema_version: 1,
+                    revision: 0,
+                    agent_id: "claude-code".to_string(),
+                    installation_path: "/opt/claude".to_string(),
+                    target_config_path: target.to_string_lossy().into_owned(),
+                    connector_id: "claude-code-v1".to_string(),
+                    baseline_snapshot_id: "31".repeat(16),
+                    last_transaction_snapshot_id: "32".repeat(16),
+                    before_hash: "a".repeat(64),
+                    managed_after_hash: "b".repeat(64),
+                    owned_paths: vec![legacy_owned_path.clone()],
+                    owned_value_macs: BTreeMap::from([(
+                        legacy_owned_path.to_string(),
+                        "c".repeat(64),
+                    )]),
+                    companion_files: Vec::new(),
+                    acquired_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+
+        state.force_forget("claude-code", "/opt/claude").unwrap();
+
+        let stripped: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(stripped["model"], "opus[1m]");
+        assert_eq!(
+            stripped["modelPicker"]["options"][0]["model"],
+            "user-gateway"
+        );
+        assert!(stripped["env"].get("ANTHROPIC_BASE_URL").is_none());
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
@@ -4959,9 +5467,10 @@ mod tests {
         .unwrap();
         let connector = connector_for("workbuddy-v1").unwrap();
 
-        let prepared = prepare_connector_force_strip_owned(&target, connector)
-            .unwrap()
-            .expect("the existing WorkBuddy file must be projected");
+        let prepared =
+            prepare_connector_force_strip_owned(&target, connector, &connector.owned_paths())
+                .unwrap()
+                .expect("the existing WorkBuddy file must be projected");
         let projected = parse_source_bytes(
             Some(prepared.rendered.as_slice()),
             DocumentFormat::Json,
@@ -5005,9 +5514,12 @@ mod tests {
         }"#;
         std::fs::write(&target, initial).unwrap();
         let connector = connector_for("workbuddy-v1").unwrap();
-        let prepared = vec![prepare_connector_force_strip_owned(&target, connector)
-            .unwrap()
-            .unwrap()];
+        let prepared =
+            vec![
+                prepare_connector_force_strip_owned(&target, connector, &connector.owned_paths())
+                    .unwrap()
+                    .unwrap(),
+            ];
         let externally_updated = br#"{
           "models": [
             {"id":"user-existing"},

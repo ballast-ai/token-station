@@ -364,6 +364,7 @@ impl Gateway {
         router: &Router,
         raw_headers: &[(String, String)],
         body: &[u8],
+        routing_model: Option<&str>,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<Option<(UpstreamModel, StreamOutcome)>, ErrorEnvelope> {
@@ -391,7 +392,8 @@ impl Gateway {
         // serve it. Quota-first needs the canonical path's lease/settlement
         // state, so it deliberately falls through. A routing failure also falls
         // through so the normal path surfaces the real error.
-        let mut mini = ChatRequest::new(&model, Vec::new());
+        let route_model = routing_model.unwrap_or(&model);
+        let mut mini = ChatRequest::new(route_model, Vec::new());
         mini.stream = stream;
         // Preserve the one feature the router needs for its hard tool gate
         // without parsing or rewriting Anthropic's native tool vocabulary.
@@ -458,13 +460,10 @@ impl Gateway {
 
         // Committed to the passthrough path.
         let headers = Self::curate_passthrough_headers(raw_headers)?;
-        // The caller's own requested name, not the routed target: `decision`
-        // is only reachable through a successful route, so checking
-        // `decision.chosen.model` against the catalog is a near-tautology —
-        // it is always a configured target and would let an unlisted caller
-        // string through verbatim into the receipt.
+        // Store the bounded Harness key when the gateway translated a Claude
+        // family. Otherwise retain the caller-name privacy boundary.
         let configured = self.catalog.iter().any(|(target, _)| target.model == model);
-        record.requested_model = canonical_requested_model(&model, configured);
+        record.requested_model = canonical_requested_model(route_model, configured);
         record.stream = stream;
 
         // The native body is now just another attempt payload. Everything below

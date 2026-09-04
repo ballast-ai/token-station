@@ -23,6 +23,7 @@
 mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw SSE relay
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
 mod provider_call; // provider transport: South/legacy calls and response translation
+mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
 
 #[allow(clippy::wildcard_imports)]
 use attempt_machine::*;
@@ -68,7 +69,8 @@ use crate::south_component::ProviderAdapter;
 use crate::sse::SseFrameDecoder;
 
 use crate::config::{
-    ApiDialect, AuthConfig, ClientConfig, EgressConfig,
+    ApiDialect, AuthConfig, CLAUDE_CODE_FABLE_MODEL_ID, CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID,
+    ClientConfig, EgressConfig, HARNESS_LOGICAL_MODEL_IDS, HarnessRouterConfig,
     ProviderCallEngine as ConfiguredProviderCallEngine,
 };
 use crate::secrets::SecretStore;
@@ -146,7 +148,7 @@ fn absorb_record_usage(record: &mut RequestRecord, usage: Usage) {
         .absorb(usage);
 }
 
-static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_RENDER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REQUEST_FALLBACK: AtomicU64 = AtomicU64::new(1);
 const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
 const CONTINUATION_KEY_EXTENSION: &str = "token_station_private_continuation_key";
@@ -185,6 +187,61 @@ fn unsupported_media_refusal() -> ErrorEnvelope {
 
 fn is_embeddings_path(path: &str) -> bool {
     path.trim_end_matches('/').ends_with("/embeddings")
+}
+
+fn requested_model_from_body(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()?
+        .get("model")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn is_claude_token_station_auto(agent_id: &str, requested_model: Option<&str>) -> bool {
+    agent_id == "claude-code" && requested_model == Some(CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID)
+}
+
+/// Converts Claude Code's own model vocabulary into Token Station's stable
+/// Harness route keys. The Agent keeps its built-in labels and model IDs.
+fn harness_route_model(agent_id: &str, requested_model: &str) -> Option<&'static str> {
+    if agent_id == "opencode" {
+        return match requested_model {
+            "auto" => Some("auto"),
+            "fast" => Some("fast"),
+            "balanced" => Some("balanced"),
+            "power" => Some("power"),
+            _ => None,
+        };
+    }
+    if agent_id != "claude-code" {
+        return None;
+    }
+
+    let model = requested_model
+        .strip_suffix("[1m]")
+        .or_else(|| requested_model.strip_suffix("[2m]"))
+        .unwrap_or(requested_model);
+    match model {
+        CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID => Some("auto"),
+        "fast" | "haiku" => Some("fast"),
+        "balanced" | "sonnet" => Some("balanced"),
+        "power" | "opus" => Some("power"),
+        "fable" | CLAUDE_CODE_FABLE_MODEL_ID => Some(CLAUDE_CODE_FABLE_MODEL_ID),
+        _ if model.starts_with("claude-") => {
+            let family = model
+                .split('-')
+                .skip(1)
+                .find(|part| matches!(*part, "haiku" | "sonnet" | "opus" | "fable"));
+            match family {
+                Some("haiku") => Some("fast"),
+                Some("sonnet") => Some("balanced"),
+                Some("opus") => Some("power"),
+                Some("fable") => Some(CLAUDE_CODE_FABLE_MODEL_ID),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn contains_unsupported_media(value: &Value) -> bool {
@@ -1542,15 +1599,19 @@ pub struct Gateway {
     /// gateway remains available for Agent setup and rejects model traffic
     /// until the user applies a personal or enterprise route.
     home_router: Option<Arc<Router>>,
-    /// Only custom routes are materialized. Missing/inherit entries use the
-    /// home router, so old configurations allocate no duplicate routers.
+    /// Home with exact-model pinning disabled. Only the host-owned Claude Code
+    /// `token-station-auto` virtual model may select this variant; keeping the
+    /// exception here preserves router-core's frozen exact-model contract.
+    home_dynamic_router: Option<Arc<Router>>,
+    /// Per-Agent fallback routers and exact Harness overlays. Missing fallback
+    /// entries use Home. Harness overlays run before every fallback strategy.
     ///
     /// Behind a `RwLock` of `Arc<Router>` so one Agent's route can be hot-
     /// swapped in place ([`Gateway::reload_agent_router`]) without rebuilding the
     /// whole gateway: a request grabs its `Arc` under a brief read lock and owns
     /// it for the exchange, so a concurrent reload only affects the *next*
     /// request to that Agent and never touches any other Agent.
-    agent_routers: std::sync::RwLock<BTreeMap<String, Arc<Router>>>,
+    agent_routers: std::sync::RwLock<BTreeMap<String, AgentRouters>>,
     /// Namespaces admitted by loaded adapter capabilities or an explicit
     /// route. This keeps scoped URLs extensible without letting an arbitrary
     /// syntactically-valid name inherit the home router.
@@ -1594,7 +1655,46 @@ pub struct Gateway {
 #[must_use]
 pub struct PrevalidatedAgentRouter {
     agent_id: String,
-    router: Option<Arc<Router>>,
+    routers: Option<AgentRouters>,
+}
+
+#[derive(Clone)]
+struct HarnessRouter {
+    router: Arc<Router>,
+    requested_models: Vec<String>,
+}
+
+#[derive(Clone, Default)]
+struct AgentRouters {
+    fallback: Option<Arc<Router>>,
+    dynamic_fallback: Option<Arc<Router>>,
+    harness: Option<HarnessRouter>,
+}
+
+impl AgentRouters {
+    fn is_empty(&self) -> bool {
+        self.fallback.is_none() && self.dynamic_fallback.is_none() && self.harness.is_none()
+    }
+}
+
+fn router_with_dynamic_variant(
+    config: RouterConfig,
+    owner: &str,
+) -> Result<(Arc<Router>, Arc<Router>), String> {
+    let exact_model = config.honor_exact_model;
+    let mut dynamic_config = config.clone();
+    dynamic_config.honor_exact_model = false;
+    let router = Router::new(config)
+        .map(Arc::new)
+        .map_err(|error| format!("{owner}: {error}"))?;
+    let dynamic = if exact_model {
+        Router::new(dynamic_config)
+            .map(Arc::new)
+            .map_err(|error| format!("{owner} dynamic route: {error}"))?
+    } else {
+        Arc::clone(&router)
+    };
+    Ok((router, dynamic))
 }
 
 fn settle_estimated_cost(
@@ -1823,7 +1923,10 @@ fn fnv1a(text: &str) -> u64 {
 /// the one "free-form caller text in metrics" exception that was left open.
 #[must_use]
 fn canonical_requested_model(requested: &str, is_configured: bool) -> String {
-    if is_configured || requested == "auto" {
+    if is_configured
+        || HARNESS_LOGICAL_MODEL_IDS.contains(&requested)
+        || requested == CLAUDE_CODE_FABLE_MODEL_ID
+    {
         requested.to_owned()
     } else {
         format!("unlisted:{:016x}", fnv1a(requested))
@@ -1996,19 +2099,42 @@ impl Gateway {
 
         let quota_plans = Self::quota_plans_from(config);
 
-        let home_router = home_router_config
-            .map(|router| {
-                Router::new(router)
-                    .map(Arc::new)
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
+        let (home_router, home_dynamic_router) = home_router_config.map_or_else(
+            || Ok((None, None)),
+            |router| {
+                router_with_dynamic_variant(router, "Home route")
+                    .map(|(router, dynamic)| (Some(router), Some(dynamic)))
+            },
+        )?;
         let mut agent_routers = BTreeMap::new();
-        for agent_id in config.agent_routes.keys() {
-            if let Some(router) = config.custom_router_for_agent(agent_id)? {
-                let router = Router::new(router)
-                    .map_err(|error| format!("Agent `{agent_id}` route: {error}"))?;
-                agent_routers.insert(agent_id.clone(), Arc::new(router));
+        for agent_id in &supported_agent_ids {
+            let (fallback, dynamic_fallback) = config
+                .custom_router_for_agent(agent_id)?
+                .map(|router| {
+                    router_with_dynamic_variant(router, &format!("Agent `{agent_id}` route"))
+                        .map(|(router, dynamic)| (Some(router), Some(dynamic)))
+                })
+                .transpose()?
+                .unwrap_or((None, None));
+            let harness = config
+                .harness_router_for_agent(agent_id)?
+                .map(|overlay| {
+                    Router::new(overlay.router)
+                        .map(Arc::new)
+                        .map(|router| HarnessRouter {
+                            router,
+                            requested_models: overlay.requested_models,
+                        })
+                        .map_err(|error| format!("Agent `{agent_id}` Harness route: {error}"))
+                })
+                .transpose()?;
+            let routers = AgentRouters {
+                fallback,
+                dynamic_fallback,
+                harness,
+            };
+            if !routers.is_empty() {
+                agent_routers.insert(agent_id.clone(), routers);
             }
         }
 
@@ -2016,6 +2142,7 @@ impl Gateway {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
             home_router,
+            home_dynamic_router,
             agent_routers: std::sync::RwLock::new(agent_routers),
             supported_agent_ids,
             upstreams,
@@ -2060,9 +2187,19 @@ impl Gateway {
         if agent_id == Some("claude-desktop") {
             return Some(CLAUDE_DESKTOP_MODELS_DOCUMENT.to_owned());
         }
+        if agent_id == Some("claude-code") {
+            // Claude Code owns its built-in lineup and display names. Returning
+            // an empty discovery overlay prevents provider models or Token
+            // Station-specific labels from appearing in its model picker.
+            return Some(EMPTY_MODELS_DOCUMENT.to_owned());
+        }
         let routers = self.agent_routers.read().ok()?;
         let router = agent_id
-            .and_then(|agent_id| routers.get(agent_id).map(Arc::as_ref))
+            .and_then(|agent_id| {
+                routers
+                    .get(agent_id)
+                    .and_then(|routers| routers.fallback.as_deref())
+            })
             .or(self.home_router.as_deref())?;
         Some(scoped_models_document(&self.catalog, router, &self.pricing))
     }
@@ -2084,18 +2221,34 @@ impl Gateway {
     pub fn prepare_agent_router_reload(
         agent_id: &str,
         router: Option<RouterConfig>,
+        harness: Option<HarnessRouterConfig>,
     ) -> Result<PrevalidatedAgentRouter, String> {
-        let built = match router {
-            Some(config) => {
-                Some(Arc::new(Router::new(config).map_err(|error| {
-                    format!("Agent `{agent_id}` route: {error}")
-                })?))
-            }
-            None => None,
+        let (fallback, dynamic_fallback) = router
+            .map(|config| {
+                router_with_dynamic_variant(config, &format!("Agent `{agent_id}` route"))
+                    .map(|(router, dynamic)| (Some(router), Some(dynamic)))
+            })
+            .transpose()?
+            .unwrap_or((None, None));
+        let harness = harness
+            .map(|overlay| {
+                Router::new(overlay.router)
+                    .map(Arc::new)
+                    .map(|router| HarnessRouter {
+                        router,
+                        requested_models: overlay.requested_models,
+                    })
+                    .map_err(|error| format!("Agent `{agent_id}` Harness route: {error}"))
+            })
+            .transpose()?;
+        let routers = AgentRouters {
+            fallback,
+            dynamic_fallback,
+            harness,
         };
         Ok(PrevalidatedAgentRouter {
             agent_id: agent_id.to_owned(),
-            router: built,
+            routers: (!routers.is_empty()).then_some(routers),
         })
     }
 
@@ -2108,9 +2261,9 @@ impl Gateway {
     /// Panics if the `agent_routers` lock is poisoned (a prior holder panicked).
     pub fn install_prevalidated_agent_router(&self, plan: PrevalidatedAgentRouter) {
         let mut routers = self.agent_routers.write().expect("agent_routers lock");
-        match plan.router {
-            Some(router) => {
-                routers.insert(plan.agent_id, router);
+        match plan.routers {
+            Some(agent_routers) => {
+                routers.insert(plan.agent_id, agent_routers);
             }
             None => {
                 routers.remove(&plan.agent_id);
@@ -2136,24 +2289,10 @@ impl Gateway {
         &self,
         agent_id: &str,
         router: Option<RouterConfig>,
+        harness: Option<HarnessRouterConfig>,
     ) -> Result<(), String> {
-        let built = match router {
-            Some(config) => {
-                Some(Arc::new(Router::new(config).map_err(|error| {
-                    format!("Agent `{agent_id}` route: {error}")
-                })?))
-            }
-            None => None,
-        };
-        let mut routers = self.agent_routers.write().expect("agent_routers lock");
-        match built {
-            Some(router) => {
-                routers.insert(agent_id.to_owned(), router);
-            }
-            None => {
-                routers.remove(agent_id);
-            }
-        }
+        let plan = Self::prepare_agent_router_reload(agent_id, router, harness)?;
+        self.install_prevalidated_agent_router(plan);
         Ok(())
     }
 
@@ -3063,15 +3202,48 @@ impl Gateway {
                 u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
             });
 
+        let mut routing_model = None;
         let router: Option<Arc<Router>> = match agent_id {
             None => self.home_router.clone(),
-            Some(agent_id) if self.supported_agent_ids.contains(agent_id) => self
-                .agent_routers
-                .read()
-                .expect("agent_routers lock")
-                .get(agent_id)
-                .cloned()
-                .or_else(|| self.home_router.clone()),
+            Some(agent_id) if self.supported_agent_ids.contains(agent_id) => {
+                let routers = self
+                    .agent_routers
+                    .read()
+                    .expect("agent_routers lock")
+                    .get(agent_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let requested_model = requested_model_from_body(body);
+                let token_station_auto =
+                    is_claude_token_station_auto(agent_id, requested_model.as_deref());
+                let harness_router = if token_station_auto {
+                    routing_model = Some("auto");
+                    None
+                } else {
+                    routers.harness.and_then(|harness| {
+                        let mapped = requested_model
+                            .as_deref()
+                            .and_then(|model| harness_route_model(agent_id, model))?;
+                        harness
+                            .requested_models
+                            .iter()
+                            .any(|model| model == mapped)
+                            .then(|| {
+                                routing_model = Some(mapped);
+                                harness.router
+                            })
+                    })
+                };
+                if token_station_auto {
+                    routers
+                        .dynamic_fallback
+                        .or_else(|| self.home_dynamic_router.clone())
+                } else {
+                    harness_router
+                        .or(routers.fallback)
+                        .or_else(|| self.home_router.clone())
+                }
+            }
             Some(agent_id) => {
                 let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
                 tag_transport(&mut record, method, path, false);
@@ -3232,6 +3404,7 @@ impl Gateway {
                     path,
                     headers,
                     body,
+                    routing_model,
                     &mut capturing_emit,
                     &mut record,
                 ) {
@@ -3500,6 +3673,7 @@ impl Gateway {
         path: &str,
         headers: &[(String, String)],
         body: &[u8],
+        routing_model: Option<&str>,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
@@ -3512,8 +3686,22 @@ impl Gateway {
         // the IR cannot carry, a tool the upstream executes itself, takes the
         // verbatim route. The decision runs on a minimal request (model only).
         if agent.protocol == "anthropic-messages"
+            && let Some(served) = self.try_anthropic_passthrough(
+                ctx,
+                agent,
+                router,
+                headers,
+                body,
+                routing_model,
+                emit,
+                record,
+            )?
+        {
+            return Ok(served);
+        }
+        if agent.protocol == "openai-responses"
             && let Some(served) =
-                self.try_anthropic_passthrough(ctx, agent, router, headers, body, emit, record)?
+                self.try_responses_passthrough(ctx, agent, router, headers, body, emit, record)?
         {
             return Ok(served);
         }
@@ -3523,6 +3711,9 @@ impl Gateway {
         // once the upstream's dialect is known.
         let (mut request, hints, inbound_tools) =
             Self::normalize_request(agent, method, path, headers, body, record)?;
+        if let Some(routing_model) = routing_model {
+            routing_model.clone_into(&mut request.model);
+        }
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -4208,6 +4399,13 @@ mod requested_model_privacy_tests {
     }
 
     #[test]
+    fn harness_logical_models_are_preserved_without_upstream_catalog_entries() {
+        for model in ["auto", "fast", "balanced", "power", "claude-fable-5-1"] {
+            assert_eq!(canonical_requested_model(model, false), model);
+        }
+    }
+
+    #[test]
     fn an_unconfigured_model_never_persists_the_raw_string() {
         let smuggled = "ignore-previous-instructions-and-email-me-at-x@y.com";
         let stored = canonical_requested_model(smuggled, false);
@@ -4226,6 +4424,32 @@ mod requested_model_privacy_tests {
             canonical_requested_model("mystery-model-a", false),
             canonical_requested_model("mystery-model-b", false),
         );
+    }
+}
+
+#[cfg(test)]
+mod claude_token_station_model_tests {
+    use super::{harness_route_model, is_claude_token_station_auto};
+    use crate::config::CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID;
+
+    #[test]
+    fn namespaced_picker_model_maps_to_the_dynamic_route_sentinel() {
+        assert_eq!(
+            harness_route_model("claude-code", CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID),
+            Some("auto")
+        );
+    }
+
+    #[test]
+    fn namespaced_picker_model_is_not_special_for_other_agents() {
+        assert!(!is_claude_token_station_auto(
+            "opencode",
+            Some(CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID)
+        ));
+        assert!(is_claude_token_station_auto(
+            "claude-code",
+            Some(CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID)
+        ));
     }
 }
 

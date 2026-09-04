@@ -419,6 +419,7 @@ export interface RouteContextView {
 }
 
 export type AgentRouteMode = "inherit" | "custom" | "profile";
+export type HarnessModelTarget = TierView;
 
 export interface AgentRouteView {
   mode: AgentRouteMode;
@@ -426,11 +427,14 @@ export interface AgentRouteView {
   inherits_global?: boolean;
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
+  harness_config_error?: string | null;
   profile: string | null;
   /** Effective routing mode for this Agent: its override first, otherwise the home default. */
   routing_mode: RoutingMode;
   /** Effective exact target for Direct mode; absent/null means configuration is incomplete. */
   direct_target?: DirectRouteTarget | null;
+  /** Effective request-model mappings, including unsaved independent edits. */
+  harness_model_routes?: Record<string, HarnessModelTarget>;
 }
 
 export interface QuotaAccount {
@@ -918,6 +922,7 @@ export const addProvider = (
   credential_source: "store" | "env" | "file" | "none" = api_key ? "store" : "none",
   credential_reference: string | null = null,
   provider_dialect: "openai-compatible" | "azure-openai-v1" = "openai-compatible",
+  catalog_revision: number | null = null,
 ) =>
   invoke<StateView>("add_provider_with_credential", {
     name,
@@ -928,6 +933,7 @@ export const addProvider = (
     credentialSource: credential_source,
     credentialReference: credential_reference,
     providerDialect: provider_dialect,
+    catalogRevision: catalog_revision,
   });
 
 export const addManagedEnterpriseRoute = (
@@ -1047,6 +1053,14 @@ export const discoverProviderModels = (
     apiKey: api_key,
   });
 
+export const discoverProviderModelLimits = (
+  name: string,
+  base_url: string,
+) => invoke<ModelDiscoveryView>("discover_provider_model_limits", {
+  name,
+  baseUrl: base_url,
+});
+
 export const verifyEnterpriseRoute = (
   base_url: string,
   api_key: string,
@@ -1120,6 +1134,21 @@ export const setAgentTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
+
+export const setAgentHarnessModelRoute = (
+  agentId: AgentId,
+  requestedModel: string,
+  upstream: string | null,
+  model: string | null,
+) => invoke<StateView>("set_agent_harness_model_route", {
+  agentId,
+  requestedModel,
+  upstream,
+  model,
+});
+
+export const restartAgentHarnessRoutes = (agentId: AgentId) =>
+  invoke<StateView>("restart_agent_harness_routes", { agentId });
 
 export const saveHomeRouteAsProfile = (name: string) =>
   invoke<StateView>("save_home_route_as_profile", { name });

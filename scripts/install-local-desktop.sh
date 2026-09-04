@@ -9,6 +9,7 @@ readonly install_lock="$installed_parent/.token-station.install.lock"
 readonly launch_check_interval="${TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS:-1}"
 readonly launch_check_samples="${TOKEN_STATION_LAUNCH_CHECK_SAMPLES:-3}"
 readonly launch_open_attempts="${TOKEN_STATION_LAUNCH_OPEN_ATTEMPTS:-5}"
+readonly desktop_config="${TOKEN_STATION_DESKTOP_CONFIG:-$HOME/Library/Application Support/$bundle_id/token-station.json}"
 
 staging_app=""
 backup_app=""
@@ -128,6 +129,20 @@ trap cleanup EXIT
 "$root/scripts/build-desktop.sh" --local --target "$target"
 
 verify_app "$built_app" "built app"
+
+built_executable=$(
+  /usr/libexec/PlistBuddy -c "Print:CFBundleExecutable" \
+    "$built_app/Contents/Info.plist"
+)
+if [[ -z "$built_executable" || "$built_executable" == */* ]]; then
+  echo "built app executable verification failed" >&2
+  exit 1
+fi
+if [[ -f "$desktop_config" ]] \
+  && ! "$built_app/Contents/MacOS/$built_executable" --self-test-config "$desktop_config"; then
+  echo "candidate cannot read the current desktop configuration; the installed App was not replaced" >&2
+  exit 1
+fi
 
 if [[ -e "$installed_app" ]]; then
   if [[ ! -d "$installed_app" ]]; then

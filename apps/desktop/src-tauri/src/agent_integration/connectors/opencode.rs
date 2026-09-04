@@ -1,10 +1,21 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use token_station_cli::config::HARNESS_LOGICAL_MODEL_IDS;
 
 use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
+
+fn model_name(id: &str) -> &'static str {
+    match id {
+        "auto" => "auto (智能路由)",
+        "fast" => "fast (快速)",
+        "balanced" => "balanced (均衡)",
+        "power" => "power (高性能)",
+        _ => unreachable!("logical model IDs come from a closed catalog"),
+    }
+}
 
 pub struct OpenCodeConnector;
 pub(super) static CONNECTOR: OpenCodeConnector = OpenCodeConnector;
@@ -22,9 +33,9 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     ],
     config_format: DocumentFormat::Json5,
     config_path_template: "${HOME}/.config/opencode/opencode.json",
-    // Write only provider.tokenstation. The model is selected as tokenstation/auto
-    // inside that block, not through the top-level model. owned_fields must match
-    // owned_paths() and connect_patch() or ownership and restoration will drift.
+    // Write only provider.tokenstation. Top-level model selection remains owned by
+    // the user. owned_fields must match owned_paths() and connect_patch() or
+    // ownership and restoration will drift.
     owned_fields: &["provider.tokenstation"],
     requires_virtual_key: true,
     restart_required: false,
@@ -78,6 +89,12 @@ impl Connector for OpenCodeConnector {
                     .to_string(),
             );
         }
+        if input.model_metadata.is_none() {
+            return Err(
+                "OpenCode 当前路由没有可达模型；本次未修改 ~/.config/opencode/opencode.json。"
+                    .to_string(),
+            );
+        }
         input
             .token
             .map(|_| ())
@@ -104,22 +121,26 @@ impl Connector for OpenCodeConnector {
             .token
             .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())?;
         let vision = input.model_metadata.is_some_and(|metadata| metadata.vision);
-        let mut model = json!({
-            "name": "auto (智能路由)",
-            "attachment": vision,
-            "modalities": {
-                "input": if vision { json!(["text", "image"]) } else { json!(["text"]) },
-                "output": ["text"]
+        let mut models = serde_json::Map::new();
+        for id in HARNESS_LOGICAL_MODEL_IDS {
+            let mut model = json!({
+                "name": model_name(id),
+                "attachment": vision,
+                "modalities": {
+                    "input": if vision { json!(["text", "image"]) } else { json!(["text"]) },
+                    "output": ["text"]
+                }
+            });
+            if let Some(metadata) = input.model_metadata {
+                if let Some((context, output)) = metadata.opencode_limits() {
+                    model["limit"] = json!({"context": context, "output": output});
+                }
+                if let Some(cost) = &metadata.cost {
+                    model["cost"] = serde_json::to_value(cost)
+                        .map_err(|error| format!("OpenCode 模型价格序列化失败：{error}"))?;
+                }
             }
-        });
-        if let Some(metadata) = input.model_metadata {
-            if let Some((context, output)) = metadata.opencode_limits() {
-                model["limit"] = json!({"context": context, "output": output});
-            }
-            if let Some(cost) = &metadata.cost {
-                model["cost"] = serde_json::to_value(cost)
-                    .map_err(|error| format!("OpenCode 模型价格序列化失败：{error}"))?;
-            }
+            models.insert(id.to_owned(), model);
         }
         Ok(vec![PatchOperation {
             operation: PatchKind::Replace,
@@ -128,9 +149,7 @@ impl Connector for OpenCodeConnector {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "token-station",
                 "options": { "baseURL": input.base_url, "apiKey": token },
-                "models": {
-                    "auto": model
-                }
+                "models": models
             })),
         }])
     }
@@ -154,32 +173,41 @@ impl Connector for OpenCodeConnector {
         let token = input
             .token
             .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())?;
-        let metadata_valid = input.model_metadata.is_none_or(|metadata| {
-            let model = &provider["models"]["auto"];
-            let limits_valid = metadata.opencode_limits().map_or_else(
-                || model.get("limit").is_none(),
-                |(context, output)| model["limit"] == json!({"context": context, "output": output}),
-            );
-            limits_valid && metadata.cost.as_ref().map_or_else(
-                    || provider["models"]["auto"].get("cost").is_none(),
-                    |cost| provider["models"]["auto"]["cost"] == json!(cost),
-                )
-        });
         let vision = input.model_metadata.is_some_and(|metadata| metadata.vision);
         let expected_input = if vision {
             json!(["text", "image"])
         } else {
             json!(["text"])
         };
+        let models_valid = HARNESS_LOGICAL_MODEL_IDS.iter().all(|id| {
+            let model = &provider["models"][*id];
+            let metadata_valid = input.model_metadata.is_none_or(|metadata| {
+                let limits_valid = metadata.opencode_limits().map_or_else(
+                    || model.get("limit").is_none(),
+                    |(context, output)| {
+                        model["limit"] == json!({"context": context, "output": output})
+                    },
+                );
+                limits_valid
+                    && metadata.cost.as_ref().map_or_else(
+                        || model.get("cost").is_none(),
+                        |cost| model["cost"] == json!(cost),
+                    )
+            });
+            model["name"] == json!(model_name(id))
+                && model["attachment"] == json!(vision)
+                && model["modalities"]["input"] == expected_input
+                && model["modalities"]["output"] == json!(["text"])
+                && metadata_valid
+        });
         let valid = provider["npm"] == json!("@ai-sdk/openai-compatible")
             && provider["name"] == json!("token-station")
-            && provider["models"]["auto"]["name"] == json!("auto (智能路由)")
-            && provider["models"]["auto"]["attachment"] == json!(vision)
-            && provider["models"]["auto"]["modalities"]["input"] == expected_input
-            && provider["models"]["auto"]["modalities"]["output"] == json!(["text"])
+            && provider["models"].as_object().is_some_and(|models| {
+                models.len() == HARNESS_LOGICAL_MODEL_IDS.len()
+            })
+            && models_valid
             && provider["options"]["baseURL"] == json!(input.base_url)
-            && provider["options"]["apiKey"] == json!(token)
-            && metadata_valid;
+            && provider["options"]["apiKey"] == json!(token);
         if valid {
             Ok(())
         } else {
@@ -189,8 +217,8 @@ impl Connector for OpenCodeConnector {
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
         let metadata = match input.model_metadata {
-            Some(value) if value.output == 0 && value.opencode_limits().is_some() => {
-                "已同步可信上下文；输出上限使用安全默认值 8192，未改写供应商模型能力。"
+            Some(value) if value.has_compatibility_limits() => {
+                "部分供应商模型上限未知；已写入聚合后的保守 Agent 兼容值，未改写供应商模型能力。"
             }
             Some(value) if value.cost.is_some() => "已同步上下文、输出上限和统一价格。",
             Some(_) => "已同步安全的上下文和输出上限；候选价格不一致或未知，未写入虚假价格。",
@@ -198,7 +226,7 @@ impl Connector for OpenCodeConnector {
         };
         format!(
             "opencode 已加入 token-station provider(~/.config/opencode/opencode.json,已备份)。\
-             在 opencode 里选模型 tokenstation/auto 即可。{metadata}"
+             可选择 tokenstation/auto、fast、balanced 或 power。{metadata}"
         )
     }
 }
@@ -212,10 +240,25 @@ mod tests {
     use crate::agent_integration::connectors::AgentModelMetadata;
 
     #[test]
+    fn unconfigured_route_is_rejected_before_writing() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        let error = OpenCodeConnector.validate_preconditions(&input).unwrap_err();
+        assert!(error.contains("没有可达模型"), "{error}");
+    }
+
+    #[test]
     fn missing_provider_output_uses_the_opencode_safe_default() {
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 0,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: false,
@@ -237,9 +280,8 @@ mod tests {
         );
         assert!(OpenCodeConnector
             .success_message(&input)
-            .contains("输出上限使用安全默认值 8192"));
+            .contains("部分供应商模型上限未知"));
     }
-
     #[test]
     fn jsonc_connection_preserves_comments_and_unrelated_fields() {
         let source = br#"{
@@ -271,5 +313,110 @@ mod tests {
         assert!(rendered.contains("\"theme\": \"system\""));
         assert!(rendered.contains("\"existing\""));
         assert!(rendered.contains("\"tokenstation\""));
+    }
+
+    #[test]
+    fn connection_exposes_each_harness_logical_model_with_the_same_safe_metadata() {
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 16_384,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+
+        let operations = OpenCodeConnector.connect_patch(&input).unwrap();
+        let models = operations[0]
+            .value
+            .as_ref()
+            .unwrap()
+            .pointer("/models")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+
+        assert_eq!(
+            models.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["auto", "balanced", "fast", "power"]
+        );
+        for id in ["auto", "fast", "balanced", "power"] {
+            assert_eq!(
+                models[id]["limit"],
+                json!({"context": 128_000, "output": 16_384})
+            );
+            assert_eq!(models[id]["attachment"], json!(true));
+        }
+    }
+
+    #[test]
+    fn metadata_refresh_keeps_all_four_logical_models_in_sync() {
+        let initial = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
+        let refreshed = AgentModelMetadata {
+            context: 256_000,
+            output: 32_768,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let mut document = parse_source_bytes(
+            Some(br#"{"model":"tokenstation/balanced"}"#),
+            DocumentFormat::Json5,
+            "OpenCode",
+        )
+        .unwrap();
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: Some(&initial),
+        };
+        apply_patch(
+            &mut document,
+            &OpenCodeConnector.connect_patch(&input).unwrap(),
+        )
+        .unwrap();
+        let refreshed_input = ConnectInput {
+            model_metadata: Some(&refreshed),
+            ..input
+        };
+        let patch = OpenCodeConnector
+            .refresh_patch_for_document(
+                &document,
+                &refreshed_input,
+                &OpenCodeConnector.owned_paths(),
+            )
+            .unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        OpenCodeConnector
+            .validate_projected(&document, &refreshed_input)
+            .unwrap();
+        let root = semantic_json(&document).unwrap();
+
+        assert_eq!(root["model"], json!("tokenstation/balanced"));
+        for id in HARNESS_LOGICAL_MODEL_IDS {
+            let model = &root["provider"]["tokenstation"]["models"][id];
+            assert_eq!(model["limit"], json!({"context": 256_000, "output": 32_768}));
+            assert_eq!(model["attachment"], json!(true));
+        }
     }
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderView } from "../api";
@@ -124,8 +124,6 @@ describe("DirectRoutePanel", () => {
     expect(openAiRadio).toBeChecked();
     expect(openAiRow).toHaveClass("selected");
     expect(openAiRow?.querySelectorAll(".direct-selected-mark")).toHaveLength(1);
-    expect(within(openAiRow as HTMLElement).getByRole("button", { name: /调整 openai-account 顺序/ }))
-      .toHaveAttribute("aria-roledescription", "可排序项");
 
     await user.click(screen.getByRole("combobox", { name: "openai-account 模型" }));
     expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
@@ -135,7 +133,29 @@ describe("DirectRoutePanel", () => {
     expect(screen.queryByRole("option", { name: "deepseek-chat" })).toBeNull();
   });
 
-  it("applies the selected provider and model even after keyboard reordering", async () => {
+  it("shows provider identity before the model selector without manual reorder controls", () => {
+    const { container } = render(
+      <DirectRoutePanel
+        providers={providers}
+        target={null}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+      />,
+    );
+
+    const row = screen.getByRole("radio", { name: /openai-account/ }).closest(".direct-provider-row");
+    if (!row) throw new Error("openai direct row missing");
+    const provider = row.querySelector(".direct-provider-copy");
+    const model = within(row as HTMLElement).getByRole("combobox", { name: "openai-account 模型" });
+    if (!provider) throw new Error("openai provider identity missing");
+
+    expect(provider.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector(".direct-drag-handle")).toBeNull();
+    expect(container.querySelector("[aria-roledescription]")).toBeNull();
+  });
+
+  it("applies the selected provider and model", async () => {
     const onApply = vi.fn();
     const user = userEvent.setup();
     render(
@@ -153,15 +173,129 @@ describe("DirectRoutePanel", () => {
     await user.click(screen.getByRole("option", { name: "gpt-5.6-mini" }));
     expect(onApply).not.toHaveBeenCalled();
 
-    const handle = screen.getByRole("button", { name: /调整 openai-account 顺序/ });
-    await user.click(handle);
-    await user.keyboard("{ArrowUp}");
-    expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/openai-account/);
-    expect(onApply).not.toHaveBeenCalled();
-
     await user.click(screen.getByRole("button", { name: "应用" }));
     expect(onApply).toHaveBeenCalledOnce();
     expect(onApply).toHaveBeenCalledWith("openai-account", "gpt-5.6-mini");
+  });
+
+  it("moves a successfully applied provider to the top and persists the new order", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn().mockResolvedValue(true);
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={onApply}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /openai-account/ }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
+
+    await waitFor(() => expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/openai-account/));
+    expect(onApply).toHaveBeenCalledWith("openai-account", "gpt-5.6");
+    expect(JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"))
+      .toEqual(["openai-account", "deepseek-account", "empty-account"]);
+  });
+
+  it("animates changed row positions after a successful apply", async () => {
+    const user = userEvent.setup();
+    const rect = (top: number) => ({
+      x: 0,
+      y: top,
+      top,
+      right: 600,
+      bottom: top + 64,
+      left: 0,
+      width: 600,
+      height: 64,
+      toJSON: () => ({}),
+    } as DOMRect);
+    let nextFrame: FrameRequestCallback | null = null;
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      nextFrame = callback;
+      return 1;
+    });
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+
+    try {
+      const { container } = render(
+        <DirectRoutePanel
+          providers={providers}
+          target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+          busy={false}
+          applying={false}
+          onApply={vi.fn().mockResolvedValue(true)}
+        />,
+      );
+      const items = Array.from(container.querySelectorAll<HTMLElement>(".direct-provider-item"));
+      const [deepseekItem, openAiItem, emptyItem] = items;
+      let deepseekReads = 0;
+      let openAiReads = 0;
+      vi.spyOn(deepseekItem, "getBoundingClientRect")
+        .mockImplementation(() => rect(deepseekReads++ === 0 ? 0 : 72));
+      vi.spyOn(openAiItem, "getBoundingClientRect")
+        .mockImplementation(() => rect(openAiReads++ === 0 ? 72 : 0));
+      vi.spyOn(emptyItem, "getBoundingClientRect").mockImplementation(() => rect(144));
+
+      await user.click(screen.getByRole("radio", { name: /openai-account/ }));
+      await user.click(screen.getByRole("button", { name: "应用" }));
+
+      expect(openAiItem.style.transform).toBe("translate(0px, 72px)");
+      expect(deepseekItem.style.transform).toBe("translate(0px, -72px)");
+      expect(nextFrame).not.toBeNull();
+
+      act(() => nextFrame?.(performance.now()));
+      expect(openAiItem.style.transform).toBe("");
+      expect(deepseekItem.style.transform).toBe("");
+    } finally {
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+
+  it("keeps the provider order when apply fails", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn().mockResolvedValue(false);
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={onApply}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /openai-account/ }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
+
+    await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
+    expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/deepseek-account/);
+    expect(JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"))
+      .toEqual(["deepseek-account", "openai-account", "empty-account"]);
+  });
+
+  it("reports whether the selected direct target is still unapplied", async () => {
+    const user = userEvent.setup();
+    const onDraftChange = vi.fn();
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+        onDraftChange={onDraftChange}
+      />,
+    );
+
+    expect(onDraftChange).toHaveBeenLastCalledWith(false);
+    await user.click(screen.getByRole("combobox", { name: "deepseek-account 模型" }));
+    await user.click(screen.getByRole("option", { name: "deepseek-reasoner" }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(true);
   });
 
   it("keeps an un-applied model selection across an equivalent provider refresh", async () => {
@@ -210,354 +344,9 @@ describe("DirectRoutePanel", () => {
       .toHaveTextContent("gpt-5.6-mini");
   });
 
-  it("uses one accessible sortable handle and keeps the provider model bound while moving", async () => {
+  it("disables every routing control while busy", () => {
     const onApply = vi.fn();
-    const user = userEvent.setup();
     render(
-      <DirectRoutePanel
-        providers={providers}
-        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
-        busy={false}
-        applying={false}
-        onApply={onApply}
-      />,
-    );
-
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
-    expect(handle).toHaveAttribute("aria-roledescription", "可排序项");
-    expect(handle).not.toHaveAttribute("draggable");
-
-    await user.click(screen.getByRole("combobox", { name: "deepseek-account 模型" }));
-    await user.click(screen.getByRole("option", { name: "deepseek-reasoner" }));
-    await user.click(handle);
-    await user.keyboard("{ArrowDown}");
-
-    const movedRow = screen.getAllByRole("radio")[1].closest(".direct-provider-row");
-    if (!movedRow) throw new Error("moved deepseek row missing");
-    expect(within(movedRow as HTMLElement).getByRole("radio", { name: /deepseek-account/ })).toBeChecked();
-    expect(within(movedRow as HTMLElement).getByRole("combobox", { name: "deepseek-account 模型" }))
-      .toHaveTextContent("deepseek-reasoner");
-    expect(movedRow.querySelector('[data-provider-brand="deepseek"]')).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /调整 deepseek-account 顺序/ })).toHaveFocus();
-    expect(screen.getByText("已将 deepseek-account 移到第 2 项，共 3 项。"))
-      .toHaveAttribute("role", "status");
-    expect(onApply).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "应用" }));
-    expect(onApply).toHaveBeenCalledWith("deepseek-account", "deepseek-reasoner");
-  });
-
-  it("does not enter pointer dragging before the activation distance and cancels cleanly", async () => {
-    render(
-      <DirectRoutePanel
-        providers={providers}
-        target={null}
-        busy={false}
-        applying={false}
-        onApply={vi.fn()}
-      />,
-    );
-
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
-    const row = screen.getByRole("radio", { name: /deepseek-account/ }).closest(".direct-provider-row");
-    if (!row) throw new Error("deepseek direct row missing");
-    const initialOrder = screen.getAllByRole("radio").map((radio) => radio.getAttribute("aria-label"));
-
-    fireEvent.pointerDown(handle, {
-      pointerId: 1,
-      button: 0,
-      isPrimary: true,
-      clientX: 20,
-      clientY: 20,
-    });
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 20, clientY: 24 });
-    expect(row).not.toHaveClass("dragging");
-
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 20, clientY: 30 });
-    await waitFor(() => expect(row).toHaveClass("dragging"));
-
-    fireEvent.keyDown(document, { key: "Escape", code: "Escape" });
-    await waitFor(() => expect(row).not.toHaveClass("dragging"));
-    expect(screen.getAllByRole("radio").map((radio) => radio.getAttribute("aria-label")))
-      .toEqual(initialOrder);
-    expect(JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"))
-      .toEqual(["deepseek-account", "openai-account", "empty-account"]);
-  });
-
-  it("starts pointer sorting only from the dedicated drag handle", () => {
-    const { container } = render(
-      <DirectRoutePanel
-        providers={providers}
-        target={null}
-        busy={false}
-        applying={false}
-        onApply={vi.fn()}
-      />,
-    );
-    const row = screen.getByRole("radio", { name: /deepseek-account/ }).closest(".direct-provider-row");
-    if (!row) throw new Error("deepseek direct row missing");
-    const targets = [
-      row,
-      within(row as HTMLElement).getByRole("radio"),
-      row.querySelector<HTMLElement>(".direct-provider-brand"),
-      within(row as HTMLElement).getByRole("combobox", { name: "deepseek-account 模型" }),
-    ].filter((target): target is HTMLElement => Boolean(target));
-
-    targets.forEach((target, index) => {
-      fireEvent.pointerDown(target, {
-        pointerId: index + 1,
-        button: 0,
-        isPrimary: true,
-        clientX: 20,
-        clientY: 20,
-      });
-      fireEvent.pointerMove(document, { pointerId: index + 1, clientX: 20, clientY: 40 });
-      expect(row).not.toHaveClass("dragging");
-      fireEvent.pointerUp(document, { pointerId: index + 1, clientX: 20, clientY: 40 });
-    });
-    expect(container.querySelector(".direct-provider-row.dragging")).toBeNull();
-  });
-
-  it("reorders rows through the pointer sensor without changing or applying the selected target", async () => {
-    const onApply = vi.fn();
-    const { container } = render(
-      <DirectRoutePanel
-        providers={providers}
-        target={{ upstream: "openai-account", model: "gpt-5.6" }}
-        busy={false}
-        applying={false}
-        onApply={onApply}
-      />,
-    );
-    const wrappers = Array.from(container.querySelectorAll<HTMLElement>(".direct-provider-sortable"));
-    wrappers.forEach((wrapper, index) => {
-      const top = index * 72;
-      vi.spyOn(wrapper, "getBoundingClientRect").mockReturnValue({
-        x: 0,
-        y: top,
-        top,
-        right: 600,
-        bottom: top + 64,
-        left: 0,
-        width: 600,
-        height: 64,
-        toJSON: () => ({}),
-      });
-    });
-
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
-    fireEvent.pointerDown(handle, {
-      pointerId: 1,
-      button: 0,
-      isPrimary: true,
-      clientX: 20,
-      clientY: 32,
-    });
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 20, clientY: 42 });
-    await waitFor(() => expect(handle.closest(".direct-provider-row")).toHaveClass("dragging"));
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 20, clientY: 104 });
-    await waitFor(() => expect(wrappers[0].style.transform).not.toBe(""));
-    expect(wrappers[1].style.transform).toMatch(/-72px/);
-    fireEvent.pointerUp(document, { pointerId: 1, clientX: 20, clientY: 104 });
-
-    await waitFor(() => expect(screen.getAllByRole("radio")[1]).toHaveAccessibleName(/deepseek-account/));
-    expect(Array.from(container.querySelectorAll<HTMLElement>(".direct-provider-sortable"))
-      .every((wrapper) => wrapper.style.transform === "")).toBe(true);
-    expect(screen.getByRole("radio", { name: /openai-account/ })).toBeChecked();
-    expect(onApply).not.toHaveBeenCalled();
-    expect(JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"))
-      .toEqual(["openai-account", "deepseek-account", "empty-account"]);
-  });
-
-  it("keeps the order when pointer dragging ends outside every provider row", async () => {
-    const { container } = render(
-      <DirectRoutePanel
-        providers={providers}
-        target={null}
-        busy={false}
-        applying={false}
-        onApply={vi.fn()}
-      />,
-    );
-    Array.from(container.querySelectorAll<HTMLElement>(".direct-provider-sortable"))
-      .forEach((wrapper, index) => {
-        const top = index * 72;
-        vi.spyOn(wrapper, "getBoundingClientRect").mockReturnValue({
-          x: 0,
-          y: top,
-          top,
-          right: 600,
-          bottom: top + 64,
-          left: 0,
-          width: 600,
-          height: 64,
-          toJSON: () => ({}),
-        });
-      });
-    const initialOrder = screen.getAllByRole("radio").map((radio) => radio.getAttribute("aria-label"));
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
-
-    fireEvent.pointerDown(handle, {
-      pointerId: 1,
-      button: 0,
-      isPrimary: true,
-      clientX: 20,
-      clientY: 32,
-    });
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 20, clientY: 42 });
-    await waitFor(() => expect(handle.closest(".direct-provider-row")).toHaveClass("dragging"));
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 700, clientY: 500 });
-    fireEvent.pointerUp(document, { pointerId: 1, clientX: 700, clientY: 500 });
-
-    await waitFor(() => expect(handle.closest(".direct-provider-row")).not.toHaveClass("dragging"));
-    expect(screen.getAllByRole("radio").map((radio) => radio.getAttribute("aria-label")))
-      .toEqual(initialOrder);
-    expect(JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"))
-      .toEqual(["deepseek-account", "openai-account", "empty-account"]);
-  });
-
-  it("supports standard keyboard pickup, movement, drop, and focus restoration", async () => {
-    const { container } = render(
-      <DirectRoutePanel
-        providers={providers}
-        target={null}
-        busy={false}
-        applying={false}
-        onApply={vi.fn()}
-      />,
-    );
-    Array.from(container.querySelectorAll<HTMLElement>(".direct-provider-sortable"))
-      .forEach((wrapper, index) => {
-        const top = index * 72;
-        vi.spyOn(wrapper, "getBoundingClientRect").mockReturnValue({
-          x: 0,
-          y: top,
-          top,
-          right: 600,
-          bottom: top + 64,
-          left: 0,
-          width: 600,
-          height: 64,
-          toJSON: () => ({}),
-        });
-      });
-
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
-    handle.focus();
-    fireEvent.keyDown(handle, { key: " ", code: "Space" });
-    await waitFor(() => expect(handle.closest(".direct-provider-row")).toHaveClass("dragging"));
-    expect(document.querySelector('[id^="DndLiveRegion"]'))
-      .toHaveTextContent("deepseek-account 当前位于第 1 项，共 3 项。");
-    fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
-    fireEvent.keyDown(document, { key: " ", code: "Space" });
-
-    await waitFor(() => expect(screen.getAllByRole("radio")[1]).toHaveAccessibleName(/deepseek-account/));
-    expect(document.querySelector('[id^="DndLiveRegion"]'))
-      .toHaveTextContent("已将 deepseek-account 放到第 2 项，共 3 项。");
-    expect(screen.getByRole("button", { name: /调整 deepseek-account 顺序/ })).toHaveFocus();
-  });
-
-  it("supports Enter pickup and drop with focus restoration", async () => {
-    const { container } = render(
-      <DirectRoutePanel
-        providers={providers}
-        target={null}
-        busy={false}
-        applying={false}
-        onApply={vi.fn()}
-      />,
-    );
-    Array.from(container.querySelectorAll<HTMLElement>(".direct-provider-sortable"))
-      .forEach((wrapper, index) => {
-        const top = index * 72;
-        vi.spyOn(wrapper, "getBoundingClientRect").mockReturnValue({
-          x: 0,
-          y: top,
-          top,
-          right: 600,
-          bottom: top + 64,
-          left: 0,
-          width: 600,
-          height: 64,
-          toJSON: () => ({}),
-        });
-      });
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
-    handle.focus();
-
-    fireEvent.keyDown(handle, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(handle.closest(".direct-provider-row")).toHaveClass("dragging"));
-    fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
-    fireEvent.keyDown(document, { key: "Enter", code: "Enter" });
-
-    await waitFor(() => expect(screen.getAllByRole("radio")[1]).toHaveAccessibleName(/deepseek-account/));
-    expect(screen.getByRole("button", { name: /调整 deepseek-account 顺序/ })).toHaveFocus();
-  });
-
-  it("supports Enter pickup and Escape cancellation with localized instructions", async () => {
-    const { container } = render(
-      <DirectRoutePanel
-        providers={providers}
-        target={null}
-        busy={false}
-        applying={false}
-        onApply={vi.fn()}
-      />,
-    );
-    Array.from(container.querySelectorAll<HTMLElement>(".direct-provider-sortable"))
-      .forEach((wrapper, index) => {
-        const top = index * 72;
-        vi.spyOn(wrapper, "getBoundingClientRect").mockReturnValue({
-          x: 0,
-          y: top,
-          top,
-          right: 600,
-          bottom: top + 64,
-          left: 0,
-          width: 600,
-          height: 64,
-          toJSON: () => ({}),
-        });
-      });
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
-    expect(handle).toHaveAccessibleDescription(/按空格或回车拾取该供应商/);
-    handle.focus();
-
-    fireEvent.keyDown(handle, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(handle.closest(".direct-provider-row")).toHaveClass("dragging"));
-    fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
-    fireEvent.keyDown(document, { key: "Escape", code: "Escape" });
-
-    await waitFor(() => expect(handle.closest(".direct-provider-row")).not.toHaveClass("dragging"));
-    expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/deepseek-account/);
-    expect(handle).toHaveFocus();
-  });
-
-  it("does not wrap keyboard reordering at either end of the list", async () => {
-    const user = userEvent.setup();
-    render(
-      <DirectRoutePanel
-        providers={providers}
-        target={null}
-        busy={false}
-        applying={false}
-        onApply={vi.fn()}
-      />,
-    );
-
-    const initialOrder = screen.getAllByRole("radio").map((radio) => radio.getAttribute("aria-label"));
-    await user.click(screen.getByRole("button", { name: /调整 deepseek-account 顺序/ }));
-    await user.keyboard("{ArrowUp}");
-    await user.click(screen.getByRole("button", { name: /调整 empty-account 顺序/ }));
-    await user.keyboard("{ArrowDown}");
-
-    expect(screen.getAllByRole("radio").map((radio) => radio.getAttribute("aria-label")))
-      .toEqual(initialOrder);
-  });
-
-  it("disables every routing and sorting control while busy", () => {
-    const onApply = vi.fn();
-    const { container } = render(
       <DirectRoutePanel
         providers={providers}
         target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
@@ -566,44 +355,33 @@ describe("DirectRoutePanel", () => {
         onApply={onApply}
       />,
     );
-    const handle = screen.getByRole("button", { name: /调整 deepseek-account 顺序/ });
     const row = screen.getByRole("radio", { name: /deepseek-account/ }).closest(".direct-provider-row");
     if (!row) throw new Error("deepseek direct row missing");
 
-    expect(handle).toBeDisabled();
     expect(within(row as HTMLElement).getByRole("radio")).toBeDisabled();
     expect(within(row as HTMLElement).getByRole("combobox", { name: "deepseek-account 模型" }))
       .toBeDisabled();
     expect(screen.getByRole("button", { name: "应用" })).toBeDisabled();
 
-    fireEvent.pointerDown(handle, {
-      pointerId: 1,
-      button: 0,
-      isPrimary: true,
-      clientX: 20,
-      clientY: 20,
-    });
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 20, clientY: 40 });
     fireEvent.click(row);
 
-    expect(container.querySelector(".direct-provider-row.dragging")).toBeNull();
     expect(onApply).not.toHaveBeenCalled();
   });
 
-  it("restores the persisted provider order after remounting", async () => {
+  it("restores the successfully promoted provider order after remounting", async () => {
     const user = userEvent.setup();
     const firstRender = render(
       <DirectRoutePanel
         providers={providers}
-        target={null}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
         busy={false}
         applying={false}
-        onApply={vi.fn()}
+        onApply={vi.fn().mockResolvedValue(true)}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /调整 openai-account 顺序/ }));
-    await user.keyboard("{ArrowUp}");
+    await user.click(screen.getByRole("radio", { name: /openai-account/ }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
     await waitFor(() => expect(
       JSON.parse(window.localStorage.getItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY) ?? "[]"),
     ).toEqual(["openai-account", "deepseek-account", "empty-account"]));
@@ -645,14 +423,10 @@ describe("DirectRoutePanel", () => {
       expect(screen.getByRole("alert")).toHaveTextContent("无法保存供应商显示顺序");
 
       const user = userEvent.setup();
-      const handle = screen.getByRole("button", { name: /调整 openai-account 顺序/ });
-      await user.click(handle);
-      await user.keyboard("{ArrowUp}");
-      expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/openai-account/);
-
       await user.click(screen.getByRole("radio", { name: /openai-account/ }));
       await user.click(screen.getByRole("button", { name: "应用" }));
       expect(onApply).toHaveBeenCalledWith("openai-account", "gpt-5.6");
+      await waitFor(() => expect(screen.getAllByRole("radio")[0]).toHaveAccessibleName(/openai-account/));
     } finally {
       setItem.mockRestore();
     }

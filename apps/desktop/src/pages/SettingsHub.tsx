@@ -552,18 +552,12 @@ function SettingsHubContent({
               >
                 <Icon data-icon="inline-start" aria-hidden="true" />
                 <span>
-                  <strong>{item.englishLabel ? copy(
+                  {item.englishLabel ? copy(
                     item.englishLabel,
                     item.chineseLabel ?? item.englishLabel,
                     item.traditionalLabel ?? item.englishLabel,
                     item.japaneseLabel ?? item.englishLabel,
-                  ) : t(item.label)}</strong>
-                  <small>{item.englishDescription ? copy(
-                    item.englishDescription,
-                    item.chineseDescription ?? item.englishDescription,
-                    item.traditionalDescription ?? item.englishDescription,
-                    item.japaneseDescription ?? item.englishDescription,
-                  ) : t(item.description)}</small>
+                  ) : t(item.label)}
                 </span>
               </Button>
             );
