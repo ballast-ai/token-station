@@ -706,6 +706,9 @@ pub(crate) fn known_context_window(model: &str) -> u64 {
     if name.contains("claude") {
         return 200_000;
     }
+    if name == "glm-5.2" {
+        return 1_000_000;
+    }
     128_000
 }
 
@@ -724,6 +727,19 @@ pub(crate) struct BuiltinModelLimits {
 
 pub(crate) fn builtin_model_limits(base_url: &str, model: &str) -> Option<BuiltinModelLimits> {
     let endpoint = base_url.trim().trim_end_matches('/');
+    if model == "glm-5.2"
+        && matches!(
+            endpoint,
+            "https://open.bigmodel.cn/api/paas/v4"
+                | "https://api.z.ai/api/paas/v4"
+                | "https://open.wecoding.ai/v1"
+        )
+    {
+        return Some(BuiltinModelLimits {
+            context_window: 1_000_000,
+            max_output_tokens: 131_072,
+        });
+    }
     if !matches!(
         endpoint,
         "https://api.moonshot.cn/v1" | "https://api.moonshot.ai/v1"

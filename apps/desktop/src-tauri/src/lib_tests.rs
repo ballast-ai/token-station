@@ -462,6 +462,7 @@ fn known_context_window_reads_size_markers_then_family_defaults() {
     // Fall back to the family default when no marker exists.
     assert_eq!(known_context_window("gemini-2.5-pro"), 1_000_000);
     assert_eq!(known_context_window("claude-opus-4-8"), 200_000);
+    assert_eq!(known_context_window("glm-5.2"), 1_000_000);
     // Unknown families and version numbers use the 128k fallback without false inference.
     assert_eq!(known_context_window("deepseek-v4-pro"), 128_000);
     assert_eq!(known_context_window("glm-4.6"), 128_000);
@@ -500,13 +501,46 @@ fn desktop_preparation_backfills_exact_kimi_models_from_builtin_limits() {
 }
 
 #[test]
+fn desktop_preparation_backfills_official_glm_5_2_limits_for_the_wecoding_route() {
+    let draft = json!({
+        "upstreams": {
+            "wecoding": {
+                "provider": "openai-compatible",
+                "base_url": "https://open.wecoding.ai/v1",
+                "models": [{
+                    "model": "glm-5.2",
+                    "context_window": 128000,
+                    "x-token-station-context-window-source": "heuristic"
+                }]
+            }
+        }
+    });
+
+    let prepared = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+    let model = &prepared["upstreams"]["wecoding"]["models"][0];
+    assert_eq!(model["context_window"], json!(1_000_000));
+    assert_eq!(model["max_output_tokens"], json!(131_072));
+    assert_eq!(
+        model["x-token-station-context-window-source"],
+        json!("builtin_preset")
+    );
+    assert_eq!(
+        model["x-token-station-max-output-tokens-source"],
+        json!("builtin_preset")
+    );
+}
+
+#[test]
 fn builtin_limits_do_not_match_unofficial_endpoints_similar_ids_or_operator_values() {
     let draft = json!({
         "upstreams": {
             "gateway": {
                 "provider": "openai-compatible",
                 "base_url": "https://gateway.example/v1",
-                "models": [{"model": "kimi-k3", "context_window": 128000}]
+                "models": [
+                    {"model": "kimi-k3", "context_window": 128000},
+                    {"model": "glm-5.2", "context_window": 128000}
+                ]
             },
             "kimi": {
                 "provider": "openai-compatible",
@@ -527,6 +561,9 @@ fn builtin_limits_do_not_match_unofficial_endpoints_similar_ids_or_operator_valu
 
     let prepared = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
     assert!(prepared["upstreams"]["gateway"]["models"][0]
+        .get("max_output_tokens")
+        .is_none());
+    assert!(prepared["upstreams"]["gateway"]["models"][1]
         .get("max_output_tokens")
         .is_none());
     assert!(prepared["upstreams"]["kimi"]["models"][0]
