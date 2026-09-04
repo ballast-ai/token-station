@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, AgentModelMetadata, ConnectInput, Connector, ConnectorCapabilities};
+use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
@@ -22,7 +22,7 @@ const OWNED_ENV_KEYS: &[&str] = &[
 ];
 
 #[cfg(test)]
-const TRANSPORT_ENV_KEYS: &[&str] = &[
+const PRE_CUSTOM_MODEL_OWNED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "MAX_THINKING_TOKENS",
@@ -34,17 +34,30 @@ const TRANSPORT_ENV_KEYS: &[&str] = &[
 const MIN_AUTO_COMPACT_WINDOW: u32 = 100_000;
 const MAX_AUTO_COMPACT_WINDOW: u32 = 1_000_000;
 
-const CUSTOM_MODEL_ENV_VALUES: &[(&str, &str)] = &[
-    ("ANTHROPIC_CUSTOM_MODEL_OPTION", "auto"),
-    (
-        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-        "Token Station Auto",
-    ),
-    (
-        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
-        "Routes requests through the active Token Station Agent route.",
-    ),
-];
+struct CustomModelOption {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+}
+
+impl CustomModelOption {
+    fn env_values(&self) -> [(&'static str, &'static str); 3] {
+        [
+            ("ANTHROPIC_CUSTOM_MODEL_OPTION", self.id),
+            ("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", self.name),
+            (
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+                self.description,
+            ),
+        ]
+    }
+}
+
+const CUSTOM_MODEL: CustomModelOption = CustomModelOption {
+    id: "auto",
+    name: "Token Station Auto",
+    description: "Routes requests through the active Token Station Agent route.",
+};
 
 const LEGACY_DEFAULT_MODEL_ENV_VALUES: &[(&str, &str)] = &[
     ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "fast"),
@@ -52,17 +65,11 @@ const LEGACY_DEFAULT_MODEL_ENV_VALUES: &[(&str, &str)] = &[
     ("ANTHROPIC_DEFAULT_OPUS_MODEL", "power"),
 ];
 
-const LEGACY_CUSTOM_MODEL_ENV_VALUES: &[(&str, &str)] = &[
-    ("ANTHROPIC_CUSTOM_MODEL_OPTION", "claude-fable-5-1"),
-    (
-        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-        "Fable via Token Station",
-    ),
-    (
-        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
-        "Route Claude Fable through the configured Token Station pool",
-    ),
-];
+const LEGACY_CUSTOM_MODEL: CustomModelOption = CustomModelOption {
+    id: "claude-fable-5-1",
+    name: "Fable via Token Station",
+    description: "Route Claude Fable through the configured Token Station pool",
+};
 
 pub(super) static CONNECTOR: ClaudeCodeConnector = ClaudeCodeConnector;
 static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
@@ -172,14 +179,21 @@ impl Connector for ClaudeCodeConnector {
         let ConfigDocument::Json(root) = document else {
             return Err("Claude Code 连接器收到错误的配置格式".to_string());
         };
-        if root
+        if !root
             .get("env")
             .is_none_or(|value| value.is_object() || value.is_null())
         {
-            Ok(())
-        } else {
-            Err("Claude Code settings.json 的 env 必须是对象".to_string())
+            return Err("Claude Code settings.json 的 env 必须是对象".to_string());
         }
+        if !root.get("availableModels").is_none_or(|value| {
+            value.is_null()
+                || value
+                    .as_array()
+                    .is_some_and(|models| models.iter().all(serde_json::Value::is_string))
+        }) {
+            return Err("Claude Code settings.json 的 availableModels 必须是字符串数组".to_string());
+        }
+        Ok(())
     }
 
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String> {
@@ -193,20 +207,22 @@ impl Connector for ClaudeCodeConnector {
             .collect())
     }
 
+    fn connect_patch_for_document(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+    ) -> Result<Vec<PatchOperation>, String> {
+        validate_custom_model_visibility(document)?;
+        self.connect_patch(input)
+    }
+
     fn refresh_patch_for_document(
         &self,
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
         owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
-        let mut operations = self.connect_patch(input)?;
-        preserve_unowned_custom_option(document, owned_paths, &mut operations)?;
-        operations.extend(legacy_model_migration_patch(
-            document,
-            None,
-            Some(owned_paths),
-        )?);
-        Ok(operations)
+        refreshed_patch(document, None, input, owned_paths)
     }
 
     fn refresh_patch_with_baseline(
@@ -216,14 +232,7 @@ impl Connector for ClaudeCodeConnector {
         input: &ConnectInput<'_>,
         owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
-        let mut operations = self.connect_patch(input)?;
-        preserve_unowned_custom_option(document, owned_paths, &mut operations)?;
-        operations.extend(legacy_model_migration_patch(
-            document,
-            baseline,
-            Some(owned_paths),
-        )?);
-        Ok(operations)
+        refreshed_patch(document, baseline, input, owned_paths)
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
@@ -275,7 +284,8 @@ impl Connector for ClaudeCodeConnector {
         input: &ConnectInput<'_>,
         owned_paths: &[ConfigPath],
     ) -> Result<(), String> {
-        if CUSTOM_MODEL_ENV_VALUES
+        if CUSTOM_MODEL
+            .env_values()
             .iter()
             .all(|(key, _)| owned_paths.contains(&path(&["env", key])))
         {
@@ -301,7 +311,7 @@ fn managed_env_values(input: &ConnectInput<'_>) -> Result<Vec<(&'static str, Str
         .token
         .ok_or_else(|| "Claude Code 接入缺少虚拟 Key".to_string())?;
     let (context, compact_window) = route_context_values(input)?;
-    Ok(vec![
+    let mut values = vec![
         ("ANTHROPIC_BASE_URL", input.base_url.to_string()),
         ("ANTHROPIC_AUTH_TOKEN", token.to_string()),
         ("MAX_THINKING_TOKENS", "0".to_string()),
@@ -309,32 +319,34 @@ fn managed_env_values(input: &ConnectInput<'_>) -> Result<Vec<(&'static str, Str
         ("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1".to_string()),
         ("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1".to_string()),
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".to_string()),
-        (
-            CUSTOM_MODEL_ENV_VALUES[0].0,
-            CUSTOM_MODEL_ENV_VALUES[0].1.to_string(),
-        ),
-        (
-            CUSTOM_MODEL_ENV_VALUES[1].0,
-            CUSTOM_MODEL_ENV_VALUES[1].1.to_string(),
-        ),
-        (
-            CUSTOM_MODEL_ENV_VALUES[2].0,
-            CUSTOM_MODEL_ENV_VALUES[2].1.to_string(),
-        ),
+    ];
+    values.extend(
+        CUSTOM_MODEL
+            .env_values()
+            .map(|(key, value)| (key, value.to_string())),
+    );
+    values.extend([
         ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", context),
         ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", compact_window),
-    ])
+    ]);
+    Ok(values)
 }
 
 fn route_context_values(input: &ConnectInput<'_>) -> Result<(String, String), String> {
-    let (context, output) = input
+    let metadata = input
         .model_metadata
-        .and_then(AgentModelMetadata::safe_limits)
         .ok_or_else(|| {
             "Claude Code 的 Token Station Auto 缺少可信上下文或最大输出容量；本次未修改配置"
                 .to_string()
         })?;
-    let compact_window = (context - output).clamp(
+    let (context, _) = metadata.safe_limits().ok_or_else(|| {
+        "Claude Code 的 Token Station Auto 缺少可信上下文或最大输出容量；本次未修改配置"
+            .to_string()
+    })?;
+    let max_input = metadata.safe_max_input().ok_or_else(|| {
+        "Claude Code 的 Token Station Auto 缺少可信输入预算；本次未修改配置".to_string()
+    })?;
+    let compact_window = max_input.clamp(
         MIN_AUTO_COMPACT_WINDOW,
         MAX_AUTO_COMPACT_WINDOW,
     );
@@ -342,7 +354,8 @@ fn route_context_values(input: &ConnectInput<'_>) -> Result<(String, String), St
 }
 
 fn is_custom_model_key(key: &str) -> bool {
-    CUSTOM_MODEL_ENV_VALUES
+    CUSTOM_MODEL
+        .env_values()
         .iter()
         .any(|(custom_key, _)| *custom_key == key)
 }
@@ -370,15 +383,55 @@ fn validate_non_custom_fields(
     }
 }
 
-fn preserve_unowned_custom_option(
+fn refreshed_patch(
+    document: &ConfigDocument,
+    baseline: Option<&ConfigDocument>,
+    input: &ConnectInput<'_>,
+    owned_paths: &[ConfigPath],
+) -> Result<Vec<PatchOperation>, String> {
+    validate_custom_model_visibility(document)?;
+    let mut operations = ClaudeCodeConnector.connect_patch(input)?;
+    reject_unowned_custom_option_conflict(document, owned_paths)?;
+    operations.extend(legacy_model_migration_patch(
+        document,
+        baseline,
+        Some(owned_paths),
+    )?);
+    Ok(operations)
+}
+
+fn validate_custom_model_visibility(document: &ConfigDocument) -> Result<(), String> {
+    let ConfigDocument::Json(root) = document else {
+        return Err("Claude Code 连接器收到错误的配置格式".to_string());
+    };
+    let Some(available) = root
+        .get("availableModels")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(());
+    };
+    if available
+        .iter()
+        .any(|model| model.as_str() == Some(CUSTOM_MODEL.id))
+    {
+        Ok(())
+    } else {
+        Err(
+            "Claude Code 的 availableModels 未允许 `auto`，Token Station Auto 会被隐藏；请先在该允许列表中加入 `auto`"
+                .to_string(),
+        )
+    }
+}
+
+fn reject_unowned_custom_option_conflict(
     document: &ConfigDocument,
     owned_paths: &[ConfigPath],
-    operations: &mut Vec<PatchOperation>,
 ) -> Result<(), String> {
     let ConfigDocument::Json(root) = document else {
         return Err("Claude Code 连接器收到错误的配置格式".to_string());
     };
-    if CUSTOM_MODEL_ENV_VALUES
+    if CUSTOM_MODEL
+        .env_values()
         .iter()
         .any(|(key, _)| owned_paths.contains(&path(&["env", key])))
     {
@@ -386,25 +439,26 @@ fn preserve_unowned_custom_option(
     }
 
     let env = root.get("env").and_then(serde_json::Value::as_object);
-    let slot_is_available = CUSTOM_MODEL_ENV_VALUES.iter().all(|(key, expected)| {
+    let slot_is_available = CUSTOM_MODEL.env_values().iter().all(|(key, expected)| {
         let current = env
             .and_then(|env| env.get(*key))
             .and_then(serde_json::Value::as_str);
         current.is_none()
             || current == Some(*expected)
-            || LEGACY_CUSTOM_MODEL_ENV_VALUES
+            || LEGACY_CUSTOM_MODEL
+                .env_values()
                 .iter()
                 .find_map(|(legacy_key, legacy)| (*legacy_key == *key).then_some(*legacy))
                 == current
     });
-    if !slot_is_available {
-        operations.retain(|operation| {
-            !CUSTOM_MODEL_ENV_VALUES
-                .iter()
-                .any(|(key, _)| operation.path == path(&["env", key]))
-        });
+    if slot_is_available {
+        Ok(())
+    } else {
+        Err(
+            "Claude Code 的唯一自定义模型槽位已被用户修改；请先断开后重新连接，以确认由 Token Station Auto 接管该槽位"
+                .to_string(),
+        )
     }
-    Ok(())
 }
 
 fn legacy_model_migration_patch(
@@ -428,7 +482,7 @@ fn legacy_model_migration_patch(
     });
     let legacy_custom_option_was_selected = owned_paths.is_some_and(|paths| {
         paths.contains(&path(&["env", "ANTHROPIC_CUSTOM_MODEL_OPTION"]))
-            && LEGACY_CUSTOM_MODEL_ENV_VALUES.iter().all(|(key, value)| {
+            && LEGACY_CUSTOM_MODEL.env_values().iter().all(|(key, value)| {
                 env.and_then(|env| env.get(*key))
                     .and_then(serde_json::Value::as_str)
                     == Some(*value)
@@ -495,11 +549,13 @@ fn native_model_selection(model: &str, legacy_custom_option_was_selected: bool) 
 mod tests {
     use super::*;
     use crate::agent_integration::config_codec::{apply_patch, parse_source_bytes, semantic_json};
+    use crate::agent_integration::connectors::AgentModelMetadata;
 
     fn route_metadata(context: u32, output: u32) -> AgentModelMetadata {
         AgentModelMetadata {
             context,
             output,
+            max_input: context - output,
             vision: true,
             tools: true,
             reasoning: false,
@@ -661,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_refresh_does_not_claim_a_custom_option_added_after_connection() {
+    fn managed_refresh_rejects_a_custom_option_changed_after_connection() {
         let metadata = route_metadata(128_000, 32_768);
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/claude-code",
@@ -669,7 +725,7 @@ mod tests {
             adapter_ready: true,
             model_metadata: Some(&metadata),
         };
-        let mut document = parse_source_bytes(
+        let document = parse_source_bytes(
             Some(
                 br#"{
                     "env": {
@@ -683,37 +739,23 @@ mod tests {
             "Claude Code",
         )
         .unwrap();
-        let previously_owned = TRANSPORT_ENV_KEYS
+        let previously_owned = PRE_CUSTOM_MODEL_OWNED_ENV_KEYS
             .iter()
             .map(|key| path(&["env", key]))
             .collect::<Vec<_>>();
 
-        let patch = ClaudeCodeConnector
-            .refresh_patch_for_document(&document, &input, &previously_owned)
-            .unwrap();
-        apply_patch(&mut document, &patch).unwrap();
-        let newly_owned = previously_owned
-            .iter()
-            .filter(|path| patch.iter().any(|operation| operation.path == **path))
-            .cloned()
-            .collect::<Vec<_>>();
-        ClaudeCodeConnector
-            .validate_refresh_projected(&document, &input, &newly_owned)
-            .unwrap();
-        let root = semantic_json(&document).unwrap();
-        let env = root["env"].as_object().unwrap();
-
-        assert_eq!(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], json!("user-custom"));
-        assert_eq!(env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"], json!("User model"));
+        let Err(error) = ClaudeCodeConnector.refresh_patch_for_document(
+            &document,
+            &input,
+            &previously_owned,
+        ) else {
+            panic!("a changed custom model slot must block managed refresh");
+        };
+        assert!(error.contains("唯一自定义模型槽位已被用户修改"));
         assert_eq!(
-            env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"],
-            json!("User description")
+            semantic_json(&document).unwrap()["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION"],
+            json!("user-custom")
         );
-        assert!(newly_owned.iter().all(|owned| {
-            !CUSTOM_MODEL_ENV_VALUES
-                .iter()
-                .any(|(key, _)| *owned == path(&["env", key]))
-        }));
     }
 
     #[test]
@@ -801,5 +843,27 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("缺少可信上下文或最大输出容量"));
         assert!(ClaudeCodeConnector.connect_patch(&input).is_err());
+    }
+
+    #[test]
+    fn connection_rejects_an_allowlist_that_would_hide_token_station_auto() {
+        let metadata = route_metadata(200_000, 32_000);
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/claude-code",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let document = parse_source_bytes(
+            Some(br#"{"availableModels":["opus","sonnet"]}"#),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
+
+        let Err(error) = ClaudeCodeConnector.connect_patch_for_document(&document, &input) else {
+            panic!("a hidden custom option must block connection");
+        };
+        assert!(error.contains("availableModels 未允许 `auto`"));
     }
 }

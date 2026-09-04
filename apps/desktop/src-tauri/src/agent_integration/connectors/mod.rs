@@ -43,6 +43,10 @@ impl AgentModelCost {
 pub struct AgentModelMetadata {
     pub context: u32,
     pub output: u32,
+    /// Smallest verified `context - max_output` budget across every reachable
+    /// target. Zero means an older/manual fixture that should derive the value
+    /// from the aggregate safe limits.
+    pub max_input: u32,
     pub vision: bool,
     pub tools: bool,
     pub reasoning: bool,
@@ -55,6 +59,18 @@ impl AgentModelMetadata {
     pub fn safe_limits(&self) -> Option<(u32, u32)> {
         (self.context > 0 && self.output > 0 && self.output < self.context)
             .then_some((self.context, self.output))
+    }
+
+    pub fn safe_max_input(&self) -> Option<u32> {
+        let derived = self
+            .safe_limits()
+            .map(|(context, output)| context - output)?;
+        let max_input = if self.max_input == 0 {
+            derived
+        } else {
+            self.max_input
+        };
+        (max_input > 0 && max_input < self.context).then_some(max_input)
     }
 
     pub fn opencode_limits(&self) -> Option<(u32, u32)> {
@@ -288,6 +304,18 @@ mod tests {
     };
     use crate::agent_integration::types::PatchKind;
 
+    fn standard_test_metadata() -> AgentModelMetadata {
+        AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            max_input: 0,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        }
+    }
+
     #[test]
     fn connector_patch_cannot_escape_owned_paths() {
         let operation = PatchOperation {
@@ -402,6 +430,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -467,6 +496,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: true,
@@ -518,6 +548,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: true,
@@ -596,6 +627,7 @@ mod tests {
             let metadata = AgentModelMetadata {
                 context,
                 output,
+                max_input: 0,
                 vision: false,
                 tools: true,
                 reasoning: true,
@@ -616,6 +648,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: u32::MAX,
             output: u32::MAX - 1,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: true,
@@ -639,6 +672,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: true,
@@ -681,6 +715,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: true,
@@ -1010,6 +1045,7 @@ mod tests {
             model_metadata: Some(&AgentModelMetadata {
                 context: 257_550,
                 output: 32_768,
+                max_input: 0,
                 vision: true,
                 tools: true,
                 reasoning: true,
@@ -1061,6 +1097,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 257_550,
             output: 32_768,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1107,6 +1144,7 @@ mod tests {
             model_metadata: Some(&AgentModelMetadata {
                 context: 257_550,
                 output: 32_768,
+                max_input: 0,
                 vision: true,
                 tools: true,
                 reasoning: true,
@@ -1165,6 +1203,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 257_550,
             output: 32_768,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1282,6 +1321,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 0,
             output: 0,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1438,6 +1478,7 @@ experimental_bearer_token = "fixture-codex-key"
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 16_384,
+            max_input: 0,
             vision: false,
             tools: false,
             reasoning: false,
@@ -1484,14 +1525,7 @@ experimental_bearer_token = "fixture-codex-key"
 
     #[test]
     fn connectors_recover_only_null_optional_object_containers() {
-        let metadata = AgentModelMetadata {
-            context: 128_000,
-            output: 8_192,
-            vision: true,
-            tools: true,
-            reasoning: false,
-            cost: None,
-        };
+        let metadata = standard_test_metadata();
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
@@ -1554,14 +1588,7 @@ experimental_bearer_token = "fixture-codex-key"
                 "model 必须是对象",
             ),
         ];
-        let metadata = AgentModelMetadata {
-            context: 128_000,
-            output: 8_192,
-            vision: true,
-            tools: true,
-            reasoning: false,
-            cost: None,
-        };
+        let metadata = standard_test_metadata();
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
@@ -1611,14 +1638,7 @@ experimental_bearer_token = "fixture-codex-key"
     #[test]
     fn connector_contract_matrix_covers_metadata_preconditions_projection_and_disconnect() {
         let home = Path::new("/fixture/home");
-        let metadata = AgentModelMetadata {
-            context: 128_000,
-            output: 8_192,
-            vision: true,
-            tools: true,
-            reasoning: false,
-            cost: None,
-        };
+        let metadata = standard_test_metadata();
         let good = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-virtual-key"),

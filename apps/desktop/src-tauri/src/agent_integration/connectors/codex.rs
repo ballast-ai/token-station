@@ -151,15 +151,20 @@ impl Connector for CodexConnector {
                 .into_iter()
                 .map(|(field, value)| replace(&["model_providers", "tokenstation", field], value)),
         );
-        if let Some((context, output)) = input
+        if let Some((context, _)) = input
             .model_metadata
             .and_then(AgentModelMetadata::safe_limits)
         {
             operations.push(replace(&["model_context_window"], json!(context)));
-            operations.push(replace(
-                &["model_auto_compact_token_limit"],
-                json!(context - output),
-            ));
+            if let Some(max_input) = input
+                .model_metadata
+                .and_then(AgentModelMetadata::safe_max_input)
+            {
+                operations.push(replace(
+                    &["model_auto_compact_token_limit"],
+                    json!(max_input),
+                ));
+            }
         }
         // Older connectors wrote env_key. Codex prefers it over the embedded
         // bearer token, so leaving it behind makes a GUI connection depend on
@@ -847,6 +852,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 8_192,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: true,
@@ -991,6 +997,7 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 32_000,
             output: 4_000,
+            max_input: 0,
             vision: false,
             tools: true,
             reasoning: true,

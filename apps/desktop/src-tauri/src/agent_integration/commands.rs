@@ -351,6 +351,7 @@ struct CommandSession {
     plans: HashMap<String, StoredPlan>,
 }
 
+#[derive(Clone)]
 pub struct AgentProxyRuntime {
     instance_id: String,
     connector_base_urls: BTreeMap<String, String>,
@@ -472,6 +473,22 @@ impl AgentProxyRuntime {
     fn connection_issue(&self, connector_id: &str) -> Option<&AgentConnectionIssueView> {
         self.connection_issues.get(connector_id)
     }
+
+    pub(crate) fn model_metadata(&self, agent_id: &str) -> Option<&AgentModelMetadata> {
+        self.model_metadata.get(agent_id)
+    }
+
+    pub(crate) fn replace_model_metadata(
+        &mut self,
+        agent_id: &str,
+        metadata: Option<AgentModelMetadata>,
+    ) {
+        if let Some(metadata) = metadata {
+            self.model_metadata.insert(agent_id.to_string(), metadata);
+        } else {
+            self.model_metadata.remove(agent_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -491,6 +508,14 @@ fn configured_router_for_agent(
         Some(router) => Ok(router),
         None => config.home_router_config(),
     }
+}
+
+pub(crate) fn model_metadata_for_config(
+    config: &token_station_cli::config::ClientConfig,
+    agent_id: &str,
+) -> Result<Option<AgentModelMetadata>, String> {
+    let router = configured_router_for_agent(config, agent_id)?;
+    agent_model_metadata_for_router(config, &router)
 }
 
 fn agent_model_metadata_for_router(
@@ -522,6 +547,7 @@ fn agent_model_metadata_for_router(
 
     let mut context = Some(u32::MAX);
     let mut output = Some(u32::MAX);
+    let mut max_input = Some(u32::MAX);
     let mut vision = true;
     let mut tools = true;
     let mut reasoning = true;
@@ -540,6 +566,15 @@ fn agent_model_metadata_for_router(
             return Ok(None);
         };
         let max_output = (capability.max_output_tokens > 0).then_some(capability.max_output_tokens);
+        max_input = max_input.and_then(|current| {
+            max_output.and_then(|output| {
+                capability
+                    .context_window
+                    .checked_sub(output)
+                    .filter(|input| *input > 0)
+                    .map(|input| current.min(input))
+            })
+        });
         context = context.and_then(|current| {
             (capability.context_window > 0).then_some(current.min(capability.context_window))
         });
@@ -574,9 +609,11 @@ fn agent_model_metadata_for_router(
     });
     let context = context.unwrap_or(0);
     let output = output.unwrap_or(0);
+    let max_input = max_input.unwrap_or(0);
     Ok(Some(AgentModelMetadata {
         context,
         output,
+        max_input,
         vision,
         tools,
         reasoning,
@@ -970,6 +1007,7 @@ fn validate_force_forget_reconnect(
     let metadata = AgentModelMetadata {
         context: 131_072,
         output: 8_192,
+        max_input: 0,
         vision: true,
         tools: true,
         reasoning: true,
@@ -2936,16 +2974,21 @@ mod tests {
         }
     }
 
-    fn prepared(target: &Path, secret: &str, now_ms: u64) -> PreparedChangePlan {
-        let source = read_config_source(target).unwrap();
-        let metadata = AgentModelMetadata {
+    fn fixture_model_metadata() -> AgentModelMetadata {
+        AgentModelMetadata {
             context: 200_000,
             output: 32_000,
+            max_input: 0,
             vision: true,
             tools: true,
             reasoning: false,
             cost: None,
-        };
+        }
+    }
+
+    fn prepared(target: &Path, secret: &str, now_ms: u64) -> PreparedChangePlan {
+        let source = read_config_source(target).unwrap();
+        let metadata = fixture_model_metadata();
         build_connection_plan(
             connector_for("claude-code-v1").unwrap(),
             &record(target, false),
@@ -2971,14 +3014,7 @@ mod tests {
             .iter()
             .map(|connector| (connector.capabilities().adapter_id.to_string(), true))
             .collect();
-        let metadata = AgentModelMetadata {
-            context: 200_000,
-            output: 32_000,
-            vision: true,
-            tools: true,
-            reasoning: false,
-            cost: None,
-        };
+        let metadata = fixture_model_metadata();
         let model_metadata = builtin_connectors()
             .iter()
             .map(|connector| (connector.agent_id().to_string(), metadata.clone()))
@@ -3023,8 +3059,8 @@ mod tests {
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
         draft["routing"]["mode"] = json!("tiered");
         for (name, context, output) in [
-            ("provider_a", 257_550, 32_768),
-            ("provider_b", 128_000, 16_384),
+            ("provider_a", 128_000, 64_000),
+            ("provider_b", 200_000, 16_384),
         ] {
             draft["upstreams"][name] = json!({
                 "provider": "openai-compatible",
@@ -3051,6 +3087,7 @@ mod tests {
         let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
         assert_eq!(metadata.context, 128_000);
         assert_eq!(metadata.output, 16_384);
+        assert_eq!(metadata.max_input, 64_000);
         assert!(metadata.vision);
         assert!(metadata.tools);
         assert!(metadata.reasoning);
@@ -3061,6 +3098,7 @@ mod tests {
             .expect("Claude Code inherits the same effective home route");
         assert_eq!(claude.context, 128_000);
         assert_eq!(claude.output, 16_384);
+        assert_eq!(claude.max_input, 64_000);
 
         draft["agent_routes"]["workbuddy"] = json!({
             "mode": "custom",
@@ -3076,8 +3114,9 @@ mod tests {
         let workbuddy = agent_model_metadata(&workbuddy_config, "workbuddy")
             .unwrap()
             .unwrap();
-        assert_eq!(workbuddy.context, 257_550);
-        assert_eq!(workbuddy.output, 32_768);
+        assert_eq!(workbuddy.context, 128_000);
+        assert_eq!(workbuddy.output, 64_000);
+        assert_eq!(workbuddy.max_input, 64_000);
 
         draft["upstreams"]["provider_b"]["models"][0]["catalog_cost"]["output"] = json!(0.7);
         draft["upstreams"]["provider_b"]["models"][0]["vision"] = json!(false);
