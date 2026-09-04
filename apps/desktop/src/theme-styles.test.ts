@@ -556,18 +556,16 @@ describe("retained page theme styles", () => {
     expect(codeBlockRule).toMatch(/border:\s*1px solid var\(--line\)/);
   });
 
-  it("shows a distinct Direct row dragging state and disables its motion when requested", () => {
-    const draggingRule = appCss.match(/\.direct-provider-row\.dragging\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const draggingWrapperRule = appCss.match(/\.direct-provider-sortable\.dragging\s*\{([^}]*)\}/s)?.[1] ?? "";
+  it("animates Direct provider promotion and disables its motion when requested", () => {
+    const providerItemRule = appCss.match(/\.direct-provider-item\s*\{([^}]*)\}/s)?.[1] ?? "";
     const reducedMotion = Array.from(
       appCss.matchAll(/@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}/g),
       (match) => match[1],
     ).join("\n");
 
-    expect(draggingRule).toMatch(/box-shadow:/);
-    expect(draggingRule).toMatch(/opacity:/);
-    expect(draggingWrapperRule).toMatch(/z-index:/);
-    expect(reducedMotion).toMatch(/\.direct-provider-sortable[^}]*transition:\s*none/);
+    expect(providerItemRule).toMatch(/transition:\s*transform 280ms/);
+    expect(providerItemRule).toMatch(/cubic-bezier\(\.22, 1, \.36, 1\)/);
+    expect(reducedMotion).toMatch(/\.direct-provider-item[^}]*transition:\s*none/);
     expect(reducedMotion).toMatch(/\.direct-provider-row[^}]*transition:\s*none/);
   });
 
