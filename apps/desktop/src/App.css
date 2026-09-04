@@ -7758,10 +7758,12 @@ pre.block {
 .direct-provider-row {
   min-height: 64px;
   display: grid;
-  grid-template-columns: 40px minmax(125px, .65fr) minmax(210px, 1fr) 20px;
+  grid-template-columns: 40px minmax(140px, 220px) minmax(300px, 720px) 20px;
   align-items: center;
-  gap: 10px;
-  padding: 8px 11px 8px 7px;
+  justify-content: center;
+  gap: clamp(12px, 1.4vw, 18px);
+  padding-block: 8px;
+  padding-inline: clamp(14px, 3vw, 48px);
   border: 1px solid var(--line);
   border-radius: 10px;
   color: var(--ink);

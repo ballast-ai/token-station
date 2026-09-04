@@ -556,6 +556,16 @@ describe("retained page theme styles", () => {
     expect(codeBlockRule).toMatch(/border:\s*1px solid var\(--line\)/);
   });
 
+  it("keeps wide Direct provider controls in one centered visual group", () => {
+    const providerRowRule = appCss.match(/\.direct-provider-row\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(providerRowRule).toMatch(
+      /grid-template-columns:\s*40px minmax\(140px, 220px\) minmax\(300px, 720px\) 20px/,
+    );
+    expect(providerRowRule).toMatch(/justify-content:\s*center/);
+    expect(providerRowRule).toMatch(/padding-inline:\s*clamp\(14px, 3vw, 48px\)/);
+  });
+
   it("animates Direct provider promotion and disables its motion when requested", () => {
     const providerItemRule = appCss.match(/\.direct-provider-item\s*\{([^}]*)\}/s)?.[1] ?? "";
     const reducedMotion = Array.from(
