@@ -787,6 +787,115 @@ pub(crate) fn source_is_default(source: Option<&str>) -> bool {
     )
 }
 
+/// Merge Provider-reported capacity facts without treating built-in presets or
+/// name-based heuristics as Provider truth. An output-only report may invalidate
+/// a default context; preserve the reported output and leave context unknown so
+/// Agent projections can use their own compatibility budget.
+pub(crate) fn apply_provider_reported_limits(
+    capability: &mut Value,
+    reported_context: Option<u32>,
+    reported_output: Option<u32>,
+) -> bool {
+    let mut changed = false;
+    if let Some(context) = reported_context {
+        let source = json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY);
+        if (capability["context_window"].as_u64().unwrap_or_default() == 0
+            || source_is_default(source)
+            || source == Some(LIMIT_SOURCE_PROVIDER))
+            && (capability["context_window"].as_u64() != Some(u64::from(context))
+                || source != Some(LIMIT_SOURCE_PROVIDER))
+        {
+            let configured_output = capability["max_output_tokens"].as_u64().unwrap_or_default();
+            let output_source = json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY);
+            let stale_output = configured_output >= u64::from(context)
+                && configured_output > 0
+                && (source_is_default(output_source)
+                    || output_source == Some(LIMIT_SOURCE_PROVIDER));
+            let protected_conflict = configured_output >= u64::from(context)
+                && configured_output > 0
+                && !stale_output;
+            if !protected_conflict {
+                if stale_output {
+                    capability
+                        .as_object_mut()
+                        .expect("model capability is an object")
+                        .remove("max_output_tokens");
+                    capability
+                        .as_object_mut()
+                        .expect("model capability is an object")
+                        .remove(MAX_OUTPUT_TOKENS_SOURCE_KEY);
+                }
+                capability["context_window"] = json!(context);
+                capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+                changed = true;
+            }
+        }
+    }
+
+    let effective_context = capability["context_window"].as_u64().unwrap_or_default();
+    let configured_output = capability["max_output_tokens"].as_u64().unwrap_or_default();
+    if effective_context > 0
+        && configured_output >= effective_context
+        && configured_output > 0
+        && source_is_default(json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY))
+    {
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove("max_output_tokens");
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove(MAX_OUTPUT_TOKENS_SOURCE_KEY);
+        changed = true;
+    }
+
+    let Some(output) = reported_output else {
+        return changed;
+    };
+    let output_source =
+        json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY).map(str::to_owned);
+    if capability["max_output_tokens"].as_u64().unwrap_or_default() > 0
+        && !source_is_default(output_source.as_deref())
+        && output_source.as_deref() != Some(LIMIT_SOURCE_PROVIDER)
+    {
+        return changed;
+    }
+
+    let mut effective_context = capability["context_window"].as_u64().unwrap_or_default();
+    if reported_context.is_none()
+        && effective_context > 0
+        && u64::from(output) >= effective_context
+        && matches!(
+            json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY),
+            Some(
+                LIMIT_SOURCE_BUILTIN_PRESET | LIMIT_SOURCE_HEURISTIC | LIMIT_SOURCE_PROVIDER
+            )
+        )
+    {
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove("context_window");
+        capability
+            .as_object_mut()
+            .expect("model capability is an object")
+            .remove(CONTEXT_WINDOW_SOURCE_KEY);
+        effective_context = 0;
+        changed = true;
+    }
+
+    if (effective_context == 0 || u64::from(output) < effective_context)
+        && (capability["max_output_tokens"].as_u64() != Some(u64::from(output))
+            || output_source.as_deref() != Some(LIMIT_SOURCE_PROVIDER))
+    {
+        capability["max_output_tokens"] = json!(output);
+        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+        changed = true;
+    }
+    changed
+}
+
 pub(crate) fn apply_builtin_model_limits_to_upstream(upstream: &mut Value) -> bool {
     let base_url = upstream["base_url"].as_str().unwrap_or_default().to_owned();
     let Some(models) = upstream["models"].as_array_mut() else {
@@ -812,8 +921,11 @@ pub(crate) fn apply_builtin_model_limits_to_upstream(upstream: &mut Value) -> bo
             && context_source
                 .as_deref()
                 .is_none_or(|source| source == LIMIT_SOURCE_HEURISTIC);
+        let provider_output_blocks_context = output_source.as_deref() == Some(LIMIT_SOURCE_PROVIDER)
+            && output >= u64::from(preset.context_window);
 
         if (context == 0 || legacy_heuristic || source_is_default(context_source.as_deref()))
+            && !provider_output_blocks_context
             && (context != u64::from(preset.context_window)
                 || context_source.as_deref() != Some(LIMIT_SOURCE_BUILTIN_PRESET))
         {
@@ -875,6 +987,7 @@ pub(crate) fn add_provider(
         None,
         "openai-compatible",
         false,
+        None,
     )
 }
 
@@ -890,6 +1003,7 @@ pub(crate) fn add_provider_with_credential(
     credential_source: String,
     credential_reference: Option<String>,
     provider_dialect: Option<String>,
+    catalog_revision: Option<u64>,
 ) -> Result<StateView, String> {
     let provider_dialect = provider_dialect.as_deref().unwrap_or("openai-compatible");
     add_provider_impl(
@@ -903,6 +1017,7 @@ pub(crate) fn add_provider_with_credential(
         credential_reference.as_deref(),
         provider_dialect,
         false,
+        catalog_revision,
     )
 }
 
@@ -977,6 +1092,7 @@ pub(crate) fn add_managed_enterprise_route(
             None,
             "openai-compatible",
             true,
+            None,
         );
         if result.is_ok() {
             return result;
@@ -1153,6 +1269,7 @@ pub(crate) fn add_provider_impl(
     credential_reference: Option<&str>,
     provider_dialect: &str,
     managed_route: bool,
+    catalog_revision: Option<u64>,
 ) -> Result<StateView, String> {
     if !matches!(provider_dialect, "openai-compatible" | "azure-openai-v1") {
         return Err("Provider dialect 不受支持".to_owned());
@@ -1226,9 +1343,36 @@ pub(crate) fn add_provider_impl(
     };
     let models = normalize_provider_model_ids(models)?;
     let managed_model = managed_route.then(|| models[0].clone());
+    let discovered_limits = catalog_revision
+        .filter(|_| provider_dialect == "openai-compatible")
+        .and_then(|revision| {
+            model_catalog::live_catalog_at_revision(
+                &data_dir,
+                &name,
+                &base_url,
+                revision,
+            )
+        })
+        .unwrap_or_default();
+    let discovered_by_model: std::collections::BTreeMap<&str, &model_catalog::CatalogModelView> =
+        discovered_limits
+            .iter()
+            .filter(|model| model.catalog_state == model_catalog::CatalogState::Active)
+            .map(|model| (model.model.as_str(), model))
+            .collect();
     let model_objs: Vec<Value> = models
         .iter()
-        .map(|model| provider_model_capability(&base_url, model, managed_route))
+        .map(|model| {
+            let mut capability = provider_model_capability(&base_url, model, managed_route);
+            if let Some(discovered) = discovered_by_model.get(model.as_str()) {
+                apply_provider_reported_limits(
+                    &mut capability,
+                    discovered.context_window,
+                    discovered.max_output_tokens,
+                );
+            }
+            capability
+        })
         .collect();
     // A previous interrupted removal may have left only derived catalog data.
     // New Provider identity must never inherit it, even with the same name/URL.

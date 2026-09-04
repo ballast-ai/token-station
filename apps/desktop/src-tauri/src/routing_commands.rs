@@ -702,6 +702,7 @@ mod tests {
             context,
             output,
             max_input,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,

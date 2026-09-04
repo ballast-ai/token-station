@@ -300,9 +300,29 @@ fn merge_live_catalog(
         }
         if live_model.context_window.is_some() {
             record.context_window = live_model.context_window;
+            if live_model.max_output_tokens.is_none()
+                && record
+                    .max_output_tokens
+                    .zip(live_model.context_window)
+                    .is_some_and(|(output, context)| output >= context)
+            {
+                // The new context is fresher than an omitted cached output.
+                // Never synthesize a contradictory pair across revisions.
+                record.max_output_tokens = None;
+            }
         }
         if live_model.max_output_tokens.is_some() {
             record.max_output_tokens = live_model.max_output_tokens;
+            if live_model.context_window.is_none()
+                && record
+                    .context_window
+                    .zip(live_model.max_output_tokens)
+                    .is_some_and(|(context, output)| output >= context)
+            {
+                // Symmetrically prefer the newly observed output over an
+                // omitted, incompatible cached context.
+                record.context_window = None;
+            }
         }
         if live_model.cost.is_some() {
             record.cost = live_model.cost.clone();
@@ -475,8 +495,14 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
             .or_else(|| bounded_u32(item.get("context_window")))
             .or_else(|| bounded_u32(item.get("context_length")));
         let max_output_tokens = bounded_u32(item.pointer("/limit/output"))
-            .or_else(|| bounded_u32(item.get("max_output_tokens")))
-            .filter(|output| context_window.is_none_or(|context| *output <= context));
+            .or_else(|| bounded_u32(item.get("max_output_tokens")));
+        if let (Some(context), Some(output)) = (context_window, max_output_tokens) {
+            if output >= context {
+                return Err(format!(
+                    "模型 `{model}` 的最大输出 {output} 必须小于上下文 {context}"
+                ));
+            }
+        }
         let cost = catalog_cost(item.get("cost"));
         models
             .entry(model.to_owned())
@@ -510,6 +536,16 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
             return Err(format!(
                 "模型数量超过单供应商 {MAX_MODELS_PER_PROVIDER} 个上限"
             ));
+        }
+    }
+    for model in models.values() {
+        if let (Some(context), Some(output)) = (model.context_window, model.max_output_tokens) {
+            if output >= context {
+                return Err(format!(
+                    "模型 `{}` 的合并最大输出 {output} 必须小于上下文 {context}",
+                    model.model
+                ));
+            }
         }
     }
     Ok(models.into_values().collect())
@@ -783,6 +819,22 @@ pub(crate) fn catalog_for_provider(
     (revision, catalog.into_values().collect())
 }
 
+/// Return one exact Provider catalog revision for atomic use by Add Provider.
+/// Cache entries are written only after a successful live fetch; stale fallback reads do not
+/// advance the revision. Provider identity is bound by both name and normalized Base URL.
+pub(crate) fn live_catalog_at_revision(
+    data_dir: &Path,
+    name: &str,
+    base_url: &str,
+    revision: u64,
+) -> Option<Vec<CatalogModelView>> {
+    (revision > 0)
+        .then(|| read_cached_entry(data_dir, name, base_url))
+        .flatten()
+        .filter(|entry| entry.revision == revision)
+        .map(|entry| entry.models)
+}
+
 fn write_cache(data_dir: &Path, name: &str, entry: CacheEntry) -> Result<(), String> {
     let _guard = CACHE_WRITE_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -885,8 +937,9 @@ fn now_ms() -> u64 {
 mod tests {
     use super::{
         catalog_for_provider, discover_with_cache, discover_with_cache_egress, fetch_models,
-        parse_models, read_cached_entry, remove_provider, status_message, unknown_catalog_model,
-        write_cache, CacheEntry, CatalogSource, CatalogState, MAX_MODELS_PER_PROVIDER,
+        merge_live_catalog, parse_models, read_cached_entry, remove_provider, status_message,
+        unknown_catalog_model, write_cache, CacheEntry, CatalogSource, CatalogState,
+        MAX_MODELS_PER_PROVIDER,
         MAX_MODEL_ID_BYTES,
     };
     use serde_json::json;
@@ -1058,6 +1111,33 @@ mod tests {
         assert_eq!(models[0].context_window, None);
         assert_eq!(models[0].max_output_tokens, None);
         assert_eq!(models[0].cost, None);
+    }
+
+    #[test]
+    fn contradictory_positive_model_limits_reject_the_untrusted_catalog() {
+        let error = parse_models(&json!({
+            "data": [{
+                "id": "unsafe",
+                "context_window": 8_192,
+                "max_output_tokens": 8_192
+            }]
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("最大输出 8192 必须小于上下文 8192"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_rows_cannot_merge_into_a_contradictory_limit_pair() {
+        let error = parse_models(&json!({
+            "data": [
+                {"id": "unsafe", "context_window": 8_000},
+                {"id": "unsafe", "max_output_tokens": 9_000}
+            ]
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("合并最大输出 9000"), "{error}");
     }
 
     #[test]
@@ -1337,6 +1417,67 @@ mod tests {
         }));
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn partial_refreshes_never_merge_into_a_contradictory_limit_pair() {
+        let mut prior_output = unknown_catalog_model(
+            "model".to_owned(),
+            CatalogSource::Live,
+            Some(1),
+            CatalogState::Active,
+        );
+        prior_output.max_output_tokens = Some(200_000);
+        let previous = CacheEntry {
+            base_url: "https://provider.example/v1".to_owned(),
+            revision: 1,
+            models: vec![prior_output],
+            fetched_at_ms: 1,
+        };
+        let mut fresh_context = unknown_catalog_model(
+            "model".to_owned(),
+            CatalogSource::Live,
+            Some(2),
+            CatalogState::Active,
+        );
+        fresh_context.context_window = Some(128_000);
+        let (merged, _, _) = merge_live_catalog(
+            "https://provider.example/v1",
+            Some(&previous),
+            &[fresh_context],
+            2,
+        );
+        assert_eq!(merged.models[0].context_window, Some(128_000));
+        assert_eq!(merged.models[0].max_output_tokens, None);
+
+        let mut prior_context = unknown_catalog_model(
+            "model".to_owned(),
+            CatalogSource::Live,
+            Some(2),
+            CatalogState::Active,
+        );
+        prior_context.context_window = Some(128_000);
+        let previous = CacheEntry {
+            base_url: "https://provider.example/v1".to_owned(),
+            revision: 2,
+            models: vec![prior_context],
+            fetched_at_ms: 2,
+        };
+        let mut fresh_output = unknown_catalog_model(
+            "model".to_owned(),
+            CatalogSource::Live,
+            Some(3),
+            CatalogState::Active,
+        );
+        fresh_output.max_output_tokens = Some(200_000);
+        let (merged, _, _) = merge_live_catalog(
+            "https://provider.example/v1",
+            Some(&previous),
+            &[fresh_output],
+            3,
+        );
+        assert_eq!(merged.models[0].context_window, None);
+        assert_eq!(merged.models[0].max_output_tokens, Some(200_000));
     }
 
     #[test]

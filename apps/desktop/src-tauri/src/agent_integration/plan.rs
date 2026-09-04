@@ -1567,6 +1567,7 @@ mod tests {
             context: 200_000,
             output: 32_000,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: false,

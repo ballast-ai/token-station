@@ -89,6 +89,12 @@ impl Connector for OpenCodeConnector {
                     .to_string(),
             );
         }
+        if input.model_metadata.is_none() {
+            return Err(
+                "OpenCode 当前路由没有可达模型；本次未修改 ~/.config/opencode/opencode.json。"
+                    .to_string(),
+            );
+        }
         input
             .token
             .map(|_| ())
@@ -211,8 +217,8 @@ impl Connector for OpenCodeConnector {
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
         let metadata = match input.model_metadata {
-            Some(value) if value.output == 0 && value.opencode_limits().is_some() => {
-                "已同步可信上下文；输出上限使用安全默认值 8192，未改写供应商模型能力。"
+            Some(value) if value.has_compatibility_limits() => {
+                "部分供应商模型上限未知；已写入聚合后的保守 Agent 兼容值，未改写供应商模型能力。"
             }
             Some(value) if value.cost.is_some() => "已同步上下文、输出上限和统一价格。",
             Some(_) => "已同步安全的上下文和输出上限；候选价格不一致或未知，未写入虚假价格。",
@@ -234,11 +240,25 @@ mod tests {
     use crate::agent_integration::connectors::AgentModelMetadata;
 
     #[test]
+    fn unconfigured_route_is_rejected_before_writing() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        let error = OpenCodeConnector.validate_preconditions(&input).unwrap_err();
+        assert!(error.contains("没有可达模型"), "{error}");
+    }
+
+    #[test]
     fn missing_provider_output_uses_the_opencode_safe_default() {
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 0,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: false,
@@ -260,7 +280,7 @@ mod tests {
         );
         assert!(OpenCodeConnector
             .success_message(&input)
-            .contains("输出上限使用安全默认值 8192"));
+            .contains("部分供应商模型上限未知"));
     }
     #[test]
     fn jsonc_connection_preserves_comments_and_unrelated_fields() {
@@ -301,6 +321,7 @@ mod tests {
             context: 128_000,
             output: 16_384,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -341,6 +362,7 @@ mod tests {
             context: 128_000,
             output: 8_192,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: false,
@@ -350,6 +372,7 @@ mod tests {
             context: 256_000,
             output: 32_768,
             max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,

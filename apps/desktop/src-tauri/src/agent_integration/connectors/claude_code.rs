@@ -569,23 +569,23 @@ fn stripped_model_picker(
 }
 
 fn route_context_values(input: &ConnectInput<'_>) -> Result<(String, String), String> {
-    let metadata = input
-        .model_metadata
-        .ok_or_else(|| {
-            "Claude Code 的 Token Station Auto 缺少可信上下文或最大输出容量；本次未修改配置"
-                .to_string()
-        })?;
-    let (context, _) = metadata.safe_limits().ok_or_else(|| {
-        "Claude Code 的 Token Station Auto 缺少可信上下文或最大输出容量；本次未修改配置"
-            .to_string()
+    if input.model_metadata.is_none() {
+        return Err(
+            "Claude Code 的 Token Station Auto 当前路由没有可达模型；本次未修改配置".to_string(),
+        );
+    }
+    let (context, _) = input.connection_limits().ok_or_else(|| {
+        "Claude Code 的 Token Station Auto 模型上限相互矛盾；本次未修改配置".to_string()
     })?;
-    let max_input = metadata.safe_max_input().ok_or_else(|| {
+    let max_input = input.connection_max_input().ok_or_else(|| {
         "Claude Code 的 Token Station Auto 缺少可信输入预算；本次未修改配置".to_string()
     })?;
-    let compact_window = max_input.clamp(
-        MIN_AUTO_COMPACT_WINDOW,
-        MAX_AUTO_COMPACT_WINDOW,
-    );
+    if max_input < MIN_AUTO_COMPACT_WINDOW {
+        return Err(format!(
+            "Claude Code 的 Token Station Auto 输入预算 {max_input} 低于自动压缩下限 {MIN_AUTO_COMPACT_WINDOW}；本次未修改配置"
+        ));
+    }
+    let compact_window = max_input.min(MAX_AUTO_COMPACT_WINDOW);
     Ok((context.to_string(), compact_window.to_string()))
 }
 
@@ -985,6 +985,7 @@ mod tests {
             context,
             output,
             max_input: context - output,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: false,
@@ -1189,7 +1190,7 @@ mod tests {
 
     #[test]
     fn managed_refresh_rejects_a_custom_option_changed_after_connection() {
-        let metadata = route_metadata(128_000, 32_768);
+        let metadata = route_metadata(200_000, 32_768);
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
@@ -1511,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn context_projection_clamps_auto_compaction_to_claude_supported_bounds() {
+    fn context_projection_rejects_too_small_input_and_clamps_the_upper_bound() {
         let low = route_metadata(64_000, 8_000);
         let low_input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/claude-code",
@@ -1519,10 +1520,8 @@ mod tests {
             adapter_ready: true,
             model_metadata: Some(&low),
         };
-        assert_eq!(
-            route_context_values(&low_input).unwrap(),
-            ("64000".to_string(), "100000".to_string())
-        );
+        let error = route_context_values(&low_input).unwrap_err();
+        assert!(error.contains("低于自动压缩下限"), "{error}");
 
         let high = route_metadata(2_000_000, 100_000);
         let high_input = ConnectInput {
@@ -1536,7 +1535,33 @@ mod tests {
     }
 
     #[test]
-    fn connection_fails_closed_without_trusted_route_limits() {
+    fn connection_uses_compatibility_limits_when_route_limits_are_unknown() {
+        let metadata = route_metadata(0, 0);
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/claude-code",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+
+        ClaudeCodeConnector
+            .validate_preconditions(&input)
+            .expect("missing optional Provider metadata must not block connection");
+        let patch = ClaudeCodeConnector.connect_patch(&input).unwrap();
+        let context = patch
+            .iter()
+            .find(|operation| operation.path == path(&["env", "CLAUDE_CODE_MAX_CONTEXT_TOKENS"]))
+            .and_then(|operation| operation.value.as_ref());
+        let compact = patch
+            .iter()
+            .find(|operation| operation.path == path(&["env", "CLAUDE_CODE_AUTO_COMPACT_WINDOW"]))
+            .and_then(|operation| operation.value.as_ref());
+        assert_eq!(context, Some(&json!("128000")));
+        assert_eq!(compact, Some(&json!("119808")));
+    }
+
+    #[test]
+    fn connection_rejects_a_route_without_any_reachable_model() {
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
@@ -1544,11 +1569,8 @@ mod tests {
             model_metadata: None,
         };
 
-        let error = ClaudeCodeConnector
-            .validate_preconditions(&input)
-            .unwrap_err();
-        assert!(error.contains("缺少可信上下文或最大输出容量"));
-        assert!(ClaudeCodeConnector.connect_patch(&input).is_err());
+        let error = ClaudeCodeConnector.validate_preconditions(&input).unwrap_err();
+        assert!(error.contains("没有可达模型"), "{error}");
     }
 
     #[test]
