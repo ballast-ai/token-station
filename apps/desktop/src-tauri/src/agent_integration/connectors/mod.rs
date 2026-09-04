@@ -1484,11 +1484,19 @@ experimental_bearer_token = "fixture-codex-key"
 
     #[test]
     fn connectors_recover_only_null_optional_object_containers() {
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let fixtures: [(&dyn Connector, &[u8]); 4] = [
             (&ClaudeCodeConnector, br#"{"env":null,"keep":true}"#),
@@ -1546,11 +1554,19 @@ experimental_bearer_token = "fixture-codex-key"
                 "model 必须是对象",
             ),
         ];
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
 
         for (connector, existing, unowned_marker, invalid_shape, expected_error) in fixtures {
@@ -1595,29 +1611,37 @@ experimental_bearer_token = "fixture-codex-key"
     #[test]
     fn connector_contract_matrix_covers_metadata_preconditions_projection_and_disconnect() {
         let home = Path::new("/fixture/home");
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
         let good = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let wrong = ConnectInput {
             base_url: "http://127.0.0.1:9999/v1",
             token: Some("wrong-key"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let not_ready = ConnectInput {
             base_url: good.base_url,
             token: good.token,
             adapter_ready: false,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let missing_token = ConnectInput {
             base_url: good.base_url,
             token: None,
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let connectors: [&dyn Connector; 6] = [
             &ClaudeCodeConnector,
@@ -1655,10 +1679,7 @@ experimental_bearer_token = "fixture-codex-key"
                 .owned_paths()
                 .iter()
                 .any(|owned| { sensitive.segments.starts_with(&owned.segments) })));
-            assert_eq!(
-                connector.projects_model_metadata(),
-                connector.connector_id() != "claude-code-v1"
-            );
+            assert!(connector.projects_model_metadata());
             assert_eq!(
                 connector.legacy_companion_format(
                     Path::new("/fixture/config"),
