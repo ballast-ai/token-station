@@ -887,6 +887,7 @@ fn prepare_force_strip_owned(
 fn prepare_connector_force_strip_owned(
     target: &Path,
     connector: &dyn Connector,
+    owned_paths: &[ConfigPath],
 ) -> Result<Option<PreparedForceStrip>, AgentCommandError> {
     let source = read_config_source(target).map_err(AgentCommandError::internal)?;
     if !source.existed {
@@ -903,6 +904,16 @@ fn prepare_connector_force_strip_owned(
         .map_err(AgentCommandError::internal)?;
     validate_patch_ownership(&removals, &owned_paths_with_legacy(connector))
         .map_err(AgentCommandError::internal)?;
+    let removals = removals
+        .into_iter()
+        .filter(|operation| {
+            owned_paths.iter().any(|owned| {
+                operation.path.segments.len() >= owned.segments.len()
+                    && operation.path.segments[..owned.segments.len()] == owned.segments
+            })
+        })
+        .collect::<Vec<_>>();
+    validate_patch_ownership(&removals, owned_paths).map_err(AgentCommandError::internal)?;
     prepare_force_strip_projection(
         target,
         source,
@@ -1696,7 +1707,9 @@ impl AgentCommandState {
             // Main config: regular connectors use fixed Remove operations, while
             // WorkBuddy filters dynamically by model ID so force disconnect does
             // not remove models the user added later.
-            if let Some(prepared) = prepare_connector_force_strip_owned(target, connector)? {
+            if let Some(prepared) =
+                prepare_connector_force_strip_owned(target, connector, &ownership.owned_paths)?
+            {
                 prepared_strips.push(prepared);
             }
             // Companion config: parse the persisted format or a connector's
@@ -5001,7 +5014,11 @@ mod tests {
         let root = scratch("force-forget-target");
         let target = root.join("settings.json");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&target, br#"{"unowned":"keep"}"#).unwrap();
+        std::fs::write(
+            &target,
+            br#"{"unowned":"keep","model":"opus[1m]","modelPicker":{"options":[{"model":"user-gateway","label":"User gateway"}],"replaceBuiltInOptions":true,"userExtension":"keep"}}"#,
+        )
+        .unwrap();
         let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
         install_scan(&state, catalog, vec![record(&target, false)]);
 
@@ -5060,6 +5077,14 @@ mod tests {
             after_connect.contains("ANTHROPIC_BASE_URL"),
             "接管应写入受管字段"
         );
+        let mut connected_json: serde_json::Value = serde_json::from_str(&after_connect).unwrap();
+        assert!(connected_json["modelPicker"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["model"] == "user-gateway"));
+        connected_json["model"] = serde_json::json!("opus[1m]");
+        std::fs::write(&target, serde_json::to_vec_pretty(&connected_json).unwrap()).unwrap();
         assert_eq!(
             state
                 .ownership
@@ -5081,6 +5106,17 @@ mod tests {
             "受管字段应被删除"
         );
         assert!(after_forget.contains("keep"), "用户自己的字段必须保留");
+        let after_forget_json: serde_json::Value = serde_json::from_str(&after_forget).unwrap();
+        assert_eq!(after_forget_json["model"], "opus[1m]");
+        assert!(after_forget_json["modelPicker"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["model"] == "user-gateway"));
+        assert_eq!(after_forget_json["modelPicker"]["userExtension"], "keep");
+        assert!(after_forget_json["modelPicker"]
+            .get("replaceBuiltInOptions")
+            .is_none());
         assert!(
             state
                 .ownership
@@ -5093,6 +5129,63 @@ mod tests {
             state.force_forget("claude-code", "/opt/claude").is_err(),
             "已无归属时再次强制断开应报错"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn legacy_claude_force_forget_preserves_the_unowned_user_model() {
+        let state = state("legacy-claude-force-forget");
+        let root = scratch("legacy-claude-force-forget-target");
+        let target = root.join("settings.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &target,
+            br#"{"model":"opus[1m]","modelPicker":{"options":[{"model":"user-gateway","label":"User gateway"}]},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8787/agents/claude-code"}}"#,
+        )
+        .unwrap();
+        let legacy_owned_path = ConfigPath {
+            segments: vec!["env".to_string(), "ANTHROPIC_BASE_URL".to_string()],
+        };
+        state
+            .ownership
+            .commit(
+                crate::agent_integration::ownership::OwnershipRecord {
+                    schema_version: 1,
+                    revision: 0,
+                    agent_id: "claude-code".to_string(),
+                    installation_path: "/opt/claude".to_string(),
+                    target_config_path: target.to_string_lossy().into_owned(),
+                    connector_id: "claude-code-v1".to_string(),
+                    baseline_snapshot_id: "31".repeat(16),
+                    last_transaction_snapshot_id: "32".repeat(16),
+                    before_hash: "a".repeat(64),
+                    managed_after_hash: "b".repeat(64),
+                    owned_paths: vec![legacy_owned_path.clone()],
+                    owned_value_macs: BTreeMap::from([(
+                        legacy_owned_path.to_string(),
+                        "c".repeat(64),
+                    )]),
+                    companion_files: Vec::new(),
+                    acquired_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+
+        state.force_forget("claude-code", "/opt/claude").unwrap();
+
+        let stripped: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(stripped["model"], "opus[1m]");
+        assert_eq!(
+            stripped["modelPicker"]["options"][0]["model"],
+            "user-gateway"
+        );
+        assert!(stripped["env"].get("ANTHROPIC_BASE_URL").is_none());
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
@@ -5283,9 +5376,10 @@ mod tests {
         .unwrap();
         let connector = connector_for("workbuddy-v1").unwrap();
 
-        let prepared = prepare_connector_force_strip_owned(&target, connector)
-            .unwrap()
-            .expect("the existing WorkBuddy file must be projected");
+        let prepared =
+            prepare_connector_force_strip_owned(&target, connector, &connector.owned_paths())
+                .unwrap()
+                .expect("the existing WorkBuddy file must be projected");
         let projected = parse_source_bytes(
             Some(prepared.rendered.as_slice()),
             DocumentFormat::Json,
@@ -5329,9 +5423,12 @@ mod tests {
         }"#;
         std::fs::write(&target, initial).unwrap();
         let connector = connector_for("workbuddy-v1").unwrap();
-        let prepared = vec![prepare_connector_force_strip_owned(&target, connector)
-            .unwrap()
-            .unwrap()];
+        let prepared =
+            vec![
+                prepare_connector_force_strip_owned(&target, connector, &connector.owned_paths())
+                    .unwrap()
+                    .unwrap(),
+            ];
         let externally_updated = br#"{
           "models": [
             {"id":"user-existing"},

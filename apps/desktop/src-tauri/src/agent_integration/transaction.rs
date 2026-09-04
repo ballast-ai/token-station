@@ -3627,7 +3627,7 @@ keep = true
     fn transaction_disconnect_restores_only_owned_paths_and_preserves_later_user_fields() {
         let root = scratch("disconnect");
         let target = root.join("settings.json");
-        let initial = br#"{"unowned":"keep","env":{"USER_VALUE":"original","ANTHROPIC_CUSTOM_MODEL_OPTION":"user-model","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"User model","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"User description","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"777777","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"700000"}}"#;
+        let initial = br#"{"model":"opus[1m]","modelPicker":{"options":[{"model":"user-gateway","label":"User gateway"}],"replaceBuiltInOptions":true,"userExtension":"keep"},"unowned":"keep","env":{"USER_VALUE":"original","ANTHROPIC_CUSTOM_MODEL_OPTION":"user-model","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"User model","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"User description","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"777777","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"700000"}}"#;
         write_initial(&target, initial);
         let connect = prepare(&target, "vk-disconnect-secret");
         let keys = Arc::new(TestKeys::available());
@@ -3644,6 +3644,18 @@ keep = true
         engine
             .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
             .unwrap();
+
+        let connected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(connected["model"], "token-station-auto");
+        assert_eq!(connected["modelPicker"]["replaceBuiltInOptions"], false);
+        assert_eq!(
+            connected["modelPicker"]["options"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
 
         let mut current_json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
@@ -3691,6 +3703,17 @@ keep = true
         let restored: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         assert_eq!(restored["unowned"], "keep");
+        assert_eq!(restored["model"], "opus[1m]");
+        assert_eq!(restored["modelPicker"]["replaceBuiltInOptions"], true);
+        assert_eq!(restored["modelPicker"]["userExtension"], "keep");
+        assert_eq!(
+            restored["modelPicker"]["options"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            restored["modelPicker"]["options"][0]["model"],
+            "user-gateway"
+        );
         assert_eq!(restored["later_user_field"]["enabled"], true);
         assert_eq!(restored["env"]["USER_VALUE"], "original");
         assert_eq!(
@@ -3790,6 +3813,7 @@ keep = true
             serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         assert_eq!(restored["unowned"], "keep");
         assert_eq!(restored["later_user_field"]["enabled"], true);
+        assert!(restored.get("model").is_none());
         assert!(ownership_store.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
     }

@@ -1849,6 +1849,11 @@ mod tests {
         );
         let active_paths = ClaudeCodeConnector.owned_paths();
         let legacy_paths = ClaudeCodeConnector.legacy_owned_paths();
+        let previous_active_paths = active_paths
+            .iter()
+            .filter(|path| path.segments != ["model"] && path.segments != ["modelPicker"])
+            .cloned()
+            .collect::<Vec<_>>();
         let ownership = OwnershipRecord {
             schema_version: 1,
             revision: 1,
@@ -1860,7 +1865,7 @@ mod tests {
             last_transaction_snapshot_id: "02".repeat(16),
             before_hash: "a".repeat(64),
             managed_after_hash: "b".repeat(64),
-            owned_paths: active_paths
+            owned_paths: previous_active_paths
                 .iter()
                 .chain(legacy_paths.iter())
                 .cloned()
@@ -1913,12 +1918,23 @@ mod tests {
                 assert_eq!(env[key], json!("user-opus"));
             }
         }
-        assert_eq!(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], json!("auto"));
+        assert_eq!(
+            env["ANTHROPIC_CUSTOM_MODEL_OPTION"],
+            json!("token-station-auto")
+        );
         assert_eq!(
             env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"],
-            json!("Token Station Auto")
+            json!("Token Station Auto (200K context)")
         );
-        assert_eq!(projected["model"], json!("auto"));
+        assert_eq!(projected["model"], json!("token-station-auto"));
+        assert_eq!(
+            projected["modelPicker"]["options"][0]["model"],
+            json!("token-station-auto")
+        );
+        assert_eq!(
+            projected["modelPicker"]["replaceBuiltInOptions"],
+            json!(false)
+        );
         assert_eq!(prepared.view.owned_paths, active_paths);
     }
 
