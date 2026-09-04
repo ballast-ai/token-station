@@ -1,27 +1,5 @@
-import {
-  DndContext,
-  KeyboardSensor,
-  PointerSensor,
-  closestCorners,
-  pointerWithin,
-  useSensor,
-  useSensors,
-  type Announcements,
-  type CollisionDetection,
-  type DragEndEvent,
-  type Modifier,
-  type ScreenReaderInstructions,
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  arrayMove,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { CheckCircle2, GripVertical } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CheckCircle2 } from "lucide-react";
 import type { DirectRouteTarget, ProviderView } from "../api";
 import { ProviderIcon } from "../brandIcons";
 import CompactCombobox from "./CompactCombobox";
@@ -66,52 +44,26 @@ function initialModels(providers: ProviderView[], target?: DirectRouteTarget | n
   ]));
 }
 
-const restrictToVerticalAxis: Modifier = ({ transform }) => ({
-  ...transform,
-  x: 0,
-});
-
-const directProviderCollisionDetection: CollisionDetection = (args) => {
-  if (args.pointerCoordinates) return pointerWithin(args);
-  return closestCorners(args);
-};
-
-interface SortableDirectProviderRowProps {
+interface DirectProviderRowProps {
   provider: ProviderView;
-  index: number;
   model: string;
   selected: boolean;
   busy: boolean;
   onSelect: () => void;
-  onMove: (targetIndex: number) => void;
   onModelChange: (model: string) => void;
+  rowRef: (node: HTMLDivElement | null) => void;
 }
 
-function SortableDirectProviderRow({
+function DirectProviderRow({
   provider,
-  index,
   model,
   selected,
   busy,
   onSelect,
-  onMove,
   onModelChange,
-}: SortableDirectProviderRowProps) {
+  rowRef,
+}: DirectProviderRowProps) {
   const { copy } = useLocalizedCopy();
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    setActivatorNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({
-    id: provider.name,
-    disabled: busy,
-    animateLayoutChanges: () => false,
-    attributes: { roleDescription: copy("sortable item", "可排序项", "可排序專案", "並べ替え可能な項目") },
-  });
   const hasModels = provider.models.length > 0;
   const selectionLabel = copy(
     selected ? "Selected" : "Not selected",
@@ -120,48 +72,15 @@ function SortableDirectProviderRow({
     selected ? "選択済み" : "未選択",
   );
   const modelLabel = model || copy("No available models", "无可用模型", "無可用模型", "利用可能なモデルがありません");
-  const sortableStyle = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  };
-
-  const handleSortKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (!isDragging && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-      event.preventDefault();
-      onMove(index + (event.key === "ArrowUp" ? -1 : 1));
-      return;
-    }
-    listeners?.onKeyDown?.(event);
-  };
-
   return (
-    <div
-      className={`direct-provider-sortable${isDragging ? " dragging" : ""}`}
-      ref={setNodeRef}
-      style={sortableStyle}
-    >
+    <div className="direct-provider-item" ref={rowRef}>
       <div
-        className={`direct-provider-row${selected ? " selected" : ""}${hasModels ? "" : " unavailable"}${isDragging ? " dragging" : ""}`}
-        onClick={(event) => {
-          if (busy || !hasModels || (event.target as HTMLElement).closest(".direct-drag-handle")) return;
+        className={`direct-provider-row${selected ? " selected" : ""}${hasModels ? "" : " unavailable"}`}
+        onClick={() => {
+          if (busy || !hasModels) return;
           onSelect();
         }}
       >
-        <button
-          className="direct-drag-handle"
-          type="button"
-          ref={setActivatorNodeRef}
-          disabled={busy}
-          {...attributes}
-          {...listeners}
-          aria-label={copy(
-            `Reorder ${provider.name}; position ${index + 1}; use the up or down arrow key`,
-            `调整 ${provider.name} 顺序；当前第 ${index + 1} 项；使用上下方向键`, `調整 ${provider.name} 順序；當前第 ${index + 1} 項；使用上下方向鍵`, `${provider.name} の順序を調整；現在の位置は ${index + 1} 番；上または下の矢印キーを使用`
-          )}
-          onKeyDown={handleSortKeyDown}
-        >
-          <GripVertical aria-hidden="true" />
-        </button>
         <input
           className="direct-provider-radio"
           type="radio"
@@ -170,13 +89,6 @@ function SortableDirectProviderRow({
           disabled={busy || !hasModels}
           aria-label={`${modelLabel} · ${provider.name} · ${selectionLabel}`}
           onChange={onSelect}
-        />
-        <CompactCombobox
-          ariaLabel={copy(`${provider.name} model`, `${provider.name} 模型`, `${provider.name} 模型`, `${provider.name} モデル`)}
-          value={model}
-          disabled={busy || !hasModels}
-          options={provider.models.map((providerModel) => ({ value: providerModel, label: providerModel }))}
-          onChange={onModelChange}
         />
         <span className="direct-provider-brand" aria-hidden="true">
           <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
@@ -187,6 +99,13 @@ function SortableDirectProviderRow({
             ? copy("Provider", "供应商", "供應商", "プロバイダー")
             : copy("Manage a model before selecting", "请先添加已管理模型", "請先新增已管理模型", "まず管理済みモデルを追加してください")}</small>
         </span>
+        <CompactCombobox
+          ariaLabel={copy(`${provider.name} model`, `${provider.name} 模型`, `${provider.name} 模型`, `${provider.name} モデル`)}
+          value={model}
+          disabled={busy || !hasModels}
+          options={provider.models.map((providerModel) => ({ value: providerModel, label: providerModel }))}
+          onChange={onModelChange}
+        />
         <CheckCircle2 className="direct-selected-mark" aria-hidden="true" />
       </div>
     </div>
@@ -220,11 +139,9 @@ export default function DirectRoutePanel({
   const previousTargetKey = useRef(targetKey);
   const onDraftChangeRef = useRef(onDraftChange);
   onDraftChangeRef.current = onDraftChange;
-  const [sortAnnouncement, setSortAnnouncement] = useState("");
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
+  const rowNodesRef = useRef(new Map<string, HTMLDivElement>());
+  const pendingPositionsRef = useRef<Map<string, DOMRect> | null>(null);
+  const [routeAnnouncement, setRouteAnnouncement] = useState("");
 
   useEffect(() => {
     setProviderOrder((current) => {
@@ -255,10 +172,10 @@ export default function DirectRoutePanel({
       showError(
         localizedCopy(
           language,
-          "Could not save the provider display order; reordering still works for this session.",
-          "无法保存供应商显示顺序；本次排序仍可使用。",
-          "無法儲存供應商顯示順序；本次工作階段仍可重新排序。",
-          "プロバイダーの表示順を保存できませんでした。このセッションでは並べ替えを引き続き使用できます。",
+          "Could not save the provider display order; the applied provider stays first for this session.",
+          "无法保存供应商显示顺序；已应用的供应商会在本次使用期间保持在首位。",
+          "無法儲存供應商顯示順序；已套用的供應商會在本次使用期間保持在首位。",
+          "プロバイダーの表示順を保存できませんでした。適用済みのプロバイダーはこのセッション中は先頭に表示されます。",
         ),
         "direct-provider-order-storage",
       );
@@ -289,67 +206,39 @@ export default function DirectRoutePanel({
     .map((name) => providers.find((provider) => provider.name === name))
     .filter((provider): provider is ProviderView => Boolean(provider));
 
-  const moveProvider = (name: string, targetIndex: number) => {
-    const fromIndex = providerOrder.indexOf(name);
-    if (fromIndex < 0) return;
-    if (targetIndex < 0 || targetIndex >= providerOrder.length) {
-      setSortAnnouncement(copy(
-        `${name} is already at the ${targetIndex < 0 ? "top" : "bottom"} of the list.`,
-        `${name} 已在列表${targetIndex < 0 ? "顶部" : "底部"}。`,
-        `${name} 已在列表${targetIndex < 0 ? "頂端" : "底部"}。`,
-        `${name} はリストの${targetIndex < 0 ? "先頭" : "末尾"}にあります。`,
-      ));
-      return;
-    }
-    if (fromIndex === targetIndex) return;
-    setProviderOrder(arrayMove(providerOrder, fromIndex, targetIndex));
-    setSortAnnouncement(copy(
-      `Moved ${name} to position ${targetIndex + 1} of ${providerOrder.length}.`,
-      `已将 ${name} 移到第 ${targetIndex + 1} 项，共 ${providerOrder.length} 项。`, `已將 ${name} 移到第 ${targetIndex + 1} 項，共 ${providerOrder.length} 項。`, `${name} を ${providerOrder.length} 項中の ${targetIndex + 1} 項に移動しました。`
-    ));
-  };
+  useLayoutEffect(() => {
+    const previousPositions = pendingPositionsRef.current;
+    pendingPositionsRef.current = null;
+    if (!previousPositions || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
 
-  const finishProviderDrag = ({ active, over }: DragEndEvent) => {
-    if (!over || active.id === over.id) return;
-    setProviderOrder((current) => {
-      const fromIndex = current.indexOf(String(active.id));
-      const targetIndex = current.indexOf(String(over.id));
-      if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex) return current;
-      return arrayMove(current, fromIndex, targetIndex);
+    const movedRows: HTMLDivElement[] = [];
+    rowNodesRef.current.forEach((node, name) => {
+      const previous = previousPositions.get(name);
+      if (!previous) return;
+      const current = node.getBoundingClientRect();
+      const offsetX = previous.left - current.left;
+      const offsetY = previous.top - current.top;
+      if (offsetX === 0 && offsetY === 0) return;
+      node.style.transition = "none";
+      node.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
+      movedRows.push(node);
     });
-  };
-
-  const providerPosition = (id: string | number) => providerOrder.indexOf(String(id)) + 1;
-  const screenReaderInstructions: ScreenReaderInstructions = {
-    draggable: copy(
-      "Press Space or Enter to pick up this provider. Use the up and down arrow keys to move it, then press Space or Enter to drop it. Press Escape to cancel.",
-      "按空格或回车拾取该供应商，使用上下方向键移动，再按空格或回车放下；按 Escape 取消。", "按空白鍵或 Enter 鍵選取該供應商，使用上下方向鍵移動，再按空白鍵或 Enter 鍵放下；按 Escape 鍵取消。", "スペースキーまたは Enter キーでこのプロバイダーを選択し、上下矢印キーで移動して、もう一度スペースキーまたは Enter キーで配置します。Escape キーでキャンセルします。"
-    ),
-  };
-  const announcements: Announcements = {
-    onDragStart: ({ active }) => copy(
-      `Picked up ${String(active.id)}, position ${providerPosition(active.id)} of ${providerOrder.length}.`,
-      `已拾取 ${String(active.id)}，当前第 ${providerPosition(active.id)} 项，共 ${providerOrder.length} 项。`, `已拾取 ${String(active.id)}，當前第 ${providerPosition(active.id)} 項，共 ${providerOrder.length} 項。`, `${String(active.id)} を選択しました。現在 ${providerOrder.length} 項中の ${providerPosition(active.id)} 項です。`
-    ),
-    onDragOver: ({ active, over }) => over ? copy(
-      `${String(active.id)} is over position ${providerPosition(over.id)} of ${providerOrder.length}.`,
-      `${String(active.id)} 当前位于第 ${providerPosition(over.id)} 项，共 ${providerOrder.length} 项。`, `${String(active.id)} 當前位於第 ${providerPosition(over.id)} 項，共 ${providerOrder.length} 項。`, `${String(active.id)} は ${providerOrder.length} 項中の ${providerPosition(over.id)} 項に現在位置しています。`
-    ) : copy(
-      `${String(active.id)} is outside the provider list.`,
-      `${String(active.id)} 已移出供应商列表。`, `${String(active.id)} 已移出供應商列表。`, `${String(active.id)} はプロバイダー一覧から外れました。`
-    ),
-    onDragEnd: ({ active, over }) => over ? copy(
-      `Dropped ${String(active.id)} at position ${providerPosition(over.id)} of ${providerOrder.length}.`,
-      `已将 ${String(active.id)} 放到第 ${providerPosition(over.id)} 项，共 ${providerOrder.length} 项。`, `已將 ${String(active.id)} 放到第 ${providerPosition(over.id)} 項，共 ${providerOrder.length} 項。`, `${String(active.id)} を ${providerOrder.length} 項中の ${providerPosition(over.id)} 項に配置しました。`
-    ) : copy(
-      `Sorting cancelled. ${String(active.id)} kept its position.`,
-      `已取消排序，${String(active.id)} 保持原位置。`, `已取消排序，${String(active.id)} 保持原位置。`, `並べ替えをキャンセルしました。${String(active.id)} は元の位置を維持します。`
-    ),
-    onDragCancel: ({ active }) => copy(
-      `Sorting cancelled. ${String(active.id)} kept its position.`,
-      `已取消排序，${String(active.id)} 保持原位置。`, `已取消排序，${String(active.id)} 保持原位置。`, `並べ替えをキャンセルしました。${String(active.id)} は元の位置を維持します。`
-    ),
-  };
+    if (movedRows.length === 0) return;
+    void movedRows[0].offsetHeight;
+    const frame = requestAnimationFrame(() => {
+      movedRows.forEach((node) => {
+        node.style.transition = "";
+        node.style.transform = "";
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      movedRows.forEach((node) => {
+        node.style.transition = "";
+        node.style.transform = "";
+      });
+    };
+  }, [providerOrder]);
 
   const selectedModel = selectedProvider ? modelByProvider[selectedProvider] ?? "" : "";
   const selectedTargetValid = providers.some((provider) => (
@@ -368,17 +257,30 @@ export default function DirectRoutePanel({
   }, []);
 
   const applySelectedTarget = async () => {
-    const applied = await onApply(selectedProvider, selectedModel);
+    const appliedProvider = selectedProvider;
+    const appliedModel = selectedModel;
+    const applied = await onApply(appliedProvider, appliedModel);
     if (applied === false) return;
-    setProviderOrder((current) => {
-      const appliedIndex = current.indexOf(selectedProvider);
-      return appliedIndex > 0 ? arrayMove(current, appliedIndex, 0) : current;
-    });
-    setSortAnnouncement(copy(
-      `Applied ${selectedProvider} and moved it to the top of the list.`,
-      `已应用 ${selectedProvider}，并将其移到列表顶部。`,
-      `已應用 ${selectedProvider}，並將其移到清單頂端。`,
-      `${selectedProvider} を適用し、リストの先頭に移動しました。`,
+    const promoted = providerOrder.indexOf(appliedProvider) > 0;
+    if (promoted) {
+      pendingPositionsRef.current = new Map(Array.from(rowNodesRef.current, ([name, node]) => (
+        [name, node.getBoundingClientRect()]
+      )));
+      setProviderOrder((current) => [
+        appliedProvider,
+        ...current.filter((name) => name !== appliedProvider),
+      ]);
+    }
+    setRouteAnnouncement(promoted ? copy(
+      `Applied ${appliedProvider} and moved it to the top of the list.`,
+      `已应用 ${appliedProvider}，并将其移到列表顶部。`,
+      `已應用 ${appliedProvider}，並將其移到清單頂端。`,
+      `${appliedProvider} を適用し、リストの先頭に移動しました。`,
+    ) : copy(
+      `Applied ${appliedProvider}.`,
+      `已应用 ${appliedProvider}。`,
+      `已應用 ${appliedProvider}。`,
+      `${appliedProvider} を適用しました。`,
     ));
   };
 
@@ -440,41 +342,30 @@ export default function DirectRoutePanel({
           "请先添加供应商并管理至少一个模型。", "請先新增供應商並管理至少一個模型。", "シンプルルーティングを使用する前に、プロバイダーを追加し、少なくとも1つのモデルを管理してください。"
         )}</p>
       ) : (
-        <DndContext
-          sensors={sensors}
-          collisionDetection={directProviderCollisionDetection}
-          modifiers={[restrictToVerticalAxis]}
-          accessibility={{ announcements, screenReaderInstructions }}
-          onDragEnd={finishProviderDrag}
-        >
-          <SortableContext
-            items={orderedProviders.map((provider) => provider.name)}
-            strategy={verticalListSortingStrategy}
-          >
-            <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "简单路由供应商", "簡單路由供應商", "シンプルルーティングプロバイダー")}>
-              {orderedProviders.map((provider, index) => (
-                <SortableDirectProviderRow
-                  key={provider.name}
-                  provider={provider}
-                  index={index}
-                  model={modelByProvider[provider.name] ?? ""}
-                  selected={selectedProvider === provider.name}
-                  busy={busy}
-                  onSelect={() => setSelectedProvider(provider.name)}
-                  onMove={(targetIndex) => moveProvider(provider.name, targetIndex)}
-                  onModelChange={(nextModel) => setModelByProvider((current) => ({
-                    ...current,
-                    [provider.name]: nextModel,
-                  }))}
-                />
-              ))}
-            </div>
-          </SortableContext>
-        </DndContext>
+        <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "简单路由供应商", "簡單路由供應商", "シンプルルーティングプロバイダー")}>
+          {orderedProviders.map((provider) => (
+            <DirectProviderRow
+              key={provider.name}
+              provider={provider}
+              model={modelByProvider[provider.name] ?? ""}
+              selected={selectedProvider === provider.name}
+              busy={busy}
+              onSelect={() => setSelectedProvider(provider.name)}
+              onModelChange={(nextModel) => setModelByProvider((current) => ({
+                ...current,
+                [provider.name]: nextModel,
+              }))}
+              rowRef={(node) => {
+                if (node) rowNodesRef.current.set(provider.name, node);
+                else rowNodesRef.current.delete(provider.name);
+              }}
+            />
+          ))}
+        </div>
       )}
 
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {sortAnnouncement}
+        {routeAnnouncement}
       </span>
 
       {!selectedTargetValid && (
