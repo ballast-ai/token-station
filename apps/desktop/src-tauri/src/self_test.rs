@@ -202,6 +202,14 @@ pub fn run_installed_self_test(output: &std::path::Path) -> Result<(), String> {
     collected.map(|_| ())
 }
 
+/// Proves that this exact desktop binary can read the configuration which an
+/// existing installation will hand to it. This is intentionally read-only.
+pub fn run_config_compatibility_check(path: &std::path::Path) -> Result<(), String> {
+    token_station_cli::config::ClientConfig::load(path)
+        .map(|_| ())
+        .map_err(|_| "candidate cannot read the current desktop configuration".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

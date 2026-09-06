@@ -43,13 +43,29 @@ impl AgentModelCost {
 pub struct AgentModelMetadata {
     pub context: u32,
     pub output: u32,
+    /// Smallest verified `context - max_output` budget across every reachable
+    /// target. Zero means an older/manual fixture that should derive the value
+    /// from the aggregate safe limits.
+    pub max_input: u32,
+    /// True when at least one reachable target needed an Agent-only capacity
+    /// fallback. This preserves provenance after safe limits are aggregated.
+    #[serde(skip)]
+    pub uses_compatibility_limits: bool,
     pub vision: bool,
     pub tools: bool,
     pub reasoning: bool,
     pub cost: Option<AgentModelCost>,
 }
 
-pub const OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS: u32 = 8_192;
+pub const AGENT_COMPATIBILITY_CONTEXT_WINDOW: u32 = 128_000;
+pub const AGENT_COMPATIBILITY_OUTPUT_TOKENS: u32 = 8_192;
+
+fn compatibility_limits() -> (u32, u32) {
+    (
+        AGENT_COMPATIBILITY_CONTEXT_WINDOW,
+        AGENT_COMPATIBILITY_OUTPUT_TOKENS,
+    )
+}
 
 impl AgentModelMetadata {
     pub fn safe_limits(&self) -> Option<(u32, u32)> {
@@ -57,13 +73,51 @@ impl AgentModelMetadata {
             .then_some((self.context, self.output))
     }
 
+    pub fn safe_max_input(&self) -> Option<u32> {
+        let derived = self
+            .safe_limits()
+            .map(|(context, output)| context - output)?;
+        let max_input = if self.max_input == 0 {
+            derived
+        } else {
+            self.max_input
+        };
+        (max_input > 0 && max_input < self.context).then_some(max_input)
+    }
+
     pub fn opencode_limits(&self) -> Option<(u32, u32)> {
+        self.connection_limits()
+    }
+
+    /// Limits that an Agent can use when Provider capacity metadata is
+    /// incomplete. Compatibility defaults are not Provider facts and are never
+    /// written back to the Provider model capability.
+    pub fn connection_limits(&self) -> Option<(u32, u32)> {
+        if self.context == 0 {
+            return Some(compatibility_limits());
+        }
+        if self.context <= 1 {
+            return None;
+        }
         let output = if self.output == 0 {
-            OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
+            AGENT_COMPATIBILITY_OUTPUT_TOKENS.min(self.context / 2)
         } else {
             self.output
         };
-        (self.context > 0 && output < self.context).then_some((self.context, output))
+        (output < self.context).then_some((self.context, output))
+    }
+
+    pub fn connection_max_input(&self) -> Option<u32> {
+        let (context, output) = self.connection_limits()?;
+        if self.context == context && self.max_input > 0 && self.max_input < context {
+            Some(self.max_input)
+        } else {
+            Some(context - output)
+        }
+    }
+
+    pub fn has_compatibility_limits(&self) -> bool {
+        self.uses_compatibility_limits || self.context == 0 || self.output == 0
     }
 }
 
@@ -72,6 +126,18 @@ pub struct ConnectInput<'a> {
     pub token: Option<&'a str>,
     pub adapter_ready: bool,
     pub model_metadata: Option<&'a AgentModelMetadata>,
+}
+
+impl ConnectInput<'_> {
+    pub fn connection_limits(&self) -> Option<(u32, u32)> {
+        self.model_metadata
+            .and_then(AgentModelMetadata::connection_limits)
+    }
+
+    pub fn connection_max_input(&self) -> Option<u32> {
+        self.model_metadata
+            .and_then(AgentModelMetadata::connection_max_input)
+    }
 }
 
 /// A second configuration file that must commit with a Connector's primary
@@ -125,10 +191,22 @@ pub trait Connector: Sync {
     fn config_path(&self, home: &Path) -> PathBuf;
     fn create_dir_error(&self) -> &'static str;
     fn owned_paths(&self) -> Vec<ConfigPath>;
+    /// Paths owned only by an earlier Connector version. New connections do
+    /// not claim them. Refresh and force-forget can clean up matching legacy
+    /// values while an old ownership record still names the paths.
+    fn legacy_owned_paths(&self) -> Vec<ConfigPath> {
+        Vec::new()
+    }
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
         Vec::new()
     }
     fn projects_model_metadata(&self) -> bool {
+        false
+    }
+    fn refreshes_managed_configuration(&self) -> bool {
+        self.projects_model_metadata()
+    }
+    fn refresh_requires_baseline(&self, _owned_paths: &[ConfigPath]) -> bool {
         false
     }
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String>;
@@ -151,6 +229,15 @@ pub trait Connector: Sync {
         _owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
         self.connect_patch_for_document(document, input)
+    }
+    fn refresh_patch_with_baseline(
+        &self,
+        document: &ConfigDocument,
+        _baseline: Option<&ConfigDocument>,
+        input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        self.refresh_patch_for_document(document, input, owned_paths)
     }
     fn companion_projections(
         &self,
@@ -241,6 +328,12 @@ pub(super) fn validate_patch_ownership(
     Ok(())
 }
 
+pub(super) fn owned_paths_with_legacy(connector: &dyn Connector) -> Vec<ConfigPath> {
+    let mut paths = connector.owned_paths();
+    paths.extend(connector.legacy_owned_paths());
+    paths
+}
+
 pub(super) fn path(segments: &[&str]) -> ConfigPath {
     ConfigPath {
         segments: segments
@@ -260,6 +353,19 @@ mod tests {
         render_document, semantic_json,
     };
     use crate::agent_integration::types::PatchKind;
+
+    fn standard_test_metadata() -> AgentModelMetadata {
+        AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: true,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        }
+    }
 
     #[test]
     fn connector_patch_cannot_escape_owned_paths() {
@@ -375,6 +481,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -440,6 +548,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -491,6 +601,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -546,7 +658,44 @@ mod tests {
     }
 
     #[test]
-    fn kimi_code_connector_refuses_unknown_context_limits_before_writing() {
+    fn kimi_code_connector_uses_compatibility_limits_when_route_limits_are_unknown() {
+        let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
+        let metadata = AgentModelMetadata {
+            context: 0,
+            output: 0,
+            max_input: 0,
+            uses_compatibility_limits: false,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
+            token: Some("fixture-kimi-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+
+        connector
+            .validate_preconditions(&input)
+            .expect("missing optional Provider metadata must not block connection");
+        let mut document = parse_source_bytes(None, connector.format(), connector.label()).unwrap();
+        apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(
+            semantic["models"]["tokenstation-auto"]["max_context_size"],
+            json!(128_000)
+        );
+        assert_eq!(
+            semantic["models"]["tokenstation-auto"]["max_output_size"],
+            json!(8_192)
+        );
+    }
+
+    #[test]
+    fn kimi_code_connector_rejects_a_route_without_reachable_models() {
         let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
@@ -555,11 +704,8 @@ mod tests {
             model_metadata: None,
         };
 
-        let error = connector
-            .validate_preconditions(&input)
-            .expect_err("Kimi Code requires a known positive context limit");
-
-        assert!(error.contains("context"), "{error}");
+        let error = connector.validate_preconditions(&input).unwrap_err();
+        assert!(error.contains("reachable route model"), "{error}");
     }
 
     #[test]
@@ -569,6 +715,8 @@ mod tests {
             let metadata = AgentModelMetadata {
                 context,
                 output,
+                max_input: 0,
+                uses_compatibility_limits: false,
                 vision: false,
                 tools: true,
                 reasoning: true,
@@ -589,6 +737,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: u32::MAX,
             output: u32::MAX - 1,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -612,6 +762,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -654,6 +806,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 131_072,
             output: 8_192,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: true,
             reasoning: true,
@@ -983,6 +1137,8 @@ mod tests {
             model_metadata: Some(&AgentModelMetadata {
                 context: 257_550,
                 output: 32_768,
+                max_input: 0,
+                uses_compatibility_limits: false,
                 vision: true,
                 tools: true,
                 reasoning: true,
@@ -1034,6 +1190,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 257_550,
             output: 32_768,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1080,6 +1238,8 @@ mod tests {
             model_metadata: Some(&AgentModelMetadata {
                 context: 257_550,
                 output: 32_768,
+                max_input: 0,
+                uses_compatibility_limits: false,
                 vision: true,
                 tools: true,
                 reasoning: true,
@@ -1138,6 +1298,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 257_550,
             output: 32_768,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1166,7 +1328,7 @@ mod tests {
             .unwrap();
         assert!(CodexConnector
             .success_message(&codex_input)
-            .contains("已同步安全上下文窗口和自动压缩阈值"));
+            .contains("safe context and automatic compaction limits were synchronized"));
         let codex = semantic_json(&codex).unwrap();
         assert_eq!(codex["model_context_window"], json!(257_550));
         assert_eq!(
@@ -1255,6 +1417,8 @@ mod tests {
         let metadata = AgentModelMetadata {
             context: 0,
             output: 0,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: true,
             tools: true,
             reasoning: true,
@@ -1285,7 +1449,10 @@ mod tests {
         let opencode_model = &opencode["provider"]["tokenstation"]["models"]["auto"];
         assert_eq!(opencode_model["attachment"], json!(true));
         assert_eq!(opencode_model["cost"]["output"], json!(0.6));
-        assert!(opencode_model.get("limit").is_none());
+        assert_eq!(
+            opencode_model["limit"],
+            json!({"context": 128_000, "output": 8_192})
+        );
 
         let workbuddy_input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
@@ -1411,6 +1578,8 @@ experimental_bearer_token = "fixture-codex-key"
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 16_384,
+            max_input: 0,
+            uses_compatibility_limits: false,
             vision: false,
             tools: false,
             reasoning: false,
@@ -1457,11 +1626,12 @@ experimental_bearer_token = "fixture-codex-key"
 
     #[test]
     fn connectors_recover_only_null_optional_object_containers() {
+        let metadata = standard_test_metadata();
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let fixtures: [(&dyn Connector, &[u8]); 4] = [
             (&ClaudeCodeConnector, br#"{"env":null,"keep":true}"#),
@@ -1519,11 +1689,12 @@ experimental_bearer_token = "fixture-codex-key"
                 "model 必须是对象",
             ),
         ];
+        let metadata = standard_test_metadata();
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
 
         for (connector, existing, unowned_marker, invalid_shape, expected_error) in fixtures {
@@ -1568,29 +1739,30 @@ experimental_bearer_token = "fixture-codex-key"
     #[test]
     fn connector_contract_matrix_covers_metadata_preconditions_projection_and_disconnect() {
         let home = Path::new("/fixture/home");
+        let metadata = standard_test_metadata();
         let good = ConnectInput {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let wrong = ConnectInput {
             base_url: "http://127.0.0.1:9999/v1",
             token: Some("wrong-key"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let not_ready = ConnectInput {
             base_url: good.base_url,
             token: good.token,
             adapter_ready: false,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let missing_token = ConnectInput {
             base_url: good.base_url,
             token: None,
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
         let connectors: [&dyn Connector; 6] = [
             &ClaudeCodeConnector,
@@ -1628,10 +1800,7 @@ experimental_bearer_token = "fixture-codex-key"
                 .owned_paths()
                 .iter()
                 .any(|owned| { sensitive.segments.starts_with(&owned.segments) })));
-            assert_eq!(
-                connector.projects_model_metadata(),
-                connector.connector_id() != "claude-code-v1"
-            );
+            assert!(connector.projects_model_metadata());
             assert_eq!(
                 connector.legacy_companion_format(
                     Path::new("/fixture/config"),

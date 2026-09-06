@@ -207,6 +207,158 @@ describe("humanizeAppError", () => {
     expect(humanizeAppError(raw, "en")).not.toContain("/Users/example");
   });
 
+  it("shows the sanitized backend reason when no curated guidance matches", () => {
+    const raw = "Provider 回收站只能在配置已保存后清空；请先保存当前 Provider 删除";
+
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "操作失败：Provider 回收站只能在配置已保存后清空；请先保存当前 Provider 删除",
+    );
+    expect(humanizeAppError(raw, "en")).toBe(
+      "Operation failed: Provider 回收站只能在配置已保存后清空；请先保存当前 Provider 删除",
+    );
+  });
+
+  it("uses the real message from a structured backend error", () => {
+    const error = {
+      field: "providers",
+      reason_code: "provider_purge_rejected",
+      message: "磁盘配置仍包含待删除 Provider glm；请先保存 Provider 删除后再清空回收站",
+      detail: { api_key: "must-not-be-read" },
+    };
+
+    expect(humanizeAppError(error, "zh-CN")).toBe(
+      "操作失败：磁盘配置仍包含待删除 Provider glm；请先保存 Provider 删除后再清空回收站",
+    );
+  });
+
+  it("redacts secrets, URL credentials, query values, and local paths from real details", () => {
+    const raw = "Remote reply token=tok_live_1234567890123456 at https://alice:hunter2@example.com/v1?password=sk-live-12345678901234567890 from /Users/alice/.config/token-station/config.json";
+    const message = humanizeAppError(raw, "en");
+
+    expect(message).toContain("Operation failed: Remote reply token=[redacted]");
+    expect(message).toContain("https://[redacted]@example.com/v1?password=[redacted]");
+    expect(message).toContain("from [local path]");
+    expect(message).not.toMatch(/hunter2|tok_live|sk-live|\/Users\/alice/);
+  });
+
+  it.each([
+    "Error: transaction failed\n    at saveConfig (/Users/alice/app.js:10:2)",
+    "thread 'main' panicked at internal invariant: secret state",
+    "secret internal diagnostic: transaction row 42",
+  ])("does not expose internal diagnostic text: %s", (raw) => {
+    expect(humanizeAppError(raw, "en")).toBe(
+      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
+    );
+  });
+
+  it("bounds an unclassified backend detail", () => {
+    const message = humanizeAppError(`Provider operation rejected: ${"x".repeat(1_000)}`, "en");
+
+    expect(message).toMatch(/^Operation failed: Provider operation rejected: x+…$/);
+    expect(message.length).toBeLessThanOrEqual(340);
+  });
+
+  it("uses structured reason codes for curated guidance", () => {
+    expect(humanizeAppError({
+      reason_code: "invalid_proxy_url",
+      message: "The supplied value is invalid.",
+    }, "zh-CN")).toBe(
+      "地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。",
+    );
+  });
+
+  it.each([
+    ["model generation failed: upstream returned malformed output", "Operation failed: model generation failed: upstream returned malformed output"],
+    ["Agent connection profile is missing", "Operation failed: Agent connection profile is missing"],
+    ["JSON schema is unsupported by the selected model", "Operation failed: JSON schema is unsupported by the selected model"],
+    ["credential snapshot could not be written", "Operation failed: credential snapshot could not be written"],
+    ["quota configuration is invalid", "Operation failed: quota configuration is invalid"],
+    ["operation timed out while waiting for a local lock", "Operation failed: operation timed out while waiting for a local lock"],
+  ])("does not invent a cause for an ambiguous keyword: %s", (raw, expected) => {
+    expect(humanizeAppError(raw, "en")).toBe(expected);
+  });
+
+  it("does not throw when an untrusted error object has hostile getters", () => {
+    const error = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(error, "message", {
+      get() {
+        throw new Error("getter must not escape");
+      },
+    });
+
+    expect(() => humanizeAppError(error, "en")).not.toThrow();
+    expect(humanizeAppError(error, "en")).toBe(
+      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
+    );
+  });
+
+  it("redacts quoted and localized password values", () => {
+    const message = humanizeAppError(
+      "Remote detail password=\"two words\"，密码='中文 口令'",
+      "zh-CN",
+    );
+
+    expect(message).toBe("操作失败：Remote detail password=[redacted]，密码=[redacted]");
+  });
+
+  it("redacts JSON secret fields and localized full-width separators", () => {
+    const message = humanizeAppError(
+      'Remote detail {"password":"two words"}，密码：“中文口令”',
+      "zh-CN",
+    );
+
+    expect(message).toBe(
+      '操作失败：Remote detail {"password":"[redacted]"}，密码：[redacted]',
+    );
+    expect(message).not.toMatch(/two words|中文口令/);
+  });
+
+  it("does not expose a secret passed as a structured model target", () => {
+    const message = humanizeAppError({
+      code: "model_contract_unknown_model",
+      target: "sk-proj-12345678901234567890",
+    }, "en");
+
+    expect(message).toBe(
+      "The OpenCode route references a model that is not available. Repair the route or add that model.",
+    );
+    expect(message).not.toContain("sk-proj");
+  });
+
+  it("does not expose a secret embedded in a router pool name", () => {
+    const message = humanizeAppError(
+      "pool `sk-proj-12345678901234567890` has no members",
+      "en",
+    );
+
+    expect(message).toBe(
+      "The selected route pool is empty. Add a provider and model to this pool, then save again.",
+    );
+    expect(message).not.toContain("sk-proj");
+  });
+
+  it("redacts a macOS path whose directory names contain spaces", () => {
+    const message = humanizeAppError(
+      "无法读取 /Users/alice/Library/Application Support/com.tokenstation.desktop/token-station.json：unknown field `future_route`",
+      "zh-CN",
+    );
+
+    expect(message).toBe("操作失败：无法读取 [local path]：unknown field `future_route`");
+    expect(message).not.toMatch(/alice|Application Support|com\.tokenstation/);
+  });
+
+  it("redacts Windows paths with spaces and bearer credentials without a colon", () => {
+    const message = humanizeAppError(
+      "Authorization Bearer opaquecredential123456 failed while reading C:\\Users\\Alice Smith\\AppData\\Roaming\\Token Station\\config.json",
+      "en",
+    );
+
+    expect(message).toBe(
+      "Operation failed: Authorization Bearer [redacted] failed while reading [local path]",
+    );
+    expect(message).not.toMatch(/opaquecredential|Alice Smith|AppData|Token Station/);
+  });
+
   it("does not direct database failures to a recovery screen", () => {
     expect(humanizeAppError("metrics database schema mismatch", "en")).toBe(
       "The local data could not be opened. Update Token Station and try again; if the problem continues, contact support.",

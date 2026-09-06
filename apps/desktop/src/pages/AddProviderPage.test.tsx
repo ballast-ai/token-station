@@ -40,6 +40,15 @@ beforeEach(() => {
       };
     }
     if (command === "add_provider_with_credential") return {};
+    if (command === "discover_provider_models" || command === "discover_provider_model_limits") {
+      return {
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: "model limits unavailable",
+        capabilities_updated: false,
+      };
+    }
     if (command === "get_state") return { source: "fresh-state" };
     if (command === "import_model_prices_for_provider") {
       return {
@@ -216,6 +225,208 @@ function RegularCatalogHarness() {
 }
 
 describe("AddProviderPage", () => {
+  it("refreshes model limits after creation without blocking on discovery failure", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "discover_provider_model_limits") throw new Error("catalog unavailable");
+      return baseImplementation?.(command, args);
+    });
+    renderPage({ onAdded });
+
+    await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "discover_provider_model_limits",
+      { name: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
+    ));
+    expect(onAdded).toHaveBeenCalledWith({}, expect.any(String));
+  });
+
+  it("publishes the added Provider before slow model discovery finishes", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    let resolveDiscovery: ((value: unknown) => void) | undefined;
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command === "discover_provider_model_limits") {
+        return new Promise((resolve) => {
+          resolveDiscovery = resolve;
+        });
+      }
+      return baseImplementation?.(command, args) as Promise<unknown>;
+    });
+    renderPage({ onAdded });
+
+    await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
+    resolveDiscovery?.({
+      models: [],
+      source: "none",
+      fetched_at_ms: null,
+      warning: "timed out",
+      capabilities_updated: false,
+    });
+  });
+
+  it("publishes refreshed Provider state when live discovery updates model limits", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    const onStateChanged = vi.fn();
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "discover_provider_model_limits") {
+        return {
+          models: ["deepseek-v4-flash"],
+          source: "live",
+          fetched_at_ms: 42,
+          warning: null,
+          capabilities_updated: true,
+        };
+      }
+      return baseImplementation?.(command, args);
+    });
+    renderPage({ onAdded, onStateChanged });
+
+    await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(onAdded).toHaveBeenCalledWith({}, expect.any(String));
+    await waitFor(() => expect(onStateChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "fresh-state" }),
+    ));
+  });
+
+  it("binds Add Provider to the exact live catalog revision already shown", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "discover_provider_models") {
+        return {
+          models: ["deepseek-v4-flash"],
+          source: "live",
+          fetched_at_ms: 42,
+          warning: null,
+          capabilities_updated: false,
+          revision: 7,
+          catalog: [],
+          added: [],
+          removed: [],
+        };
+      }
+      if (command === "add_provider_with_credential") {
+        return {
+          providers: [{
+            name: "deepseek",
+            model_capabilities: [{
+              model: "deepseek-v4-flash",
+              context_window_source: "provider",
+            }],
+          }],
+        };
+      }
+      return baseImplementation?.(command, args);
+    });
+    renderPage();
+
+    await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+    await screen.findByText("已同步 1 个");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "add_provider_with_credential",
+      expect.objectContaining({ catalogRevision: 7 }),
+    );
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+      "discover_provider_model_limits",
+      expect.anything(),
+    );
+  });
+
+  it("retries limit discovery when Add Provider cannot consume the shown revision", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "discover_provider_models") {
+        return {
+          models: ["deepseek-v4-flash"],
+          source: "live",
+          fetched_at_ms: 42,
+          warning: null,
+          capabilities_updated: false,
+          revision: 7,
+        };
+      }
+      return baseImplementation?.(command, args);
+    });
+    renderPage();
+
+    await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+    await screen.findByText("已同步 1 个");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "discover_provider_model_limits",
+      { name: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
+    ));
+  });
+
+  it("invalidates live catalog evidence when the API key changes", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "discover_provider_models") {
+        return {
+          models: ["deepseek-v4-flash"],
+          source: "live",
+          fetched_at_ms: 42,
+          warning: null,
+          capabilities_updated: false,
+          revision: 7,
+        };
+      }
+      return baseImplementation?.(command, args);
+    });
+    renderPage();
+
+    await pickPreset(user, "DeepSeek");
+    await pickModel(user, "deepseek-v4-flash");
+    const keyInput = screen.getByLabelText("API Key");
+    await user.type(keyInput, "key-a");
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+    await screen.findByText("已同步 1 个");
+    await user.clear(keyInput);
+    await user.type(keyInput, "key-b");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "add_provider_with_credential",
+      expect.objectContaining({ apiKey: "key-b", catalogRevision: null }),
+    );
+  });
+
   it("imports all selected public prices in one batch when adding a cloud preset", async () => {
     window.localStorage.setItem("token-station-language", "zh-CN");
     const user = userEvent.setup();

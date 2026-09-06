@@ -22,14 +22,23 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
 use token_station_router_core::{
-    CONFIG_VERSION, ConfigError as RouterConfigError, ConfigSource, RecoveryPolicy, RouterConfig,
-    RoutingMode as CoreRoutingMode, UpstreamModel, UpstreamRef,
+    CONFIG_VERSION, ConfigError as RouterConfigError, ConfigSource, Match, RecoveryPolicy,
+    RouterConfig, RoutingMode as CoreRoutingMode, Rule, UpstreamModel, UpstreamRef,
 };
 
 const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
 const DIRECT_POOL: &str = "direct";
+
+/// Stable model IDs that coding harnesses can use as routing intent.
+pub const HARNESS_LOGICAL_MODEL_IDS: [&str; 4] = ["auto", "fast", "balanced", "power"];
+
+/// Claude Code's stable first-party Fable request model.
+pub const CLAUDE_CODE_FABLE_MODEL_ID: &str = "claude-fable-5-1";
+
+/// Public Claude Code picker ID for Token Station's dynamic Agent route.
+pub const CLAUDE_CODE_TOKEN_STATION_AUTO_MODEL_ID: &str = "token-station-auto";
 
 /// The host-level routing philosophies exposed by Token Station. Direct is
 /// compiled into an ordinary one-member router-core tier so the protected core
@@ -317,6 +326,77 @@ pub struct AgentRouteConfig {
     /// consulted only when the effective routing mode is direct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_target: Option<UpstreamModel>,
+    /// Maps one Agent request model to one configured provider and model.
+    /// The host compiles this map into exact `requested_model` rules. Null from
+    /// an older desktop draft remains compatible and becomes an empty map.
+    #[serde(
+        default,
+        deserialize_with = "null_to_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub harness_model_routes: BTreeMap<String, AgentRouteTarget>,
+}
+
+/// Returns the closed request-model catalog for one Harness-aware Agent.
+#[must_use]
+pub fn harness_request_models(agent_id: &str) -> &'static [&'static str] {
+    match agent_id {
+        "claude-code" => &["fast", "balanced", "power", CLAUDE_CODE_FABLE_MODEL_ID],
+        "opencode" => &["auto", "fast", "balanced", "power"],
+        _ => &[],
+    }
+}
+
+fn harness_rule_id(agent_id: &str, requested_model: &str) -> String {
+    format!("harness-{agent_id}-{requested_model}")
+}
+
+fn harness_pool_id(agent_id: &str, requested_model: &str) -> String {
+    let agent = agent_id.replace('-', "_");
+    let model = requested_model.replace('-', "_");
+    format!("__harness_{agent}_{model}")
+}
+
+fn compile_harness_model_routes(
+    agent_id: &str,
+    configured: &BTreeMap<String, AgentRouteTarget>,
+    router: &mut RouterConfig,
+) -> Result<bool, String> {
+    let reserved_ids: Vec<String> = harness_request_models(agent_id)
+        .iter()
+        .map(|requested_model| harness_rule_id(agent_id, requested_model))
+        .collect();
+    let reserved_pools: Vec<String> = harness_request_models(agent_id)
+        .iter()
+        .map(|requested_model| harness_pool_id(agent_id, requested_model))
+        .collect();
+    router.rules.retain(|rule| !reserved_ids.contains(&rule.id));
+    router
+        .pools
+        .retain(|pool, _| !reserved_pools.contains(pool));
+    let mut compiled = Vec::new();
+    for (requested_model, target) in configured {
+        let upstream = UpstreamRef::new(target.upstream.clone()).map_err(|error| {
+            format!("Agent `{agent_id}` Harness route has invalid upstream: {error}")
+        })?;
+        let pool = harness_pool_id(agent_id, requested_model);
+        router.pools.insert(
+            pool.clone(),
+            vec![UpstreamModel::new(upstream, target.model.clone())],
+        );
+        compiled.push(Rule {
+            id: harness_rule_id(agent_id, requested_model),
+            matcher: Match {
+                requested_model: Some(requested_model.clone()),
+                ..Match::default()
+            },
+            route_to: pool,
+        });
+    }
+    let compiled_any = !compiled.is_empty();
+    compiled.append(&mut router.rules);
+    router.rules = compiled;
+    Ok(compiled_any)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +412,13 @@ pub struct AgentTierRoutes {
 pub struct AgentRouteTarget {
     pub upstream: String,
     pub model: String,
+}
+
+/// One exact-model overlay evaluated before an Agent's fallback strategy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRouterConfig {
+    pub router: RouterConfig,
+    pub requested_models: Vec<String>,
 }
 
 impl AgentTierRoutes {
@@ -562,8 +649,10 @@ pub struct UpstreamConfig {
     /// is forwarded verbatim to `base_url` + `/messages`, because the IR has no
     /// way to say "the upstream runs this tool". Every other request to the
     /// upstream takes the translated path through the Anthropic provider
-    /// component, so the upstream must be `provider: anthropic`. `base_url`
-    /// must end at the version segment, e.g.
+    /// component, so the upstream must be `provider: anthropic`.
+    /// `responses-native` provides the same escape hatch for OpenAI Responses
+    /// Web Search and requires `provider: openai-compatible`.
+    /// `base_url` must end at the version segment, e.g.
     /// `https://api.deepseek.com/anthropic/v1`, so the resolved URL is
     /// `…/anthropic/v1/messages`.
     #[serde(default, skip_serializing_if = "ApiDialect::is_default")]
@@ -597,6 +686,9 @@ pub enum ApiDialect {
     /// Forward the caller's original Anthropic Messages body verbatim to
     /// `base_url` + `/messages`, bypassing the Canonical IR.
     AnthropicNative,
+    /// Forward an OpenAI Responses body with active Web Search verbatim to
+    /// `base_url` + `/responses`, bypassing the Canonical IR.
+    ResponsesNative,
 }
 
 impl ApiDialect {
@@ -871,19 +963,62 @@ impl ClientConfig {
             .or_else(|| home_direct_target.cloned());
         let direct_target_differs = effective_mode == RoutingMode::Direct
             && effective_direct_target.as_ref() != home_direct_target;
-        // Pure inheritance on every effective axis → no per-Agent router; the
-        // home router serves it directly (keeps the fast path and config small).
-        if tier_base.is_none() && effective_mode == home_mode && !direct_target_differs {
+        // Pure inheritance on every effective axis usually uses Home directly.
+        let pure_inheritance =
+            tier_base.is_none() && effective_mode == home_mode && !direct_target_differs;
+        if pure_inheritance {
             return Ok(None);
         }
         let router = tier_base.unwrap_or_else(|| self.router.clone());
-        Self::compile_router_config(
+        let router = Self::compile_router_config(
             router,
             effective_mode,
             effective_direct_target,
             &format!("Agent `{agent_id}`"),
-        )
-        .map(Some)
+        )?;
+        Ok(Some(router))
+    }
+
+    /// Returns an exact-model overlay for one Harness-aware Agent. The Gateway
+    /// evaluates this overlay before Direct, Tiered, or Quota Priority routing.
+    ///
+    /// # Errors
+    ///
+    /// A configured target cannot be represented as a safe upstream reference.
+    pub fn harness_router_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<HarnessRouterConfig>, String> {
+        if !Self::is_valid_agent_id(agent_id) {
+            return Err(format!("invalid Agent route id `{agent_id}`"));
+        }
+        let Some(route) = self.agent_routes.get(agent_id) else {
+            return Ok(None);
+        };
+        if route.harness_model_routes.is_empty() {
+            return Ok(None);
+        }
+        let requested_models = route.harness_model_routes.keys().cloned().collect();
+        let mut router = self.router.clone();
+        router.pools.clear();
+        router.rules.clear();
+        router.hint_routes.clear();
+        router.heuristic = None;
+        router.default_pool.clear();
+        router.honor_exact_model = false;
+        router.recovery = RecoveryPolicy::Strict;
+        router.routing_mode = CoreRoutingMode::Tiered;
+        compile_harness_model_routes(agent_id, &route.harness_model_routes, &mut router)?;
+        router.default_pool = router
+            .rules
+            .first()
+            .ok_or_else(|| format!("Agent `{agent_id}` Harness 映射未生成路由规则"))?
+            .route_to
+            .clone();
+        Ok(Some(HarnessRouterConfig {
+            router,
+            requested_models,
+        }))
     }
 
     fn validate_agent_tiers(&self, owner: &str, tiers: &AgentTierRoutes) -> Result<(), String> {
@@ -964,6 +1099,25 @@ impl ClientConfig {
         for (agent_id, route) in &self.agent_routes {
             if !Self::is_valid_agent_id(agent_id) {
                 return Err(format!("invalid Agent route id `{agent_id}`"));
+            }
+            let supported_models = harness_request_models(agent_id);
+            for requested_model in route.harness_model_routes.keys() {
+                if !supported_models.contains(&requested_model.as_str()) {
+                    return Err(format!(
+                        "Agent `{agent_id}` has unsupported Harness request model `{requested_model}`"
+                    ));
+                }
+            }
+            for (requested_model, target) in &route.harness_model_routes {
+                let upstream = UpstreamRef::new(target.upstream.clone()).map_err(|error| {
+                    format!(
+                        "Agent `{agent_id}` Harness request `{requested_model}` has invalid upstream: {error}"
+                    )
+                })?;
+                self.validate_direct_target(
+                    &format!("Agent `{agent_id}` Harness request `{requested_model}`"),
+                    &UpstreamModel::new(upstream, target.model.clone()),
+                )?;
             }
             if route.mode == AgentRouteMode::Custom && route.custom_route.is_none() {
                 return Err(format!(
@@ -1107,18 +1261,7 @@ impl ClientConfig {
             token_station_router_core::UpstreamRef::new(name.clone())
                 .map_err(|error| error.to_string())?;
             validate_local_identity(name, upstream)?;
-            // The escape hatch forwards Anthropic Messages verbatim; every other
-            // request to the same upstream is rendered by the Anthropic provider
-            // component, so the dialect must be one it speaks.
-            if upstream.api_dialect == ApiDialect::AnthropicNative
-                && upstream.provider != "anthropic"
-            {
-                return Err(format!(
-                    "upstream `{name}` is `api_dialect: anthropic-native` but speaks `{}`; an \
-                     anthropic-native upstream must be `provider: anthropic`",
-                    upstream.provider
-                ));
-            }
+            validate_api_dialect(name, upstream)?;
             if !upstream.base_url.uses_https() && !upstream.base_url.is_loopback() {
                 return Err(format!(
                     "upstream `{name}` must use HTTPS unless its endpoint is loopback"
@@ -1181,6 +1324,22 @@ impl ClientConfig {
 
         Ok(())
     }
+}
+
+fn validate_api_dialect(name: &str, upstream: &UpstreamConfig) -> Result<(), String> {
+    let (dialect, required_provider, article) = match upstream.api_dialect {
+        ApiDialect::Translated => return Ok(()),
+        ApiDialect::AnthropicNative => ("anthropic-native", "anthropic", "an"),
+        ApiDialect::ResponsesNative => ("responses-native", "openai-compatible", "a"),
+    };
+    if upstream.provider == required_provider {
+        return Ok(());
+    }
+    Err(format!(
+        "upstream `{name}` is `api_dialect: {dialect}` but speaks `{}`; {article} \
+         {dialect} upstream must be `provider: {required_provider}`",
+        upstream.provider
+    ))
 }
 
 fn validate_local_identity(name: &str, upstream: &UpstreamConfig) -> Result<(), String> {
@@ -1276,6 +1435,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&native).expect("serializes")["api_dialect"],
             serde_json::json!("anthropic-native")
+        );
+
+        let responses_native: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "api_dialect": "responses-native",
+            "base_url": "https://api.openai.com/v1",
+            "models": [{ "model": "gpt-5.5" }]
+        }))
+        .expect("responses-native upstream parses");
+        assert_eq!(responses_native.api_dialect, ApiDialect::ResponsesNative);
+        assert_eq!(
+            serde_json::to_value(&responses_native).expect("serializes")["api_dialect"],
+            serde_json::json!("responses-native")
         );
     }
 
@@ -1536,6 +1708,57 @@ mod tests {
             .remove("auth");
         let anonymous: ClientConfig = serde_json::from_value(anonymous).unwrap();
         assert!(anonymous.validate().unwrap_err().contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn responses_native_requires_the_openai_compatible_provider() {
+        let mut value = example();
+        value["upstreams"]["openai_personal"]["api_dialect"] =
+            serde_json::json!("responses-native");
+        value["upstreams"]["openai_personal"]["provider"] = serde_json::json!("anthropic");
+        let config: ClientConfig = serde_json::from_value(value).expect("config parses");
+
+        let error = config
+            .validate()
+            .expect_err("Responses passthrough requires its matching provider dialect");
+        assert!(error.contains("responses-native"), "{error}");
+        assert!(error.contains("openai-compatible"), "{error}");
+    }
+
+    #[test]
+    fn harness_model_routes_survive_config_load_and_save() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "claude-code": {
+                "mode": "inherit",
+                "harness_model_routes": {
+                    "balanced": {
+                        "upstream": "openai_personal",
+                        "model": "gpt-5.5"
+                    }
+                }
+            }
+        });
+
+        let config: ClientConfig =
+            serde_json::from_value(value).expect("known Harness mappings remain readable");
+        config.validate().expect("Harness mapping config validates");
+        let saved = serde_json::to_value(config).expect("Harness mapping config serializes");
+        assert_eq!(
+            saved["agent_routes"]["claude-code"]["harness_model_routes"]["balanced"],
+            serde_json::json!({
+                "upstream": "openai_personal",
+                "model": "gpt-5.5"
+            })
+        );
+        serde_json::from_value::<ClientConfig>(saved.clone())
+            .expect("saved Harness mapping reloads");
+
+        let mut unknown = saved;
+        unknown["agent_routes"]["claude-code"]["future_route_typo"] = serde_json::json!({});
+        let error = serde_json::from_value::<ClientConfig>(unknown)
+            .expect_err("unrelated unknown fields remain rejected");
+        assert!(error.to_string().contains("future_route_typo"), "{error}");
     }
 
     #[test]
@@ -1837,10 +2060,83 @@ mod tests {
             config
                 .custom_router_for_agent("opencode")
                 .expect("known Agent")
-                .is_none()
+                .is_none(),
+            "a generic inherited router without desktop tier pools needs no overlay"
         );
         assert!(config.agent_routes["opencode"].custom_route.is_some());
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn harness_model_routes_compile_each_request_to_its_exact_target() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "claude-code": {
+                "mode": "custom",
+                "custom_route": three_tiers("openai_personal", "gpt-5.5"),
+                "harness_model_routes": {
+                    "fast": { "upstream": "ollama_local", "model": "llama3.3" },
+                    "balanced": { "upstream": "openai_personal", "model": "gpt-5.5" },
+                    "power": { "upstream": "openai_personal", "model": "gpt-5.5" },
+                    "claude-fable-5-1": { "upstream": "ollama_local", "model": "llama3.3" }
+                }
+            }
+        });
+        let path = scratch("harness-model-routes", &value.to_string());
+        let config = ClientConfig::load(&path).expect("Harness mappings validate");
+        let overlay = config
+            .harness_router_for_agent("claude-code")
+            .expect("known Agent")
+            .expect("Harness mappings materialize");
+        let router = overlay.router;
+        let route_for = |model: &str| {
+            router
+                .rules
+                .iter()
+                .find(|rule| rule.matcher.requested_model.as_deref() == Some(model))
+                .map(|rule| rule.route_to.as_str())
+        };
+
+        for (requested_model, upstream, model) in [
+            ("fast", "ollama_local", "llama3.3"),
+            ("balanced", "openai_personal", "gpt-5.5"),
+            ("power", "openai_personal", "gpt-5.5"),
+            ("claude-fable-5-1", "ollama_local", "llama3.3"),
+        ] {
+            let pool = route_for(requested_model).expect("the exact request has a rule");
+            assert_eq!(router.pools[pool][0].upstream.as_str(), upstream);
+            assert_eq!(router.pools[pool][0].model, model);
+        }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn absent_harness_routes_leave_inherited_requests_on_the_normal_cascade() {
+        let mut value = example();
+        let high = value["router"]["pools"]["sota"].clone();
+        let low = value["router"]["pools"]["cheap"].clone();
+        let pools = value["router"]["pools"]
+            .as_object_mut()
+            .expect("example pools are an object");
+        pools.insert("tier_high".to_owned(), high.clone());
+        pools.insert("tier_mid".to_owned(), high);
+        pools.insert("tier_low".to_owned(), low);
+        let config: ClientConfig =
+            serde_json::from_value(value).expect("desktop tiers deserialize");
+        config.validate().expect("desktop tiers validate");
+
+        assert!(
+            config
+                .custom_router_for_agent("opencode")
+                .expect("known Agent")
+                .is_none()
+        );
+        assert!(
+            config
+                .harness_router_for_agent("opencode")
+                .expect("known Agent")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1888,7 +2184,7 @@ mod tests {
         );
         assert_eq!(opencode.pools["tier_high"][0].model, "gpt-5.5");
 
-        // Pure inheritance on both axes → no per-Agent router.
+        // Pure inheritance without desktop tier pools needs no per-Agent router.
         assert!(
             config
                 .custom_router_for_agent("claude-code")

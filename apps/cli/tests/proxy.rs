@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use token_station_cli::config::ClientConfig;
+use token_station_cli::config::{ClientConfig, HarnessRouterConfig};
 use token_station_cli::gateway::{FeatureLayer, Gateway, Reply, StageStatus};
 use token_station_cli::server;
 
@@ -125,6 +125,8 @@ struct MockUpstream {
     hanging_worker: Option<std::thread::JoinHandle<()>>,
 }
 
+type RequestValidator = fn(&Seen) -> Option<Vec<Vec<u8>>>;
+
 /// A bounded local endpoint that distinguishes a direct TLS connection from
 /// an environment-proxy CONNECT without allowing either path onto the network.
 struct ConnectionTrap {
@@ -223,6 +225,13 @@ impl MockUpstream {
     /// TCP segments to force awkward split points (`Vec<Vec<u8>>` per
     /// response).
     fn start(responses: Vec<Vec<Vec<u8>>>) -> Self {
+        Self::start_with_validator(responses, None)
+    }
+
+    fn start_with_validator(
+        responses: Vec<Vec<Vec<u8>>>,
+        validator: Option<RequestValidator>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
         let port = listener.local_addr().expect("bound").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -236,10 +245,13 @@ impl MockUpstream {
             for (index, stream) in listener.incoming().enumerate() {
                 let Ok(mut stream) = stream else { break };
                 let request = read_http_request(&mut stream);
+                let validation_response = validator.and_then(|validate| validate(&request));
                 record.lock().expect("recorder").push(request);
                 counter.fetch_add(1, Ordering::SeqCst);
 
-                let script = responses.get(index.min(responses.len().saturating_sub(1)));
+                let script = validation_response
+                    .as_ref()
+                    .or_else(|| responses.get(index.min(responses.len().saturating_sub(1))));
                 if let Some(segments) = script {
                     for segment in segments {
                         stream.write_all(segment).expect("mock writes");
@@ -563,6 +575,18 @@ fn http_json(status: u16, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn reject_tool_options_without_tools(request: &Seen) -> Option<Vec<Vec<u8>>> {
+    (request.body.get("tools").is_none()
+        && (request.body.get("tool_choice").is_some()
+            || request.body.get("parallel_tool_calls").is_some()))
+    .then(|| {
+        vec![http_json(
+            400,
+            r#"{"error":{"message":"tool options require tools"}}"#,
+        )]
+    })
+}
+
 fn http_json_with_headers(status: u16, body: &str, headers: &[(&str, &str)]) -> Vec<u8> {
     use std::fmt::Write as _;
 
@@ -643,6 +667,102 @@ fn start_proxy_with_agent(
     agent_plugin: &str,
 ) -> Proxy {
     start_proxy_with_agents(upstream, key_file, metrics, &[agent_plugin])
+}
+
+fn start_native_responses_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-native-responses-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai-responses"],
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+        },
+        "upstreams": {
+            "responses_native": {
+                "provider": "openai-compatible",
+                "api_dialect": "responses-native",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [{
+                    "model": "gpt-5.5",
+                    "tool": true,
+                    "tool_state": "verified",
+                    "context_window": 400_000
+                }]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "responses_native", "model": "gpt-5.5" }
+            ] },
+            "default_pool": "main"
+        }
+    }))
+    .expect("native Responses config parses");
+    spawn_proxy(&config)
+}
+
+fn start_mixed_responses_proxy(
+    native: &MockUpstream,
+    translated: &MockUpstream,
+    key_file: &Path,
+) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-mixed-responses-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let upstream = |base_url: String, dialect: Option<&str>| {
+        let mut value = json!({
+            "provider": "openai-compatible",
+            "base_url": base_url,
+            "auth": { "slot": "provider_api_key", "file": key_file },
+            "models": [{
+                "model": "gpt-5.5",
+                "tool": true,
+                "tool_state": "verified",
+                "context_window": 400_000
+            }]
+        });
+        if let Some(dialect) = dialect {
+            value["api_dialect"] = json!(dialect);
+        }
+        value
+    };
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai-responses"],
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+        },
+        "upstreams": {
+            "native": upstream(native.base_url(), Some("responses-native")),
+            "translated": upstream(translated.base_url(), None)
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "translated", "model": "gpt-5.5" },
+                { "upstream": "native", "model": "gpt-5.5" }
+            ] },
+            "default_pool": "main"
+        }
+    }))
+    .expect("mixed Responses config parses");
+    spawn_proxy(&config)
 }
 
 fn start_proxy_with_agents(
@@ -1408,6 +1528,14 @@ fn message_text(content: &Value) -> String {
     }
 }
 
+fn responses_input_message(text: impl Into<String>) -> Value {
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text.into()}]
+    })
+}
+
 fn key_file(name: &str, contents: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("ts-proxy-key-{}-{name}", std::process::id()));
     std::fs::write(&path, contents).expect("temp dir writable");
@@ -1536,6 +1664,20 @@ fn post_scoped(
     let status = response.status().as_u16();
     let body = response.into_body().read_to_string().expect("body reads");
     (status, body)
+}
+
+fn post_claude_model(proxy: &Proxy, model: &str) -> (u16, String) {
+    post_scoped(
+        proxy,
+        "/agents/claude-code/v1/messages",
+        &json!({
+            "model": model,
+            "max_tokens": 16,
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+        &proxy.virtual_key,
+        true,
+    )
 }
 
 fn sse_events(body: &str) -> Vec<Value> {
@@ -2468,6 +2610,11 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
         std::collections::BTreeSet::from(["agent-model".to_owned()])
     );
     assert_eq!(
+        model_ids("/agents/claude-code/v1/models"),
+        std::collections::BTreeSet::new(),
+        "Claude Code keeps its built-in model names without a discovery overlay"
+    );
+    assert_eq!(
         model_ids("/v1/models"),
         std::collections::BTreeSet::from(["home-model".to_owned()])
     );
@@ -2571,11 +2718,183 @@ fn scoped_models_switch_on_the_next_request_after_router_reload() {
     .expect("replacement Agent router parses");
     proxy
         .gateway
-        .reload_agent_router("opencode", Some(replacement))
+        .reload_agent_router("opencode", Some(replacement), None)
         .expect("Agent router reloads");
     assert_eq!(
         model_ids(),
         std::collections::BTreeSet::from(["agent-model".to_owned()])
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+fn harness_routing_answer(id: &str, model: &str) -> Value {
+    json!({
+        "id": id,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    })
+}
+
+#[test]
+fn harness_mapping_runs_before_quota_priority_fallback() {
+    let home = MockUpstream::start(vec![vec![http_json(
+        200,
+        &harness_routing_answer("chatcmpl-home", "home-model").to_string(),
+    )]]);
+    let mapped = MockUpstream::start(vec![vec![http_json(
+        200,
+        &harness_routing_answer("chatcmpl-mapped", "agent-model").to_string(),
+    )]]);
+    let key = key_file("harness-before-quota", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &mapped, &key);
+    let quota = serde_json::from_value(json!({
+        "version": 1,
+        "routing_mode": "quota_first",
+        "quota_accounts": [
+            { "upstream": "home_upstream", "model": "home-model" }
+        ]
+    }))
+    .expect("quota fallback parses");
+    let harness = HarnessRouterConfig {
+        router: serde_json::from_value(json!({
+            "version": 1,
+            "pools": {
+                "mapped": [{ "upstream": "agent_upstream", "model": "agent-model" }]
+            },
+            "rules": [{
+                "id": "opencode-fast",
+                "when": { "requested_model": "fast" },
+                "route_to": "mapped"
+            }],
+            "default_pool": "mapped"
+        }))
+        .expect("Harness overlay parses"),
+        requested_models: vec!["fast".to_owned()],
+    };
+    proxy
+        .gateway
+        .reload_agent_router("opencode", Some(quota), Some(harness))
+        .expect("Agent routers reload");
+
+    let fast = json!({
+        "model": "fast",
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/opencode/v1/chat/completions",
+        &fast,
+        &proxy.virtual_key,
+        false,
+    );
+    assert_eq!(status, 200);
+
+    let balanced = json!({
+        "model": "balanced",
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/opencode/v1/chat/completions",
+        &balanced,
+        &proxy.virtual_key,
+        false,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(mapped.hits(), 1, "the exact Harness mapping wins");
+    assert_eq!(home.hits(), 1, "an unmapped request uses quota fallback");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn claude_code_native_model_names_select_logical_harness_routes() {
+    let home = MockUpstream::start(vec![vec![http_json(
+        200,
+        &harness_routing_answer("chatcmpl-home", "home-model").to_string(),
+    )]]);
+    let mapped_responses = (0..8)
+        .map(|index| {
+            vec![http_json(
+                200,
+                &harness_routing_answer(&format!("chatcmpl-mapped-{index}"), "agent-model")
+                    .to_string(),
+            )]
+        })
+        .collect();
+    let mapped = MockUpstream::start(mapped_responses);
+    let key = key_file("claude-native-harness-models", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &mapped, &key);
+    let harness = HarnessRouterConfig {
+        router: serde_json::from_value(json!({
+            "version": 1,
+            "pools": {
+                "fast": [{ "upstream": "agent_upstream", "model": "agent-model" }],
+                "balanced": [{ "upstream": "agent_upstream", "model": "agent-model" }],
+                "power": [{ "upstream": "agent_upstream", "model": "agent-model" }],
+                "fable": [{ "upstream": "agent_upstream", "model": "agent-model" }]
+            },
+            "rules": [
+                { "id": "claude-fast", "when": { "requested_model": "fast" }, "route_to": "fast" },
+                { "id": "claude-balanced", "when": { "requested_model": "balanced" }, "route_to": "balanced" },
+                { "id": "claude-power", "when": { "requested_model": "power" }, "route_to": "power" },
+                { "id": "claude-fable", "when": { "requested_model": "claude-fable-5-1" }, "route_to": "fable" }
+            ],
+            "default_pool": "balanced"
+        }))
+        .expect("Claude Harness overlay parses"),
+        requested_models: vec![
+            "fast".to_owned(),
+            "balanced".to_owned(),
+            "power".to_owned(),
+            "claude-fable-5-1".to_owned(),
+        ],
+    };
+    let exact_fallback = serde_json::from_value(json!({
+        "version": 1,
+        "honor_exact_model": true,
+        "pools": {
+            "default": [{ "upstream": "home_upstream", "model": "home-model" }]
+        },
+        "default_pool": "default"
+    }))
+    .expect("exact-model fallback parses");
+    proxy
+        .gateway
+        .reload_agent_router("claude-code", Some(exact_fallback), Some(harness))
+        .expect("Claude Harness router reloads");
+
+    for model in [
+        "haiku",
+        "claude-haiku-4-5-20251001",
+        "sonnet",
+        "claude-3-7-sonnet-20250219",
+        "opus",
+        "claude-opus-5",
+        "fable",
+        "claude-fable-5",
+    ] {
+        let (status, body) = post_claude_model(&proxy, model);
+        assert_eq!(status, 200, "{model}: {body}");
+    }
+
+    let (status, body) = post_claude_model(&proxy, "token-station-auto");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        mapped.hits(),
+        8,
+        "recognized Claude families use Harness mappings"
+    );
+    assert_eq!(
+        home.hits(),
+        1,
+        "Token Station Auto becomes the dynamic sentinel even under exact-model mode"
     );
 
     std::fs::remove_file(key).ok();
@@ -2691,6 +3010,8 @@ fn a_responses_request_round_trips_through_the_existing_provider_pipeline() {
         seen[0].authorization.as_deref(),
         Some("Bearer sk-test-key-abc")
     );
+    assert!(seen[0].body.get("tools").is_none());
+    assert!(seen[0].body.get("tool_choice").is_none());
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
     assert_eq!(seen[0].body["messages"][0]["role"], json!("system"));
     assert_eq!(
@@ -2805,7 +3126,7 @@ fn an_unknown_responses_continuation_fails_explicitly_before_the_upstream() {
 #[test]
 fn responses_previous_response_id_replays_history_through_the_provider_pipeline() {
     let first_answer = json!({
-        "id": "chatcmpl-continuation-1",
+        "id": "chatcmpl-provider-reused-id",
         "model": "gpt-5.5",
         "choices": [{
             "index": 0,
@@ -2815,7 +3136,7 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
         "usage": {"prompt_tokens": 3, "completion_tokens": 2}
     });
     let second_answer = json!({
-        "id": "chatcmpl-continuation-2",
+        "id": "chatcmpl-provider-reused-id",
         "model": "gpt-5.5",
         "choices": [{
             "index": 0,
@@ -2839,19 +3160,29 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
     );
     assert_eq!(first_status, 200, "{first_body}");
     let first_body: Value = serde_json::from_str(&first_body).expect("first response is JSON");
-    assert_eq!(first_body["id"], json!("chatcmpl-continuation-1"));
+    let first_response_id = first_body["id"]
+        .as_str()
+        .expect("translated Responses output has an id");
+    assert!(first_response_id.starts_with("resp_token_station_"));
+    assert_ne!(first_response_id, "chatcmpl-provider-reused-id");
 
     let (second_status, _, second_body) = send_responses(
         &proxy,
         &json!({
             "model": "auto",
             "input": "second turn",
-            "previous_response_id": "chatcmpl-continuation-1",
+            "previous_response_id": first_response_id,
             "store": false
         }),
         &token,
     );
     assert_eq!(second_status, 200, "{second_body}");
+    let second_body: Value = serde_json::from_str(&second_body).expect("second response is JSON");
+    let second_response_id = second_body["id"]
+        .as_str()
+        .expect("continued Responses output has an id");
+    assert!(second_response_id.starts_with("resp_token_station_"));
+    assert_ne!(second_response_id, first_response_id);
     let seen = mock.seen();
     assert_eq!(seen.len(), 2);
     let messages = seen[1].body["messages"]
@@ -2861,6 +3192,108 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
     assert_eq!(messages[0]["content"], json!("first turn"));
     assert_eq!(messages[1]["content"], json!("first answer"));
     assert_eq!(messages[2]["content"], json!("second turn"));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn oversized_responses_history_reaches_upstream_without_optional_continuation_state() {
+    let compaction_answer = json!({
+        "id": "chatcmpl-oversized-history",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "compacted"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2}
+    });
+    let continued_answer = json!({
+        "id": "chatcmpl-compacted-turn",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "continued"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+    });
+    let mock = MockUpstream::start_with_validator(
+        vec![
+            vec![http_json(200, &compaction_answer.to_string())],
+            vec![http_json(200, &continued_answer.to_string())],
+        ],
+        Some(reject_tool_options_without_tools),
+    );
+    let key = key_file("responses-oversized-history", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let token = proxy.virtual_key.clone();
+    let oversized_input = "x".repeat(2 * 1024 * 1024 + 1);
+
+    let (status, _, body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": [responses_input_message(oversized_input)],
+            "store": false,
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false
+        }),
+        &token,
+    );
+    assert_eq!(status, 200, "{body}");
+    let body: Value = serde_json::from_str(&body).expect("the compaction response is JSON");
+    let uncached_response_id = body["id"]
+        .as_str()
+        .expect("translated Responses output has an id");
+    assert!(uncached_response_id.starts_with("resp_token_station_"));
+    assert_eq!(mock.hits(), 1, "the cache ceiling must not gate routing");
+    let seen = mock.seen();
+    assert_eq!(
+        message_text(&seen[0].body["messages"][0]["content"]).len(),
+        2 * 1024 * 1024 + 1
+    );
+    assert!(seen[0].body.get("tools").is_none());
+    assert!(seen[0].body.get("tool_choice").is_none());
+
+    let (continued_status, _, continued_body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": "continue",
+            "previous_response_id": uncached_response_id,
+            "store": false
+        }),
+        &token,
+    );
+    assert_eq!(continued_status, 400, "{continued_body}");
+    assert!(continued_body.contains("continuation_expired"));
+    assert_eq!(
+        mock.hits(),
+        1,
+        "an uncached continuation must fail explicitly before routing"
+    );
+
+    let (post_compaction_status, _, post_compaction_body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": [responses_input_message("compacted summary and next turn")],
+            "store": false,
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false
+        }),
+        &token,
+    );
+    assert_eq!(post_compaction_status, 200, "{post_compaction_body}");
+    assert_eq!(mock.hits(), 2, "the compacted turn reaches the upstream");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].body.get("tools").is_none());
+    assert!(seen[1].body.get("tool_choice").is_none());
+    assert!(seen[1].body.get("parallel_tool_calls").is_none());
 
     std::fs::remove_file(key).ok();
 }
@@ -3444,6 +3877,179 @@ fn translated_responses_hosted_tool_fails_before_upstream_with_receipt_reason() 
         );
         assert_eq!(conversion["reason_detail"], json!(expected_detail));
     }
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_responses_web_search_relays_json_without_translation() {
+    let upstream_body = json!({
+        "id": "resp_native_1",
+        "object": "response",
+        "status": "completed",
+        "model": "gpt-5.5",
+        "output": [{
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "Token Station"}
+        }],
+        "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+    })
+    .to_string();
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_body)]]);
+    let key = key_file("native-responses-web-search", "sk-native-responses");
+    let proxy = start_native_responses_proxy(&mock, &key);
+    let request = json!({
+        "model": "auto",
+        "input": "Find current information.",
+        "tools": [{"type": "web_search"}],
+        "include": ["web_search_call.action.sources"],
+        "metadata": {"trace": "preserve-me"},
+        "stream": false
+    });
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &request,
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, upstream_body, "native response body is relayed");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "one native upstream request");
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some("Bearer sk-native-responses")
+    );
+    assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
+    assert_eq!(seen[0].body["tools"], request["tools"]);
+    assert_eq!(seen[0].body["include"], request["include"]);
+    assert_eq!(seen[0].body["metadata"], request["metadata"]);
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_responses_web_search_relays_sse_without_translation() {
+    let sse = concat!(
+        "event: response.web_search_call.in_progress\n",
+        "data: {\"type\":\"response.web_search_call.in_progress\",\"item_id\":\"ws_1\",\"output_index\":0}\n\n",
+        "event: response.web_search_call.completed\n",
+        "data: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"ws_1\",\"output_index\":0}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_stream\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"output_tokens\":5,\"total_tokens\":18}}}\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("native-responses-web-search-sse", "sk-native-responses");
+    let proxy = start_native_responses_proxy(&mock, &key);
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": "Find current information.",
+            "tools": [{"type": "web_search"}],
+            "stream": true
+        }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, sse, "native SSE frames are relayed byte for byte");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(seen[0].body["stream"], json!(true));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_responses_never_falls_back_to_a_translated_upstream() {
+    let native_error = json!({"error": {"message": "native unavailable"}}).to_string();
+    let native = MockUpstream::start(vec![vec![http_json(503, &native_error)]]);
+    let translated = MockUpstream::start(vec![vec![http_json(
+        200,
+        &json!({"unexpected": true}).to_string(),
+    )]]);
+    let key = key_file("native-responses-mixed-fallback", "sk-native-responses");
+    let proxy = start_mixed_responses_proxy(&native, &translated, &key);
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": "Find current information.",
+            "tools": [{"type": "web_search"}],
+            "stream": false
+        }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body, native_error);
+    assert_eq!(native.hits(), 1);
+    assert_eq!(
+        translated.hits(),
+        0,
+        "raw Responses bodies must not reach translated fallbacks"
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn disabled_responses_web_access_keeps_the_translated_path() {
+    let translated_answer = json!({
+        "id": "chatcmpl-cached-search",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "No live search."},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 3, "total_tokens": 9}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &translated_answer.to_string())]]);
+    let key = key_file(
+        "disabled-native-responses-web-search",
+        "sk-native-responses",
+    );
+    let proxy = start_native_responses_proxy(&mock, &key);
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": "Use only cached knowledge.",
+            "tools": [{"type": "web_search", "external_web_access": false}],
+            "stream": false
+        }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert!(seen[0].body.get("tools").is_none());
 
     std::fs::remove_file(key).ok();
 }

@@ -112,6 +112,45 @@ pub(crate) fn complete_serve_start<R: Runtime>(
     metrics_db: PathBuf,
     upstream_epochs: BTreeMap<String, u64>,
 ) {
+    let applying_this_generation = {
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        matches!(
+            inner.server,
+            ServerLifecycle::Applying {
+                generation: current,
+                ..
+            } if current == generation
+        )
+    };
+    let mut restore_runtime = None;
+    let result = result.and_then(|prepared| {
+        if applying_this_generation {
+            let state = app.state::<AppStateManaged>();
+            let current = match crate::agent_integration::commands::runtime_from_app(state.inner())
+            {
+                Ok(current) => current,
+                Err(error) if error.code == "local_auth_disabled" => return Ok(prepared),
+                Err(error) => {
+                    return Err(StartFailure::new(
+                        "agent_metadata_transition",
+                        error.message,
+                    ));
+                }
+            };
+            let transition = crate::agent_integration::commands::transition_runtime_for_config(
+                &current,
+                prepared.serving_config(),
+            )
+            .map_err(|error| StartFailure::new("agent_metadata_transition", error))?;
+            app.state::<AgentCommandState>()
+                .refresh_model_metadata(None, &transition)
+                .map_err(|error| StartFailure::new("agent_metadata_transition", error.message))?;
+            restore_runtime = Some(current);
+        }
+        Ok(prepared)
+    });
+
     // Same-port handoff must first release the old accept socket. This state
     // mutation is instant; the candidate bind/retry itself happens below,
     // outside the App mutex.
@@ -304,6 +343,13 @@ pub(crate) fn complete_serve_start<R: Runtime>(
         };
         Some(inner.serve_view())
     };
+    if !published {
+        if let Some(runtime) = restore_runtime.as_ref() {
+            let _ = app
+                .state::<AgentCommandState>()
+                .refresh_model_metadata(None, runtime);
+        }
+    }
     if published {
         let app_state = app.state::<AppStateManaged>();
         let agents = app.state::<AgentCommandState>();

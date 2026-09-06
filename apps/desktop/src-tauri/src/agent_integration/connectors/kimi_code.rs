@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, AgentModelMetadata, ConnectInput, Connector, ConnectorCapabilities};
+use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{
     BaseUrlShape, ConfigPath, PatchKind, PatchOperation, Platform,
@@ -165,23 +165,31 @@ impl Connector for KimiCodeConnector {
 }
 
 fn positive_context_size(input: &ConnectInput<'_>) -> Result<u32, String> {
-    let metadata = input
-        .model_metadata
-        .ok_or_else(|| "Kimi Code requires context limits from the active route. config.toml was not changed.".to_string())?;
-    if metadata.context <= 1 {
-        return Err("Kimi Code requires a context limit greater than 1. config.toml was not changed.".to_string());
+    if input.model_metadata.is_none() {
+        return Err(
+            "Kimi Code requires at least one reachable route model. config.toml was not changed."
+                .to_string(),
+        );
     }
-    if metadata.output > 0 && metadata.output >= metadata.context {
-        return Err("Kimi Code requires the output limit to be smaller than the context limit. config.toml was not changed.".to_string());
-    }
-    Ok(metadata.context)
+    input
+        .connection_limits()
+        .map(|(context, _)| context)
+        .ok_or_else(|| {
+            if input
+                .model_metadata
+                .is_some_and(|metadata| metadata.context > 0 && metadata.context <= 1)
+            {
+                "Kimi Code requires a context limit greater than one token. config.toml was not changed."
+                    .to_string()
+            } else {
+                "Kimi Code requires the output limit to be smaller than the context limit. config.toml was not changed."
+                    .to_string()
+            }
+        })
 }
 
 fn safe_output_size(input: &ConnectInput<'_>) -> Option<u32> {
-    input
-        .model_metadata
-        .and_then(AgentModelMetadata::safe_limits)
-        .map(|(_, output)| output)
+    input.connection_limits().map(|(_, output)| output)
 }
 
 fn replace(segments: &[&str], value: serde_json::Value) -> PatchOperation {

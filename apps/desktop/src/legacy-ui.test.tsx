@@ -236,7 +236,7 @@ describe("legacy desktop read-only pages", () => {
     first.unmount();
     vi.mocked(getRouterTable).mockRejectedValueOnce(new Error("router down"));
     render(<RouterTable />);
-    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).toBeInTheDocument();
+    expect(await screen.findByText("操作失败：router down")).toBeInTheDocument();
   });
 
   it("loads grouped stats, changes scope and detail view, and formats nullable cost", async () => {
@@ -337,7 +337,7 @@ describe("legacy desktop read-only pages", () => {
     first.unmount();
     vi.mocked(getStats).mockRejectedValueOnce(new Error("stats down"));
     render(<Stats />);
-    expect((await screen.findAllByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("操作失败：stats down")).length).toBeGreaterThan(0);
   });
 
   it("loads and refreshes plugin metadata, including empty values", async () => {
@@ -355,7 +355,7 @@ describe("legacy desktop read-only pages", () => {
   it("shows plugin errors", async () => {
     vi.mocked(getPlugins).mockRejectedValue(new Error("plugin down"));
     render(<Plugins />);
-    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).toBeInTheDocument();
+    expect(await screen.findByText("操作失败：plugin down")).toBeInTheDocument();
   });
 });
 
@@ -460,9 +460,9 @@ describe("settings and update actions", () => {
     await user.click(screen.getByRole("switch", { name: /本地指标/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
     const viewport = screen.getByTestId("error-toast-viewport");
-    expect(await within(viewport).findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。"))
+    expect(await within(viewport).findByText("操作失败：settings denied"))
       .toBeInTheDocument();
-    expect(screen.queryByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。", { selector: ".settings-card .banner" }))
+    expect(screen.queryByText("操作失败：settings denied", { selector: ".settings-card .banner" }))
       .toBeNull();
   });
 
@@ -661,7 +661,7 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     expect(await screen.findByText("暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存模型" }));
-    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请更新 Token Station 或联系支持。")).toBeInTheDocument();
+    expect(await screen.findByText("操作失败：save down")).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
   });
 
@@ -804,11 +804,11 @@ describe("model selection and provider model management", () => {
     await userEvent.setup().click(screen.getByRole("tab", { name: "连接" }));
     const baseUrl = screen.getByRole("textbox", { name: "编辑 Base URL" });
     const endpointAlert = await screen.findByRole("alert");
-    expect(endpointAlert).toHaveTextContent("操作未能完成");
+    expect(endpointAlert).toHaveTextContent("操作失败：invalid endpoint");
     expect(endpointAlert.id).not.toMatch(/\s/);
     expect(baseUrl).toHaveAttribute("aria-describedby", endpointAlert.id);
     expect(baseUrl).toHaveAttribute("aria-invalid", "true");
-    expect(baseUrl).toHaveAccessibleDescription(/操作未能完成/);
+    expect(baseUrl).toHaveAccessibleDescription(/操作失败：invalid endpoint/);
     expect(screen.getByRole("button", { name: "保存连接" })).toBeDisabled();
     expect(within(screen.getByTestId("error-toast-viewport")).queryByRole("alert")).toBeNull();
   });
@@ -983,17 +983,55 @@ describe("model selection and provider model management", () => {
     )).toBeInTheDocument();
   });
 
-  it("目录中未配置的模型不提供必然失败的限制保存入口", () => {
+  it("最大输出缺失时仍可以单独保存上下文上限", async () => {
+    const provider: ProviderView = {
+      name: "deepseek", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["deepseek-v4"], has_auth: true,
+      model_capabilities: [{
+        model: "deepseek-v4", tool: "unknown", vision: "unknown", json_schema: "unknown",
+        context_window: 128000, max_output_tokens: 0,
+      }],
+    };
+    vi.mocked(setProviderModelLimits).mockResolvedValue(state);
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    const context = screen.getByRole("spinbutton", { name: "deepseek-v4 上下文上限" });
+    expect(screen.getByRole("spinbutton", { name: "deepseek-v4 最大输出 Token" })).toHaveValue(null);
+
+    await user.clear(context);
+    await user.type(context, "256000");
+    await user.click(screen.getByRole("button", { name: "保存 deepseek-v4 模型限制" }));
+
+    await waitFor(() => expect(setProviderModelLimits).toHaveBeenCalledWith(
+      "deepseek",
+      "deepseek-v4",
+      256000,
+      0,
+    ));
+  });
+
+  it("高级模型设置只显示当前已选择的模型", async () => {
     const provider: ProviderView = {
       name: "catalog-only", provider: "openai-compatible", base_url: "https://api.example/v1",
       models: ["configured"], has_auth: true,
       catalog: [{ model: "catalog-only-model", tool: "unknown", vision: "unknown", json_schema: "unknown", source: "live", last_seen_ms: 1, catalog_state: "active" }],
     };
 
-    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    const { container } = render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    const ledger = container.querySelector(".model-ledger");
+    const user = userEvent.setup();
 
-    expect(screen.queryByRole("button", { name: "保存 catalog-only-model 模型限制" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/catalog-only-model.*OpenCode/)).not.toBeInTheDocument();
+    expect(ledger).not.toBeNull();
+    expect(within(ledger as HTMLElement).getByText("configured")).toBeInTheDocument();
+    expect(within(ledger as HTMLElement).queryByText("catalog-only-model")).not.toBeInTheDocument();
+
+    await user.type(screen.getByRole("textbox", { name: "手动输入模型 ID" }), "catalog-only-model");
+    await user.click(screen.getByRole("button", { name: "加入列表" }));
+    expect(within(ledger as HTMLElement).getByText("catalog-only-model")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /✓configured/ }));
+    expect(within(ledger as HTMLElement).queryByText("configured")).not.toBeInTheDocument();
   });
 
   it("保留已下架模型并展示本次目录差异", async () => {
@@ -1295,7 +1333,7 @@ describe("provider deletion lifecycle", () => {
     expect(screen.queryByRole("dialog", { name: "删除影响预览" })).toBeNull();
   });
 
-  it("does not expose a raw provider recovery error in English mode", () => {
+  it("shows a sanitized provider recovery reason in English mode", () => {
     window.localStorage.setItem("token-station-language", "en");
     render(
       <ProviderList
@@ -1311,7 +1349,7 @@ describe("provider deletion lifecycle", () => {
     );
 
     expect(screen.getByText(
-      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
+      "Operation failed: 恢复供应商失败：[local path]",
     )).toBeInTheDocument();
     expect(screen.queryByText(/\/Users\/example/)).not.toBeInTheDocument();
   });

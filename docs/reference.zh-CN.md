@@ -30,6 +30,8 @@ South 是默认的 Provider 执行引擎：覆盖非流式与流式调用、Bear
 
 Anthropic 线协议的上游（`provider: anthropic`，即 Anthropic API 本身或兼容的 `/anthropic/v1` 端点）与其它上游一样经 Anthropic Provider 组件翻译：thinking、强制 `tool_choice`、server tool 的历史块都能往返。Canonical IR 唯一承载不了的是"由上游自己执行的工具"（`web_search`、`web_fetch`、`code_execution`、`tool_search`、`mcp`、`advisor`）。为此给上游设置 `"api_dialect": "anthropic-native"`：声明了这类工具的 Anthropic Messages 请求会被原样转发到 `base_url` + `/messages`（只改写 `model`），该上游的其它请求仍走翻译路径。该设置要求 `provider: anthropic`，且 `base_url` 以版本段结尾；它只能在配置文件中编辑，桌面端不提供。
 
+Codex 实时 Web Search 需要上游实现原生 OpenAI Responses API。请给明确选定的 `provider: openai-compatible` 上游设置 `"api_dialect": "responses-native"`，并让 `base_url` 结束于 API 版本段，例如 `https://api.openai.com/v1`。此后，声明了有效 `web_search` 工具的 Responses 请求会转发到 `base_url` + `/responses`；Token Station 会保留请求与响应格式，包括 `web_search_call` JSON 项和 SSE 事件，只改写 `model`。未启用 Web Search 的请求仍走翻译链路。翻译型上游仍会在发起网络请求前拒绝由供应商执行的工具。桌面端目前不提供这个高级设置。
+
 ## 桌面端
 
 App 提供首次使用引导、Agent 重新扫描、供应商、用量、设置、明暗主题、中英文、请求日志查看、加密 Connector 快照和供应商回收站。

@@ -82,6 +82,16 @@ import BudgetPricingPage from "./pages/BudgetPricingPage";
 import "./App.css";
 import { humanizeAppError } from "./errors";
 import { resolveStatusMenuNavigation } from "./statusMenuNavigation";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./components/ui/alert-dialog";
 
 function errorText(error: unknown): string {
   return humanizeAppError(error);
@@ -269,6 +279,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const [state, setState] = useState<StateView | null>(null);
   const [view, setView] = useState<AppView>("overview");
   const [modelEntryOpen, setModelEntryOpen] = useState(false);
+  const [directRouteDraftDirty, setDirectRouteDraftDirty] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState<AppView | null>(null);
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [shownUndetectedAgentIds, setShownUndetectedAgentIds] = useState<Set<string>>(
@@ -315,6 +327,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const viewRef = useRef(view);
   const lastConnectionAgentIdRef = useRef<string | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
+  const navigateRef = useRef<(next: AppView) => void>(() => undefined);
+  const continueEditingRef = useRef<HTMLButtonElement>(null);
   const pendingApplyRevisionRef = useRef<number | null>(null);
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
   const firstRunGuideCheckedRef = useRef(false);
@@ -386,8 +400,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       if (disposed) return;
       const next = resolveStatusMenuNavigation(target, statusMenuAgentIdsRef.current);
       if (!next) return;
-      viewHistoryRef.current = next === "add-provider" ? [viewRef.current] : [];
-      setView(next);
+      navigateRef.current(next);
     }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
@@ -803,14 +816,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     }
   };
 
-  const navigate = (next: AppView) => {
-    if (freeProviderBusy) return;
-    const lastConnectionAgentId = lastConnectionAgentIdRef.current;
-    const target = next === "agents"
-      && lastConnectionAgentId
-      && visibleAgentIds.has(lastConnectionAgentId)
-      ? `agent:${lastConnectionAgentId}` as AppView
-      : next;
+  const commitNavigation = (target: AppView) => {
     if (
       target === "providers"
       && !firstRunGuideOpen
@@ -833,6 +839,31 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       viewHistoryRef.current = [];
     }
     setView(target);
+  };
+
+  const navigate = (next: AppView) => {
+    if (freeProviderBusy) return;
+    const lastConnectionAgentId = lastConnectionAgentIdRef.current;
+    const target = next === "agents"
+      && lastConnectionAgentId
+      && visibleAgentIds.has(lastConnectionAgentId)
+      ? `agent:${lastConnectionAgentId}` as AppView
+      : next;
+    if (target === view) return;
+    if (view === "home" && state?.routing_mode === "direct" && directRouteDraftDirty) {
+      setPendingNavigation(target);
+      return;
+    }
+    commitNavigation(target);
+  };
+  navigateRef.current = navigate;
+
+  const leaveWithoutApplying = () => {
+    if (!pendingNavigation) return;
+    const target = pendingNavigation;
+    setPendingNavigation(null);
+    setDirectRouteDraftDirty(false);
+    commitNavigation(target);
   };
 
   const navigateBack = () => {
@@ -1024,10 +1055,11 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
               routingMode={state.routing_mode}
               directTarget={state.direct_target ?? null}
               onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode))}
-              onApplyDirect={(upstream, model) => void run(async () => {
+              onApplyDirect={(upstream, model) => run(async () => {
                 await setDirectRoute(upstream, model);
                 return serveStart();
               }, undefined, true)}
+              onDirectDraftChange={setDirectRouteDraftDirty}
               quotaAccounts={state.quota_accounts ?? []}
               onSaveQuota={saveQuota}
               onSaveQuotaPlan={saveQuotaPlan}
@@ -1248,6 +1280,43 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
           </section>
         );
       })()}
+
+      <AlertDialog
+        open={pendingNavigation !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingNavigation(null);
+        }}
+      >
+        <AlertDialogContent
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            continueEditingRef.current?.focus();
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{copy(
+              "The selected model is not applied",
+              "所选模型尚未应用",
+              "所選模型尚未套用",
+              "選択したモデルはまだ適用されていません",
+            )}</AlertDialogTitle>
+            <AlertDialogDescription>{copy(
+              "Your selected model has not been applied. Leaving this page will discard the selection.",
+              "你选择的模型尚未应用。离开此页面将丢弃该选择。",
+              "你選擇的模型尚未套用。離開此頁面將捨棄該選擇。",
+              "選択したモデルはまだ適用されていません。このページから移動すると、選択内容が破棄されます。",
+            )}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel ref={continueEditingRef}>
+              {copy("Continue editing", "继续编辑", "繼續編輯", "編集を続ける")}
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={leaveWithoutApplying}>
+              {copy("Leave without applying", "不应用并离开", "不套用並離開", "適用せずに移動")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <FirstRunTutorialPrompt
         open={firstRunTutorialPromptOpen}
         onStart={() => {

@@ -343,6 +343,38 @@ describe("retained page theme styles", () => {
     expect(bodyRule).toMatch(/overflow-y:\s*auto/);
   });
 
+  it("keeps Agent change review in a wide flat table with a fixed assurance row", () => {
+    const rules = (pattern: RegExp) => {
+      const matches = Array.from(appCss.matchAll(pattern));
+      return matches.map((match) => match[1] ?? "");
+    };
+    const dialogRule = rules(
+      /\.agent-change-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/gs,
+    ).find((rule) => rule.includes("max-width: 880px")) ?? "";
+    const listRule = rules(/\.agent-change-list\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("330px")) ?? "";
+    const rowRule = rules(/\.agent-change-row\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("subgrid")) ?? "";
+    const fieldRule = rules(/\.agent-change-path\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("white-space: nowrap")) ?? "";
+    const stateRule = rules(/\.agent-change-state\s*\{([^}]*)\}/gs)
+      .find((rule) => rule.includes("background: transparent")) ?? "";
+    const narrowRules = appCss.slice(appCss.indexOf("@media (max-width: 640px)"));
+
+    expect(dialogRule).toMatch(/max-width:\s*880px/);
+    expect(dialogRule).toMatch(/height:\s*min\(760px, calc\(100vh - 32px\)\)/);
+    expect(dialogRule).toMatch(/grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto/);
+    expect(listRule).toMatch(/grid-template-columns:\s*330px 110px minmax\(0, 1fr\)/);
+    expect(rowRule).toMatch(/grid-template-columns:\s*subgrid/);
+    expect(rowRule).not.toMatch(/border:/);
+    expect(fieldRule).toMatch(/white-space:\s*nowrap/);
+    expect(stateRule).toMatch(/border:\s*0/);
+    expect(stateRule).toMatch(/background:\s*transparent/);
+    expect(narrowRules).toMatch(/\.agent-change-path[^}]*white-space:\s*normal/s);
+    expect(appCss).not.toMatch(/\.agent-change-arrow/);
+    expect(appCss).not.toMatch(/\.agent-change-states/);
+  });
+
   it("uses filled hierarchy instead of nested frames inside provider management", () => {
     const lastRule = (pattern: RegExp) => {
       const matches = Array.from(appCss.matchAll(pattern));
@@ -434,6 +466,9 @@ describe("retained page theme styles", () => {
     const pointerHoverRule = appCss.match(
       /\.settings-subnav\[data-input-mode="pointer"\] \[data-slot="button"\]\.settings-subnav-item:hover\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const navigationItemRule = appCss.match(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(workspaceRule).toMatch(/overflow:\s*hidden/);
     expect(pageRule).toMatch(/height:\s*100%/);
@@ -443,7 +478,12 @@ describe("retained page theme styles", () => {
     expect(sidebarRule).toMatch(/align-content:\s*start/);
     expect(sidebarRule).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\)/);
     const subnavRule = appCss.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(subnavRule).toMatch(/display:\s*flex/);
+    expect(subnavRule).toMatch(/flex-direction:\s*column/);
+    expect(subnavRule).toMatch(/align-items:\s*stretch/);
     expect(subnavRule).toMatch(/overflow-y:\s*auto/);
+    expect(navigationItemRule).toMatch(/height:\s*40px/);
+    expect(navigationItemRule).toMatch(/min-height:\s*40px/);
     expect(pressedNavigationRule).toMatch(/transform:\s*none/);
     expect(pointerHoverRule).toMatch(/background:\s*var\(--surface-2\)/);
     expect(appCss).not.toMatch(
@@ -505,6 +545,9 @@ describe("retained page theme styles", () => {
       /\.settings-page \.settings-content\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
     const subnavRule = narrowRules.match(/\.settings-subnav\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const navigationItemRule = narrowRules.match(
+      /\.settings-subnav \[data-slot="button"\]\.settings-subnav-item\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
 
     expect(workspaceRule).toMatch(/overflow:\s*auto/);
     expect(pageRule).toMatch(/height:\s*auto/);
@@ -512,8 +555,11 @@ describe("retained page theme styles", () => {
     expect(contentRule).toMatch(/overflow-y:\s*visible/);
     expect(contentRule).toMatch(/overscroll-behavior:\s*auto/);
     expect(contentRule).toMatch(/scrollbar-gutter:\s*auto/);
+    expect(subnavRule).toMatch(/flex-direction:\s*row/);
     expect(subnavRule).toMatch(/border:\s*0/);
     expect(subnavRule).toMatch(/background:\s*transparent/);
+    expect(navigationItemRule).toMatch(/min-width:\s*max-content/);
+    expect(navigationItemRule).toMatch(/height:\s*40px/);
   });
 
   it("uses theme tokens for router JSON code blocks", () => {
@@ -524,18 +570,26 @@ describe("retained page theme styles", () => {
     expect(codeBlockRule).toMatch(/border:\s*1px solid var\(--line\)/);
   });
 
-  it("shows a distinct Direct row dragging state and disables its motion when requested", () => {
-    const draggingRule = appCss.match(/\.direct-provider-row\.dragging\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const draggingWrapperRule = appCss.match(/\.direct-provider-sortable\.dragging\s*\{([^}]*)\}/s)?.[1] ?? "";
+  it("keeps wide Direct provider controls in one centered visual group", () => {
+    const providerRowRule = appCss.match(/\.direct-provider-row\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(providerRowRule).toMatch(
+      /grid-template-columns:\s*40px minmax\(140px, 220px\) minmax\(300px, 720px\) 20px/,
+    );
+    expect(providerRowRule).toMatch(/justify-content:\s*center/);
+    expect(providerRowRule).toMatch(/padding-inline:\s*clamp\(14px, 3vw, 48px\)/);
+  });
+
+  it("animates Direct provider promotion and disables its motion when requested", () => {
+    const providerItemRule = appCss.match(/\.direct-provider-item\s*\{([^}]*)\}/s)?.[1] ?? "";
     const reducedMotion = Array.from(
       appCss.matchAll(/@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}/g),
       (match) => match[1],
     ).join("\n");
 
-    expect(draggingRule).toMatch(/box-shadow:/);
-    expect(draggingRule).toMatch(/opacity:/);
-    expect(draggingWrapperRule).toMatch(/z-index:/);
-    expect(reducedMotion).toMatch(/\.direct-provider-sortable[^}]*transition:\s*none/);
+    expect(providerItemRule).toMatch(/transition:\s*transform 280ms/);
+    expect(providerItemRule).toMatch(/cubic-bezier\(\.22, 1, \.36, 1\)/);
+    expect(reducedMotion).toMatch(/\.direct-provider-item[^}]*transition:\s*none/);
     expect(reducedMotion).toMatch(/\.direct-provider-row[^}]*transition:\s*none/);
   });
 
@@ -745,15 +799,16 @@ describe("retained page theme styles", () => {
     );
   });
 
-  it("uses one flat theme-aware surface for the request audit inspector", () => {
+  it("uses borderless theme-aware color blocks for the request audit inspector", () => {
     const plaintextRule = appCss.match(/\.request-detail-dialog \.request-plaintext\s*\{([^}]*)\}/s)?.[1] ?? "";
     const scrollRule = appCss.match(/\.request-detail-dialog \.request-plaintext-scroll\s*\{([^}]*)\}/s)?.[1] ?? "";
     const semanticBlockRule = appCss.match(/\.request-detail-dialog \.request-semantic-block\s*\{([^}]*)\}/s)?.[1] ?? "";
     const semanticBodyRule = appCss.match(/\.request-semantic-block > pre\s*\{([^}]*)\}/s)?.[1] ?? "";
     const thinkingLabelRule = appCss.match(/\.request-detail-dialog \.request-semantic-block\.thinking > div\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const packetRule = appCss.match(/\.request-detail-dialog \.http-packet\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const packetContentRule = appCss.match(/\.request-detail-dialog \.http-packet-content\s*\{([^}]*)\}/s)?.[1] ?? "";
-    const disclosureRule = appCss.match(/\.request-detail-dialog :is\(\.http-packet-disclosure, \.http-change-disclosure\)\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const workbenchRule = appCss.match(/\.request-detail-dialog \.http-conversation-workbench\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const conversationRule = appCss.match(/\.request-detail-dialog \.http-conversation-item\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const packetSectionRule = appCss.match(/\.request-detail-dialog \.http-packet-section\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const disclosureRule = appCss.match(/\.request-detail-dialog \.http-change-disclosure\s*\{([^}]*)\}/s)?.[1] ?? "";
 
     expect(plaintextRule).toMatch(/border:\s*0/);
     expect(plaintextRule).toMatch(/background:\s*transparent/);
@@ -765,12 +820,15 @@ describe("retained page theme styles", () => {
     expect(thinkingLabelRule).toMatch(/color:\s*var\(--muted\)/);
     expect(thinkingLabelRule).toMatch(/background:\s*transparent/);
     expect(thinkingLabelRule).not.toMatch(/var\(--warning\)/);
-    expect(packetRule).toMatch(/border:\s*0/);
-    expect(packetContentRule).toMatch(/border-left:\s*1px solid var\(--line-strong\)/);
-    expect(disclosureRule).toMatch(/width:\s*28px/);
-    expect(disclosureRule).toMatch(/height:\s*28px/);
+    expect(workbenchRule).toMatch(/border:\s*0/);
+    expect(workbenchRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(conversationRule).toMatch(/border:\s*0/);
+    expect(packetSectionRule).toMatch(/border:\s*0/);
+    expect(packetSectionRule).toMatch(/background:\s*var\(--canvas\)/);
+    expect(disclosureRule).toMatch(/width:\s*26px/);
+    expect(disclosureRule).toMatch(/height:\s*26px/);
 
-    for (const rule of [plaintextRule, scrollRule, semanticBlockRule, semanticBodyRule, thinkingLabelRule, packetRule, packetContentRule, disclosureRule]) {
+    for (const rule of [plaintextRule, scrollRule, semanticBlockRule, semanticBodyRule, thinkingLabelRule, workbenchRule, conversationRule, packetSectionRule, disclosureRule]) {
       expect(rule).not.toMatch(/#08101d|#0b1220|#fff\b/i);
     }
   });

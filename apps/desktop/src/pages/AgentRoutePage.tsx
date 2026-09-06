@@ -22,9 +22,11 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
+  restartAgentHarnessRoutes,
   restartAgentRoute,
   restoreCursorProvider,
   setAgentRouteMode,
+  setAgentHarnessModelRoute,
   setAgentTier,
   type AgentInstallationView,
   type ConfigPlanView,
@@ -40,6 +42,7 @@ import {
   type TierSlot,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
+import HarnessModelMapping from "../components/HarnessModelMapping";
 import InstallationPicker from "../components/InstallationPicker";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import RoutingModeSelector from "../components/RoutingModeSelector";
@@ -161,6 +164,36 @@ function changeValueMeaning(path: string, preview: string | undefined, copy: Loc
     default:
       return null;
   }
+}
+
+function structuredJsonPreview(preview: string | undefined) {
+  if (preview === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(preview);
+    if (parsed === null || typeof parsed !== "object") return null;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return null;
+  }
+}
+
+const jsonTokenPattern = /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"\s*:|"(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+
+function StructuredJsonPreview({ value, label }: { value: string; label: string }) {
+  return (
+    <pre className="agent-change-json" role="region" aria-label={label} tabIndex={0}>
+      {value.split(jsonTokenPattern).map((token, index) => {
+        let tokenClass = "";
+        if (token.startsWith('"')) tokenClass = token.trimEnd().endsWith(":") ? "key" : "string";
+        else if (token === "true" || token === "false") tokenClass = "boolean";
+        else if (token === "null") tokenClass = "null";
+        else if (/^-?\d/.test(token)) tokenClass = "number";
+        return tokenClass
+          ? <span className={`agent-change-json-${tokenClass}`} key={index}>{token}</span>
+          : token;
+      })}
+    </pre>
+  );
 }
 
 export function compactDiscoveryPath(path: string): string {
@@ -777,6 +810,13 @@ export default function AgentRoutePage({
       : copy("Custom routing saved", "独立路由已保存", "獨立路由已儲存", "カスタムルーティングが保存されました"),
   );
 
+  const saveHarnessRoutes = () => runState(
+    () => restartAgentHarnessRoutes(metadata.agent_id),
+    serveRunning
+      ? copy("Harness mappings saved and restarted", "Harness 映射已保存并生效", "Harness 映射已儲存並生效", "Harness マッピングを保存して適用しました")
+      : copy("Harness mappings saved", "Harness 映射已保存", "Harness 映射已儲存", "Harness マッピングを保存しました"),
+  );
+
   // In Follow Home mode, apply the current home tiers to this Agent immediately.
   // Restarting an inherited route clears the Agent-specific route and hot-applies the home configuration.
   const applyHomeRoute = () => runState(
@@ -1066,6 +1106,17 @@ export default function AgentRoutePage({
                 "設定ファイルはまだ変更されていません。続行する前に各フィールドを確認してください。ローカル認証情報は平文で表示されます。スクリーンショットと画面共有を避けてください。"
               )}</DialogDescription>
           </DialogHeader>
+          <div className="agent-backup-assurance">
+            <ShieldCheck aria-hidden="true" />
+            <div>
+              <strong>{copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
+              <span>{pendingPlan?.intent === "restore"
+                ? copy("Only Token Station-owned fields change. Other fields stay as they are.", "只恢复 Token Station 受管字段，其他字段保持不变。", "只恢復 Token Station 受管欄位，其他欄位保持不變。", "Token Station 管理フィールドのみ復元し、他のフィールドは保持します。")
+                : pendingPlan?.intent === "review"
+                  ? copy("This is a read-only record. Closing it does not change the file.", "这是只读记录，关闭不会修改文件。", "這是唯讀記錄，關閉不會修改檔案。", "読み取り専用の記録です。閉じてもファイルは変更されません。")
+                  : copy("Token Station saves the original file locally immediately before writing.", "写入前会在本机保存原文件的加密快照。", "寫入前會在本機儲存原檔案的加密快照。", "書き込み直前に元のファイルをローカルへ暗号化保存します。")}</span>
+            </div>
+          </div>
           <div className="agent-change-scroll" role="region" aria-label={copy("Configuration changes", "配置改动", "設定變更", "設定変更")} tabIndex={0}>
             {pendingPlan ? (
               <div className="agent-change-files">
@@ -1074,33 +1125,49 @@ export default function AgentRoutePage({
                     <div className="agent-change-file-head">
                       <span>{copy("Target file", "目标文件", "目標檔案", "対象ファイル")}</span>
                       <code>{file.path}</code>
+                      <small>{copy(
+                        `${file.changes.length} changes`,
+                        `${file.changes.length} 项改动`,
+                        `${file.changes.length} 項變更`,
+                        `${file.changes.length} 件の変更`,
+                      )}</small>
                     </div>
-                    <div className="agent-change-list">
+                    <div
+                      className="agent-change-list"
+                      role="table"
+                      aria-label={copy("Configuration changes", "配置改动", "設定變更", "設定変更")}
+                    >
+                      <div className="agent-change-table-head" role="row">
+                        <span role="columnheader">{copy("Field", "字段", "欄位", "フィールド")}</span>
+                        <span role="columnheader">{copy("Before", "修改前", "修改前", "変更前")}</span>
+                        <span role="columnheader">{copy("After", "修改后", "修改後", "変更後")}</span>
+                      </div>
                       {file.changes.map((change, index) => {
                         const changePath = change.path.segments.join(".");
                         const beforePreview = change.before_preview;
                         const afterPreview = change.after_preview;
                         const beforeMeaning = changeValueMeaning(changePath, beforePreview, copy);
                         const afterMeaning = changeValueMeaning(changePath, afterPreview, copy);
+                        const beforeJson = structuredJsonPreview(beforePreview);
+                        const afterJson = structuredJsonPreview(afterPreview);
                         return (
-                        <article className="agent-change-row" key={`${changePath}-${index}`}>
-                          <div className="agent-change-path-group">
-                            <code className="agent-change-path">{changePath}</code>
+                        <div className="agent-change-row" role="row" key={`${changePath}-${index}`}>
+                          <code className="agent-change-path" role="cell">{changePath}</code>
+                          <div className={`agent-change-state before ${beforePreview === undefined ? "empty" : ""}`} role="cell">
+                            <span className="agent-change-mobile-label">{copy("Before", "修改前", "修改前", "変更前")}</span>
+                            {beforeJson
+                              ? <StructuredJsonPreview value={beforeJson} label={copy("Formatted JSON", "格式化 JSON", "格式化 JSON", "整形済み JSON")} />
+                              : <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "before", pendingPlan.intent, beforePreview, copy)}</strong>}
+                            {beforeMeaning ? <small>{beforeMeaning}</small> : null}
                           </div>
-                          <div className="agent-change-states">
-                            <div>
-                              <span>{copy("Before", "修改前", "修改前", "変更前")}</span>
-                              <strong className={beforePreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "before", pendingPlan.intent, beforePreview, copy)}</strong>
-                              {beforeMeaning ? <small>{beforeMeaning}</small> : null}
-                            </div>
-                            <span className="agent-change-arrow" aria-hidden="true">→</span>
-                            <div className="after">
-                              <span>{copy("After", "修改后", "修改後", "変更後")}</span>
-                              <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "after", pendingPlan.intent, afterPreview, copy)}</strong>
-                              {afterMeaning ? <small>{afterMeaning}</small> : null}
-                            </div>
+                          <div className={`agent-change-state after ${afterPreview === undefined ? "empty" : ""}`} role="cell">
+                            <span className="agent-change-mobile-label">{copy("After", "修改后", "修改後", "変更後")}</span>
+                            {afterJson
+                              ? <StructuredJsonPreview value={afterJson} label={copy("Formatted JSON", "格式化 JSON", "格式化 JSON", "整形済み JSON")} />
+                              : <strong className={afterPreview !== undefined ? "agent-change-value" : undefined}>{changeState(change.operation, "after", pendingPlan.intent, afterPreview, copy)}</strong>}
+                            {afterMeaning ? <small>{afterMeaning}</small> : null}
                           </div>
-                        </article>
+                        </div>
                         );
                       })}
                     </div>
@@ -1108,17 +1175,6 @@ export default function AgentRoutePage({
                 ))}
               </div>
             ) : null}
-            <div className="agent-backup-assurance">
-              <ShieldCheck aria-hidden="true" />
-              <div>
-                <strong>{copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
-                <span>{pendingPlan?.intent === "restore"
-                  ? copy("Only Token Station-owned fields change. Other fields stay as they are.", "只恢复 Token Station 受管字段，其他字段保持不变。", "只恢復 Token Station 受管欄位，其他欄位保持不變。", "Token Station 管理フィールドのみ復元し、他のフィールドは保持します。")
-                  : pendingPlan?.intent === "review"
-                    ? copy("This is a read-only record. Closing it does not change the file.", "这是只读记录，关闭不会修改文件。", "這是唯讀記錄，關閉不會修改檔案。", "読み取り専用の記録です。閉じてもファイルは変更されません。")
-                  : copy("Token Station saves the original file locally immediately before writing.", "写入前会在本机保存原文件的加密快照。", "寫入前會在本機儲存原檔案的加密快照。", "書き込み直前に元のファイルをローカルへ暗号化保存します。")}</span>
-              </div>
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" type="button" disabled={busy} onClick={closePendingPlan}>
@@ -1208,6 +1264,25 @@ export default function AgentRoutePage({
       </AlertDialog>
         </>
       )}
+      {pageMode !== "connection" && ["claude-code", "opencode"].includes(metadata.agent_id) ? (
+        <HarnessModelMapping
+          agentId={metadata.agent_id}
+          providers={providers}
+          routes={route.harness_model_routes}
+          disabled={busy}
+          saveDisabled={Boolean(route.harness_config_error)}
+          error={route.harness_config_error}
+          onChange={(requestedModel, target) => runState(() =>
+            setAgentHarnessModelRoute(
+              metadata.agent_id,
+              requestedModel,
+              target.upstream,
+              target.model,
+            )
+          )}
+          onSave={saveHarnessRoutes}
+        />
+      ) : null}
       {pageMode !== "connection" && (
         !independentEditorOpen ? (
           <section
@@ -1236,7 +1311,10 @@ export default function AgentRoutePage({
               className="agent-route-inheritance-action"
               variant="outline"
               type="button"
-              onClick={() => setIndependentEditorOpen(true)}
+              onClick={() => {
+                setIndependentEditorOpen(true);
+                void switchMode("custom");
+              }}
             >
               <SlidersHorizontal data-icon="inline-start" aria-hidden="true" />
               {copy("Set independent routing", "设置独立路由", "設定獨立路由", "独立ルーティングを設定")}

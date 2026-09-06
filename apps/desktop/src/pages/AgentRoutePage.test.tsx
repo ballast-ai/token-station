@@ -16,6 +16,7 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
+  restartAgentHarnessRoutes,
   restartAgentRoute,
   restoreCursorProvider,
   setAgentRouteMode,
@@ -36,9 +37,11 @@ vi.mock("../api", () => ({
   openAgentBackupDirectory: vi.fn(),
   planAgentConnection: vi.fn(),
   planAgentDisconnect: vi.fn(),
+  restartAgentHarnessRoutes: vi.fn(),
   restartAgentRoute: vi.fn(),
   restoreCursorProvider: vi.fn(),
   setAgentRouteMode: vi.fn(),
+  setAgentHarnessModelRoute: vi.fn(),
   setAgentTier: vi.fn(),
 }));
 
@@ -103,6 +106,7 @@ describe("AgentRoutePage multi-install admission", () => {
     vi.mocked(mountAgentProfile).mockReset().mockResolvedValue({} as never);
     vi.mocked(openAgentBackupDirectory).mockReset().mockResolvedValue("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots");
     vi.mocked(restartAgentRoute).mockReset().mockResolvedValue({} as never);
+    vi.mocked(restartAgentHarnessRoutes).mockReset().mockResolvedValue({} as never);
     vi.mocked(restoreCursorProvider).mockReset().mockResolvedValue({
       state: "disconnected",
       message: "已恢复 Cursor 官方配置并断开",
@@ -315,6 +319,12 @@ describe("AgentRoutePage multi-install admission", () => {
         sensitive: false,
         summary: "<设置受管值>",
         after_preview: '"1"',
+      }, {
+        operation: "add",
+        path: { segments: ["provider", "tokenstation"] },
+        sensitive: false,
+        summary: "<设置受管值>",
+        after_preview: '{"models":{"auto":{"attachment":true,"limit":{"context":128000,"output":8192}}}}',
       }],
       human_diff: "endpoint changed",
     } as never);
@@ -355,7 +365,18 @@ describe("AgentRoutePage multi-install admission", () => {
     await user.click(connect);
 
     const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
-    expect(within(preview).getByRole("region", { name: "配置改动" })).toHaveClass("agent-change-scroll");
+    const changesRegion = within(preview).getByRole("region", { name: "配置改动" });
+    const backupAssurance = within(preview).getByText("已加密备份")
+      .closest<HTMLElement>(".agent-backup-assurance");
+    expect(changesRegion).toHaveClass("agent-change-scroll");
+    expect(backupAssurance).not.toBeNull();
+    expect(changesRegion).not.toContainElement(backupAssurance);
+    expect(backupAssurance?.compareDocumentPosition(changesRegion) ?? 0)
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(within(preview).getByRole("table", { name: "配置改动" })).toBeInTheDocument();
+    expect(within(preview).getByRole("columnheader", { name: "字段" })).toBeInTheDocument();
+    expect(within(preview).getByRole("columnheader", { name: "修改前" })).toBeInTheDocument();
+    expect(within(preview).getByRole("columnheader", { name: "修改后" })).toBeInTheDocument();
     expect(preview).toHaveTextContent("/Users/x/.claude/settings.json");
     expect(preview).toHaveTextContent("env.ANTHROPIC_BASE_URL");
     expect(preview).toHaveTextContent("修改前");
@@ -367,6 +388,10 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(preview).toHaveTextContent('"0"');
     expect(preview).toHaveTextContent("Thinking token 预算设为 0");
     expect(preview).toHaveTextContent("关闭自适应 Thinking");
+    const formattedJson = within(preview).getByRole("region", { name: "格式化 JSON" });
+    expect(formattedJson.textContent).toContain(
+      '{\n  "models": {\n    "auto": {\n      "attachment": true,\n      "limit": {\n        "context": 128000,\n        "output": 8192\n      }\n    }\n  }\n}',
+    );
     expect(preview).toHaveTextContent('"must-not-render-old-secret"');
     expect(preview).toHaveTextContent('"must-not-render-new-secret"');
     expect(preview).toHaveTextContent("本机凭据会以明文显示，请避免截屏或共享屏幕");
@@ -1231,7 +1256,7 @@ describe("AgentRoutePage multi-install admission", () => {
 
     const viewport = screen.getByTestId("error-toast-viewport");
     expect(await within(viewport).findByRole("status")).toHaveTextContent("已恢复备份并断开");
-    expect(within(viewport).getByRole("alert")).toHaveTextContent("操作未能完成");
+    expect(within(viewport).getByRole("alert")).toHaveTextContent("操作失败：refresh failed");
     expect(document.querySelector(".agent-route-page .banner")).toBeNull();
   });
 
@@ -1306,7 +1331,7 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.getByRole("button", { name: "预览并接入" })).toBeEnabled();
   });
 
-  it("does not expose a raw compatibility message in English mode", () => {
+  it("shows a sanitized compatibility reason in English mode", () => {
     window.localStorage.setItem("token-station-language", "en");
     const blocked = installation("/opt/homebrew/bin/claude", "1.0.0");
     blocked.discovery.is_path_default = true;
@@ -1365,9 +1390,9 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(screen.getByText(
-      "The operation could not be completed. Try again. If it still fails, update Token Station or contact support.",
+      "Operation failed: 当前版本在阻断列表中：[local path]",
     )).toBeInTheDocument();
-    expect(screen.queryByText(/当前版本在阻断列表/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/Users\/example/)).not.toBeInTheDocument();
   });
 
   it("lets the user connect the exact Claude Code installation they selected", async () => {
@@ -1910,6 +1935,8 @@ describe("AgentRoutePage split page modes", () => {
     render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="routing" embedded /></ErrorToastProvider>);
 
     expect(screen.getByText("跟随全局路由")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Harness 模型映射" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Haiku 供应商" })).toBeEnabled();
     expect(screen.queryByRole("tablist", { name: "Agent 路由策略" })).toBeNull();
     expect(screen.queryByText("选择请求如何分配")).toBeNull();
     expect(screen.queryByRole("button", { name: "预览并接入" })).toBeNull();
