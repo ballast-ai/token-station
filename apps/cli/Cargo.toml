@@ -16,7 +16,7 @@ getrandom = "0.4.3"
 pdf-extract = "0.12.0"
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2 = "0.10"
 south-contracts = { workspace = true }
 south-core = { workspace = true }

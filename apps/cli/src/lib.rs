@@ -16,6 +16,7 @@
 //! A library crate so the integration tests can stand the whole server up
 //! in-process against a mock upstream; `main.rs` is a thin argument parser.
 
+mod accounting;
 pub mod admin;
 pub mod admission;
 pub mod backup;

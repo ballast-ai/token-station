@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { AggView } from "../api";
 import UsageTrendChart from "./UsageTrendChart";
+import { within } from "@testing-library/react";
 
 const aggregate: AggView = {
   requests: 3,
@@ -18,107 +19,100 @@ const aggregate: AggView = {
   cost_micros: 420_000,
   priced_requests: 3,
   unpriced_requests: 0,
+  cache_read_reported_requests: 3,
+  cache_write_reported_requests: 3,
 };
 
+
+const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
+const bucketMs = new Date(2026, 6, 23, 11).getTime();
+
 describe("UsageTrendChart", () => {
-  it("renders cc-Switch-style token and cost series on a continuous 24-hour axis", async () => {
-    const user = userEvent.setup();
-    const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
-    const bucketMs = new Date(2026, 6, 23, 11).getTime();
-    const { container } = render(
-      <UsageTrendChart
-        groups={[[String(bucketMs), aggregate]]}
-        range="24h"
-        nowMs={nowMs}
-      />,
-    );
-
-    expect(screen.getByRole("img", { name: /24 个小时槽，活跃 1 个/ })).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: /左轴为 Token，右轴为成本/ })).toBeInTheDocument();
-    expect(screen.getByText((_, element) => element?.textContent === "活跃 1 / 24 小时")).toBeInTheDocument();
-    expect(container.querySelectorAll("[data-usage-bucket]")).toHaveLength(24);
+  it("does not present missing token reports as a zero peak", () => {
+    const missing = { ...aggregate, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      input_reported_requests: 0, output_reported_requests: 0, total_reported_requests: 0,
+      cache_read_reported_requests: 0, cache_write_reported_requests: 0 };
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), missing]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelector(".usage-chart-meta")).toHaveTextContent("Token 峰值 未上报");
+  });
+  it("preserves four curves, filled areas, and a dual cost axis without layout switches", () => {
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
+    expect(screen.getByRole("img", { name: /25 个小时槽，活跃 1 个/ })).toHaveAccessibleName(/左轴为 Token，右轴为成本/);
+    expect(container.querySelectorAll("[data-usage-bucket]")).toHaveLength(25);
     expect(container.querySelectorAll(".usage-chart-series")).toHaveLength(4);
-    expect(container.querySelector(".usage-chart-cost-line")).toBeInTheDocument();
-
-    await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
-    expect(screen.getByText("输入总量")).toBeInTheDocument();
-    expect(screen.getByText("80,000")).toBeInTheDocument();
-    expect(screen.getByText("3,000")).toBeInTheDocument();
-    expect(screen.getByText("1,200")).toBeInTheDocument();
-    expect(screen.getByText("64,000")).toBeInTheDocument();
-    expect(screen.getAllByText("$0.420")).toHaveLength(2);
-    expect(screen.getByText("3 次请求 · 0 个错误 · 缓存指标属于输入子集")).toBeInTheDocument();
+    expect(container.querySelectorAll(".usage-chart-area")).toHaveLength(4);
+    for (const path of container.querySelectorAll(".usage-chart-series, .usage-chart-cost-line")) expect(path.getAttribute("d")).toContain(" C ");
+    expect(container.querySelector(".usage-chart-bar, .usage-chart-controls, [data-cost-unknown]")).toBeNull();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
   });
 
-  it("shows zero cache writes without inventing missing-data semantics", async () => {
+  it("keeps exact input, output, cache, and costs together in the original tooltip", async () => {
     const user = userEvent.setup();
-    const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
-    const bucketMs = new Date(2026, 6, 23, 12).getTime();
-    const { container } = render(
-      <UsageTrendChart
-        groups={[[String(bucketMs), { ...aggregate, cache_write_tokens: 0 }]]}
-        range="24h"
-        nowMs={nowMs}
-      />,
-    );
-
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
     await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
-    expect(screen.getByText("缓存写入").nextElementSibling).toHaveTextContent("0");
-    expect(container.querySelector('[aria-label*="缓存写入 0"]')).toBeInTheDocument();
+    for (const value of ["80,000", "3,000", "64,000", "1,200", "$0.42"]) expect(within(screen.getByRole("status")).getByText(value)).toBeInTheDocument();
   });
 
-  it("labels legacy buckets as provider-reported input", async () => {
+  it("retains unknown and partial token coverage across range updates", () => {
+    const value = { ...aggregate, input_tokens: 10, output_tokens: 0,
+      input_reported_requests: 1, output_reported_requests: 0, total_reported_requests: 0 };
+    const { container, rerender } = render(<UsageTrendChart groups={[[String(bucketMs), value]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelector(`[data-bucket-key="${bucketMs}"]`)).toHaveAccessibleName(/输入总量 10（部分上报） · 输出 未上报/);
+    const day = new Date(2026, 6, 23).getTime();
+    rerender(<UsageTrendChart groups={[[String(day), { ...value, output_reported_requests: 3 }]]} range="7d" nowMs={nowMs} />);
+    expect(container.querySelector(`[data-bucket-key="${day}"]`)).toHaveAccessibleName(/输出 0/);
+  });
+
+  it("distinguishes unreported cache writes from reported zero without yellow crosses", () => {
+    const value = { ...aggregate, cache_write_tokens: 0, cache_write_reported_requests: 0 };
+    const { container, rerender } = render(<UsageTrendChart groups={[[String(bucketMs), value]]} range="all" nowMs={nowMs} />);
+    expect(container.querySelector("[data-usage-bucket]")).toHaveAccessibleName(/缓存写入 未上报/);
+    expect(container.querySelector(".usage-chart-series.cache-write")).toHaveAttribute("d", "");
+    rerender(<UsageTrendChart groups={[[String(bucketMs), { ...value, cache_write_reported_requests: 3 }]]} range="all" nowMs={nowMs} />);
+    expect(container.querySelector("[data-usage-bucket]")).toHaveAccessibleName(/缓存写入 0/);
+    expect(container.querySelector(".usage-chart-series.cache-write")?.getAttribute("d")).toMatch(/^M /);
+    expect(container.querySelector(".usage-chart-cost-unknown, [data-cost-unknown]")).toBeNull();
+  });
+
+  it("breaks unknown cost segments and explains partial known cost in the tooltip", async () => {
     const user = userEvent.setup();
-    const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
-    const bucketMs = new Date(2026, 6, 23, 12).getTime();
-    const { container } = render(
-      <UsageTrendChart
-        groups={[[String(bucketMs), { ...aggregate, legacy_input_requests: 1 }]]}
-        range="24h"
-        nowMs={nowMs}
-      />,
-    );
-
+    const partial = { ...aggregate, priced_requests: 1, unpriced_requests: 2, missing_price_requests: 1, missing_usage_requests: 1 };
+    const missing = { ...aggregate, cost_micros: null, priced_requests: 0, unpriced_requests: 3 };
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), partial], [String(bucketMs + 3600000), missing]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelector(".usage-chart-cost-line")?.getAttribute("d")?.match(/M /g)).toHaveLength(2);
+    expect(container.querySelector(`[data-bucket-key="${bucketMs + 3600000}"]`)).toHaveAccessibleName(/成本 未知/);
     await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
-    expect(screen.getByText("上游输入")).toBeInTheDocument();
-    expect(container.querySelector('[aria-label*="上游输入 80,000"]')).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("$0.42（部分）");
+    expect(screen.getByRole("status")).toHaveTextContent("1 次缺少价格 · 1 次用量不完整");
   });
 
-  it("marks an unpriced request bucket as unknown instead of zero cost", async () => {
+  it("keeps a single priced point visible with micro-dollar precision and keyboard inspection", async () => {
     const user = userEvent.setup();
-    const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
-    const bucketMs = new Date(2026, 6, 23, 12).getTime();
-    const unpriced = {
-      ...aggregate,
-      cost_micros: null,
-      priced_requests: 0,
-      unpriced_requests: 3,
-    };
-    const { container } = render(
-      <UsageTrendChart
-        groups={[[String(bucketMs), unpriced]]}
-        range="24h"
-        nowMs={nowMs}
-      />,
-    );
-
-    expect(screen.getByText("未定价")).toBeInTheDocument();
-    await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
-    expect(screen.getByText("未知")).toBeInTheDocument();
-    expect(container.querySelector("[data-cost-unknown]")).toBeInTheDocument();
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), { ...aggregate, cost_micros: 1 }]]} range="all" nowMs={nowMs} />);
+    expect(container.querySelectorAll("[data-usage-point]")).toHaveLength(4);
+    expect(container.querySelector("[data-cost-point]")).toHaveAttribute("r", "2.5");
+    await user.tab();
+    expect(screen.getByRole("status")).toHaveTextContent("$0.000001");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("localizes unknown cost in the Japanese accessible bucket label", () => {
+  it("does not bridge missing token lines or area segments", async () => {
+    const user = userEvent.setup();
+    const missing = { ...aggregate, input_reported_requests: 0, input_tokens: 0 };
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), missing]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelector(".usage-chart-series.input")?.getAttribute("d")?.match(/M /g)).toHaveLength(2);
+    expect(container.querySelector(".usage-chart-area.input")?.getAttribute("d")?.match(/ Z/g)).toHaveLength(2);
+    await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
+    expect(container.querySelector(".usage-chart-crosshair circle.input")).toBeNull();
+    await user.hover(container.querySelector("[data-usage-bucket]") as Element);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("retains historical input labels and localizes unknown cost", () => {
     window.localStorage.setItem("token-station-language", "ja");
-    const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
-    const bucketMs = new Date(2026, 6, 23, 12).getTime();
-    const { container } = render(
-      <UsageTrendChart
-        groups={[[String(bucketMs), { ...aggregate, cost_micros: null }]]}
-        range="24h"
-        nowMs={nowMs}
-      />,
-    );
-    expect(container.querySelector('[aria-label*="コスト 不明"]')).toBeInTheDocument();
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), { ...aggregate, legacy_input_requests: 1, cost_micros: null }]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelector("[role='button']")).toHaveAccessibleName(/報告された入力/);
+    expect(container.querySelector("[role='button']")).toHaveAccessibleName(/コスト 不明/);
   });
 });

@@ -257,6 +257,16 @@ pub(crate) struct AggView {
     pub(crate) cost_micros: Option<i64>,
     pub(crate) priced_requests: u64,
     pub(crate) unpriced_requests: u64,
+    pub(crate) missing_price_requests: u64,
+    pub(crate) missing_usage_requests: u64,
+    pub(crate) actual_cost_requests: u64,
+    pub(crate) estimated_cost_requests: u64,
+    pub(crate) cache_read_reported_requests: u64,
+    pub(crate) cache_write_reported_requests: u64,
+    pub(crate) input_reported_requests: u64,
+    pub(crate) output_reported_requests: u64,
+    pub(crate) total_reported_requests: u64,
+    pub(crate) incomplete_usage_requests: u64,
 }
 
 impl AggView {
@@ -275,6 +285,16 @@ impl AggView {
             cost_micros: None,
             priced_requests: 0,
             unpriced_requests: 0,
+            missing_price_requests: 0,
+            missing_usage_requests: 0,
+            actual_cost_requests: 0,
+            estimated_cost_requests: 0,
+            cache_read_reported_requests: 0,
+            cache_write_reported_requests: 0,
+            input_reported_requests: 0,
+            output_reported_requests: 0,
+            total_reported_requests: 0,
+            incomplete_usage_requests: 0,
         }
     }
     pub(crate) fn from(a: &stats::Aggregate) -> Self {
@@ -292,6 +312,16 @@ impl AggView {
             cost_micros: a.cost_micros,
             priced_requests: a.priced_requests,
             unpriced_requests: a.unpriced_requests,
+            missing_price_requests: a.missing_price_requests,
+            missing_usage_requests: a.missing_usage_requests,
+            actual_cost_requests: a.actual_cost_requests,
+            estimated_cost_requests: a.estimated_cost_requests,
+            cache_read_reported_requests: a.cache_read_reported_requests,
+            cache_write_reported_requests: a.cache_write_reported_requests,
+            input_reported_requests: a.input_reported_requests,
+            output_reported_requests: a.output_reported_requests,
+            total_reported_requests: a.total_reported_requests,
+            incomplete_usage_requests: a.incomplete_usage_requests,
         }
     }
 }

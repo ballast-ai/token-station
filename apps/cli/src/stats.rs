@@ -88,6 +88,17 @@ pub struct Aggregate {
     /// was not covered by the price table.
     pub priced_requests: u64,
     pub unpriced_requests: u64,
+    pub missing_price_requests: u64,
+    pub missing_usage_requests: u64,
+    pub actual_cost_requests: u64,
+    pub estimated_cost_requests: u64,
+    pub cache_read_reported_requests: u64,
+    pub cache_write_reported_requests: u64,
+    pub input_reported_requests: u64,
+    pub output_reported_requests: u64,
+    /// Requests with both input and output reported, including explicit zeros.
+    pub total_reported_requests: u64,
+    pub incomplete_usage_requests: u64,
 }
 
 /// The whole answer: totals, plus one bucket per group when `--by` was given.
@@ -252,7 +263,7 @@ fn select_rows(
                     (SELECT south_fallback_reason FROM attempts
                       WHERE attempts.request_id = requests.request_id
                       ORDER BY ordinal DESC LIMIT 1),
-                    usage_semantics
+                    usage_semantics, usage_observation, cost_kind
              FROM requests
              WHERE started_at_ms >= ?1
                AND (?2 IS NULL OR started_at_ms < ?2)
@@ -295,6 +306,8 @@ fn select_rows(
                     engine: row.get::<_, Option<String>>(15)?,
                     fallback_reason: row.get::<_, Option<String>>(16)?,
                     legacy_input: row.get::<_, String>(17)? == "provider_reported_v1",
+                    observation: crate::store::read_usage_observation(row, 18)?,
+                    cost_kind: row.get(19)?,
                 })
             },
         )
@@ -414,6 +427,8 @@ struct Row {
     engine: Option<String>,
     fallback_reason: Option<String>,
     legacy_input: bool,
+    observation: Option<token_station_metrics::UsageObservation>,
+    cost_kind: String,
 }
 
 impl Row {
@@ -462,20 +477,39 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         cost_micros: None,
         priced_requests: 0,
         unpriced_requests: 0,
+        ..Aggregate::default()
     };
     for row in rows {
         bucket.requests += 1;
         bucket.errors += u64::from(row.is_error());
         latencies.push(row.latency_ms);
-        bucket.input_tokens = bucket
-            .input_tokens
-            .saturating_add(row.input_tokens.unwrap_or(0));
+        let input = row
+            .observation
+            .map_or(row.input_tokens, |value| value.input_tokens);
+        let output = row
+            .observation
+            .map_or(row.output_tokens, |value| value.output_tokens);
+        bucket.input_reported_requests += u64::from(input.is_some());
+        bucket.output_reported_requests += u64::from(output.is_some());
+        bucket.total_reported_requests += u64::from(input.is_some() && output.is_some());
+        bucket.incomplete_usage_requests +=
+            u64::from(row.observation.is_some_and(|value| value.incomplete));
+        // Historical positive values prove presence. Historical zeros do not.
+        bucket.cache_read_reported_requests += u64::from(
+            row.observation
+                .is_some_and(|value| value.cache_read_tokens.is_some())
+                || row.cache_read_tokens.is_some_and(|value| value > 0),
+        );
+        bucket.cache_write_reported_requests += u64::from(
+            row.observation
+                .is_some_and(|value| value.cache_write_tokens.is_some())
+                || row.cache_write_tokens.is_some_and(|value| value > 0),
+        );
+        bucket.input_tokens = bucket.input_tokens.saturating_add(input.unwrap_or(0));
         if row.input_tokens.is_some() && row.legacy_input {
             bucket.legacy_input_requests = bucket.legacy_input_requests.saturating_add(1);
         }
-        bucket.output_tokens = bucket
-            .output_tokens
-            .saturating_add(row.output_tokens.unwrap_or(0));
+        bucket.output_tokens = bucket.output_tokens.saturating_add(output.unwrap_or(0));
         bucket.cache_read_tokens = bucket
             .cache_read_tokens
             .saturating_add(row.cache_read_tokens.unwrap_or(0));
@@ -488,8 +522,32 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         if let Some(cost) = row.cost_micros {
             bucket.cost_micros = Some(bucket.cost_micros.unwrap_or(0).saturating_add(cost));
             bucket.priced_requests = bucket.priced_requests.saturating_add(1);
+            if row.cost_kind == "actual" {
+                bucket.actual_cost_requests += 1;
+            } else {
+                bucket.estimated_cost_requests += 1;
+            }
         } else {
             bucket.unpriced_requests = bucket.unpriced_requests.saturating_add(1);
+            let mut usage = token_station_protocol::Usage {
+                input_tokens: input.unwrap_or(0),
+                output_tokens: output.unwrap_or(0),
+                cache_read_tokens: row.cache_read_tokens.unwrap_or(0),
+                cache_write_tokens: row.cache_write_tokens.unwrap_or(0),
+                reasoning_tokens: row.reasoning_tokens.unwrap_or(0),
+                ..token_station_protocol::Usage::default()
+            };
+            if let Some(observation) = row.observation {
+                observation.apply(&mut usage);
+            }
+            let complete_usage = input.is_some()
+                && output.is_some()
+                && crate::accounting::can_estimate(&usage, row.observation);
+            if complete_usage {
+                bucket.missing_price_requests += 1;
+            } else {
+                bucket.missing_usage_requests += 1;
+            }
         }
     }
     latencies.sort_unstable();
@@ -557,6 +615,48 @@ mod tests {
 
     /// A store with a known population: 19 fast successes 10..=190ms, one slow
     /// 1000ms failure, and one pre-routing refusal from before the window.
+    #[test]
+    fn coverage_distinguishes_missing_prices_usage_and_reported_zero_cache() {
+        let path =
+            std::env::temp_dir().join(format!("ts-stats-{}-coverage.sqlite", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut priced = record(1, 1, 200, Some("p"), Some((10, 2)));
+        priced.cost_kind = token_station_metrics::CostKind::Actual;
+        priced.cost_micros = Some(1);
+        priced.usage_observation = Some(token_station_metrics::UsageObservation {
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            cache_write_tokens: Some(0),
+            ..token_station_metrics::UsageObservation::default()
+        });
+        store.record(&priced);
+        store.record(&record(2, 1, 200, Some("p"), Some((20, 3))));
+        store.record(&record(3, 1, 429, Some("p"), None));
+        let result = collect(&path, None, None).unwrap().total;
+        assert_eq!(
+            (
+                result.requests,
+                result.priced_requests,
+                result.unpriced_requests
+            ),
+            (3, 1, 2)
+        );
+        assert_eq!(
+            (result.missing_price_requests, result.missing_usage_requests),
+            (1, 1)
+        );
+        assert_eq!(
+            (result.actual_cost_requests, result.estimated_cost_requests),
+            (1, 0)
+        );
+        assert_eq!(result.cache_write_reported_requests, 1);
+        assert_eq!(result.cache_read_reported_requests, 0);
+        assert_eq!(result.cost_micros, Some(1));
+        drop(store);
+        std::fs::remove_file(path).ok();
+    }
+
     fn fixture(name: &str) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("ts-stats-{}-{name}.sqlite", std::process::id()));
@@ -574,6 +674,81 @@ mod tests {
         store.record(&record(2_000_000, 1000, 502, Some("mock_backup"), None));
         store.record(&record(1_000, 5, 400, None, None));
         path
+    }
+
+    #[test]
+    fn token_reporting_coverage_preserves_partial_snapshots_and_legacy_values() {
+        use token_station_metrics::UsageObservation;
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-token-coverage.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut zero = record(1, 1, 200, Some("p"), Some((0, 0)));
+        zero.usage_observation = Some(UsageObservation {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            ..UsageObservation::default()
+        });
+        store.record(&zero);
+        let mut input_only = record(2, 1, 200, Some("p"), Some((10, 99)));
+        input_only.usage_observation = Some(UsageObservation {
+            input_tokens: Some(10),
+            ..UsageObservation::default()
+        });
+        store.record(&input_only);
+        let mut partial = record(3, 1, 502, Some("p"), Some((99, 5)));
+        partial.usage_observation = Some(UsageObservation {
+            output_tokens: Some(5),
+            incomplete: true,
+            ..UsageObservation::default()
+        });
+        store.record(&partial);
+        store.record(&record(4, 1, 429, Some("p"), None));
+        store.record(&record(5, 1, 200, Some("p"), Some((0, 0))));
+        let mut invalid = record(6, 1, 200, Some("p"), Some((2, 1)));
+        invalid.usage.as_mut().unwrap().cache_read_tokens = 3;
+        invalid.usage_observation = Some(UsageObservation {
+            input_tokens: Some(2),
+            output_tokens: Some(1),
+            cache_read_tokens: Some(3),
+            ..UsageObservation::default()
+        });
+        store.record(&invalid);
+        let result = collect(&path, None, None).unwrap().total;
+        assert_eq!((result.input_tokens, result.output_tokens), (12, 6));
+        assert_eq!(
+            (
+                result.input_reported_requests,
+                result.output_reported_requests,
+                result.total_reported_requests
+            ),
+            (4, 4, 3)
+        );
+        assert_eq!(result.incomplete_usage_requests, 1);
+        assert_eq!(
+            (result.missing_price_requests, result.missing_usage_requests),
+            (2, 4)
+        );
+        assert_eq!(
+            result.cache_write_reported_requests, 1,
+            "historical cache zero stays unknown"
+        );
+        let only = super::collect_range(&path, Some(2), Some(3), None)
+            .unwrap()
+            .total;
+        assert_eq!(
+            (
+                only.input_reported_requests,
+                only.output_reported_requests,
+                only.total_reported_requests
+            ),
+            (1, 0, 0)
+        );
+        drop(store);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

@@ -285,6 +285,7 @@ export interface ReceiptConversionView {
 }
 
 export interface ReceiptView {
+  usage_observation?: (Partial<Record<keyof ReceiptUsageView | "cache_write_5m_tokens" | "cache_write_1h_tokens", number | null>> & { incomplete?: boolean }) | null;
   request_id: string;
   started_at_ms: number;
   latency_ms: number;
@@ -739,6 +740,16 @@ export interface SnapshotView {
 }
 
 export interface AggView {
+  input_reported_requests?: number;
+  output_reported_requests?: number;
+  total_reported_requests?: number;
+  incomplete_usage_requests?: number;
+  missing_price_requests?: number;
+  missing_usage_requests?: number;
+  actual_cost_requests?: number;
+  estimated_cost_requests?: number;
+  cache_read_reported_requests?: number;
+  cache_write_reported_requests?: number;
   requests: number;
   errors: number;
   p50_latency_ms: number;

@@ -276,7 +276,7 @@ describe("legacy desktop read-only pages", () => {
     });
     const user = userEvent.setup();
     render(<Stats />);
-    expect(await screen.findByText("1.2500")).toBeInTheDocument();
+    expect(await screen.findByText("$1.25")).toBeInTheDocument();
     expect(screen.getAllByText("openai").length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "筛选" }));
     await user.click(screen.getByRole("combobox", { name: "时间范围" }));

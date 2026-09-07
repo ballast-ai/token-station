@@ -1683,9 +1683,15 @@ fn settle_estimated_cost(
     record: &mut RequestRecord,
     served: &UpstreamModel,
 ) {
+    if record.cost_kind == CostKind::Actual {
+        return;
+    }
     let Some(usage) = record.usage else {
         return;
     };
+    if !crate::accounting::can_estimate(&usage, record.usage_observation) {
+        return;
+    }
     if let Some((cost, version)) =
         pricing.price_for_upstream(served.upstream.as_str(), &served.model, &usage)
     {
@@ -4801,5 +4807,129 @@ mod ttl_model_projection_tests {
                 "one published rate cannot represent mixed TTL prices"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod estimation_eligibility_tests {
+    use super::{
+        CostKind, RequestRecord, UpstreamModel, UpstreamRef, Usage, settle_estimated_cost,
+    };
+    use token_station_metrics::UsageObservation;
+
+    #[test]
+    fn estimation_eligibility_checks_presence_cache_and_ttl_boundaries() {
+        let valid = Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_tokens: 5,
+            cache_write_tokens: 5,
+            cache_write_5m_tokens: 2,
+            cache_write_1h_tokens: 3,
+            ..Usage::default()
+        };
+        let observed = UsageObservation {
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            ..UsageObservation::default()
+        };
+        assert!(crate::accounting::can_estimate(&valid, None));
+        assert!(crate::accounting::can_estimate(&valid, Some(observed)));
+        assert!(crate::accounting::can_estimate(
+            &Usage::default(),
+            Some(UsageObservation {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                ..UsageObservation::default()
+            })
+        ));
+        for incomplete in [
+            UsageObservation {
+                input_tokens: None,
+                ..observed
+            },
+            UsageObservation {
+                output_tokens: None,
+                ..observed
+            },
+            UsageObservation {
+                incomplete: true,
+                ..observed
+            },
+        ] {
+            assert!(!crate::accounting::can_estimate(&valid, Some(incomplete)));
+        }
+        for invalid in [
+            Usage {
+                cache_read_tokens: 6,
+                ..valid
+            },
+            Usage {
+                cache_read_tokens: u64::MAX,
+                ..valid
+            },
+            Usage {
+                cache_write_1h_tokens: 4,
+                ..valid
+            },
+            Usage {
+                cache_write_5m_tokens: u64::MAX,
+                ..valid
+            },
+        ] {
+            assert!(!crate::accounting::can_estimate(&invalid, None));
+        }
+        assert!(!crate::accounting::can_estimate(
+            &valid,
+            Some(UsageObservation {
+                cache_write_1h_tokens: Some(4),
+                ..observed
+            })
+        ));
+    }
+
+    #[test]
+    fn estimation_eligibility_realtime_rejects_ttl_overlap_but_preserves_actual_cost() {
+        let pricing = crate::pricing::PriceTable::builtin();
+        let target = UpstreamModel {
+            upstream: UpstreamRef::new("test").unwrap(),
+            model: "deepseek-v4-pro".to_owned(),
+        };
+        let mut record = RequestRecord::begin(0, "openai");
+        record.usage = Some(Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_write_tokens: 5,
+            cache_write_5m_tokens: 4,
+            cache_write_1h_tokens: 3,
+            ..Usage::default()
+        });
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(
+            (record.cost_kind, record.cost_micros),
+            (CostKind::Unknown, None)
+        );
+        record.cost_kind = CostKind::Actual;
+        record.cost_micros = Some(17);
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(
+            (record.cost_kind, record.cost_micros),
+            (CostKind::Actual, Some(17))
+        );
+        record.cost_kind = CostKind::Unknown;
+        record.cost_micros = None;
+        record.usage.as_mut().unwrap().cache_write_5m_tokens = 2;
+        record.usage_observation = Some(UsageObservation {
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            incomplete: true,
+            ..UsageObservation::default()
+        });
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(record.cost_kind, CostKind::Unknown);
+        record.usage_observation.as_mut().unwrap().incomplete = false;
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(record.cost_kind, CostKind::Estimated);
+        assert!(record.cost_micros.is_some());
     }
 }

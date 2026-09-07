@@ -495,11 +495,7 @@ impl Gateway {
             // A client that already hung up (or a fired drain) gets no further
             // upstreams tried on its behalf.
             if ctx.is_cancelled() {
-                if let Some(error) = Self::lifecycle_cancellation(ctx) {
-                    return Err(error);
-                }
-                Self::emit_cancelled(emit);
-                return Ok((target.clone(), StreamOutcome::ClientCancelled));
+                return Self::cancel_before_attempt(ctx, target, emit, record);
             }
             // Per-Provider admission, held across this attempt. A provider at
             // its ceiling is skipped like a retriable failure — the next
@@ -616,6 +612,30 @@ impl Gateway {
         }))
     }
 
+    fn cancel_before_attempt(
+        ctx: &RequestContext,
+        pending: &UpstreamModel,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &RequestRecord,
+    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        if let Some(error) = Self::lifecycle_cancellation(ctx) {
+            return Err(error);
+        }
+        Self::emit_cancelled(emit);
+        // Usage belongs to the last started attempt. The next candidate has
+        // not entered its wrapper and must not receive its predecessor's bill.
+        let served = record.attempt_records.last().map_or_else(
+            || pending.clone(),
+            |attempt| {
+                UpstreamModel::new(
+                    UpstreamRef::new(&attempt.upstream).expect("attempt upstream was validated"),
+                    &attempt.model,
+                )
+            },
+        );
+        Ok((served, StreamOutcome::ClientCancelled))
+    }
+
     /// The request one attempt renders: the routed model, and `document`
     /// blocks resolved for the upstream's dialect. An Anthropic upstream takes
     /// them as they are; every other dialect's renderer refuses them by name,
@@ -640,9 +660,65 @@ impl Gateway {
     }
 
     /// One upstream attempt: build, authorize, inject, send, translate back.
+    #[allow(clippy::too_many_arguments)]
+    fn try_upstream(
+        &self,
+        ctx: &RequestContext,
+        attempt_timeout: Duration,
+        agent: &LoadedAgent,
+        payload: &AttemptPayload<'_>,
+        inbound_tools: &Value,
+        target: &UpstreamModel,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+        upstream_http_status: &mut Option<u16>,
+        provider_call_engine: &mut ProviderCallOutcome,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        let endpoint = self
+            .upstreams
+            .get(target.upstream.as_str())
+            .map_or_else(String::new, |upstream| upstream.config.base_url.as_str());
+        ctx.begin_accounting(&endpoint);
+        record.usage = None;
+        record.usage_observation = None;
+        record.cost_micros = None;
+        record.cost_kind = CostKind::Unknown;
+        record.price_version = None;
+        let result = self.try_upstream_inner(
+            ctx,
+            attempt_timeout,
+            agent,
+            payload,
+            inbound_tools,
+            target,
+            emit,
+            record,
+            upstream_http_status,
+            provider_call_engine,
+        );
+        Self::finish_attempt_accounting(ctx, record, &result);
+        result
+    }
+
+    fn finish_attempt_accounting(
+        ctx: &RequestContext,
+        record: &mut RequestRecord,
+        result: &Result<StreamOutcome, ErrorEnvelope>,
+    ) {
+        ctx.finish_accounting(record);
+        if !matches!(result, Ok(StreamOutcome::Complete)) {
+            if record.usage_observation.is_none() && record.usage.is_some() {
+                record.usage_observation = Some(token_station_metrics::UsageObservation::default());
+            }
+            if let Some(observation) = record.usage_observation.as_mut() {
+                observation.incomplete = true;
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
     #[allow(clippy::too_many_lines)] // payload choice, eligibility and dispatch stay one path
-    fn try_upstream(
+    fn try_upstream_inner(
         &self,
         ctx: &RequestContext,
         attempt_timeout: Duration,
@@ -861,6 +937,213 @@ mod attempt_budget_tests {
 }
 
 #[cfg(test)]
+mod cancelled_settlement_tests {
+    use super::*;
+    use crate::pricing::{ModelPrice, PriceTable};
+    use crate::quota_tracker::{QuotaPlan, QuotaTracker, QuotaWindowSpec};
+    use token_station_router_core::{DecidedBy, RequestFeatures};
+
+    fn gateway() -> Gateway {
+        let config: ClientConfig = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        let plan = QuotaPlan {
+            windows: vec![QuotaWindowSpec {
+                len_ms: 60_000,
+                limit: 10_000_000,
+            }],
+            ..QuotaPlan::default()
+        };
+        Gateway {
+            agents: Vec::new(),
+            skipped_agents: Vec::new(),
+            home_router: None,
+            agent_routers: std::sync::RwLock::new(BTreeMap::new()),
+            supported_agent_ids: BTreeSet::new(),
+            upstreams: BTreeMap::new(),
+            local_upstreams: BTreeSet::new(),
+            free_upstreams: BTreeSet::new(),
+            catalog: Vec::new(),
+            health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
+                eject_after: 3,
+                cooldown: Duration::from_secs(1),
+            })),
+            quota: std::sync::Mutex::new(QuotaTracker::new(
+                [("a".to_owned(), plan.clone()), ("b".to_owned(), plan)].into(),
+            )),
+            admission: Admission::new(config.concurrency),
+            pricing: PriceTable {
+                version: 9,
+                models: [
+                    (
+                        "a/shared".to_owned(),
+                        ModelPrice {
+                            input_per_mtok: 200_000,
+                            ..ModelPrice::default()
+                        },
+                    ),
+                    (
+                        "b/shared".to_owned(),
+                        ModelPrice {
+                            input_per_mtok: 700_000,
+                            ..ModelPrice::default()
+                        },
+                    ),
+                ]
+                .into(),
+            },
+            secrets: SecretStore::from_config(&config, &config.data.dir),
+            egress: EgressPolicy::new(config.egress),
+            south_runtime: None,
+            recorder: Arc::new(token_station_metrics::NoopRecorder),
+            body_log: None,
+        }
+    }
+
+    #[test]
+    fn cancellation_between_attempts_keeps_cost_quota_and_affinity_on_actual_account() {
+        let gateway = gateway();
+        let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let a = UpstreamModel::new(UpstreamRef::new("a").unwrap(), "shared");
+        let b = UpstreamModel::new(UpstreamRef::new("b").unwrap(), "shared");
+        let decision = Decision {
+            chosen: a.clone(),
+            fallbacks: vec![b.clone()],
+            decided_by: DecidedBy::Default,
+            features: RequestFeatures::default(),
+            pool: "main".to_owned(),
+        };
+        let mut record = RequestRecord::begin(1, "openai");
+        record_actual_attempt_target(&mut record, &decision, &a);
+        record.attempts = 1;
+        ctx.begin_accounting("https://example.test/v1");
+        ctx.capture_upstream_response_head(200, &BTreeMap::new());
+        ctx.append_upstream_response_body(
+            br#"{"usage":{"prompt_tokens":1000000,"completion_tokens":0}}"#,
+        );
+        ctx.finish_accounting(&mut record);
+        let error = ErrorEnvelope::new(
+            ErrorCode::ProviderProtocolError,
+            502,
+            "invalid response envelope",
+        );
+        record.attempt_records.push(attempt_receipt(
+            &a,
+            1,
+            1,
+            Some(200),
+            ProviderCallOutcome::default(),
+            Err(&error),
+            &record,
+        ));
+
+        // Freeze the real loop boundary: A failed with observed usage, B is
+        // pending, and the client disconnects before B can enter its wrapper.
+        ctx.cancel();
+        let mut replies = Vec::new();
+        let result = Gateway::cancel_before_attempt(
+            &ctx,
+            &b,
+            &mut |reply| {
+                replies.push(reply);
+                true
+            },
+            &record,
+        );
+        gateway.settle_quota("conversation", 1_000, &record, &result);
+        let (served, outcome) = result.unwrap();
+        gateway.settle(&mut record, &served, outcome);
+
+        let quota = gateway.quota.lock().unwrap();
+        let snapshots = quota.snapshot(&["a".to_owned(), "b".to_owned()], 1_000);
+        assert_eq!(snapshots[0].windows[0].used, 1_000_000);
+        assert_eq!(snapshots[1].windows[0].used, 0);
+        assert_eq!(quota.last_account("conversation"), Some(&a));
+        assert_eq!(served, a);
+        assert_eq!(record.cost_micros, Some(200_000));
+        assert_eq!(record.status, 499);
+        assert_eq!(record.attempt_records.len(), 1);
+        assert_eq!(record.routing.as_ref().unwrap().upstream, "a");
+        assert_eq!(replies.len(), 1);
+    }
+
+    #[test]
+    fn cancellation_before_any_attempt_does_not_charge_or_remember_pending_account() {
+        let gateway = gateway();
+        let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let pending = UpstreamModel::new(UpstreamRef::new("b").unwrap(), "shared");
+        let mut record = RequestRecord::begin(1, "openai");
+        ctx.cancel();
+        let result = Gateway::cancel_before_attempt(&ctx, &pending, &mut |_| true, &record);
+        gateway.settle_quota("unstarted", 1_000, &record, &result);
+        let (served, outcome) = result.unwrap();
+        gateway.settle(&mut record, &served, outcome);
+        let quota = gateway.quota.lock().unwrap();
+        assert_eq!(
+            quota.snapshot(&["b".to_owned()], 1_000)[0].windows[0].used,
+            0
+        );
+        assert!(quota.last_account("unstarted").is_none());
+        assert!(record.cost_micros.is_none());
+        assert!(record.routing.is_none());
+        assert!(record.attempt_records.is_empty());
+        assert_eq!(record.status, 499);
+    }
+
+    #[test]
+    fn failed_attempt_observations_are_incomplete_without_inventing_missing_usage() {
+        let gateway = gateway();
+        let target = UpstreamModel::new(UpstreamRef::new("a").unwrap(), "shared");
+        let error = ErrorEnvelope::new(
+            ErrorCode::ProviderProtocolError,
+            502,
+            "invalid response envelope",
+        );
+        for (body, adapter_usage) in [
+            (
+                Some(r#"{"usage":{"prompt_tokens":1000000,"completion_tokens":0}}"#),
+                None,
+            ),
+            (Some(r#"{"usage":{}}"#), None),
+            (
+                None,
+                Some(Usage {
+                    input_tokens: 1_000_000,
+                    ..Usage::default()
+                }),
+            ),
+            (None, None),
+        ] {
+            for result in [
+                Ok(StreamOutcome::Complete),
+                Err(error.clone()),
+                Ok(StreamOutcome::ClientCancelled),
+                Ok(StreamOutcome::FailedAfterPartial),
+                Ok(StreamOutcome::FailedBeforeOutput),
+            ] {
+                let failed = !matches!(result, Ok(StreamOutcome::Complete));
+                let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+                ctx.begin_accounting("https://example.test/v1");
+                ctx.capture_upstream_response_head(200, &BTreeMap::new());
+                if let Some(body) = body {
+                    ctx.append_upstream_response_body(body.as_bytes());
+                }
+                let mut record = RequestRecord::begin(1, "openai");
+                record.usage = adapter_usage;
+                Gateway::finish_attempt_accounting(&ctx, &mut record, &result);
+                if body.is_some() || (failed && adapter_usage.is_some()) {
+                    assert_eq!(record.usage_observation.unwrap().incomplete, failed);
+                } else {
+                    assert!(record.usage_observation.is_none());
+                }
+                if failed {
+                    settle_estimated_cost(&gateway.pricing, &mut record, &target);
+                    assert_eq!(record.cost_micros, None);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod request_receipt_tests {
     use std::collections::BTreeMap;
 
@@ -912,6 +1195,38 @@ mod request_receipt_tests {
             assert_eq!(record.cost_micros, Some(expected));
             assert_eq!(record.price_version, Some(9));
         }
+    }
+
+    #[test]
+    fn actual_cost_wins_and_incomplete_or_inconsistent_usage_is_not_estimated() {
+        let pricing = PriceTable::builtin();
+        let target = UpstreamModel {
+            upstream: UpstreamRef::new("openrouter").unwrap(),
+            model: "gpt-5.5".to_owned(),
+        };
+        let mut record = RequestRecord::begin(0, "openai");
+        record.usage = Some(Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            ..Usage::default()
+        });
+        record.cost_kind = CostKind::Actual;
+        record.cost_micros = Some(1);
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(record.cost_micros, Some(1));
+        assert_eq!(record.price_version, None);
+        record.cost_kind = CostKind::Unknown;
+        record.cost_micros = None;
+        record.usage_observation = Some(token_station_metrics::UsageObservation {
+            input_tokens: Some(10),
+            ..token_station_metrics::UsageObservation::default()
+        });
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(record.cost_micros, None);
+        record.usage_observation = None;
+        record.usage.as_mut().unwrap().cache_read_tokens = 11;
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(record.cost_micros, None);
     }
 
     #[test]

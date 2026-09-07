@@ -4816,6 +4816,12 @@ pre.block {
   background: transparent;
 }
 .usage-trend-chart { padding: 0 14px 12px; }
+.connected-model-search { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; padding: 2px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
+.connected-model-search:focus-within { border-color: var(--signal); box-shadow: 0 0 0 1px var(--signal); }
+.connected-model-search [data-slot="input-group-control"],
+.connected-model-search [data-slot="input-group-control"]:focus,
+.connected-model-search [data-slot="input-group-control"]:focus-visible { appearance: none; -webkit-appearance: none; border: 0; outline: none; background: transparent; box-shadow: none; min-height: 40px; }
+.connected-model-search input::-webkit-search-cancel-button { appearance: none; }
 .usage-chart-meta {
   min-height: 29px;
   display: flex;
@@ -4881,24 +4887,18 @@ pre.block {
 .usage-chart-crosshair circle.cache-write { stroke: var(--usage-cache-write); }
 .usage-chart-crosshair circle.cache-read { stroke: var(--usage-cache); }
 .usage-chart-crosshair circle.cost { stroke: var(--usage-cost); }
-.usage-chart-cost-unknown circle {
-  fill: var(--surface);
-  stroke: var(--warning);
-  stroke-width: 1.7;
-  vector-effect: non-scaling-stroke;
-}
-.usage-chart-cost-unknown path {
-  fill: none;
-  stroke: var(--warning);
-  stroke-width: 1.4;
-  vector-effect: non-scaling-stroke;
-  pointer-events: none;
-}
+.usage-chart-point { stroke: none; pointer-events: none; }
+.usage-chart-point.input { fill: var(--signal); }
+.usage-chart-point.output { fill: var(--usage-output); }
+.usage-chart-point.cache-write { fill: var(--usage-cache-write); }
+.usage-chart-point.cache-read { fill: var(--usage-cache); }
+.usage-chart-point.cost { fill: var(--usage-cost); }
 .usage-chart-tooltip {
   position: absolute;
   top: 16px;
   z-index: 2;
-  width: 184px;
+  width: 260px;
+  max-width: calc(100% - 24px);
   display: grid;
   gap: 5px;
   padding: 10px 11px;
@@ -4908,10 +4908,8 @@ pre.block {
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   box-shadow: 0 12px 34px rgba(10, 16, 28, .18);
   backdrop-filter: blur(12px);
-  transform: translateX(10px);
   pointer-events: none;
 }
-.usage-chart-tooltip.align-right { transform: translateX(calc(-100% - 10px)); }
 .usage-chart-tooltip > strong {
   margin-bottom: 2px;
   font: 700 11px/1.3 "SF Mono", Menlo, monospace;

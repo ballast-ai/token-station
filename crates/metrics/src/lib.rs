@@ -56,7 +56,62 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
 /// - v13: records whether input usage is legacy provider-reported or canonical.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
+
+/// Allowlisted numeric observations. Missing fields remain unknown, including
+/// for receipts written before this metadata existed. Input is inclusive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageObservation {
+    /// True when parsing or the attempt did not produce a complete observation.
+    #[serde(default)]
+    pub incomplete: bool,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub cache_write_5m_tokens: Option<u64>,
+    pub cache_write_1h_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+}
+
+impl UsageObservation {
+    /// Merge snapshots field by field. An explicitly reported zero is a value.
+    pub fn absorb(&mut self, later: Self) {
+        self.incomplete |= later.incomplete;
+        macro_rules! keep {
+            ($($field:ident),+ $(,)?) => {$(
+                if later.$field.is_some() { self.$field = later.$field; }
+            )+};
+        }
+        keep!(
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cache_write_5m_tokens,
+            cache_write_1h_tokens,
+            reasoning_tokens
+        );
+    }
+
+    /// Apply observations without turning unreported fields into reported zero.
+    pub fn apply(self, usage: &mut Usage) {
+        macro_rules! apply {
+            ($($field:ident),+ $(,)?) => {$(
+                if let Some(value) = self.$field { usage.$field = value; }
+            )+};
+        }
+        apply!(
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cache_write_5m_tokens,
+            cache_write_1h_tokens,
+            reasoning_tokens
+        );
+    }
+}
 
 /// The content-free transport path classification recorded for diagnostics.
 /// Raw, caller-controlled URL paths never enter the receipt.
@@ -572,6 +627,9 @@ pub struct RequestRecord {
     /// event). Absence is information; it is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Field presence observed before provider normalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_observation: Option<UsageObservation>,
     /// Micro-units of the account currency. `None` when the model has no price
     /// (an unknown cost, never a claimed-free zero).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -610,6 +668,7 @@ impl RequestRecord {
             attempt_records: Vec::new(),
             conversion_reports: Vec::new(),
             usage: None,
+            usage_observation: None,
             cost_micros: None,
             cost_kind: CostKind::Unknown,
             price_version: None,
@@ -659,6 +718,8 @@ pub struct ReceiptView {
     pub usage: Option<Usage>,
     #[serde(default)]
     pub usage_semantics: UsageSemantics,
+    #[serde(default)]
+    pub usage_observation: Option<UsageObservation>,
     #[serde(default)]
     pub cost_kind: CostKind,
     #[serde(default)]
