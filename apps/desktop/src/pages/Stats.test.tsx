@@ -12,6 +12,8 @@ import {
 import Stats, { formatBudgetAmount } from "./Stats";
 import BudgetPricingPage from "./BudgetPricingPage";
 import { ErrorToastProvider } from "../components/ErrorToast";
+import UsageRequestLog from "../components/UsageRequestLog";
+import type { ReceiptView } from "../api";
 
 vi.mock("../components/PricingEditor", () => ({ default: () => null }));
 
@@ -55,6 +57,8 @@ const aggregate = {
   output_tokens: 500,
   cache_read_tokens: 400,
   cache_write_tokens: 100,
+  cache_read_reported_requests: 10,
+  cache_write_reported_requests: 10,
   reasoning_tokens: 80,
   cost_micros: 1_250_000,
   priced_requests: 9,
@@ -128,6 +132,78 @@ beforeEach(() => {
 });
 
 describe("usage dashboard and display-only Agent budgets", () => {
+  it("keeps complete successful totals while explaining failed requests without usage separately", async () => {
+    const value = { ...aggregate, requests: 184, errors: 96, usage_expected_requests: 85,
+      failed_without_usage_requests: 99, unpriced_failed_without_usage_requests: 99,
+      input_tokens: 6942955, output_tokens: 42628, cache_read_tokens: 5321280, cache_write_tokens: 0,
+      input_reported_requests: 85, output_reported_requests: 85, total_reported_requests: 85,
+      cache_read_reported_requests: 85, cache_write_reported_requests: 0, cache_write_unrecorded_requests: 85,
+      priced_requests: 0, unpriced_requests: 184, missing_price_requests: 85, missing_usage_requests: 99, cost_micros: null };
+    vi.mocked(getStats).mockImplementation(async (_since, by) => ({ ...statsView(by), total: value, groups: [["p", value]] }));
+    const { container } = render(<Stats />);
+    const overview = await screen.findByLabelText("用量总览");
+    expect(overview.querySelector(".usage-primary-metric strong")).toHaveTextContent(/^6,985,583$/);
+    expect(overview.querySelector(".usage-primary-metric small")).not.toHaveTextContent("部分上报");
+    expect(container.querySelector(".usage-unpriced-note")).toHaveTextContent("85 次缺少价格 · 0 次用量不完整 · 99 次失败/取消未返回用量");
+    expect(screen.getByRole("table").querySelector('td[title="6,985,583"]')).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Token 构成" })).toHaveTextContent("历史未记录");
+  });
+  it("shows partial totals and absent output in the overview, composition, and contribution rows", async () => {
+    const value = { ...aggregate, output_tokens: 0, input_reported_requests: 10,
+      output_reported_requests: 0, total_reported_requests: 0, incomplete_usage_requests: 1 };
+    vi.mocked(getStats).mockImplementation(async (_since, by) => statsView(by, value));
+    render(<Stats />);
+    const overview = await screen.findByLabelText("用量总览");
+    expect(overview.querySelector(".usage-primary-metric strong")).toHaveTextContent(/^1,000$/);
+    expect(overview.querySelector(".usage-primary-metric small")).toHaveTextContent("部分上报");
+    const composition = screen.getByRole("group", { name: "Token 构成" });
+    expect(within(composition).getByText("输出").parentElement).toHaveTextContent("未上报");
+    expect(within(composition).getByLabelText("用量不完整，无法计算占比")).toBeInTheDocument();
+    expect(screen.getByRole("table").querySelector('td[title="1,000（部分上报）"]')).toBeInTheDocument();
+  });
+
+  it("labels only known contribution cost as partial and explains both missing categories", async () => {
+    const unknown = { ...aggregate, cost_micros: null, priced_requests: 0, unpriced_requests: 10,
+      missing_price_requests: 4, missing_usage_requests: 6 };
+    const partial = { ...unknown, cost_micros: 1, priced_requests: 1, unpriced_requests: 9, missing_price_requests: 3 };
+    vi.mocked(getStats).mockImplementation(async (_since, by) => ({
+      ...statsView(by), total: unknown, groups: [["unknown", unknown], ["partial", partial]],
+    }));
+    render(<Stats />);
+    const table = await screen.findByRole("table");
+    const missing = within(table).getByTitle("4 次缺少价格 · 6 次用量不完整");
+    expect(missing).toHaveTextContent(/^未知$/);
+    expect(within(table).getByTitle("3 次缺少价格 · 6 次用量不完整")).toHaveTextContent("$0.000001（部分）");
+  });
+
+  it("updates receipt log and detail coverage from missing output to reported zero", async () => {
+    const user = userEvent.setup();
+    const receipt: ReceiptView = {
+      request_id: "coverage-receipt", started_at_ms: Date.now(), latency_ms: 10,
+      protocol: "anthropic", requested_model: "m", stream: true, status: 502,
+      error_code: null, attempts: 1, routing: null, cost_kind: "unknown", cost_micros: null,
+      price_version: null, agent_id: null, running_revision: null, decision: null,
+      attempt_records: [], conversion_reports: [],
+      usage: { input_tokens: 10, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 },
+      usage_observation: { input_tokens: 10, output_tokens: null, incomplete: true },
+    };
+    const page = { items: [receipt], total: 1, page: 1, page_size: 20 };
+    vi.mocked(getRequestReceipts).mockResolvedValue(page);
+    const props = { since: "24h", agentId: "", upstream: "", model: "", refreshKey: 0 };
+    const { rerender } = render(<UsageRequestLog {...props} />);
+    const row = await screen.findByRole("button", { name: /打开请求详情 coverage-receipt/ });
+    expect(row).toHaveTextContent("10（部分上报）");
+    await user.click(row);
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("输出").parentElement).toHaveTextContent("未上报");
+    expect(within(dialog).getByText("输入").parentElement).toHaveTextContent("10（部分上报）");
+    vi.mocked(getRequestReceipts).mockResolvedValue({ ...page, items: [{ ...receipt,
+      usage_observation: { input_tokens: 10, output_tokens: 0, cache_write_tokens: 0 } }] });
+    rerender(<UsageRequestLog {...props} since="7d" />);
+    await waitFor(() => expect(within(screen.getByRole("dialog")).getByText("输出").parentElement).toHaveTextContent("输出 0"));
+    expect(within(screen.getByRole("dialog")).getByText("缓存写").parentElement).toHaveTextContent("缓存写 0");
+    expect(within(screen.getByRole("dialog")).getByText("缓存读").parentElement).toHaveTextContent("未上报");
+  });
   it("keeps meaningful decimals for small non-zero budget amounts", () => {
     expect(formatBudgetAmount(1)).toBe("0.000001");
     expect(formatBudgetAmount(1_000)).toBe("0.001");
@@ -213,14 +289,17 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
     render(<Stats />);
 
-    expect(await screen.findByText("上报 Token")).toBeInTheDocument();
+    expect(within(await screen.findByLabelText("用量总览")).getByText("上报 Token")).toBeInTheDocument();
     const composition = screen.getByRole("group", { name: "Token 构成" });
     expect(within(composition).getByText("上游输入")).toBeInTheDocument();
     expect(within(composition).getByText("2 个历史请求使用上游原始输入")).toBeInTheDocument();
     expect(within(composition).getByText(/历史输入可能不包含缓存子项/)).toBeInTheDocument();
   });
 
-  it("orders trend, overview metrics, Token composition, and contribution details", async () => {
+  it("preserves the original trend, overview, composition order and compact coverage", async () => {
+    const value = { ...aggregate, requests: 413, priced_requests: 8, unpriced_requests: 405,
+      missing_price_requests: 227, missing_usage_requests: 178 };
+    vi.mocked(getStats).mockImplementation(async (_since, by) => statsView(by, value));
     render(<Stats />);
 
     const trend = (await screen.findByRole("img", { name: /用量趋势/ })).closest("section");
@@ -234,6 +313,11 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(trend!.compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(overview.compareDocumentPosition(composition!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(composition!.compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelector(".usage-cost-coverage")).toBeNull();
+    expect(composition!.querySelector(".usage-unpriced-note")).toHaveTextContent("8/413 次请求已计价 · 227 次缺少价格 · 178 次用量不完整");
+    expect(trend!.querySelector(".usage-dual-axis-note")).toHaveTextContent("左轴 Token · 右轴成本");
+    expect(trend!.querySelectorAll(".usage-chart-legend > span")).toHaveLength(5);
+    expect(within(trend!).queryByRole("radiogroup")).toBeNull();
   });
 
   it("renders an empty token rail without inventing a 50/50 split", async () => {
@@ -251,7 +335,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(await screen.findByLabelText("暂无 Token 数据")).toBeInTheDocument();
   });
 
-  it("does not invent missing-data semantics for a zero cache-write aggregate", async () => {
+  it("shows an explicitly reported zero cache-write aggregate", async () => {
     vi.mocked(getStats).mockImplementation(async (_since, by) => {
       const withoutCacheWrites = { ...aggregate, cache_write_tokens: 0 };
       return statsView(by, withoutCacheWrites);

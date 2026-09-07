@@ -25,7 +25,7 @@ export default function UsageWorkspace({ onOpenManagement }: UsageWorkspaceProps
           <ArrowUpRight aria-hidden="true" />
         </Button>
       </header>
-      <Stats embedded />
+      <Stats embedded onOpenManagement={onOpenManagement} />
     </div>
   );
 }

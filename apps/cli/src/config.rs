@@ -79,12 +79,20 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+fn discard_legacy_search_target<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
+}
+
 /// The whole client configuration file.
 ///
 /// `deny_unknown_fields` for the same reason `RouterConfig` has it: a
 /// misspelled key must fail loudly at load, not deserialize into a default
 /// that silently serves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// The private unit field consumes a removed setting, not a non-exhaustive marker.
+#[allow(clippy::manual_non_exhaustive)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub version: u32,
@@ -98,6 +106,14 @@ pub struct ClientConfig {
     /// derive their mode from the embedded router-core document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<HostRoutingConfig>,
+    // Consume the removed setting so upgrades do not reject an old config.
+    #[serde(
+        default,
+        rename = "web_search_target",
+        deserialize_with = "discard_legacy_search_target",
+        skip_serializing
+    )]
+    legacy_web_search_target: (),
     /// Optional per-Agent three-tier overrides. An absent entry inherits the
     /// home router, keeping every pre-Agent-routes configuration compatible.
     #[serde(
@@ -335,6 +351,9 @@ pub struct AgentRouteConfig {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub harness_model_routes: BTreeMap<String, AgentRouteTarget>,
+    /// Exact-model overlays require explicit opt-in, including legacy configurations.
+    #[serde(default)]
+    pub harness_model_mapping_enabled: bool,
 }
 
 /// Returns the closed request-model catalog for one Harness-aware Agent.
@@ -484,6 +503,9 @@ pub struct DataConfig {
     /// leaves the file log, which is always written.
     #[serde(default = "default_true")]
     pub metrics: bool,
+    /// Desktop body capture. Omitted legacy values retain capture behavior.
+    #[serde(default = "default_true")]
+    pub request_body_capture: bool,
 }
 
 impl Default for DataConfig {
@@ -491,6 +513,7 @@ impl Default for DataConfig {
         Self {
             dir: default_data_dir(),
             metrics: true,
+            request_body_capture: true,
         }
     }
 }
@@ -995,7 +1018,7 @@ impl ClientConfig {
         let Some(route) = self.agent_routes.get(agent_id) else {
             return Ok(None);
         };
-        if route.harness_model_routes.is_empty() {
+        if !route.harness_model_mapping_enabled || route.harness_model_routes.is_empty() {
             return Ok(None);
         }
         let requested_models = route.harness_model_routes.keys().cloned().collect();
@@ -1108,7 +1131,11 @@ impl ClientConfig {
                     ));
                 }
             }
-            for (requested_model, target) in &route.harness_model_routes {
+            for (requested_model, target) in route
+                .harness_model_routes
+                .iter()
+                .filter(|_| route.harness_model_mapping_enabled)
+            {
                 let upstream = UpstreamRef::new(target.upstream.clone()).map_err(|error| {
                     format!(
                         "Agent `{agent_id}` Harness request `{requested_model}` has invalid upstream: {error}"
@@ -2068,11 +2095,65 @@ mod tests {
     }
 
     #[test]
+    fn harness_mapping_requires_explicit_enable_even_for_legacy_targets() {
+        for agent in ["claude-code", "opencode"] {
+            for enabled in [None, Some(false), Some(true)] {
+                let mut value = example();
+                value["agent_routes"][agent] = serde_json::json!({
+                    "mode": "inherit",
+                    "harness_model_routes": {
+                        "balanced": { "upstream": "openai_personal", "model": "gpt-5.5" }
+                    }
+                });
+                if let Some(enabled) = enabled {
+                    value["agent_routes"][agent]["harness_model_mapping_enabled"] = enabled.into();
+                }
+                let config: ClientConfig = serde_json::from_value(value).unwrap();
+                config.validate().unwrap();
+                assert_eq!(
+                    config.harness_router_for_agent(agent).unwrap().is_some(),
+                    enabled == Some(true)
+                );
+                let saved = serde_json::to_value(&config).unwrap();
+                let loaded: ClientConfig = serde_json::from_value(saved).unwrap();
+                assert_eq!(
+                    loaded.harness_router_for_agent(agent).unwrap().is_some(),
+                    enabled == Some(true)
+                );
+                assert_eq!(loaded.agent_routes[agent].harness_model_routes.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_harness_mapping_tolerates_removed_targets() {
+        let mut value = example();
+        value["agent_routes"]["claude-code"] = serde_json::json!({
+            "mode": "inherit",
+            "harness_model_routes": {
+                "balanced": { "upstream": "removed", "model": "removed" }
+            }
+        });
+        let config: ClientConfig = serde_json::from_value(value.clone()).unwrap();
+        config.validate().unwrap();
+        assert!(
+            config
+                .harness_router_for_agent("claude-code")
+                .unwrap()
+                .is_none()
+        );
+        value["agent_routes"]["claude-code"]["harness_model_mapping_enabled"] = true.into();
+        let config: ClientConfig = serde_json::from_value(value).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn harness_model_routes_compile_each_request_to_its_exact_target() {
         let mut value = example();
         value["agent_routes"] = serde_json::json!({
             "claude-code": {
                 "mode": "custom",
+                "harness_model_mapping_enabled": true,
                 "custom_route": three_tiers("openai_personal", "gpt-5.5"),
                 "harness_model_routes": {
                     "fast": { "upstream": "ollama_local", "model": "llama3.3" },

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  ChevronDown,
   Check as CheckIcon,
   Copy as CopyIcon,
   FileDiff,
@@ -27,6 +28,7 @@ import {
   restoreCursorProvider,
   setAgentRouteMode,
   setAgentHarnessModelRoute,
+  setAgentHarnessModelMappingEnabled,
   setAgentTier,
   type AgentInstallationView,
   type ConfigPlanView,
@@ -417,6 +419,11 @@ export default function AgentRoutePage({
   const [backupDirectoryCopied, setBackupDirectoryCopied] = useState(false);
   const followsGlobal = route.inherits_global === true;
   const [independentEditorOpen, setIndependentEditorOpen] = useState(!followsGlobal);
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    setAdvancedSettingsOpen(false);
+  }, [metadata.agent_id, independentEditorOpen]);
 
   useEffect(() => {
     setIndependentEditorOpen(!followsGlobal);
@@ -1264,25 +1271,6 @@ export default function AgentRoutePage({
       </AlertDialog>
         </>
       )}
-      {pageMode !== "connection" && ["claude-code", "opencode"].includes(metadata.agent_id) ? (
-        <HarnessModelMapping
-          agentId={metadata.agent_id}
-          providers={providers}
-          routes={route.harness_model_routes}
-          disabled={busy}
-          saveDisabled={Boolean(route.harness_config_error)}
-          error={route.harness_config_error}
-          onChange={(requestedModel, target) => runState(() =>
-            setAgentHarnessModelRoute(
-              metadata.agent_id,
-              requestedModel,
-              target.upstream,
-              target.model,
-            )
-          )}
-          onSave={saveHarnessRoutes}
-        />
-      ) : null}
       {pageMode !== "connection" && (
         !independentEditorOpen ? (
           <section
@@ -1471,6 +1459,46 @@ export default function AgentRoutePage({
         </footer>
       </section>
       )}
+      {["claude-code", "opencode"].includes(metadata.agent_id) ? (
+        <section className="agent-route-advanced">
+          <Button
+            variant="ghost"
+            className="agent-route-advanced-toggle"
+            type="button"
+            aria-expanded={advancedSettingsOpen}
+            aria-controls={`agent-advanced-${metadata.agent_id}`}
+            onClick={() => setAdvancedSettingsOpen((open) => !open)}
+          >
+            <ChevronDown aria-hidden="true" className={advancedSettingsOpen ? "expanded" : ""} />
+            {copy("Advanced settings", "高级设置", "進階設定", "詳細設定")}
+          </Button>
+          {advancedSettingsOpen ? (
+            <div id={`agent-advanced-${metadata.agent_id}`}>
+                <HarnessModelMapping
+                  agentId={metadata.agent_id}
+                  providers={providers}
+                  routes={route.harness_model_routes}
+                  enabled={route.harness_model_mapping_enabled ?? false}
+                  onEnabledChange={(enabled) => runState(() =>
+                    setAgentHarnessModelMappingEnabled(metadata.agent_id, enabled)
+                  )}
+                  disabled={busy}
+                  saveDisabled={Boolean(route.harness_config_error)}
+                  error={route.harness_config_error}
+                  onChange={(requestedModel, target) => runState(() =>
+                    setAgentHarnessModelRoute(
+                      metadata.agent_id,
+                      requestedModel,
+                      target.upstream,
+                      target.model,
+                    )
+                  )}
+                  onSave={saveHarnessRoutes}
+                />
+            </div>
+          ) : null}
+        </section>
+      ) : null}
         </>
         )
       )}

@@ -84,6 +84,112 @@ mod usage_tests {
         tap.finish();
         assert!(tap.is_complete());
     }
+
+    #[test]
+    fn native_stream_without_final_usage_stays_unpriced_after_backfill() {
+        use super::{
+            Gateway, MAX_UPSTREAM_BODY, Reply, UpstreamBody, UpstreamResponse,
+            settle_estimated_cost,
+        };
+        use crate::pricing::{ModelPrice, PriceTable};
+        use crate::request_context::RequestContext;
+        use crate::store::SqliteStore;
+        use std::collections::BTreeMap;
+        use std::time::{Duration, Instant};
+        use token_station_metrics::{CostKind, Recorder, RequestRecord, RoutingRecord};
+        use token_station_protocol::StreamOutcome;
+        use token_station_router_core::{
+            DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
+        };
+
+        let target = UpstreamModel::new(UpstreamRef::new("a").unwrap(), "shared");
+        let decision = Decision {
+            chosen: target.clone(),
+            fallbacks: Vec::new(),
+            decided_by: DecidedBy::Default,
+            features: RequestFeatures::default(),
+            pool: "main".to_owned(),
+        };
+        let pricing = PriceTable {
+            version: 9,
+            models: [(
+                "a/shared".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 200_000,
+                    ..ModelPrice::default()
+                },
+            )]
+            .into(),
+        };
+        for cancel_on_chunk in [true, false] {
+            let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+            let mut record = RequestRecord::begin(1, "anthropic");
+            record.routing = Some(RoutingRecord::from(&decision));
+            ctx.begin_accounting("https://api.anthropic.com/v1");
+            let headers =
+                BTreeMap::from([("content-type".to_owned(), "text/event-stream".to_owned())]);
+            ctx.capture_upstream_response_head(200, &headers);
+            // The native relay can return Complete on message_stop without a
+            // final usage delta. Both that case and a disconnect must stay unknown.
+            let mut body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}\n\n".to_owned();
+            if !cancel_on_chunk {
+                body.push_str("data: {\"type\":\"message_stop\"}\n\n");
+            }
+            let response = UpstreamResponse {
+                status: 200,
+                headers,
+                body: UpstreamBody::Streaming(Box::new(std::io::Cursor::new(body.into_bytes()))),
+                max_body_bytes: MAX_UPSTREAM_BODY,
+            };
+            let result = Gateway::relay_raw_sse(
+                &ctx,
+                Instant::now() + Duration::from_secs(1),
+                response,
+                &mut |reply| {
+                    if cancel_on_chunk && matches!(reply, Reply::Chunk(_)) {
+                        ctx.cancel();
+                    }
+                    true
+                },
+                &mut record,
+            );
+            assert_eq!(
+                result,
+                Ok(if cancel_on_chunk {
+                    StreamOutcome::ClientCancelled
+                } else {
+                    StreamOutcome::Complete
+                })
+            );
+            assert_eq!(record.usage.unwrap().input_tokens, 1_000_000);
+            ctx.finish_accounting(&mut record);
+            settle_estimated_cost(&pricing, &mut record, &target);
+            assert!(record.usage_observation.unwrap().incomplete);
+            assert_eq!(record.cost_kind, CostKind::Unknown);
+            assert_eq!(record.cost_micros, None);
+            assert!(!crate::accounting::can_estimate(
+                &record.usage.unwrap(),
+                record.usage_observation
+            ));
+
+            let path = std::env::temp_dir().join(format!(
+                "ts-native-interrupted-{}.sqlite",
+                record.request_id
+            ));
+            let store = SqliteStore::open(&path).unwrap();
+            store.record(&record);
+            drop(store);
+            assert_eq!(
+                SqliteStore::backfill_unknown_costs(&path, &pricing).unwrap(),
+                0
+            );
+            let receipt = SqliteStore::recent_receipts(&path, 1).unwrap().remove(0);
+            assert_eq!(receipt.cost_kind, CostKind::Unknown);
+            assert_eq!(receipt.cost_micros, None);
+            assert!(receipt.usage_observation.unwrap().incomplete);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }
 
 /// Pulls usage out of a relayed Anthropic SSE stream without altering a byte
@@ -645,13 +751,11 @@ impl Gateway {
 
         // L2 authoritative quota: harvest remaining/reset headers, never the body.
         let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
-        if !windows.is_empty() {
-            self.quota.lock().expect("quota lock").note_authoritative(
-                target.upstream.as_str(),
-                unix_millis(),
-                windows,
-            );
-        }
+        self.quota.lock().expect("quota lock").note_authoritative(
+            target.upstream.as_str(),
+            unix_millis(),
+            windows,
+        );
 
         // Upstream error: return its status + body VERBATIM (Claude Code depends
         // on the original error body to self-heal), never token-station's wrapped

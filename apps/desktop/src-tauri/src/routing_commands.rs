@@ -401,6 +401,30 @@ pub(crate) fn set_agent_tier(
 }
 
 #[tauri::command]
+pub(crate) fn set_agent_harness_model_mapping_enabled(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    enabled: bool,
+) -> Result<StateView, String> {
+    ensure_known_agent_id(&agent_id)?;
+    if harness_request_models(&agent_id).is_empty() {
+        return Err(format!(
+            "Agent `{agent_id}` does not support Harness model mapping"
+        ));
+    }
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    if !inner.draft["agent_routes"].is_object() {
+        inner.draft["agent_routes"] = json!({});
+    }
+    if !inner.draft["agent_routes"][&agent_id].is_object() {
+        inner.draft["agent_routes"][&agent_id] = json!({ "mode": "inherit" });
+    }
+    inner.draft["agent_routes"][&agent_id]["harness_model_mapping_enabled"] = json!(enabled);
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
 pub(crate) fn set_agent_harness_model_route(
     state: State<'_, AppStateManaged>,
     agent_id: String,

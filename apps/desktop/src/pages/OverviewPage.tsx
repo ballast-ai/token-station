@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Activity, ArrowUpRight, Bot, Boxes, Clock3, MessageSquareText, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
@@ -45,6 +45,8 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
   const { copy } = useLocalizedCopy();
   const [stats, setStats] = useState<StatsView | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshStatsRef = useRef<() => void>(() => undefined);
   const [modelTestOpen, setModelTestOpen] = useState(false);
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const connectedAgentIds = new Set(
@@ -126,19 +128,36 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
 
   useEffect(() => {
     let active = true;
-    setStatsUnavailable(false);
-    void getStats("24h", null).then((nextStats) => {
-      if (active) setStats(nextStats);
-    }).catch(() => {
-      if (active) setStatsUnavailable(true);
-    });
+    let inFlight = false;
+    const refresh = async () => {
+      if (!active || inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      setRefreshing(true);
+      try {
+        const next = await getStats("24h", null);
+        if (active) { setStats(next); setStatsUnavailable(false); }
+      } catch {
+        if (active) setStatsUnavailable(true);
+      } finally {
+        inFlight = false;
+        if (active) setRefreshing(false);
+      }
+    };
+    refreshStatsRef.current = refresh;
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 10_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
     return () => {
       active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
     };
   }, []);
 
   const successRate = stats ? formatSuccessRate(stats) : null;
-  const requestCost = stats ? formatCost(stats.total.cost_micros) : null;
+  const requestCost = stats ? formatCost(stats.total.requests === 0 ? 0 : stats.total.cost_micros) : null;
   const statsSummary = statsUnavailable
     ? copy("Statistics are temporarily unavailable", "统计暂不可用", "統計暫不可用", "統計は一時的に利用不可です")
     : stats == null
@@ -171,7 +190,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
           <CardHeader>
             <span><Activity />{copy("Proxy status", "代理状态", "代理狀態", "プロキシステータス")}</span>
             <CardTitle><Badge variant={runtimeHealthy ? "default" : "secondary"}><i className={runtimeHealthy ? "healthy" : ""} />{runtimeHealthy ? copy("Running", "运行中", "執行中", "実行中") : copy("Stopped", "未运行", "已停止", "停止中")}</Badge></CardTitle>
-            <dl><div><dt>{copy("Revision", "版本", "版本", "リビジョン")}</dt><dd>{state.saved_revision}</dd></div><div><dt>{copy("Listen", "监听", "監聽", "リスニング")}</dt><dd>{state.serve.listen}</dd></div></dl>
+            <dl><div><dt>{copy("Saved configuration revision", "已保存配置修订", "已儲存設定修訂", "保存済み設定リビジョン")}</dt><dd>{state.saved_revision}</dd></div><div><dt>{copy("Listen", "监听", "監聽", "リスニング")}</dt><dd>{state.serve.listen}</dd></div></dl>
           </CardHeader>
         </Card>
         <Card size="sm" className="overview-request-card" data-surface="plain-section">
@@ -179,7 +198,10 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <span><WalletCards />{copy("Cost in the last 24 hours", "近 24 小时成本", "近 24 小時成本", "過去 24 時間のコスト")}</span>
             <CardTitle className="overview-cost-value">{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价", "成本未定價", "コストが未設定") : "—")}</CardTitle>
             <strong className="overview-request-count"><Clock3 />{stats ? copy(`${stats.total.requests} requests`, `${stats.total.requests} 次请求`, `${stats.total.requests} 次請求`, `${stats.total.requests} 回のリクエスト`) : "—"}</strong>
-            <p>{statsSummary}</p>
+            <p role="status">{statsSummary}</p>
+            <Button size="sm" variant="ghost" disabled={refreshing} aria-busy={refreshing} onClick={() => refreshStatsRef.current()}>
+              {copy("Refresh statistics", "刷新统计", "重新整理統計", "統計を更新")}
+            </Button>
           </CardHeader>
         </Card>
       </section>

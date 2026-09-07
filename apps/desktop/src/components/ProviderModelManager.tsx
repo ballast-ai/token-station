@@ -22,6 +22,7 @@ import {
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
 import { useLocalizedCopy, type Language, type LocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { useDraftGuard } from "./DraftNavigation";
 import { useErrorToast } from "./ErrorToast";
 import {
   Select,
@@ -186,6 +187,15 @@ export default function ProviderModelManager({
   }, [catalog, capabilities, provider.models, selected]);
   const operationDisabled = disabled || refreshing || saving || testing || editing
     || capabilitySaving !== null || limitSaving !== null;
+  const limitsDirty = capabilities.some((cap) => {
+    const draft = limitDrafts[cap.model];
+    return draft && (draft.context !== (cap.context_window ? String(cap.context_window) : "")
+      || draft.output !== (cap.max_output_tokens ? String(cap.max_output_tokens) : ""));
+  });
+  useDraftGuard(editBaseUrl !== provider.base_url || Boolean(editKey)
+    || credentialSource !== (provider.credential_source ?? (provider.has_auth ? "store" : "none"))
+    || credentialReference !== (provider.credential_reference ?? "")
+    || JSON.stringify(selected) !== JSON.stringify(provider.models) || limitsDirty);
   const taskOrder = ["models", "connection", "diagnostics"] as const;
   const moveTask = (index: number) => {
     const nextIndex = (index + taskOrder.length) % taskOrder.length;
@@ -319,7 +329,7 @@ export default function ProviderModelManager({
     void getStats("all", "upstream")
       .then((view) => {
         const aggregate = view.groups.find(([name]) => name === provider.name)?.[1];
-        setUsage(aggregate
+        setUsage(aggregate && aggregate.requests > 0
           ? copy(
             `${aggregate.requests} requests · ${aggregate.errors} errors · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens · ${costLabel(aggregate.cost_micros, copy)}`,
             `${aggregate.requests} 次请求 · ${aggregate.errors} 次错误 · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens · ${costLabel(aggregate.cost_micros, copy)}`, `${aggregate.requests} 個請求 · ${aggregate.errors} 個錯誤 · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} 個 Token · ${costLabel(aggregate.cost_micros, copy)}`, `${aggregate.requests} 回のリクエスト · ${aggregate.errors} 回のエラー · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} 個のトークン · ${costLabel(aggregate.cost_micros, copy)}`
@@ -329,15 +339,20 @@ export default function ProviderModelManager({
       .catch(() => setUsage(copy("Usage is temporarily unavailable", "用量暂不可读", "用量暫時不可讀", "使用状況は一時的に読み取れません")));
   }, [copy, provider.name]);
 
+  const limitBaselines = useRef<Record<string, ModelLimitDraft>>({});
   useEffect(() => {
-    setLimitDrafts(Object.fromEntries(capabilities.map((capability) => [
-      capability.model,
-      {
-        context: capability.context_window ? String(capability.context_window) : "",
-        output: capability.max_output_tokens ? String(capability.max_output_tokens) : "",
-      },
-    ])));
-    setLimitErrors({});
+    const previous = limitBaselines.current;
+    const next = Object.fromEntries(capabilities.map((capability) => [capability.model, {
+      context: capability.context_window ? String(capability.context_window) : "",
+      output: capability.max_output_tokens ? String(capability.max_output_tokens) : "",
+    }]));
+    limitBaselines.current = next;
+    setLimitDrafts((drafts) => Object.fromEntries(Object.entries(next).map(([model, value]) => {
+      const draft = drafts[model];
+      const baseline = previous[model];
+      const dirty = draft && baseline && (draft.context !== baseline.context || draft.output !== baseline.output);
+      return [model, dirty ? draft : value];
+    })));
   }, [capabilities]);
 
   const updateLimitDraft = (model: string, field: keyof ModelLimitDraft, value: string) => {

@@ -15,6 +15,8 @@ import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProv
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "../components/ErrorToast";
 import { RefreshCw, SlidersHorizontal } from "lucide-react";
+import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue, usageCoverageLabel, type TokenMetricKey, type CacheMetricKey } from "../usagePresentation";
+import { Button } from "../components/ui/button";
 
 export function formatBudgetAmount(micros: number): string {
   if (micros === 0) return "0.00";
@@ -49,7 +51,7 @@ function compact(value: number, locale: string, digits = 1): string {
 }
 
 function cost(micros: number | null): string {
-  return micros == null ? "—" : (micros / 1_000_000).toFixed(4);
+  return formatUsd(micros);
 }
 
 function successRate(aggregate: AggView): string {
@@ -58,7 +60,7 @@ function successRate(aggregate: AggView): string {
 }
 
 function cacheRate(aggregate: AggView): string {
-  if (!aggregate.input_tokens) return "—";
+  if (!aggregate.input_tokens || aggregate.legacy_input_requests > 0 || !tokenMetric(aggregate, "input_tokens").complete || !cacheMetric(aggregate, "cache_read_tokens").complete) return "—";
   return `${((aggregate.cache_read_tokens / aggregate.input_tokens) * 100).toFixed(1)}%`;
 }
 
@@ -79,6 +81,13 @@ function inputLabel(aggregate: AggView, copy: LocalizedCopy): string {
   return aggregate.legacy_input_requests > 0
     ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
     : copy("Input total", "输入总量", "輸入總量", "入力合計");
+}
+
+function usageText(aggregate: AggView, key: TokenMetricKey | CacheMetricKey, language: string, copy: LocalizedCopy, exact = false): string {
+  return formatUsageValue(
+    key === "cache_read_tokens" || key === "cache_write_tokens" ? cacheMetric(aggregate, key) : tokenMetric(aggregate, key),
+    (value) => exact ? value.toLocaleString(language) : compact(value, language), copy,
+  );
 }
 
 function budgetWarning(
@@ -127,9 +136,10 @@ function ToneIcon({ type }: { type: "token" | "request" | "cost" | "success" | "
 function TokenRail({ aggregate }: { aggregate: AggView }) {
   const { language, copy } = useLocalizedCopy();
   const total = aggregate.input_tokens + aggregate.output_tokens;
-  const inputPercent = total ? (aggregate.input_tokens / total) * 100 : 0;
-  const outputPercent = total ? 100 - inputPercent : 0;
-  const cachePercent = aggregate.input_tokens
+  const complete = tokenMetric(aggregate, "total").complete;
+  const inputPercent = complete && total ? (aggregate.input_tokens / total) * 100 : 0;
+  const outputPercent = complete && total ? 100 - inputPercent : 0;
+  const cachePercent = complete && tokenMetric(aggregate, "input_tokens").complete && cacheMetric(aggregate, "cache_read_tokens").complete && aggregate.input_tokens
     ? Math.min(100, (aggregate.cache_read_tokens / aggregate.input_tokens) * 100)
     : 0;
   return (
@@ -165,12 +175,14 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
             )}</p>
       </div>
       <div className="usage-rail-labels">
-        <span><i className="tone-input" /><em>{inputLabel(aggregate, copy)}</em><strong>{compact(aggregate.input_tokens, language)}</strong></span>
-        <span><i className="tone-output" /><em>{copy("Output", "输出", "輸出", "出力")}</em><strong>{compact(aggregate.output_tokens, language)}</strong></span>
+        <span><i className="tone-input" /><em>{inputLabel(aggregate, copy)}</em><strong>{usageText(aggregate, "input_tokens", language, copy)}</strong></span>
+        <span><i className="tone-output" /><em>{copy("Output", "输出", "輸出", "出力")}</em><strong>{usageText(aggregate, "output_tokens", language, copy)}</strong></span>
       </div>
       <div
         className="usage-rail-track"
-        aria-label={total
+        aria-label={!complete
+          ? copy("Usage is incomplete; proportions are unavailable", "用量不完整，无法计算占比", "用量不完整，無法計算佔比", "使用量が不完全なため割合は不明です")
+          : total
           ? copy(
               `Input ${inputPercent.toFixed(1)}%, output ${outputPercent.toFixed(1)}%`,
               `输入占 ${inputPercent.toFixed(1)}%，输出占 ${outputPercent.toFixed(1)}%`, `輸入 ${inputPercent.toFixed(1)}%，輸出 ${outputPercent.toFixed(1)}%`, `入力 ${inputPercent.toFixed(1)}%，出力 ${outputPercent.toFixed(1)}%`
@@ -185,11 +197,11 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
       <div className="usage-token-details">
         <div>
           <span><i className="tone-cache" />{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")}</span>
-          <strong>{compact(aggregate.cache_read_tokens, language)}</strong>
+          <strong>{usageText(aggregate, "cache_read_tokens", language, copy)}</strong>
         </div>
         <div>
           <span><i className="tone-cache-write" />{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")}</span>
-          <strong>{compact(aggregate.cache_write_tokens, language)}</strong>
+          <strong>{usageText(aggregate, "cache_write_tokens", language, copy)}</strong>
         </div>
         <div>
           <span><i className="tone-reasoning" />{copy("Reasoning", "推理", "推理", "推論")}</span>
@@ -204,7 +216,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
   );
 }
 
-export default function Stats({ onBack, embedded = false }: { onBack?: () => void; embedded?: boolean }) {
+export default function Stats({ onBack, embedded = false, onOpenManagement }: { onBack?: () => void; embedded?: boolean; onOpenManagement?: () => void }) {
   const { language, copy } = useLocalizedCopy();
   const { showError } = useErrorToast();
   const sinceOptions = [
@@ -365,7 +377,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
   }, [loadDashboard, refreshInterval]);
 
   const aggregate = data?.total ?? EMPTY_AGG;
-  const totalTokens = aggregate.input_tokens + aggregate.output_tokens;
+  const totalTokens = tokenMetric(aggregate, "total").value;
   const hasFilters = Boolean(agentFilter || upstreamFilter || modelFilter);
   const displayName = (id: string) =>
     agents.find((agent) => agent.agent_id === id)?.display_name ?? id;
@@ -543,17 +555,17 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
                 <span>{aggregate.legacy_input_requests > 0
                   ? copy("Reported tokens", "上报 Token", "回報 Token", "報告トークン")
                   : copy("Total tokens", "总 Token", "總 Token", "合計トークン")}</span>
-                <strong title={totalTokens.toLocaleString(language)}>{totalTokens.toLocaleString(language)}</strong>
-                <small>≈ {compact(totalTokens, language, 2)} · {aggregate.legacy_input_requests > 0
+                <strong title={totalTokens == null ? undefined : totalTokens.toLocaleString(language)}>{totalTokens == null ? copy("Not reported", "未上报", "未回報", "未報告") : totalTokens.toLocaleString(language)}</strong>
+                <small>{totalTokens == null ? "" : "≈ "}{formatUsageValue(tokenMetric(aggregate, "total"), (value) => compact(value, language, 2), copy)} · {aggregate.legacy_input_requests > 0
                   ? copy("reported input + output", "上游输入 + 输出", "上游輸入 + 輸出", "報告された入力 + 出力")
                   : copy("input + output", "输入 + 输出", "輸入 + 輸出", "入力 + 出力")}</small>
               </div>
             </div>
             <div className="usage-kpi-grid">
               <div><ToneIcon type="request" /><span>{copy("Requests", "请求", "請求", "リクエスト")}</span><strong>{aggregate.requests.toLocaleString(language)}</strong></div>
-              <div><ToneIcon type="cost" /><span>{copy("Estimated cost", "估算成本", "估算成本", "推定コスト")}</span><strong>{cost(aggregate.cost_micros)}</strong></div>
+              <div><ToneIcon type="cost" /><span>{copy("Known cost · USD", "已知成本 · USD", "已知成本 · USD", "既知のコスト · USD")}</span><strong>{cost(aggregate.cost_micros)}</strong></div>
               <div><ToneIcon type="success" /><span>{copy("Success rate", "成功率", "成功率", "成功率")}</span><strong>{successRate(aggregate)}</strong></div>
-              <div><ToneIcon type="latency" /><span>{copy("p95 latency", "p95 延迟", "p95 延遲", "p95 レイテンシー")}</span><strong>{latency(aggregate.p95_latency_ms)}</strong></div>
+              <div><ToneIcon type="latency" /><span>{copy("p95 latency", "p95 延迟", "p95 延遲", "p95 レイテンシー")}</span><strong>{aggregate.requests > 0 ? latency(aggregate.p95_latency_ms) : "—"}</strong></div>
             </div>
           </section>
 
@@ -562,9 +574,14 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
             {aggregate.unpriced_requests > 0 && (
               <div className="usage-unpriced-note">
                 {copy(
-                  `Known cost covers ${aggregate.priced_requests} requests; ${aggregate.unpriced_requests} requests are unpriced.`,
-                  `已知成本覆盖 ${aggregate.priced_requests} 个请求；另有 ${aggregate.unpriced_requests} 个请求未定价。`, `已知成本覆蓋 ${aggregate.priced_requests} 個請求；另有 ${aggregate.unpriced_requests} 個請求未定價。`, `既知のコストは ${aggregate.priced_requests} 個のリクエストをカバー；${aggregate.unpriced_requests} 個のリクエストは価格が未設定です。`
-                )}
+                  `${aggregate.priced_requests}/${aggregate.requests} priced`,
+                  `${aggregate.priced_requests}/${aggregate.requests} 次请求已计价`,
+                  `${aggregate.priced_requests}/${aggregate.requests} 次請求已計價`,
+                  `${aggregate.priced_requests}/${aggregate.requests} 件のコストあり`
+                )} · {usageCoverageLabel(aggregate, copy)}
+                {onOpenManagement && costCoverage(aggregate).missingPrice > 0 && <Button variant="link" size="sm" className="h-auto p-0" onClick={onOpenManagement}>
+                  {copy("Configure prices", "补充价格", "補充價格", "価格を設定")}
+                </Button>}
               </div>
             )}
           </section>
@@ -602,13 +619,10 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
                         : groupDisplayName(name, activeGroup, copy)}</td>
                       <td>{item.requests.toLocaleString()}</td>
                       <td>{successRate(item)}</td>
-                      <td title={(item.input_tokens + item.output_tokens).toLocaleString(language)}>{compact(item.input_tokens + item.output_tokens, language)}</td>
-                      <td>{latency(item.p95_latency_ms)}</td>
-                      <td>{cost(item.cost_micros)}{item.unpriced_requests > 0 && (
-                        <small title={copy(
-                          `${item.unpriced_requests} unpriced requests`,
-                          `${item.unpriced_requests} 个请求未定价`, `${item.unpriced_requests} 個請求未定價`, `${item.unpriced_requests} 個のリクエストは価格が未設定`
-                        )}> +?</small>
+                      <td title={usageText(item, "total", language, copy, true)}>{usageText(item, "total", language, copy)}</td>
+                      <td>{item.requests > 0 ? latency(item.p95_latency_ms) : "—"}</td>
+                      <td title={usageCoverageLabel(item, copy)}>{item.cost_micros == null ? copy("Unknown", "未知", "未知", "不明") : cost(item.cost_micros)}{item.cost_micros != null && !costCoverage(item).complete && (
+                        <small>{copy(" (partial)", "（部分）", "（部分）", "（一部）")}</small>
                       )}</td>
                     </tr>
                   ))}

@@ -11,7 +11,8 @@ import {
   type ReceiptView,
 } from "../api";
 import { ReceiptDetails } from "./RecentReceipts";
-import { useLocalizedCopy } from "./LanguageProvider";
+import { useLocalizedCopy, type LocalizedCopy } from "./LanguageProvider";
+import { receiptTokenMetric, formatUsageValue, receiptHasUsableUsage } from "../usagePresentation";
 import { humanizeAppError } from "../errors";
 import {
   Select,
@@ -55,9 +56,10 @@ function routeOf(receipt: ReceiptView, noRoute: string): string {
     : noRoute;
 }
 
-function tokenTotal(receipt: ReceiptView, reported: (total: string) => string): string {
-  if (!receipt.usage) return "—";
-  const total = (receipt.usage.input_tokens + receipt.usage.output_tokens).toLocaleString();
+function tokenTotal(receipt: ReceiptView, reported: (total: string) => string, language: string, copy: LocalizedCopy): string {
+  const metric = receiptTokenMetric(receipt, "total");
+  const total = formatUsageValue(metric, (value) => value.toLocaleString(language), copy);
+  if (metric.value == null) return total;
   return receipt.usage_semantics === "provider_reported_v1" ? reported(total) : total;
 }
 
@@ -72,7 +74,7 @@ function unknownCostReason(
   missingUsage: string,
   missingPrice: (model: string) => string,
 ): string {
-  if (receipt.usage == null) return missingUsage;
+  if (!receiptHasUsableUsage(receipt)) return missingUsage;
   const model = receipt.routing?.model || receipt.requested_model;
   return missingPrice(model);
 }
@@ -892,8 +894,8 @@ function CostState({
   const reason = unknownCostReason(
     receipt,
     copy(
-      "The upstream did not return token usage, so cost cannot be estimated.",
-      "上游未返回 Token，无法估算成本。", "上游未返回 Token，無法估算成本。", "上流から Token が返されなかったため、コストの推定ができません。"
+      "Token usage is missing, incomplete, or inconsistent, so cost cannot be estimated.",
+      "Token 用量缺失、不完整或不一致，无法估算成本。", "Token 用量缺失、不完整或不一致，無法估算成本。", "Token 使用量が未報告、不完全、または不整合のため、コストを推定できません。"
     ),
     (model) => copy(`No price configured for model: ${model}`, `缺少模型价格：${model}`, `缺少模型價格：${model}`, `モデルの価格が設定されていません：${model}`),
   );
@@ -970,15 +972,18 @@ function ReceiptDetail({
         )}
         </dl>
         <div className="request-detail-measures">
-          {receipt.usage && (
+          {(receipt.usage || receipt.usage_observation) && (
             <div className="usage-log-token-facts">
               <span>{receipt.usage_semantics === "provider_reported_v1"
                 ? copy("Input reported", "上游输入", "上游輸入", "報告された入力")
-                : copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
-              <span>{copy("Output", "输出", "輸出", "出力")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
-              <span>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
-              <span>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
-              <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
+                : copy("Input", "输入", "輸入", "入力")} <strong>{formatUsageValue(receiptTokenMetric(receipt, "input_tokens"), (value) => value.toLocaleString(language), copy)}</strong></span>
+              <span>{copy("Output", "输出", "輸出", "出力")} <strong>{formatUsageValue(receiptTokenMetric(receipt, "output_tokens"), (value) => value.toLocaleString(language), copy)}</strong></span>
+              <span>{copy("Reported tokens", "上报 Token", "回報 Token", "報告トークン")} <strong>{formatUsageValue(receiptTokenMetric(receipt, "total"), (value) => value.toLocaleString(language), copy)}</strong></span>
+              {(["cache_read_tokens", "cache_write_tokens"] as const).map((key) => {
+                const value = receipt.usage_observation?.[key] ?? ((receipt.usage?.[key] ?? 0) > 0 ? receipt.usage![key] : null);
+                return <span key={key}>{key === "cache_read_tokens" ? copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み") : copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{formatUsageValue({ value, complete: !receipt.usage_observation?.incomplete }, (count) => count.toLocaleString(language), copy)}</strong></span>;
+              })}
+              <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage?.reasoning_tokens.toLocaleString(language) ?? copy("Not reported", "未上报", "未回報", "未報告")}</strong></span>
               {receipt.usage_semantics === "provider_reported_v1" && (
                 <small>{copy(
                   "Historical provider-reported input may exclude cache tokens; totals are not canonical.",
@@ -1189,7 +1194,7 @@ export default function UsageRequestLog({
                     `${total} 上游上报`,
                     `${total} 上游上報`,
                     `${total} 報告値`,
-                  ))}</span>
+                  ), language, copy)}</span>
                   <span className="usage-log-latency">{receipt.latency_ms.toLocaleString()} ms</span>
                   <CostState receipt={receipt} compact />
                 </button>

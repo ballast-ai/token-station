@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAgentBudgets,
   listAgentRegistry,
@@ -9,6 +9,7 @@ import {
 } from "../api";
 import { useErrorToast } from "../components/ErrorToast";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import { useDraftGuard, useDraftNavigation } from "../components/DraftNavigation";
 import PageBackButton from "../components/PageBackButton";
 import PricingEditor from "../components/PricingEditor";
 import {
@@ -32,6 +33,8 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
   const { copy } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
+  const confirmNavigation = useDraftNavigation();
+  const [baseline, setBaseline] = useState("");
   const [budgets, setBudgets] = useState<BudgetStatus[]>([]);
   const [budgetErr, setBudgetErr] = useState("");
   const [agentId, setAgentId] = useState("");
@@ -41,8 +44,20 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
   const [periodEnd, setPeriodEnd] = useState("");
   const [expiryWarningDays, setExpiryWarningDays] = useState("7");
 
+  const selectedAgentRef = useRef(agentId);
+  selectedAgentRef.current = agentId;
+  const formKey = JSON.stringify([agentId, limit, warningPercent, periodStart, periodEnd, expiryWarningDays]);
+  useDraftGuard(Boolean(agentId) && Boolean(baseline) && baseline !== formKey);
+  const formKeyRef = useRef(formKey);
+  formKeyRef.current = formKey;
+  const writeInFlight = useRef(false);
+  const [writing, setWriting] = useState(false);
+
   const loadForm = useCallback((selected: string, statuses: BudgetStatus[]) => {
     const status = statuses.find((candidate) => candidate.agent_id === selected);
+    setBaseline(JSON.stringify([selected, status ? String(status.limit_micros / 1_000_000) : "10",
+      status ? String(status.warning_percent) : "80", status ? localDateTime(status.period_start_ms) : "",
+      status ? localDateTime(status.period_end_ms) : "", status ? String(status.expiry_warning_days) : "7"]));
     setLimit(status ? String(status.limit_micros / 1_000_000) : "10");
     setWarningPercent(status ? String(status.warning_percent) : "80");
     setPeriodStart(status ? localDateTime(status.period_start_ms) : "");
@@ -99,25 +114,45 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
       setBudgetErr(copy("Budget period end must be later than its start.", "预算周期结束时间必须晚于开始时间。", "預算週期結束時間必須晚於開始時間。", "予算期間の終了時間は開始時間より後でなければなりません。"));
       return;
     }
+    if (writeInFlight.current) return;
+    writeInFlight.current = true;
+    setWriting(true);
+    const submittedKey = formKeyRef.current;
     try {
       const statuses = await setAgentBudget(agentId, limitMicros, warning, startMs, endMs, expiryDays);
       setBudgets(statuses);
-      loadForm(agentId, statuses);
+      if (selectedAgentRef.current === agentId) {
+        setBaseline(submittedKey);
+        if (submittedKey === formKeyRef.current) loadForm(agentId, statuses);
+      }
       showSuccess(copy("Budget saved · Alerts only", "预算已保存 · 仅用于展示与预警", "預算已儲存 · 僅用於展示與預警", "予算が保存されました · 表示と警告用のみ"), `agent-budget-save:${agentId}`);
     } catch (error) {
       showError(humanizeAppError(error), `agent-budget-save:${agentId}`);
+    } finally {
+      writeInFlight.current = false;
+      setWriting(false);
     }
   };
 
   const deleteBudget = async () => {
+    if (writeInFlight.current) return;
+    writeInFlight.current = true;
+    setWriting(true);
+    const submittedKey = formKeyRef.current;
     setBudgetErr("");
     try {
       const statuses = await removeAgentBudget(agentId);
       setBudgets(statuses);
-      loadForm(agentId, statuses);
+      if (selectedAgentRef.current === agentId) {
+        setBaseline(submittedKey);
+        if (submittedKey === formKeyRef.current) loadForm(agentId, statuses);
+      }
       showSuccess(copy("Budget deleted", "预算已删除", "預算已刪除", "予算が削除されました"), `agent-budget-remove:${agentId}`);
     } catch (error) {
       showError(humanizeAppError(error), `agent-budget-remove:${agentId}`);
+    } finally {
+      writeInFlight.current = false;
+      setWriting(false);
     }
   };
 
@@ -147,7 +182,12 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
         <div className="budget-form">
           <div className="field-label">
             <span>Agent</span>
-            <Select value={agentId} onValueChange={(selected) => { setAgentId(selected); loadForm(selected, budgets); }}>
+            <Select disabled={writing} value={agentId} onValueChange={(selected) => {
+              if (writeInFlight.current) return;
+              const change = () => { setAgentId(selected); loadForm(selected, budgets); };
+              if (baseline === formKeyRef.current) change();
+              else confirmNavigation(change);
+            }}>
               <SelectTrigger aria-label="Agent" className="w-full min-h-[34px]">
                 <SelectValue />
               </SelectTrigger>
@@ -178,8 +218,8 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
             <input aria-label={copy("Expiry warning", "到期前预警", "到期前警示", "有効期限前通知")} className="input" type="number" min="0" max="365" step="1" value={expiryWarningDays} onChange={(event) => setExpiryWarningDays(event.target.value)} />
           </label>
           <div className="budget-actions">
-            <button className="btn primary" disabled={!agentId} onClick={() => void saveBudget()}>{copy("Save budget", "保存预算", "儲存預算", "予算を保存")}</button>
-            <button className="btn danger" disabled={!hasSelectedBudget} onClick={() => void deleteBudget()}>{copy("Delete budget", "删除预算", "刪除預算", "予算を削除")}</button>
+            <button className="btn primary" disabled={!agentId || writing} onClick={() => void saveBudget()}>{copy("Save budget", "保存预算", "儲存預算", "予算を保存")}</button>
+            <button className="btn danger" disabled={!hasSelectedBudget || writing} onClick={() => void deleteBudget()}>{copy("Delete budget", "删除预算", "刪除預算", "予算を削除")}</button>
           </div>
         </div>
         {budgetErr && <div className="banner err">{budgetErr}</div>}

@@ -28,6 +28,7 @@ mod dock_icon;
 #[cfg(test)]
 mod lib_tests;
 mod model_test;
+mod price_sync;
 mod pricing_commands;
 mod provider_commands;
 mod provider_discovery;
@@ -103,6 +104,7 @@ use config_draft::*;
 use desktop_update_commands::*;
 use dock_icon::*;
 use model_test::*;
+use price_sync::{get_pricing_inventory, set_price_sync_enabled, sync_model_prices};
 use pricing_commands::*;
 use provider_commands::*;
 use provider_discovery::*;
@@ -194,6 +196,7 @@ struct AppInner {
     /// Latest model-discovery operation for each Provider name. Provider
     /// identity can stay unchanged while two network responses finish out of order.
     discovery_generations: BTreeMap<String, u64>,
+    price_sync_running: bool,
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
@@ -380,6 +383,9 @@ pub fn run() {
             let read_only = inner.load_error.is_some();
             app.manage(AppStateManaged(Mutex::new(inner)));
             app.manage(ModelTestStreamState::default());
+            if !read_only {
+                price_sync::start_scheduler(app.handle().clone());
+            }
 
             // Agent command state must exist before the native menu is built so
             // its initial snapshot and every later refresh share one authority.
@@ -470,6 +476,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_pricing_inventory,
+            set_price_sync_enabled,
+            sync_model_prices,
             set_dock_theme_icon,
             get_state,
             get_runtime_state,
@@ -506,6 +515,7 @@ pub fn run() {
             set_agent_route_mode,
             set_agent_tier,
             set_agent_harness_model_route,
+            set_agent_harness_model_mapping_enabled,
             save_home_route_as_profile,
             mount_agent_profile,
             delete_profile,

@@ -285,6 +285,7 @@ export interface ReceiptConversionView {
 }
 
 export interface ReceiptView {
+  usage_observation?: (Partial<Record<keyof ReceiptUsageView | "cache_write_5m_tokens" | "cache_write_1h_tokens", number | null>> & { incomplete?: boolean }) | null;
   request_id: string;
   started_at_ms: number;
   latency_ms: number;
@@ -435,6 +436,7 @@ export interface AgentRouteView {
   direct_target?: DirectRouteTarget | null;
   /** Effective request-model mappings, including unsaved independent edits. */
   harness_model_routes?: Record<string, HarnessModelTarget>;
+  harness_model_mapping_enabled?: boolean;
 }
 
 export interface QuotaAccount {
@@ -454,6 +456,9 @@ export interface QuotaWindowSnapshot {
 }
 
 export interface QuotaAccountSnapshot {
+  /** Completed requests with missing token usage in retained local history. */
+  unknown_usage_requests?: number;
+  history?: "new" | "recovered" | "plan_changed" | "unavailable";
   upstream: string;
   windows: QuotaWindowSnapshot[];
   rate_headroom_permille: number;
@@ -473,6 +478,7 @@ export interface SettingsView {
   listen: string;
   auth: boolean;
   metrics: boolean;
+  request_body_capture?: boolean;
   data_dir: string;
   plugins_dir: string;
   agent: string;
@@ -735,6 +741,21 @@ export interface SnapshotView {
 }
 
 export interface AggView {
+  usage_expected_requests?: number;
+  failed_without_usage_requests?: number;
+  unpriced_failed_without_usage_requests?: number;
+  cache_read_unrecorded_requests?: number;
+  cache_write_unrecorded_requests?: number;
+  input_reported_requests?: number;
+  output_reported_requests?: number;
+  total_reported_requests?: number;
+  incomplete_usage_requests?: number;
+  missing_price_requests?: number;
+  missing_usage_requests?: number;
+  actual_cost_requests?: number;
+  estimated_cost_requests?: number;
+  cache_read_reported_requests?: number;
+  cache_write_reported_requests?: number;
   requests: number;
   errors: number;
   p50_latency_ms: number;
@@ -782,12 +803,34 @@ export interface ModelPriceView {
   output_per_mtok: number;
   cache_read_per_mtok: number;
   cache_write_per_mtok: number;
+  cache_write_5m_per_mtok?: number | null;
+  cache_write_1h_per_mtok?: number | null;
   reasoning_per_mtok: number | null;
 }
 
 export interface PriceTableView {
   version: number;
   models: Record<string, ModelPriceView>;
+}
+
+export interface PricingInventoryView {
+  table: PriceTableView;
+  offerings: Array<{
+    upstream: string;
+    model: string;
+    key: string;
+    price: ModelPriceView | null;
+    source: "manual" | "models.dev" | "provider" | "fallback" | "missing";
+    fetched_at_ms: number | null;
+  }>;
+  sync: {
+    enabled: boolean;
+    running: boolean;
+    last_attempt_ms: number | null;
+    last_sync_ms: number | null;
+    errors: string[];
+  };
+  requires_apply: boolean;
 }
 
 export interface ModelPriceSuggestionView extends ModelPriceView {
@@ -1135,6 +1178,9 @@ export const setAgentTier = (
   model: string | null,
 ) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
 
+export const setAgentHarnessModelMappingEnabled = (agentId: AgentId, enabled: boolean) =>
+  invoke<StateView>("set_agent_harness_model_mapping_enabled", { agentId, enabled });
+
 export const setAgentHarnessModelRoute = (
   agentId: AgentId,
   requestedModel: string,
@@ -1212,6 +1258,13 @@ export const removeAgentBudget = (agentId: AgentId) =>
 
 export const getPriceTable = () => invoke<PriceTableView>("get_price_table");
 
+export const getPricingInventory = () => invoke<PricingInventoryView>("get_pricing_inventory");
+
+export const syncModelPrices = () => invoke<PricingInventoryView>("sync_model_prices");
+
+export const setPriceSyncEnabled = (enabled: boolean) =>
+  invoke<PricingInventoryView>("set_price_sync_enabled", { enabled });
+
 export const listPublicProviderModels = (providerIds: string[]) =>
   invoke<PublicProviderModelsView>("list_public_provider_models", { providerIds });
 
@@ -1239,6 +1292,8 @@ export const setModelPrice = (
   outputPerMtok: price.output_per_mtok,
   cacheReadPerMtok: price.cache_read_per_mtok,
   cacheWritePerMtok: price.cache_write_per_mtok,
+  ...(price.cache_write_5m_per_mtok !== undefined ? { cacheWrite5mPerMtok: price.cache_write_5m_per_mtok } : {}),
+  ...(price.cache_write_1h_per_mtok !== undefined ? { cacheWrite1hPerMtok: price.cache_write_1h_per_mtok } : {}),
   reasoningPerMtok: price.reasoning_per_mtok,
   expectedVersion,
 });
@@ -1322,10 +1377,11 @@ export const applySnapshotRestore = (operationId: string, confirmationToken: str
 export const setSettings = (
   auth: boolean,
   metrics: boolean,
-  egress: Pick<SettingsView, "egress_mode" | "egress_proxy_url" | "egress_no_proxy" | "egress_auth_username" | "egress_auth_slot">,
+  egress: Pick<SettingsView, "egress_mode" | "egress_proxy_url" | "egress_no_proxy" | "egress_auth_username" | "egress_auth_slot" | "request_body_capture">,
 ) => invoke<StateView>("set_settings", {
   auth,
   metrics,
+  ...(egress.request_body_capture !== undefined ? { requestBodyCapture: egress.request_body_capture } : {}),
   egressMode: egress.egress_mode,
   egressProxyUrl: egress.egress_proxy_url,
   egressNoProxy: egress.egress_no_proxy,

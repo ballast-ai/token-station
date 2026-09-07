@@ -1,8 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentUiMetadataView, AgentView, StateView } from "../api";
 import { LANGUAGE_STORAGE_KEY, LanguageProvider } from "../components/LanguageProvider";
+import { getStats } from "../api";
 import OverviewPage from "./OverviewPage";
 
 vi.mock("../api", async (importOriginal) => {
@@ -148,7 +149,7 @@ describe("OverviewPage summaries", () => {
     expect(screen.getByText("プロキシのステータス、現在のルーティング、リクエストとコストを一画面で確認できます。"))
       .toBeInTheDocument();
     expect(screen.getByText("プロキシステータス")).toBeInTheDocument();
-    expect(screen.getByText("リビジョン")).toBeInTheDocument();
+    expect(screen.getByText("保存済み設定リビジョン")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Agentの概要" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Overview" })).toBeNull();
   });
@@ -166,7 +167,7 @@ describe("OverviewPage summaries", () => {
     expect(screen.getByText("代理執行狀態、當前路由、請求與成本，一屏看清。"))
       .toBeInTheDocument();
     expect(screen.getByText("代理狀態")).toBeInTheDocument();
-    expect(screen.getByText("版本")).toBeInTheDocument();
+    expect(screen.getByText("已儲存設定修訂")).toBeInTheDocument();
     expect(screen.getByText("已連線 2 個 Agent")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Overview" })).toBeNull();
   });
@@ -430,4 +431,23 @@ describe("OverviewPage summaries", () => {
 
     expect(screen.getByRole("button", { name: "验证模型连接" })).toBeDisabled();
   });
+});
+
+it("retries unavailable overview statistics without leaving the page", async () => {
+  vi.mocked(getStats).mockRejectedValueOnce(new Error("offline"));
+  render(<OverviewPage state={state} registry={registry} agents={agents} onNavigate={vi.fn()} />);
+  await screen.findByText("统计暂不可用");
+  fireEvent.click(screen.getByRole("button", { name: "刷新统计" }));
+  expect(await screen.findByText("近 24 小时暂无请求")).toBeInTheDocument();
+});
+it("refreshes overview statistics on focus and suppresses overlapping loads", async () => {
+  let resolve!: (value: Awaited<ReturnType<typeof getStats>>) => void;
+  const result = await getStats("24h", null);
+  vi.mocked(getStats).mockClear().mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+  render(<OverviewPage state={state} registry={registry} agents={agents} onNavigate={vi.fn()} />);
+  fireEvent.focus(window); fireEvent.focus(window);
+  expect(getStats).toHaveBeenCalledTimes(1);
+  await act(async () => resolve(result));
+  fireEvent.focus(window);
+  await waitFor(() => expect(getStats).toHaveBeenCalledTimes(2));
 });

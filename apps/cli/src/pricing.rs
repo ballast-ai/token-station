@@ -34,6 +34,11 @@ pub struct ModelPrice {
     pub cache_read_per_mtok: u64,
     #[serde(default)]
     pub cache_write_per_mtok: u64,
+    /// Optional TTL rates. Missing rates retain the legacy cache-write price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m_per_mtok: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_per_mtok: Option<u64>,
     /// Reasoning tokens are billed at the output rate unless a price is given.
     #[serde(default)]
     pub reasoning_per_mtok: Option<u64>,
@@ -53,6 +58,8 @@ impl ModelPrice {
             ("output_per_mtok", Some(self.output_per_mtok)),
             ("cache_read_per_mtok", Some(self.cache_read_per_mtok)),
             ("cache_write_per_mtok", Some(self.cache_write_per_mtok)),
+            ("cache_write_5m_per_mtok", self.cache_write_5m_per_mtok),
+            ("cache_write_1h_per_mtok", self.cache_write_1h_per_mtok),
             ("reasoning_per_mtok", self.reasoning_per_mtok),
         ] {
             if rate.is_some_and(|rate| rate > MAX_PRICE_PER_MTOK) {
@@ -62,6 +69,17 @@ impl ModelPrice {
             }
         }
         Ok(())
+    }
+
+    /// Returns a single cache-write rate only when every TTL uses that rate.
+    /// Connectors with one cache-price field must omit mixed TTL prices.
+    #[must_use]
+    pub fn uniform_cache_write_rate(&self) -> Option<u64> {
+        [self.cache_write_5m_per_mtok, self.cache_write_1h_per_mtok]
+            .into_iter()
+            .flatten()
+            .all(|rate| rate == self.cache_write_per_mtok)
+            .then_some(self.cache_write_per_mtok)
     }
 
     /// The cost of one exchange, in micro-units. Saturating throughout: a
@@ -77,10 +95,32 @@ impl ModelPrice {
             .saturating_sub(usage.cache_read_tokens)
             .saturating_sub(usage.cache_write_tokens);
         let fresh_output = usage.output_tokens.saturating_sub(usage.reasoning_tokens);
+        // Details are subsets of the aggregate. Malformed overlapping details
+        // must not create extra billable tokens.
+        let short_cache = usage.cache_write_5m_tokens.min(usage.cache_write_tokens);
+        let long_cache = usage
+            .cache_write_1h_tokens
+            .min(usage.cache_write_tokens - short_cache);
+        let write_other = usage.cache_write_tokens - short_cache - long_cache;
+        // Sum weighted cache classes before rounding to micro-units. Optional
+        // rates equal to the legacy rate must not change the recorded cost.
+        let weighted = |tokens: u64, rate: u64| u128::from(tokens) * u128::from(rate);
+        let cache_cost = weighted(
+            short_cache,
+            self.cache_write_5m_per_mtok
+                .unwrap_or(self.cache_write_per_mtok),
+        )
+        .saturating_add(weighted(
+            long_cache,
+            self.cache_write_1h_per_mtok
+                .unwrap_or(self.cache_write_per_mtok),
+        ))
+        .saturating_add(weighted(write_other, self.cache_write_per_mtok))
+            / 1_000_000;
         let total = per(fresh_input, self.input_per_mtok)
             .saturating_add(per(fresh_output, self.output_per_mtok))
             .saturating_add(per(usage.cache_read_tokens, self.cache_read_per_mtok))
-            .saturating_add(per(usage.cache_write_tokens, self.cache_write_per_mtok))
+            .saturating_add(cache_cost)
             .saturating_add(per(usage.reasoning_tokens, reasoning_rate));
         i64::try_from(total).unwrap_or(i64::MAX)
     }
@@ -105,6 +145,8 @@ impl PriceTable {
     #[must_use]
     pub fn builtin() -> Self {
         let price = |input, output, cache_read, cache_write| ModelPrice {
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
             input_per_mtok: input,
             output_per_mtok: output,
             cache_read_per_mtok: cache_read,
@@ -205,9 +247,15 @@ impl PriceTable {
 
     #[must_use]
     pub fn model_price_for_upstream(&self, upstream: &str, model: &str) -> Option<&ModelPrice> {
-        self.models
-            .get(&format!("{upstream}/{model}"))
-            .or_else(|| self.model_price(model))
+        self.models.get(&format!("{upstream}/{model}")).or_else(|| {
+            // A relay's raw model ID can equal a different channel's scoped key.
+            // Only unscoped model prices may participate in the generic fallback.
+            if model.contains('/') {
+                self.model_price(&normalize_model_id(model))
+            } else {
+                self.model_price(model)
+            }
+        })
     }
 
     /// Validates the current table without changing it.
@@ -365,6 +413,8 @@ mod tests {
     #[test]
     fn cache_and_reasoning_subsets_are_not_billed_twice() {
         let price = ModelPrice {
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
             input_per_mtok: 1_000_000,
             output_per_mtok: 2_000_000,
             cache_read_per_mtok: 100_000,
@@ -444,6 +494,28 @@ mod tests {
             version: 9,
             models: BTreeMap::from([("wecoding/glm-5.2".to_owned(), scoped)]),
         };
+        assert_eq!(
+            table.model_price_for_upstream("relay", "wecoding/glm-5.2"),
+            None,
+            "A relay model ID must not alias another channel's price key."
+        );
+        assert_eq!(
+            table.price_for_upstream("relay", "wecoding/glm-5.2", &usage(1_000_000, 0)),
+            None
+        );
+        let explicit = table
+            .next_with_model(
+                "relay/wecoding/glm-5.2",
+                ModelPrice {
+                    input_per_mtok: 840_000,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            explicit.price_for_upstream("relay", "wecoding/glm-5.2", &usage(1_000_000, 0)),
+            Some((840_000, 10))
+        );
 
         assert_eq!(
             table.model_price_for_upstream("another", "glm-5.2-variant"),
@@ -548,6 +620,8 @@ mod tests {
             )]),
         };
         let replacement = ModelPrice {
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
             input_per_mtok: 3_000_000,
             output_per_mtok: 4_000_000,
             cache_read_per_mtok: 500_000,

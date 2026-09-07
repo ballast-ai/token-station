@@ -3361,6 +3361,40 @@ fn completing_and_saving_an_agent_editor_commits_one_valid_custom_route() {
 }
 
 #[test]
+fn saving_legacy_harness_mapping_does_not_enable_it() {
+    let root = scratch_home("harness-mapping-opt-in");
+    let config_path = root.join("token-station.json");
+    let mut draft = template_for_test(&root);
+    draft["agent_routes"]["claude-code"] = json!({
+        "mode": "inherit",
+        "harness_model_routes": {
+            "balanced": { "upstream": "removed", "model": "removed" }
+        }
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        config_path.clone(),
+        draft,
+        None
+    )))));
+    let snapshot = restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    assert!(!snapshot.agent_routes["claude-code"].harness_model_mapping_enabled);
+    assert!(snapshot.agent_routes["claude-code"]
+        .harness_config_error
+        .is_none());
+    let config = ClientConfig::load(&config_path).unwrap();
+    assert!(config
+        .harness_router_for_agent("claude-code")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        config.agent_routes["claude-code"].harness_model_routes["balanced"].upstream,
+        "removed"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
     let root = scratch_home("agent-harness-mapping-save");
     let config_path = root.join("token-station.json");
@@ -3410,6 +3444,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         Some("provider".to_owned())
     );
 
+    set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
     restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
     let config = ClientConfig::load(&config_path).unwrap();
     assert_eq!(
@@ -3431,6 +3466,29 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         "provider"
     );
     assert_eq!(router.pools[&rule.route_to][0].model, "model");
+    let disabled =
+        set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), false)
+            .unwrap();
+    assert!(!disabled.agent_routes["claude-code"].harness_model_mapping_enabled);
+    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    let disabled_config = ClientConfig::load(&config_path).unwrap();
+    assert!(disabled_config
+        .harness_router_for_agent("claude-code")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        disabled_config.agent_routes["claude-code"]
+            .harness_model_routes
+            .len(),
+        4
+    );
+    set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
+    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    assert!(ClientConfig::load(&config_path)
+        .unwrap()
+        .harness_router_for_agent("claude-code")
+        .unwrap()
+        .is_some());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -3462,6 +3520,9 @@ fn harness_mapping_save_does_not_change_the_agent_route_mode_or_tiers() {
         Some("model".to_owned()),
     )
     .unwrap();
+    let enabled =
+        set_agent_harness_model_mapping_enabled(app.state(), "opencode".to_owned(), true).unwrap();
+    assert!(!enabled.agent_routes["opencode"].inherits_global);
     restart_agent_harness_routes(app.state(), "opencode".to_owned()).unwrap();
 
     let config = ClientConfig::load(&config_path).unwrap();
@@ -4060,6 +4121,7 @@ fn applying_home_routes_replaces_running_agent_overrides() {
         "mode": "inherit",
         "routing_mode": "direct",
         "direct_target": {"upstream": "local", "model": "small"},
+        "harness_model_mapping_enabled": true,
         "harness_model_routes": {
             "fast": {"upstream": "local", "model": "small"}
         }
@@ -4107,7 +4169,7 @@ fn applying_home_routes_replaces_running_agent_overrides() {
     assert!(persisted
         .harness_router_for_agent("opencode")
         .unwrap()
-        .is_some());
+        .is_none());
     let lifecycle = std::mem::replace(
         &mut inner.server,
         ServerLifecycle::Stopped { generation: 8 },
@@ -4892,6 +4954,8 @@ fn save_and_apply_hands_new_requests_to_the_new_revision() {
         0,
         None,
         1,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(price_v2.version, 2);
@@ -5054,6 +5118,7 @@ fn invalid_proxy_settings_are_transactional_and_field_scoped() {
         vec!["localhost".to_owned()],
         String::new(),
         String::new(),
+        None,
     ) {
         Err(error) => error,
         Ok(_) => panic!("an unsupported proxy scheme is rejected"),
@@ -6366,10 +6431,43 @@ fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views()
         Vec::new(),
         String::new(),
         String::new(),
+        None,
     )
     .unwrap();
     assert!(!configured.settings.auth);
     assert!(!configured.settings.metrics);
+    let private = set_settings(
+        app.state(),
+        false,
+        false,
+        "direct".to_owned(),
+        String::new(),
+        Vec::new(),
+        String::new(),
+        String::new(),
+        Some(false),
+    )
+    .unwrap();
+    assert!(!private.settings.request_body_capture);
+    let unchanged = set_settings(
+        app.state(),
+        false,
+        false,
+        "direct".to_owned(),
+        String::new(),
+        Vec::new(),
+        String::new(),
+        String::new(),
+        None,
+    )
+    .unwrap();
+    assert!(!unchanged.settings.request_body_capture);
+    assert!(
+        !ClientConfig::load(&root.join("token-station.json"))
+            .unwrap()
+            .data
+            .request_body_capture
+    );
 
     let plugins = get_plugins(app.state()).unwrap();
     assert!(plugins.agent.contains("agent-openai"));
@@ -6950,6 +7048,8 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
         11,
         None,
         baseline_price_version,
+        None,
+        None,
     )
     .expect("retired scoped price fixture saves");
     set_model_price(
@@ -6961,6 +7061,8 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
         31,
         None,
         baseline_price_version + 1,
+        None,
+        None,
     )
     .expect("second retired scoped price fixture saves");
     set_model_price(
@@ -6972,6 +7074,8 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
         101,
         None,
         baseline_price_version + 2,
+        None,
+        None,
     )
     .expect("unrelated scoped price fixture saves");
     provider_tombstones::archive(
@@ -7094,15 +7198,35 @@ fn model_price_edits_append_versions_and_never_revalue_historical_receipts() {
         4_000_000,
         Some(5_000_000),
         0,
+        Some(6_000_000),
+        Some(9_000_000),
     )
     .unwrap();
     assert_eq!(v1.version, 1);
     assert_eq!(v1.models["model-a"].reasoning_per_mtok, Some(5_000_000));
-    assert!(
-        set_model_price(app.state(), "model-a".to_string(), 9, 9, 9, 9, None, 0,)
-            .unwrap_err()
-            .contains("版本冲突")
+    let saved_ttl = ClientConfig::load(&root.join("token-station.json")).unwrap();
+    assert_eq!(
+        saved_ttl.pricing.models["model-a"].cache_write_5m_per_mtok,
+        Some(6_000_000)
     );
+    assert_eq!(
+        saved_ttl.pricing.models["model-a"].cache_write_1h_per_mtok,
+        Some(9_000_000)
+    );
+    assert!(set_model_price(
+        app.state(),
+        "model-a".to_string(),
+        9,
+        9,
+        9,
+        9,
+        None,
+        0,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("版本冲突"));
 
     let v2 = set_model_price(
         app.state(),
@@ -7113,6 +7237,8 @@ fn model_price_edits_append_versions_and_never_revalue_historical_receipts() {
         4_000_000,
         None,
         1,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(v2.version, 2);
@@ -7148,6 +7274,120 @@ fn model_price_edits_append_versions_and_never_revalue_historical_receipts() {
     )
     .unwrap();
     assert_eq!(agent_filtered.total.requests, 0);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn manual_price_transaction_restores_ownership_and_draft_on_failed_save() {
+    for deleted in [false, true] {
+        let root = scratch_home("manual-price-transaction-failure");
+        let config_path = root.join("token-station.json");
+        let mut draft = gateway_template_for_test(&root);
+        draft["pricing"] = json!({"version": 1, "models": {"model-a": {"input_per_mtok": 12, "output_per_mtok": 24}}});
+        let mut inner = AppInner::new(config_path.clone(), draft, None);
+        inner.save_draft().unwrap();
+        let original = inner.draft.clone();
+        let revision = inner.config_state.draft_revision();
+        let metadata_path = inner.data_dir().join("price-sync.json");
+        std::fs::create_dir_all(inner.data_dir()).unwrap();
+        let metadata = json!({"enabled": true, "records": {"model-a": {
+            "price": draft_price_table(&inner).unwrap().models["model-a"], "source": "provider", "identity": "one", "fetched_at_ms": 1
+        }}, "suppressed": []});
+        std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let blocked = root.join("blocked-config");
+        std::fs::create_dir(&blocked).unwrap();
+        inner.config_path = blocked;
+        let app = tauri::test::mock_app();
+        app.manage(AppStateManaged(Mutex::new(inner)));
+        let result = if deleted {
+            remove_model_price(app.state(), "model-a".to_owned(), 1)
+        } else {
+            set_model_price(
+                app.state(),
+                "model-a".to_owned(),
+                30,
+                60,
+                0,
+                0,
+                None,
+                1,
+                None,
+                None,
+            )
+        };
+        assert!(result.is_err());
+        let restored: Value =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(
+            restored["records"], metadata["records"],
+            "failed edits keep sync ownership"
+        );
+        assert_eq!(
+            restored["suppressed"], metadata["suppressed"],
+            "failed deletion must not leave a tombstone"
+        );
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            assert_eq!(inner.draft, original);
+            assert!(!inner.config_state.is_dirty());
+            inner.config_path = config_path.clone();
+        }
+        set_model_price(
+            app.state(),
+            "model-a".to_owned(),
+            40,
+            80,
+            0,
+            0,
+            None,
+            1,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            app.state::<AppStateManaged>()
+                .0
+                .lock()
+                .unwrap()
+                .config_state
+                .draft_revision()
+                > revision + 1
+        );
+        assert_eq!(
+            ClientConfig::load(&config_path).unwrap().pricing.models["model-a"].input_per_mtok,
+            40
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert!(saved["records"].get("model-a").is_none());
+        remove_model_price(app.state(), "model-a".to_owned(), 2).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(saved["suppressed"], json!(["model-a"]));
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[test]
+fn manual_price_transaction_reports_ownership_rollback_failure() {
+    let root = scratch_home("manual-price-rollback-error");
+    let mut inner = AppInner::new(
+        root.join("token-station.json"),
+        gateway_template_for_test(&root),
+        None,
+    );
+    let metadata_path = inner.data_dir().join("price-sync.json");
+    let error = crate::price_sync::mark_manual(&mut inner, "model-a", true, |_| {
+        std::fs::remove_file(&metadata_path).unwrap();
+        std::fs::create_dir(&metadata_path).unwrap();
+        Err("Injected configuration save failure.".to_owned())
+    })
+    .unwrap_err();
+    assert!(
+        error.contains("Injected configuration save failure."),
+        "{error}"
+    );
+    assert!(error.contains("ownership rollback also failed"), "{error}");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -7243,6 +7483,20 @@ fn public_price_batch_scopes_models_preserves_manual_values_and_bumps_once() {
     unknown.cost_kind = CostKind::Unknown;
     store.record(&unknown);
     drop(store);
+
+    inner
+        .save_draft_without_backfill()
+        .expect("price synchronization saves without a locked backfill");
+    let unfilled = SqliteStore::recent_receipts(&db, 5).unwrap();
+    assert_eq!(unfilled[0].cost_kind, CostKind::Unknown);
+    assert_eq!(unfilled[0].cost_micros, None);
+    assert_eq!(
+        ClientConfig::load(&inner.config_path)
+            .unwrap()
+            .pricing
+            .version,
+        5
+    );
 
     inner
         .save_draft()
@@ -9158,6 +9412,56 @@ fn model_test_command_reuses_the_draft_gateway_records_details_and_cleans_regist
         .is_empty());
     fixture.join().unwrap();
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn metadata_only_draft_model_test_keeps_receipts_without_body_files() {
+    let root = scratch_home("model-test-metadata-only");
+    let (upstream, fixture) = serve_chat_completion("metadata-only", 1);
+    let mut draft = gateway_template_for_test(&root);
+    draft["data"]["metrics"] = json!(true);
+    draft["data"]["request_body_capture"] = json!(false);
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible", "base_url": upstream,
+        "models": [{"model": "small"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct", "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+    assert!(app.manage(ModelTestStreamState::default()));
+    let reply = tauri::async_runtime::block_on(run_model_test_chat(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        app.state::<ModelTestStreamState>().inner(),
+        vec![ModelTestMessage {
+            role: "user".to_owned(),
+            content: "private-prompt".to_owned(),
+        }],
+        "model-test-private".to_owned(),
+    ))
+    .unwrap();
+    assert_eq!(reply.content, "metadata-only");
+    fixture.join().unwrap();
+    let data_dir = root.join("token-station-data");
+    let receipts = SqliteStore::receipt_page(
+        &data_dir.join("metrics.sqlite"),
+        &ReceiptQuery::default(),
+        1,
+        0,
+    )
+    .unwrap();
+    assert_eq!(receipts.items.len(), 1);
+    assert!(!data_dir
+        .join(token_station_cli::bodylog::BODY_DIR_NAME)
+        .exists());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

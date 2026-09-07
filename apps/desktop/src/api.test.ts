@@ -262,6 +262,8 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       output_per_mtok: 2_000_000,
       cache_read_per_mtok: 300_000,
       cache_write_per_mtok: 4_000_000,
+      cache_write_5m_per_mtok: 5_000_000,
+      cache_write_1h_per_mtok: 8_000_000,
       reasoning_per_mtok: null,
     }, 7);
     expect(invokeMock).toHaveBeenLastCalledWith("set_model_price", {
@@ -270,6 +272,8 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       outputPerMtok: 2_000_000,
       cacheReadPerMtok: 300_000,
       cacheWritePerMtok: 4_000_000,
+      cacheWrite5mPerMtok: 5_000_000,
+      cacheWrite1hPerMtok: 8_000_000,
       reasoningPerMtok: null,
       expectedVersion: 7,
     });
@@ -432,6 +436,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     ["start", () => serveStart(), "serve_start", undefined],
     ["stop", () => serveStop(), "serve_stop", undefined],
     ["settings", () => setSettings(false, true, {
+      request_body_capture: false,
       egress_mode: "http",
       egress_proxy_url: "http://proxy.internal:8080",
       egress_no_proxy: ["localhost"],
@@ -440,6 +445,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     }), "set_settings", {
       auth: false,
       metrics: true,
+      requestBodyCapture: false,
       egressMode: "http",
       egressProxyUrl: "http://proxy.internal:8080",
       egressNoProxy: ["localhost"],

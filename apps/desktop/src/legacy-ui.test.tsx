@@ -276,7 +276,7 @@ describe("legacy desktop read-only pages", () => {
     });
     const user = userEvent.setup();
     render(<Stats />);
-    expect(await screen.findByText("1.2500")).toBeInTheDocument();
+    expect(await screen.findByText("$1.25")).toBeInTheDocument();
     expect(screen.getAllByText("openai").length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "筛选" }));
     await user.click(screen.getByRole("combobox", { name: "时间范围" }));
@@ -415,6 +415,7 @@ describe("settings and update actions", () => {
     expect(screen.getByText(/需重启代理/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(setSettings).toHaveBeenCalledWith(false, true, {
+      request_body_capture: true,
       egress_mode: "direct",
       egress_proxy_url: "",
       egress_no_proxy: [],
@@ -441,6 +442,7 @@ describe("settings and update actions", () => {
     await user.type(screen.getByLabelText("代理认证槽"), "proxy_password");
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(setSettings).toHaveBeenCalledWith(true, true, {
+      request_body_capture: true,
       egress_mode: "http",
       egress_proxy_url: "http://proxy.internal:8080",
       egress_no_proxy: ["localhost", "*.corp.internal"],
@@ -464,6 +466,33 @@ describe("settings and update actions", () => {
       .toBeInTheDocument();
     expect(screen.queryByText("操作失败：settings denied", { selector: ".settings-card .banner" }))
       .toBeNull();
+  });
+
+  it("focuses the proxy error after the saving input is re-enabled even with an early animation frame", async () => {
+    let rejectSave!: (error: unknown) => void;
+    vi.mocked(setSettings).mockReturnValue(new Promise((_, reject) => { rejectSave = reject; }));
+    const user = userEvent.setup();
+    render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("combobox", { name: "出口模式" }));
+    await user.click(await screen.findByRole("option", { name: "HTTP CONNECT" }));
+    const proxyUrl = screen.getByLabelText("代理 URL");
+    await user.type(proxyUrl, "ftp://invalid.example");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(proxyUrl).toBeDisabled();
+    // Model a frame running before React commits the async save completion.
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(performance.now());
+      return 1;
+    });
+    try {
+      await act(async () => {
+        rejectSave({ field: "egress_proxy_url", reason_code: "invalid_proxy_url", message: "代理地址无效" });
+      });
+      expect(proxyUrl).toBeEnabled();
+      expect(proxyUrl).toHaveFocus();
+    } finally {
+      frame.mockRestore();
+    }
   });
 
   it("focuses and describes the proxy URL for a structured settings error", async () => {
@@ -1421,4 +1450,28 @@ describe("provider deletion lifecycle", () => {
     await user.click(within(deletionDialog).getByRole("button", { name: "取消" }));
     expect(deleteButton).toHaveFocus();
   });
+});
+
+import { useState } from "react";
+it("saving one model must retain another model's limit draft", async () => {
+  const provider: ProviderView = {
+    name: "sample", provider: "openai-compatible", base_url: "https://example.test/v1", has_auth: true,
+    models: ["model-a", "model-b"],
+    model_capabilities: ["model-a", "model-b"].map((model) => ({ model, tool: "unknown", vision: "unknown", json_schema: "unknown", context_window: 1000, max_output_tokens: 100 })),
+  };
+  const updated = { ...provider, model_capabilities: provider.model_capabilities!.map((cap) => ({ ...cap, context_window: cap.model === "model-a" ? 2000 : 1000 })) };
+  vi.mocked(setProviderModelLimits).mockResolvedValue({ ...state, providers: [updated] });
+  function Wrapper() {
+    const [current, setCurrent] = useState(provider);
+    return <ProviderModelManager provider={current} serveRunning={false} onSaved={(next) => setCurrent(next.providers[0])} />;
+  }
+  const user = userEvent.setup();
+  render(<Wrapper />);
+  const second = screen.getByRole("spinbutton", { name: "model-b 上下文上限" });
+  await user.clear(second); await user.type(second, "3000");
+  const first = screen.getByRole("spinbutton", { name: "model-a 上下文上限" });
+  await user.clear(first); await user.type(first, "2000");
+  await user.click(screen.getByRole("button", { name: "保存 model-a 模型限制" }));
+  await waitFor(() => expect(setProviderModelLimits).toHaveBeenCalledWith("sample", "model-a", 2000, 100));
+  expect(second).toHaveValue(3000);
 });

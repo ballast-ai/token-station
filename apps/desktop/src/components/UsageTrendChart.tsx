@@ -1,6 +1,8 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import "./UsageTrendChart.css";
 import type { AggView } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue, usageCoverageLabel } from "../usagePresentation";
 
 export type UsageTrendRange = "24h" | "7d" | "30d" | "all";
 
@@ -59,15 +61,16 @@ function compact(value: number, locale: string): string {
 
 function bucketStart(ms: number, unit: "hour" | "day"): number {
   const date = new Date(ms);
-  if (unit === "hour") date.setMinutes(0, 0, 0);
-  else date.setHours(0, 0, 0, 0);
+  // Subtract elapsed minutes so the second occurrence of a DST hour stays distinct.
+  if (unit === "hour") return ms - date.getMinutes() * 60_000 - date.getSeconds() * 1_000 - date.getMilliseconds();
+  date.setHours(0, 0, 0, 0);
   return date.getTime();
 }
 
 function shiftBucket(ms: number, unit: "hour" | "day", amount: number): number {
+  if (unit === "hour") return ms + amount * 3_600_000;
   const date = new Date(ms);
-  if (unit === "hour") date.setHours(date.getHours() + amount);
-  else date.setDate(date.getDate() + amount);
+  date.setDate(date.getDate() + amount);
   return date.getTime();
 }
 
@@ -100,7 +103,7 @@ function isActive(aggregate: AggView): boolean {
     || aggregate.cache_write_tokens > 0;
 }
 
-function normalizeBuckets(
+export function normalizeBuckets(
   groups: [string, AggView][],
   range: UsageTrendRange,
   nowMs: number,
@@ -112,21 +115,17 @@ function normalizeBuckets(
     if (Number.isFinite(timestamp)) indexed.set(bucketStart(timestamp, unit), aggregate);
   }
 
-  const fixedCount = range === "24h" ? 24 : range === "7d" ? 7 : range === "30d" ? 30 : null;
-  if (fixedCount != null) {
+  const duration = range === "24h" ? 86_400_000 : range === "7d" ? 7 * 86_400_000 : range === "30d" ? 30 * 86_400_000 : null;
+  if (duration != null) {
     const end = bucketStart(nowMs, unit);
-    const start = shiftBucket(end, unit, -(fixedCount - 1));
-    return {
-      unit,
-      buckets: Array.from({ length: fixedCount }, (_, index) => {
-        const timestamp = shiftBucket(start, unit, index);
-        return {
-          key: String(timestamp),
-          timestamp,
-          aggregate: indexed.get(timestamp) ?? EMPTY_AGGREGATE,
-        };
-      }),
-    };
+    // The backend filters by elapsed duration before grouping. Both endpoint
+    // buckets can be partial, and calendar-day counts can vary across DST.
+    const start = bucketStart(nowMs - duration, unit);
+    const buckets: TrendBucket[] = [];
+    for (let timestamp = start; timestamp <= end; timestamp = shiftBucket(timestamp, unit, 1)) {
+      buckets.push({ key: String(timestamp), timestamp, aggregate: indexed.get(timestamp) ?? EMPTY_AGGREGATE });
+    }
+    return { unit, buckets };
   }
 
   const timestamps = [...indexed.keys()].sort((left, right) => left - right);
@@ -141,7 +140,15 @@ function normalizeBuckets(
   ) {
     continuous.push(cursor);
   }
-  const source = continuous.length < 120 ? continuous : timestamps;
+  // Preserve real elapsed spacing without drawing activity across empty years.
+  // Zero-valued boundary days return each curve to baseline around sparse gaps.
+  const sparse = new Set(timestamps);
+  for (let index = 1; index < timestamps.length; index += 1) {
+    const after = shiftBucket(timestamps[index - 1], unit, 1);
+    const before = shiftBucket(timestamps[index], unit, -1);
+    if (after < timestamps[index]) { sparse.add(after); sparse.add(before); }
+  }
+  const source = continuous[continuous.length - 1] === last ? continuous : [...sparse].sort((a, b) => a - b);
   return {
     unit,
     buckets: source.map((timestamp) => ({
@@ -152,11 +159,16 @@ function normalizeBuckets(
   };
 }
 
-function tickIndexes(length: number): number[] {
-  if (length <= 7) return Array.from({ length }, (_, index) => index);
-  return [...new Set([0, 0.2, 0.4, 0.6, 0.8, 1].map(
-    (ratio) => Math.round((length - 1) * ratio),
-  ))];
+function tickIndexes(timestamps: number[]): number[] {
+  if (timestamps.length <= 1) return timestamps.map((_, index) => index);
+  const last = timestamps.length - 1;
+  const minimumGap = (timestamps[last] - timestamps[0]) / 6;
+  const indexes = [0];
+  for (let index = 1; index < last; index += 1) {
+    if (timestamps[index] - timestamps[indexes[indexes.length - 1]] >= minimumGap
+      && timestamps[last] - timestamps[index] >= minimumGap) indexes.push(index);
+  }
+  return [...indexes, last];
 }
 
 function niceMaximum(value: number): number {
@@ -166,6 +178,7 @@ function niceMaximum(value: number): number {
   const ceiling = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
   return ceiling * power;
 }
+
 
 function smoothPath(
   values: (number | null)[],
@@ -193,22 +206,26 @@ function smoothPath(
 }
 
 function areaPath(
-  values: number[],
+  values: (number | null)[],
   scaleMax: number,
   xForIndex: (index: number) => number,
   yForValue: (value: number, max: number) => number,
   baseline: number,
 ): string {
-  if (values.length === 0) return "";
-  const line = smoothPath(values, scaleMax, xForIndex, yForValue);
-  return `${line} L ${xForIndex(values.length - 1).toFixed(1)} ${baseline.toFixed(1)} L ${xForIndex(0).toFixed(1)} ${baseline.toFixed(1)} Z`;
+  let result = "";
+  let start = 0;
+  while (start < values.length) {
+    if (values[start] == null) { start += 1; continue; }
+    let end = start;
+    while (end + 1 < values.length && values[end + 1] != null) end += 1;
+    result += smoothPath(values.slice(start, end + 1), scaleMax, (index) => xForIndex(start + index), yForValue);
+    result += ` L ${xForIndex(end).toFixed(1)} ${baseline.toFixed(1)} L ${xForIndex(start).toFixed(1)} ${baseline.toFixed(1)} Z `;
+    start = end + 1;
+  }
+  return result;
 }
 
-function costLabel(value: number): string {
-  if (value === 0) return "$0";
-  if (value >= 1) return `$${value.toFixed(value >= 10 ? 0 : 1)}`;
-  return `$${value.toFixed(3)}`;
-}
+function costLabel(value: number): string { return formatUsd(Math.round(value * 1_000_000)); }
 
 export default function UsageTrendChart({
   groups,
@@ -221,12 +238,15 @@ export default function UsageTrendChart({
     [groups, range, nowMs],
   );
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [pointer, setPointer] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [tooltipSize, setTooltipSize] = useState({ width: 260, height: 220 });
   const hasLegacyInput = buckets.some(({ aggregate }) => aggregate.legacy_input_requests > 0);
   const plotWidth = WIDTH - PLOT.left - PLOT.right;
   const plotHeight = HEIGHT - PLOT.top - PLOT.bottom;
-  const xForIndex = (index: number) => (
-    PLOT.left + (index / Math.max(1, buckets.length - 1)) * plotWidth
-  );
+  const first = buckets[0]?.timestamp ?? 0;
+  const last = buckets[buckets.length - 1]?.timestamp ?? first;
+  const xForIndex = (index: number) => PLOT.left + (first === last ? 0.5 : (buckets[index].timestamp - first) / (last - first)) * plotWidth;
   const yForValue = (value: number, max: number) => (
     PLOT.top + plotHeight - (value / max) * plotHeight
   );
@@ -240,12 +260,13 @@ export default function UsageTrendChart({
       cache_write_tokens: copy("Cache write", "缓存写入", "快取寫入", "キャッシュ書き込み"),
       cache_read_tokens: copy("Cache hit", "缓存命中", "快取命中", "キャッシュヒット"),
     }[series.key],
-    values: buckets.map(({ aggregate }) => aggregate[series.key]),
+    values: buckets.map(({ aggregate }) => (series.key === "cache_read_tokens" || series.key === "cache_write_tokens" ? cacheMetric(aggregate, series.key) : tokenMetric(aggregate, series.key)).value),
   }));
   const rawTokenMaximum = Math.max(
     0,
-    ...tokenSeries.flatMap((series) => series.values),
+    ...tokenSeries.flatMap((series) => series.values.map((value) => value ?? 0)),
   );
+  const hasReportedTokens = tokenSeries.some((series) => series.values.some((value, index) => value != null && buckets[index].aggregate.requests > 0));
   const tokenMaximum = niceMaximum(rawTokenMaximum);
   const costValues = buckets.map(({ aggregate }) => {
     if (aggregate.cost_micros != null) return aggregate.cost_micros / 1_000_000;
@@ -262,12 +283,40 @@ export default function UsageTrendChart({
   const activeCount = buckets.filter(({ aggregate }) => isActive(aggregate)).length;
   const activeIndex = buckets.findIndex((bucket) => bucket.key === activeKey);
   const active = activeIndex >= 0 ? buckets[activeIndex] : null;
+  const isolatedCostIndexes = costValues.flatMap((value, index) => value != null && value > 0
+    && (index === 0 || costValues[index - 1] == null)
+    && (index === buckets.length - 1 || costValues[index + 1] == null) ? [index] : []);
+  const annotatedCostIndex = active
+    ? (isolatedCostIndexes.includes(activeIndex) ? activeIndex : -1)
+    : (isolatedCostIndexes[isolatedCostIndexes.length - 1] ?? -1);
+  useLayoutEffect(() => {
+    const bounds = tooltipRef.current?.getBoundingClientRect();
+    if (bounds?.width && bounds.height) setTooltipSize((previous) => previous.width === bounds.width && previous.height === bounds.height
+      ? previous : { width: bounds.width, height: bounds.height });
+  }, [active, language, pointer?.width]);
+  const clearInspection = () => { setActiveKey(null); setPointer(null); };
+  const guideX = active ? xForIndex(activeIndex) : PLOT.left;
+  const pointerGuideX = pointer ? guideX / WIDTH * pointer.width : 0;
+  const tooltipLeft = pointer
+    ? Math.max(12, Math.min(pointer.width - tooltipSize.width - 12,
+      Math.max(pointer.x, pointerGuideX) + 16 + tooltipSize.width <= pointer.width - 12
+        ? Math.max(pointer.x, pointerGuideX) + 16 : Math.min(pointer.x, pointerGuideX) - tooltipSize.width - 16))
+    : `clamp(12px, calc(${guideX / WIDTH * 100}% ${guideX > WIDTH / 2 ? "- 276px" : "+ 16px"}), max(12px, calc(100% - 272px)))`;
   const unitName = unit === "hour" ? copy("hours", "小时", "小時", "時間") : copy("days", "天", "天", "日");
   const summary = copy(
     `Usage trend with ${buckets.length} ${unitName} and ${activeCount} active periods. Tokens use the left axis and cost uses the right axis.`,
     `用量趋势，共 ${buckets.length} 个${unitName}槽，活跃 ${activeCount} 个；左轴为 Token，右轴为成本。`, `用量趨勢，共 ${buckets.length} 個${unitName}槽，活躍 ${activeCount} 個；左軸為 Token，右軸為成本。`, `使用状況のトレンド、${buckets.length} 個の ${unitName} 槽、活発な ${activeCount} 個；左軸は Token、右軸はコスト。`
   );
-  const ticks = tickIndexes(buckets.length);
+  const ticks = tickIndexes(buckets.map((bucket) => bucket.timestamp));
+  const usageText = (aggregate: AggView, key: TokenSeriesKey) => formatUsageValue(
+    key === "cache_read_tokens" || key === "cache_write_tokens" ? cacheMetric(aggregate, key) : tokenMetric(aggregate, key),
+    (value) => value.toLocaleString(language), copy,
+  );
+  const costText = (aggregate: AggView) => aggregate.requests === 0 ? formatUsd(aggregate.cost_micros ?? 0) : aggregate.cost_micros == null
+    ? copy("Unknown", "未知", "未知", "不明")
+    : formatUsd(aggregate.cost_micros) + (costCoverage(aggregate).complete || aggregate.requests === 0 ? "" : copy(" (partial)", "（部分）", "（部分）", "（一部）"));
+  const partialTokens = buckets.some(({ aggregate }) => aggregate.requests > 0 && !tokenMetric(aggregate, "total").complete);
+  const partialCost = buckets.some(({ aggregate }) => aggregate.requests > 0 && !costCoverage(aggregate).complete);
 
   if (activeCount === 0) {
     return (
@@ -288,12 +337,12 @@ export default function UsageTrendChart({
   return (
     <div className="usage-trend-chart">
       <div className="usage-chart-meta">
-        <span>{copy("Active", "活跃", "活躍", "活発")} <strong>{activeCount}</strong> / {buckets.length} {unitName}</span>
-        <span>{copy("Peak tokens", "Token 峰值", "Token 峰值", "Token ピーク")} <strong>{compact(rawTokenMaximum, language)}</strong> / {unitName}</span>
+        <span>{copy("Active", "活跃", "活躍", "活発")} <strong>{activeCount}</strong> / {buckets.length} {copy("periods", "时段", "時段", "期間")}</span>
+        <span>{copy("Peak tokens", "Token 峰值", "Token 峰值", "Token ピーク")} <strong>{hasReportedTokens ? compact(rawTokenMaximum, language) : copy("Not reported", "未上报", "未回報", "未報告")}</strong>{hasReportedTokens ? ` / ${unitName}` : ""}{partialTokens && hasReportedTokens && <small>{copy(" (partial)", "（部分上报）", "（部分回報）", "（一部報告）")}</small>}</span>
         <span>
-          {copy("Peak cost", "成本峰值", "成本峰值", "コスト ピーク")}{" "}
-          <strong>{hasPricedCost ? costLabel(rawCostMaximum) : copy("Unpriced", "未定价", "未定價", "未設定")}</strong>
-          {hasPricedCost ? ` / ${unitName}` : ""}
+          {copy("Known cost peak", "已知成本峰值", "已知成本峰值", "既知のコスト ピーク")}{" "}
+          <strong>{hasPricedCost ? costLabel(rawCostMaximum) : copy("Unknown", "未知", "未知", "不明")}</strong>
+          {hasPricedCost ? ` / ${unitName}` : ""}{partialCost && hasPricedCost && <small>{copy(" (partial)", "（部分）", "（部分）", "（一部）")}</small>}
         </span>
       </div>
 
@@ -304,7 +353,32 @@ export default function UsageTrendChart({
           role="img"
           aria-label={summary}
           preserveAspectRatio="none"
-          onMouseLeave={() => setActiveKey(null)}
+          onMouseMove={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            if (!bounds.width || !bounds.height) return;
+            const x = (event.clientX - bounds.left) / bounds.width * WIDTH;
+            const y = (event.clientY - bounds.top) / bounds.height * HEIGHT;
+            if (x < PLOT.left || x > WIDTH - PLOT.right || y < PLOT.top || y > HEIGHT - PLOT.bottom) {
+              clearInspection();
+              return;
+            }
+            let nearest = 0;
+            for (let index = 1; index < buckets.length; index += 1) {
+              if (Math.abs(xForIndex(index) - x) < Math.abs(xForIndex(nearest) - x)) nearest = index;
+            }
+            setActiveKey(buckets[nearest].key);
+            setPointer({ x: event.clientX - bounds.left, y: event.clientY - bounds.top, width: bounds.width, height: bounds.height });
+          }}
+          onMouseLeave={clearInspection}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") { clearInspection(); event.preventDefault(); }
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              const next = Math.max(0, Math.min(buckets.length - 1, activeIndex + (event.key === "ArrowRight" ? 1 : -1)));
+              setPointer(null);
+              setActiveKey(buckets[next].key);
+            }
+          }}
         >
           <defs>
             {tokenSeries.map((series) => (
@@ -370,6 +444,23 @@ export default function UsageTrendChart({
             className="usage-chart-cost-line"
           />
 
+          {tokenSeries.map((series) => series.values.map((value, index) => value != null && value > 0
+            && (index === 0 || series.values[index - 1] == null) && (index === buckets.length - 1 || series.values[index + 1] == null)
+            ? <circle key={`${series.key}-${index}`} data-usage-point className={`usage-chart-point ${series.className}`} cx={xForIndex(index)} cy={yForValue(value, tokenMaximum)} r="2.5" /> : null))}
+          {isolatedCostIndexes.map((index) => (
+            <circle key={index} data-cost-point className="usage-chart-point cost usage-chart-isolated-cost" cx={xForIndex(index)} cy={yForValue(costValues[index]!, costMaximum)} r="2.5" />
+          ))}
+          {annotatedCostIndex >= 0 && (
+            <text
+              className="usage-chart-cost-annotation"
+              x={xForIndex(annotatedCostIndex) + (xForIndex(annotatedCostIndex) > WIDTH / 2 ? -10 : 10)}
+              y={Math.max(PLOT.top + 14, yForValue(costValues[annotatedCostIndex]!, costMaximum) - 10)}
+              textAnchor={xForIndex(annotatedCostIndex) > WIDTH / 2 ? "end" : "start"}
+            >
+              {copy("Cost", "成本", "成本", "コスト")} {costText(buckets[annotatedCostIndex].aggregate)}
+            </text>
+          )}
+
           {active && (
             <g className="usage-chart-crosshair" aria-hidden="true">
               <line
@@ -378,11 +469,11 @@ export default function UsageTrendChart({
                 y1={PLOT.top}
                 y2={PLOT.top + plotHeight}
               />
-              {tokenSeries.map((series) => (
+              {tokenSeries.filter((series) => series.values[activeIndex] != null).map((series) => (
                 <circle
                   key={series.key}
                   cx={xForIndex(activeIndex)}
-                  cy={yForValue(active.aggregate[series.key], tokenMaximum)}
+                  cy={yForValue(series.values[activeIndex] ?? 0, tokenMaximum)}
                   r="4"
                   className={series.className}
                 />
@@ -405,31 +496,19 @@ export default function UsageTrendChart({
             const previousX = index > 0 ? xForIndex(index - 1) : PLOT.left;
             const hitLeft = index === 0 ? PLOT.left : (previousX + x) / 2;
             const hitRight = index === buckets.length - 1 ? WIDTH - PLOT.right : (x + nextX) / 2;
-            const currentCost = costValues[index];
-            const cacheWriteValue = aggregate.requests === 0
-              ? "—"
-              : aggregate.cache_write_tokens.toLocaleString(language);
-            const bucketInputLabel = aggregate.legacy_input_requests > 0
-              ? copy("input reported", "上游输入", "上游輸入", "報告された入力")
-              : copy("input total", "输入总量", "輸入總量", "入力合計");
-            const label = copy(
-              `${detailedLabel(bucket.timestamp, unit, language)}: ${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}, output ${aggregate.output_tokens.toLocaleString(language)}, cache write ${cacheWriteValue}, cache hit ${aggregate.cache_read_tokens.toLocaleString(language)}, cost ${currentCost == null ? "unknown" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}，输出 ${aggregate.output_tokens.toLocaleString(language)}，缓存写入 ${cacheWriteValue}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}，輸出 ${aggregate.output_tokens.toLocaleString(language)}，快取寫入 ${cacheWriteValue}，快取命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
-              `${detailedLabel(bucket.timestamp, unit, language)}：${bucketInputLabel} ${aggregate.input_tokens.toLocaleString(language)}、出力 ${aggregate.output_tokens.toLocaleString(language)}、キャッシュ書き込み ${cacheWriteValue}、キャッシュヒット ${aggregate.cache_read_tokens.toLocaleString(language)}、コスト ${currentCost == null ? "不明" : costLabel(currentCost)}`
-            );
+            const label = `${detailedLabel(bucket.timestamp, unit, language)} · ${tokenSeries.map((series) => `${series.label} ${usageText(aggregate, series.key)}`).join(" · ")} · ${copy("Cost", "成本", "成本", "コスト")} ${costText(aggregate)}`;
             return (
               <g
                 key={bucket.key}
                 data-usage-bucket
                 data-bucket-key={bucket.key}
                 tabIndex={isActive(aggregate) ? 0 : undefined}
+                role={isActive(aggregate) ? "button" : undefined}
                 aria-label={isActive(aggregate) ? label : undefined}
-                onMouseEnter={() => isActive(aggregate) && setActiveKey(bucket.key)}
-                onFocus={() => isActive(aggregate) && setActiveKey(bucket.key)}
-                onBlur={() => setActiveKey(null)}
+                onMouseEnter={() => setActiveKey(bucket.key)}
+                onFocus={() => { setPointer(null); setActiveKey(bucket.key); }}
+                onBlur={clearInspection}
               >
-                <title>{label}</title>
                 <rect
                   x={hitLeft}
                   y={PLOT.top}
@@ -437,12 +516,7 @@ export default function UsageTrendChart({
                   height={plotHeight}
                   className="usage-chart-hit-area"
                 />
-                {currentCost == null && aggregate.requests > 0 && (
-                  <g data-cost-unknown className="usage-chart-cost-unknown">
-                    <circle cx={x} cy={PLOT.top + plotHeight - 5} r="4" />
-                    <path d={`M ${x - 2} ${PLOT.top + plotHeight - 7} L ${x + 2} ${PLOT.top + plotHeight - 3} M ${x + 2} ${PLOT.top + plotHeight - 7} L ${x - 2} ${PLOT.top + plotHeight - 3}`} />
-                  </g>
-                )}
+
               </g>
             );
           })}
@@ -463,26 +537,46 @@ export default function UsageTrendChart({
               )}
             </text>
           ))}
+          {active && (
+            <g className="usage-chart-time-badge" aria-hidden="true" transform={`translate(${Math.max(62, Math.min(WIDTH - 62, guideX))}, ${HEIGHT - 13})`}>
+              <rect x="-60" y="-12" width="120" height="22" rx="4" />
+              <text textAnchor="middle" y="3">{axisLabel(active.timestamp, unit, true, language)}</text>
+            </g>
+          )}
         </svg>
 
         {active && (
           <div
-            className={`usage-chart-tooltip ${activeIndex / Math.max(1, buckets.length - 1) > 0.62 ? "align-right" : ""}`}
-            style={{ left: `${(xForIndex(activeIndex) / WIDTH) * 100}%` }}
+            ref={tooltipRef}
+            className="usage-chart-tooltip"
+            style={{ left: tooltipLeft, top: pointer ? Math.max(12, Math.min(pointer.y + 12, pointer.height - tooltipSize.height - 42)) : 16 }}
             role="status"
           >
             <strong>{detailedLabel(active.timestamp, unit, language)}</strong>
+            <div className="usage-chart-tooltip-unit">{unit === "hour" ? copy("Hourly total", "小时合计", "小時合計", "時間ごとの合計") : copy("Daily total", "每日合计", "每日合計", "日別合計")}</div>
             {tokenSeries.map((series) => (
-              <span className={series.className} key={series.key}>
-                <i />{series.label}<em>{active.aggregate[series.key].toLocaleString(language)}</em>
+              <span className={`series-${series.className}`} key={series.key}>
+                <i />{series.label}<em>{usageText(active.aggregate, series.key)}</em>
               </span>
             ))}
-            <span className="cost">
+            <span className="series-cost">
               <i />{copy("Cost", "成本", "成本", "コスト")}
-              <em>{costValues[activeIndex] == null
-                ? copy("Unknown", "未知", "未知", "不明")
-                : costLabel(costValues[activeIndex] ?? 0)}</em>
+              <em>{costText(active.aggregate)}</em>
             </span>
+            {isolatedCostIndexes.includes(activeIndex) && (
+              <small>{copy(
+                "Adjacent periods lack cost data for a continuous curve.",
+                "相邻时段成本数据不足，无法形成连续曲线。",
+                "相鄰時段成本資料不足，無法形成連續曲線。",
+                "隣接する期間のコストデータが不足しているため、連続した曲線を描画できません。",
+              )}</small>
+            )}
+            <small>{copy(
+              `${active.aggregate.priced_requests} priced`,
+              `${active.aggregate.priced_requests} 次已计价`,
+              `${active.aggregate.priced_requests} 次已計價`,
+              `${active.aggregate.priced_requests} 件のコストあり`,
+            )} · {usageCoverageLabel(active.aggregate, copy)}</small>
             <small>{copy(
               `${active.aggregate.requests.toLocaleString(language)} requests · ${active.aggregate.errors.toLocaleString(language)} errors · Cache metrics are a subset of input`,
               `${active.aggregate.requests.toLocaleString(language)} 次请求 · ${active.aggregate.errors.toLocaleString(language)} 个错误 · 缓存指标属于输入子集`, `${active.aggregate.requests.toLocaleString(language)} 次請求 · ${active.aggregate.errors.toLocaleString(language)} 個錯誤 · 快取指標屬於輸入子集`, `${active.aggregate.requests.toLocaleString(language)} 回のリクエスト · ${active.aggregate.errors.toLocaleString(language)} 件のエラー · キャッシュメトリクスは入力のサブセット`
