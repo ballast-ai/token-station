@@ -15,7 +15,7 @@ import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProv
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "../components/ErrorToast";
 import { RefreshCw, SlidersHorizontal } from "lucide-react";
-import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue, type TokenMetricKey, type CacheMetricKey } from "../usagePresentation";
+import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue, usageCoverageLabel, type TokenMetricKey, type CacheMetricKey } from "../usagePresentation";
 import { Button } from "../components/ui/button";
 
 export function formatBudgetAmount(micros: number): string {
@@ -574,11 +574,11 @@ export default function Stats({ onBack, embedded = false, onOpenManagement }: { 
             {aggregate.unpriced_requests > 0 && (
               <div className="usage-unpriced-note">
                 {copy(
-                  `${aggregate.priced_requests}/${aggregate.requests} priced · ${costCoverage(aggregate).missingPrice} missing price · ${costCoverage(aggregate).missingUsage} missing usage`,
-                  `${aggregate.priced_requests}/${aggregate.requests} 次请求已计价 · ${costCoverage(aggregate).missingPrice} 次缺少价格 · ${costCoverage(aggregate).missingUsage} 次用量不完整`,
-                  `${aggregate.priced_requests}/${aggregate.requests} 次請求已計價 · ${costCoverage(aggregate).missingPrice} 次缺少價格 · ${costCoverage(aggregate).missingUsage} 次用量不完整`,
-                  `${aggregate.priced_requests}/${aggregate.requests} 件のコストあり · ${costCoverage(aggregate).missingPrice} 件の価格なし · ${costCoverage(aggregate).missingUsage} 件の使用量不完全`
-                )}
+                  `${aggregate.priced_requests}/${aggregate.requests} priced`,
+                  `${aggregate.priced_requests}/${aggregate.requests} 次请求已计价`,
+                  `${aggregate.priced_requests}/${aggregate.requests} 次請求已計價`,
+                  `${aggregate.priced_requests}/${aggregate.requests} 件のコストあり`
+                )} · {usageCoverageLabel(aggregate, copy)}
                 {onOpenManagement && costCoverage(aggregate).missingPrice > 0 && <Button variant="link" size="sm" className="h-auto p-0" onClick={onOpenManagement}>
                   {copy("Configure prices", "补充价格", "補充價格", "価格を設定")}
                 </Button>}
@@ -621,12 +621,7 @@ export default function Stats({ onBack, embedded = false, onOpenManagement }: { 
                       <td>{successRate(item)}</td>
                       <td title={usageText(item, "total", language, copy, true)}>{usageText(item, "total", language, copy)}</td>
                       <td>{item.requests > 0 ? latency(item.p95_latency_ms) : "—"}</td>
-                      <td title={copy(
-                        `${costCoverage(item).missingPrice} missing price · ${costCoverage(item).missingUsage} missing usage`,
-                        `${costCoverage(item).missingPrice} 次缺少价格 · ${costCoverage(item).missingUsage} 次用量不完整`,
-                        `${costCoverage(item).missingPrice} 次缺少價格 · ${costCoverage(item).missingUsage} 次用量不完整`,
-                        `${costCoverage(item).missingPrice} 件の価格なし · ${costCoverage(item).missingUsage} 件の使用量不完全`
-                      )}>{item.cost_micros == null ? copy("Unknown", "未知", "未知", "不明") : cost(item.cost_micros)}{item.cost_micros != null && !costCoverage(item).complete && (
+                      <td title={usageCoverageLabel(item, copy)}>{item.cost_micros == null ? copy("Unknown", "未知", "未知", "不明") : cost(item.cost_micros)}{item.cost_micros != null && !costCoverage(item).complete && (
                         <small>{copy(" (partial)", "（部分）", "（部分）", "（一部）")}</small>
                       )}</td>
                     </tr>

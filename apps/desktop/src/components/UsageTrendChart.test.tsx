@@ -28,6 +28,24 @@ const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
 const bucketMs = new Date(2026, 6, 23, 11).getTime();
 
 describe("UsageTrendChart", () => {
+  it("shows successful usage and legacy cache absence separately from failed traffic on hover", async () => {
+    const user = userEvent.setup();
+    const value = { ...aggregate, requests: 184, errors: 96, usage_expected_requests: 85,
+      failed_without_usage_requests: 99, unpriced_failed_without_usage_requests: 99,
+      input_tokens: 6942955, output_tokens: 42628, cache_read_tokens: 5321280, cache_write_tokens: 0,
+      input_reported_requests: 85, output_reported_requests: 85, total_reported_requests: 85,
+      cache_read_reported_requests: 85, cache_write_reported_requests: 0, cache_write_unrecorded_requests: 85,
+      priced_requests: 0, unpriced_requests: 184, missing_price_requests: 85, missing_usage_requests: 99, cost_micros: null };
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), value]]} range="24h" nowMs={nowMs} />);
+    await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
+    const tooltip = screen.getByRole("status");
+    expect(tooltip).toHaveTextContent("6,942,955");
+    expect(tooltip).not.toHaveTextContent("部分上报");
+    expect(tooltip).toHaveTextContent("历史未记录");
+    expect(tooltip).toHaveTextContent("85 次缺少价格 · 0 次用量不完整 · 99 次失败/取消未返回用量");
+    expect(tooltip).toHaveTextContent("184 次请求 · 96 个错误");
+    expect(tooltip).toHaveTextContent("未知");
+  });
   it("updates the guide and time badge while moving from activity to an empty hour without clicking", () => {
     const { container } = render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
     const svg = screen.getByRole("img");

@@ -247,9 +247,15 @@ impl PriceTable {
 
     #[must_use]
     pub fn model_price_for_upstream(&self, upstream: &str, model: &str) -> Option<&ModelPrice> {
-        self.models
-            .get(&format!("{upstream}/{model}"))
-            .or_else(|| self.model_price(model))
+        self.models.get(&format!("{upstream}/{model}")).or_else(|| {
+            // A relay's raw model ID can equal a different channel's scoped key.
+            // Only unscoped model prices may participate in the generic fallback.
+            if model.contains('/') {
+                self.model_price(&normalize_model_id(model))
+            } else {
+                self.model_price(model)
+            }
+        })
     }
 
     /// Validates the current table without changing it.
@@ -488,6 +494,28 @@ mod tests {
             version: 9,
             models: BTreeMap::from([("wecoding/glm-5.2".to_owned(), scoped)]),
         };
+        assert_eq!(
+            table.model_price_for_upstream("relay", "wecoding/glm-5.2"),
+            None,
+            "A relay model ID must not alias another channel's price key."
+        );
+        assert_eq!(
+            table.price_for_upstream("relay", "wecoding/glm-5.2", &usage(1_000_000, 0)),
+            None
+        );
+        let explicit = table
+            .next_with_model(
+                "relay/wecoding/glm-5.2",
+                ModelPrice {
+                    input_per_mtok: 840_000,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            explicit.price_for_upstream("relay", "wecoding/glm-5.2", &usage(1_000_000, 0)),
+            Some((840_000, 10))
+        );
 
         assert_eq!(
             table.model_price_for_upstream("another", "glm-5.2-variant"),

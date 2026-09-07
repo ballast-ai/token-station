@@ -7216,6 +7216,120 @@ fn model_price_edits_append_versions_and_never_revalue_historical_receipts() {
 }
 
 #[test]
+fn manual_price_transaction_restores_ownership_and_draft_on_failed_save() {
+    for deleted in [false, true] {
+        let root = scratch_home("manual-price-transaction-failure");
+        let config_path = root.join("token-station.json");
+        let mut draft = gateway_template_for_test(&root);
+        draft["pricing"] = json!({"version": 1, "models": {"model-a": {"input_per_mtok": 12, "output_per_mtok": 24}}});
+        let mut inner = AppInner::new(config_path.clone(), draft, None);
+        inner.save_draft().unwrap();
+        let original = inner.draft.clone();
+        let revision = inner.config_state.draft_revision();
+        let metadata_path = inner.data_dir().join("price-sync.json");
+        std::fs::create_dir_all(inner.data_dir()).unwrap();
+        let metadata = json!({"enabled": true, "records": {"model-a": {
+            "price": draft_price_table(&inner).unwrap().models["model-a"], "source": "provider", "identity": "one", "fetched_at_ms": 1
+        }}, "suppressed": []});
+        std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let blocked = root.join("blocked-config");
+        std::fs::create_dir(&blocked).unwrap();
+        inner.config_path = blocked;
+        let app = tauri::test::mock_app();
+        app.manage(AppStateManaged(Mutex::new(inner)));
+        let result = if deleted {
+            remove_model_price(app.state(), "model-a".to_owned(), 1)
+        } else {
+            set_model_price(
+                app.state(),
+                "model-a".to_owned(),
+                30,
+                60,
+                0,
+                0,
+                None,
+                1,
+                None,
+                None,
+            )
+        };
+        assert!(result.is_err());
+        let restored: Value =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(
+            restored["records"], metadata["records"],
+            "failed edits keep sync ownership"
+        );
+        assert_eq!(
+            restored["suppressed"], metadata["suppressed"],
+            "failed deletion must not leave a tombstone"
+        );
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            assert_eq!(inner.draft, original);
+            assert!(!inner.config_state.is_dirty());
+            inner.config_path = config_path.clone();
+        }
+        set_model_price(
+            app.state(),
+            "model-a".to_owned(),
+            40,
+            80,
+            0,
+            0,
+            None,
+            1,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            app.state::<AppStateManaged>()
+                .0
+                .lock()
+                .unwrap()
+                .config_state
+                .draft_revision()
+                > revision + 1
+        );
+        assert_eq!(
+            ClientConfig::load(&config_path).unwrap().pricing.models["model-a"].input_per_mtok,
+            40
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert!(saved["records"].get("model-a").is_none());
+        remove_model_price(app.state(), "model-a".to_owned(), 2).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(saved["suppressed"], json!(["model-a"]));
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[test]
+fn manual_price_transaction_reports_ownership_rollback_failure() {
+    let root = scratch_home("manual-price-rollback-error");
+    let mut inner = AppInner::new(
+        root.join("token-station.json"),
+        gateway_template_for_test(&root),
+        None,
+    );
+    let metadata_path = inner.data_dir().join("price-sync.json");
+    let error = crate::price_sync::mark_manual(&mut inner, "model-a", true, |_| {
+        std::fs::remove_file(&metadata_path).unwrap();
+        std::fs::create_dir(&metadata_path).unwrap();
+        Err("Injected configuration save failure.".to_owned())
+    })
+    .unwrap_err();
+    assert!(
+        error.contains("Injected configuration save failure."),
+        "{error}"
+    );
+    assert!(error.contains("ownership rollback also failed"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn public_price_batch_scopes_models_preserves_manual_values_and_bumps_once() {
     use token_station_metrics::{
         CostKind, RecordedDecidedBy, Recorder, RequestRecord, RoutingRecord,
@@ -7307,6 +7421,20 @@ fn public_price_batch_scopes_models_preserves_manual_values_and_bumps_once() {
     unknown.cost_kind = CostKind::Unknown;
     store.record(&unknown);
     drop(store);
+
+    inner
+        .save_draft_without_backfill()
+        .expect("price synchronization saves without a locked backfill");
+    let unfilled = SqliteStore::recent_receipts(&db, 5).unwrap();
+    assert_eq!(unfilled[0].cost_kind, CostKind::Unknown);
+    assert_eq!(unfilled[0].cost_micros, None);
+    assert_eq!(
+        ClientConfig::load(&inner.config_path)
+            .unwrap()
+            .pricing
+            .version,
+        5
+    );
 
     inner
         .save_draft()

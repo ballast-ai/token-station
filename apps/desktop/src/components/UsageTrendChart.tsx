@@ -1,7 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AggView } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
-import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue } from "../usagePresentation";
+import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue, usageCoverageLabel } from "../usagePresentation";
 
 export type UsageTrendRange = "24h" | "7d" | "30d" | "all";
 
@@ -547,11 +547,11 @@ export default function UsageTrendChart({
               <em>{costText(active.aggregate)}</em>
             </span>
             <small>{copy(
-              `${active.aggregate.priced_requests} priced · ${costCoverage(active.aggregate).missingPrice} missing price · ${costCoverage(active.aggregate).missingUsage} missing usage`,
-              `${active.aggregate.priced_requests} 次已计价 · ${costCoverage(active.aggregate).missingPrice} 次缺少价格 · ${costCoverage(active.aggregate).missingUsage} 次用量不完整`,
-              `${active.aggregate.priced_requests} 次已計價 · ${costCoverage(active.aggregate).missingPrice} 次缺少價格 · ${costCoverage(active.aggregate).missingUsage} 次用量不完整`,
-              `${active.aggregate.priced_requests} 件のコストあり · ${costCoverage(active.aggregate).missingPrice} 件の価格なし · ${costCoverage(active.aggregate).missingUsage} 件の使用量不完全`,
-            )}</small>
+              `${active.aggregate.priced_requests} priced`,
+              `${active.aggregate.priced_requests} 次已计价`,
+              `${active.aggregate.priced_requests} 次已計價`,
+              `${active.aggregate.priced_requests} 件のコストあり`,
+            )} · {usageCoverageLabel(active.aggregate, copy)}</small>
             <small>{copy(
               `${active.aggregate.requests.toLocaleString(language)} requests · ${active.aggregate.errors.toLocaleString(language)} errors · Cache metrics are a subset of input`,
               `${active.aggregate.requests.toLocaleString(language)} 次请求 · ${active.aggregate.errors.toLocaleString(language)} 个错误 · 缓存指标属于输入子集`, `${active.aggregate.requests.toLocaleString(language)} 次請求 · ${active.aggregate.errors.toLocaleString(language)} 個錯誤 · 快取指標屬於輸入子集`, `${active.aggregate.requests.toLocaleString(language)} 回のリクエスト · ${active.aggregate.errors.toLocaleString(language)} 件のエラー · キャッシュメトリクスは入力のサブセット`

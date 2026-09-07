@@ -523,6 +523,7 @@ impl AppInner {
             south_approved_dialects,
             upstream_epochs: BTreeMap::new(),
             discovery_generations: BTreeMap::new(),
+            price_sync_running: false,
         }
     }
 
@@ -573,6 +574,15 @@ impl AppInner {
     }
 
     pub(crate) fn save_draft(&mut self) -> Result<u64, String> {
+        self.save_draft_with_backfill(true)
+    }
+
+    /// Persist configuration without scanning the metrics database under the App lock.
+    pub(crate) fn save_draft_without_backfill(&mut self) -> Result<u64, String> {
+        self.save_draft_with_backfill(false)
+    }
+
+    fn save_draft_with_backfill(&mut self, backfill: bool) -> Result<u64, String> {
         self.ensure_editable()?;
         let config = self.materialize()?;
         let draft = self.draft.clone();
@@ -650,13 +660,16 @@ impl AppInner {
             // failure as a failed config save.
             eprintln!("configuration saved but revision finalization failed: {error}");
         }
-        if let Err(error) =
-            SqliteStore::backfill_unknown_costs(&data_dir.join("metrics.sqlite"), &config.pricing)
-        {
-            // The configuration is already atomically committed. Keep save
-            // semantics truthful and retry this idempotent backfill on the next
-            // save or startup instead of reporting a rollback that did not occur.
-            eprintln!("configuration saved but historical cost backfill failed: {error}");
+        if backfill {
+            if let Err(error) = SqliteStore::backfill_unknown_costs(
+                &data_dir.join("metrics.sqlite"),
+                &config.pricing,
+            ) {
+                // The configuration is already atomically committed. Keep save
+                // semantics truthful and retry this idempotent backfill on the next
+                // save or startup instead of reporting a rollback that did not occur.
+                eprintln!("configuration saved but historical cost backfill failed: {error}");
+            }
         }
         let committed_key_upstreams = self
             .pending_provider_keys

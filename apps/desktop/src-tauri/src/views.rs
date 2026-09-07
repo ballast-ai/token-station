@@ -267,6 +267,11 @@ pub(crate) struct AggView {
     pub(crate) output_reported_requests: u64,
     pub(crate) total_reported_requests: u64,
     pub(crate) incomplete_usage_requests: u64,
+    pub(crate) usage_expected_requests: u64,
+    pub(crate) failed_without_usage_requests: u64,
+    pub(crate) unpriced_failed_without_usage_requests: u64,
+    pub(crate) cache_read_unrecorded_requests: u64,
+    pub(crate) cache_write_unrecorded_requests: u64,
 }
 
 impl AggView {
@@ -295,6 +300,11 @@ impl AggView {
             output_reported_requests: 0,
             total_reported_requests: 0,
             incomplete_usage_requests: 0,
+            usage_expected_requests: 0,
+            failed_without_usage_requests: 0,
+            unpriced_failed_without_usage_requests: 0,
+            cache_read_unrecorded_requests: 0,
+            cache_write_unrecorded_requests: 0,
         }
     }
     pub(crate) fn from(a: &stats::Aggregate) -> Self {
@@ -322,6 +332,40 @@ impl AggView {
             output_reported_requests: a.output_reported_requests,
             total_reported_requests: a.total_reported_requests,
             incomplete_usage_requests: a.incomplete_usage_requests,
+            usage_expected_requests: a.usage_expected_requests,
+            failed_without_usage_requests: a.failed_without_usage_requests,
+            unpriced_failed_without_usage_requests: a.unpriced_failed_without_usage_requests,
+            cache_read_unrecorded_requests: a.cache_read_unrecorded_requests,
+            cache_write_unrecorded_requests: a.cache_write_unrecorded_requests,
+        }
+    }
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::{stats, AggView};
+
+    #[test]
+    fn usage_population_fields_survive_desktop_serialization_and_empty_views() {
+        let aggregate = stats::Aggregate {
+            usage_expected_requests: 85,
+            failed_without_usage_requests: 99,
+            unpriced_failed_without_usage_requests: 98,
+            cache_read_unrecorded_requests: 0,
+            cache_write_unrecorded_requests: 85,
+            ..stats::Aggregate::default()
+        };
+        let view = serde_json::to_value(AggView::from(&aggregate)).unwrap();
+        let zero = serde_json::to_value(AggView::zero()).unwrap();
+        for (field, expected) in [
+            ("usage_expected_requests", 85),
+            ("failed_without_usage_requests", 99),
+            ("unpriced_failed_without_usage_requests", 98),
+            ("cache_read_unrecorded_requests", 0),
+            ("cache_write_unrecorded_requests", 85),
+        ] {
+            assert_eq!(view[field], expected);
+            assert_eq!(zero[field], 0);
         }
     }
 }

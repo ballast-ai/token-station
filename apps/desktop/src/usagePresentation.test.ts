@@ -1,8 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { cacheMetric, costCoverage, formatUsd, tokenMetric, receiptTokenMetric, receiptHasUsableUsage } from "./usagePresentation";
+import { cacheMetric, costCoverage, formatUsd, formatUsageValue, tokenMetric, receiptTokenMetric, receiptHasUsableUsage, usageCoverageLabel } from "./usagePresentation";
 import type { AggView, ReceiptView } from "./api";
 
 describe("accounting presentation", () => {
+  it("excludes no-usage failures from successful token coverage without declaring their cost free", () => {
+    const value = { requests: 184, usage_expected_requests: 85, failed_without_usage_requests: 99,
+      unpriced_failed_without_usage_requests: 99, input_tokens: 6942955, output_tokens: 42628,
+      cache_read_tokens: 5321280, cache_write_tokens: 0, input_reported_requests: 85,
+      output_reported_requests: 85, total_reported_requests: 85, cache_read_reported_requests: 85,
+      cache_write_reported_requests: 0, cache_write_unrecorded_requests: 85,
+      priced_requests: 85, unpriced_requests: 99, missing_usage_requests: 99, cost_micros: 100 } as AggView;
+    expect(tokenMetric(value, "total")).toEqual({ value: 6985583, reported: 85, complete: true });
+    expect(cacheMetric(value, "cache_read_tokens").complete).toBe(true);
+    expect(formatUsageValue(cacheMetric(value, "cache_write_tokens"), String, (en) => en)).toBe("Historically unrecorded");
+    expect(costCoverage(value).complete).toBe(false);
+    expect(tokenMetric({ ...value, usage_expected_requests: 86 }, "total").complete).toBe(false);
+    expect(tokenMetric({ ...value, incomplete_usage_requests: 1 }, "total").complete).toBe(false);
+  });
+  it("keeps modern absent cache distinct from legacy absence and verified zero", () => {
+    const value = { requests: 1, usage_expected_requests: 1, cache_write_tokens: 0,
+      cache_write_reported_requests: 0, cache_write_unrecorded_requests: 0 } as AggView;
+    const text = (entry: AggView) => formatUsageValue(cacheMetric(entry, "cache_write_tokens"), String, (en) => en);
+    expect(text(value)).toBe("Not reported");
+    expect(text({ ...value, cache_write_unrecorded_requests: 1 })).toBe("Historically unrecorded");
+    expect(text({ ...value, cache_write_reported_requests: 1 })).toBe("0");
+    expect(tokenMetric({ ...value, requests: 99, usage_expected_requests: 0, input_reported_requests: 0, output_reported_requests: 0 }, "total"))
+      .toEqual({ value: null, reported: 0, complete: true });
+  });
+  it("does not subtract priced no-usage failures from successful missing-usage warnings", () => {
+    const value = { requests: 3, usage_expected_requests: 1, failed_without_usage_requests: 2,
+      unpriced_failed_without_usage_requests: 1, priced_requests: 1, unpriced_requests: 2,
+      missing_price_requests: 0, missing_usage_requests: 2, cost_micros: 7 } as AggView;
+    expect(usageCoverageLabel(value, (en) => en)).toBe("0 missing price · 1 missing usage · 2 failed/cancelled without usage");
+    expect(costCoverage(value).complete).toBe(false);
+  });
   it("distinguishes absent, explicit zero, and partially reported token totals", () => {
     const value = { requests: 2, input_tokens: 10, output_tokens: 0,
       input_reported_requests: 1, output_reported_requests: 0, total_reported_requests: 0 } as AggView;

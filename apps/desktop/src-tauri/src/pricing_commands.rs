@@ -413,9 +413,7 @@ pub(crate) fn set_model_price(
             reasoning_per_mtok,
         },
     )?;
-    inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
-    inner.observe_draft()?;
-    inner.save_draft()?;
+    save_manual_price_edit(&mut inner, &model, false, &next)?;
     Ok(next)
 }
 
@@ -435,8 +433,31 @@ pub(crate) fn remove_model_price(
         ));
     }
     let next = current.next_without_model(&model)?;
-    inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
-    inner.observe_draft()?;
-    inner.save_draft()?;
+    save_manual_price_edit(&mut inner, &model, true, &next)?;
     Ok(next)
+}
+
+fn save_manual_price_edit(
+    inner: &mut AppInner,
+    model: &str,
+    deleted: bool,
+    next: &PriceTable,
+) -> Result<(), String> {
+    let pricing = serde_json::to_value(next).map_err(|error| error.to_string())?;
+    crate::price_sync::mark_manual(inner, model, deleted, |inner| {
+        let previous = inner.draft.clone();
+        inner.draft["pricing"] = pricing;
+        if let Err(error) = inner.observe_draft().and_then(|_| inner.save_draft()) {
+            // Restore content through the current state so allocated revisions
+            // remain reserved even when the configuration file cannot be saved.
+            inner.draft = previous;
+            return match inner.observe_draft() {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "{error} Price draft rollback also failed: {rollback_error}"
+                )),
+            };
+        }
+        Ok(())
+    })
 }

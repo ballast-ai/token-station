@@ -740,6 +740,11 @@ export interface SnapshotView {
 }
 
 export interface AggView {
+  usage_expected_requests?: number;
+  failed_without_usage_requests?: number;
+  unpriced_failed_without_usage_requests?: number;
+  cache_read_unrecorded_requests?: number;
+  cache_write_unrecorded_requests?: number;
   input_reported_requests?: number;
   output_reported_requests?: number;
   total_reported_requests?: number;
@@ -805,6 +810,26 @@ export interface ModelPriceView {
 export interface PriceTableView {
   version: number;
   models: Record<string, ModelPriceView>;
+}
+
+export interface PricingInventoryView {
+  table: PriceTableView;
+  offerings: Array<{
+    upstream: string;
+    model: string;
+    key: string;
+    price: ModelPriceView | null;
+    source: "manual" | "models.dev" | "provider" | "fallback" | "missing";
+    fetched_at_ms: number | null;
+  }>;
+  sync: {
+    enabled: boolean;
+    running: boolean;
+    last_attempt_ms: number | null;
+    last_sync_ms: number | null;
+    errors: string[];
+  };
+  requires_apply: boolean;
 }
 
 export interface ModelPriceSuggestionView extends ModelPriceView {
@@ -1228,6 +1253,13 @@ export const removeAgentBudget = (agentId: AgentId) =>
   invoke<BudgetStatus[]>("remove_agent_budget", { agentId });
 
 export const getPriceTable = () => invoke<PriceTableView>("get_price_table");
+
+export const getPricingInventory = () => invoke<PricingInventoryView>("get_pricing_inventory");
+
+export const syncModelPrices = () => invoke<PricingInventoryView>("sync_model_prices");
+
+export const setPriceSyncEnabled = (enabled: boolean) =>
+  invoke<PricingInventoryView>("set_price_sync_enabled", { enabled });
 
 export const listPublicProviderModels = (providerIds: string[]) =>
   invoke<PublicProviderModelsView>("list_public_provider_models", { providerIds });

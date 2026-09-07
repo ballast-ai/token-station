@@ -157,6 +157,20 @@ pub(crate) fn discover_candidate_with_cache_egress(
     discover_with_cache_egress_mode(data_dir, base_url, name, api_key, egress, secrets, false)
 }
 
+/// Read fresh channel facts without merging older cache prices into the response.
+pub(crate) fn fetch_prices_live_egress(
+    base_url: &str,
+    api_key: Option<&str>,
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<Vec<CatalogModelView>, String> {
+    let endpoint = ProviderEndpoint::try_new(base_url).map_err(|error| error.to_string())?;
+    if !endpoint.uses_https() || endpoint.is_loopback() {
+        return Err("Automatic channel prices require a remote HTTPS endpoint.".to_owned());
+    }
+    fetch_models_with_egress(base_url, api_key, egress, secrets)
+}
+
 fn discover_with_cache_egress_mode(
     data_dir: &Path,
     base_url: &str,

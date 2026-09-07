@@ -1,8 +1,8 @@
 //! Public model metadata and price suggestions for the Desktop control plane.
 //!
 //! This module is deliberately outside the gateway and pricing kernel. It reads
-//! a public catalog on demand. Remote model IDs remain advisory. The existing
-//! `set_model_price` command remains the only price-table write path.
+//! a public catalog on demand. Remote model IDs remain advisory. Price commands
+//! and offering synchronization validate candidates before writing a new version.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

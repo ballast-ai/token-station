@@ -132,6 +132,22 @@ beforeEach(() => {
 });
 
 describe("usage dashboard and display-only Agent budgets", () => {
+  it("keeps complete successful totals while explaining failed requests without usage separately", async () => {
+    const value = { ...aggregate, requests: 184, errors: 96, usage_expected_requests: 85,
+      failed_without_usage_requests: 99, unpriced_failed_without_usage_requests: 99,
+      input_tokens: 6942955, output_tokens: 42628, cache_read_tokens: 5321280, cache_write_tokens: 0,
+      input_reported_requests: 85, output_reported_requests: 85, total_reported_requests: 85,
+      cache_read_reported_requests: 85, cache_write_reported_requests: 0, cache_write_unrecorded_requests: 85,
+      priced_requests: 0, unpriced_requests: 184, missing_price_requests: 85, missing_usage_requests: 99, cost_micros: null };
+    vi.mocked(getStats).mockImplementation(async (_since, by) => ({ ...statsView(by), total: value, groups: [["p", value]] }));
+    const { container } = render(<Stats />);
+    const overview = await screen.findByLabelText("用量总览");
+    expect(overview.querySelector(".usage-primary-metric strong")).toHaveTextContent(/^6,985,583$/);
+    expect(overview.querySelector(".usage-primary-metric small")).not.toHaveTextContent("部分上报");
+    expect(container.querySelector(".usage-unpriced-note")).toHaveTextContent("85 次缺少价格 · 0 次用量不完整 · 99 次失败/取消未返回用量");
+    expect(screen.getByRole("table").querySelector('td[title="6,985,583"]')).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Token 构成" })).toHaveTextContent("历史未记录");
+  });
   it("shows partial totals and absent output in the overview, composition, and contribution rows", async () => {
     const value = { ...aggregate, output_tokens: 0, input_reported_requests: 10,
       output_reported_requests: 0, total_reported_requests: 0, incomplete_usage_requests: 1 };
