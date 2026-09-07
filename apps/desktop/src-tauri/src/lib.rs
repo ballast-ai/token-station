@@ -38,6 +38,7 @@ mod self_test;
 mod serve_supervisor;
 mod stats_commands;
 mod views;
+mod web_search_commands;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -545,6 +546,8 @@ pub fn run() {
             apply_snapshot_restore,
             set_settings,
             get_egress,
+            web_search_commands::get_web_search_target,
+            web_search_commands::set_web_search_target,
             get_stats,
             get_agent_budgets,
             set_agent_budget,

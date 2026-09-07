@@ -9601,3 +9601,18 @@ fn model_test_cancel_before_registration_still_stops_the_request() {
     assert!(!registry.active.contains_key("model-test-race"));
     assert!(!registry.pending_cancellations.contains("model-test-race"));
 }
+
+#[test]
+fn provider_mutations_protect_the_independent_search_target() {
+    let root = scratch_home("provider-search-reference");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["search"] = json!({"provider":"openai-compatible","base_url":"https://example.com/v1","api_dialect":"responses-native","models":[{"model":"search-model"},{"model":"keep"}]});
+    draft["web_search_target"] = json!({"upstream":"search","model":"search-model"});
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    assert!(provider_references(&inner, "search").contains(&"联网搜索".to_owned()));
+    let before = inner.draft.clone();
+    let error = replace_provider_models(&mut inner, "search", vec!["keep".to_owned()]).unwrap_err();
+    assert!(error.contains("联网搜索"), "{error}");
+    assert_eq!(inner.draft, before);
+    std::fs::remove_dir_all(root).ok();
+}

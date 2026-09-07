@@ -129,6 +129,16 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
 ///
 /// Names the unknown upstream, or every pool that still references it.
 pub fn upstream_remove(config: &mut ClientConfig, name: &str) -> Result<String, String> {
+    if config
+        .web_search_target
+        .as_ref()
+        .is_some_and(|target| target.upstream.as_str() == name)
+    {
+        return Err(
+            "This upstream is used by Web Search. Clear or replace web_search_target first."
+                .to_owned(),
+        );
+    }
     let Some(entry) = config.upstreams.get(name) else {
         return Err(format!(
             "no upstream `{name}`; configured: {}",

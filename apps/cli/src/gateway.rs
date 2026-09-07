@@ -24,6 +24,7 @@ mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
+mod web_search;
 
 #[allow(clippy::wildcard_imports)]
 use attempt_machine::*;
@@ -1605,6 +1606,7 @@ pub struct Gateway {
     /// gateway remains available for Agent setup and rejects model traffic
     /// until the user applies a personal or enterprise route.
     home_router: Option<Arc<Router>>,
+    web_search_router: Option<Arc<Router>>,
     /// Per-Agent fallback routers and exact Harness overlays. Missing fallback
     /// entries use Home. Harness overlays run before every fallback strategy.
     ///
@@ -2127,6 +2129,14 @@ impl Gateway {
         Ok(Self {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
+            web_search_router: config
+                .web_search_router_config()?
+                .map(|config| {
+                    Router::new(config)
+                        .map(Arc::new)
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?,
             home_router,
             agent_routers: std::sync::RwLock::new(agent_routers),
             supported_agent_ids,
@@ -3652,6 +3662,20 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        if agent.protocol == "anthropic-messages"
+            && let Some(served) = self.try_web_search(
+                ctx,
+                agent,
+                router,
+                headers,
+                body,
+                routing_model,
+                emit,
+                record,
+            )?
+        {
+            return Ok(served);
+        }
         // Native Anthropic passthrough, the server-tool escape hatch: an
         // anthropic-messages request that routes to an `anthropic-native`
         // upstream *and declares a server tool* (web_search, code_execution, …)

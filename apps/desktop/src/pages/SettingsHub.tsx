@@ -44,6 +44,7 @@ import { usePageTransition } from "../components/use-page-transition";
 import About from "./About";
 import { DraftNavigationBoundary, useDraftNavigation } from "../components/DraftNavigation";
 import Settings from "./Settings";
+import WebSearchSettings from "../components/WebSearchSettings";
 import RequestLogsPage from "./RequestLogsPage";
 
 type SettingsSection =
@@ -577,6 +578,7 @@ function SettingsHubContent({
         {section === "general" && (
           <>
             <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} mode="general" />
+            <WebSearchSettings providers={providers} serveRunning={runtimeHealthy} onSaved={onSaved} />
             <LocalRoutingSettings
               providers={providers}
               localOnly={localOnly}
