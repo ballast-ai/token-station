@@ -109,3 +109,18 @@ it("已有额度快照时轮询失败保留旧卡片并只显示错误弹窗", a
     vi.useRealTimers();
   }
 });
+
+it("distinguishes a fresh local estimate from restored provider allowance", async () => {
+  vi.mocked(getQuotaSnapshot).mockResolvedValue({ now_ms: 0, accounts: [account({ source: "estimated", history: "new" })] });
+  render(<QuotaUsagePage providers={[]} onBack={vi.fn()} />);
+  expect(await screen.findByText("本地跟踪从本次开始，供应商此前用量未知。")).toBeInTheDocument();
+});
+
+it("does not present unknown token settlements as measured full allowance", async () => {
+  vi.mocked(getQuotaSnapshot).mockResolvedValue({ now_ms: 0, accounts: [account({
+    source: "estimated", history: "recovered", unknown_usage_requests: 3,
+    windows: [{ len_ms: 3600000, limit: 1000, used: 0, remaining_permille: 1000, ms_until_reset: 3600000 }],
+  })] });
+  render(<QuotaUsagePage providers={[]} onBack={vi.fn()} />);
+  expect(await screen.findByText("本地历史中有 3 次请求缺少 Token 用量，估算余量可能偏高。")).toBeInTheDocument();
+});

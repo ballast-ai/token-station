@@ -1120,7 +1120,7 @@ it("reopens the guide from the About page without clearing the dismissed version
   render(<App />);
 
   await user.click(await screen.findByRole("button", { name: "设置" }));
-  expect(screen.getByRole("button", { name: "重新查看新手引导" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "重新查看新手引导" })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
 
   expect(await screen.findByRole("dialog", { name: "从这里随时回到主页" })).toBeInTheDocument();
@@ -1692,7 +1692,7 @@ describe("desktop station navigation", () => {
     await user.click(navigation().getByRole("button", { name: "用量" }));
     expect(screen.queryByText("LOCAL RECEIPT LEDGER")).toBeNull();
     expect(screen.queryByRole("tablist", { name: "用量视图" })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "预算与定价" }));
+    await user.click(await screen.findByRole("button", { name: "预算与定价" }));
     expect(await screen.findByRole("heading", { name: "预算与定价管理" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /返回/ })).toBeInTheDocument();
 
@@ -3573,4 +3573,54 @@ describe("desktop station navigation", () => {
       expectedVersion: "10.0.0",
     }));
   });
+});
+
+it("does not publish a delayed runtime poll after a newer runtime event", async () => {
+  let emitServe: ((serve: ServeView) => void) | undefined;
+  listenMock.mockImplementation(async (eventName, handler) => {
+    if (String(eventName).includes("serve")) emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+    return () => undefined;
+  });
+  let resolvePoll!: (serve: ServeView) => void;
+  const oldPoll = new Promise<ServeView>((resolve) => { resolvePoll = resolve; });
+  mockInvokeImplementation(async (command) => {
+    if (command === "get_state") return stateFixture();
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [];
+    if (command === "get_runtime_state") return oldPoll;
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+  render(<App />);
+  await screen.findByRole("heading", { name: "概览" });
+  await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === "get_runtime_state")).toBe(true));
+  act(() => emitServe?.(serveFixture({ app_runtime: "running", phase: "running", listener_reachable: true, agent_connected: true, instance_id: "new" })));
+  expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
+  await act(async () => { resolvePoll(serveFixture()); await oldPoll; });
+  expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
+});
+
+it("command reply must not replace a newer serve event", async () => {
+  let emitServe: ((serve: ServeView) => void) | undefined;
+  listenMock.mockImplementation(async (eventName, handler) => {
+    if (String(eventName).includes("serve")) emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+    return () => undefined;
+  });
+  let resolveStart!: (state: StateView) => void;
+  const startReply = new Promise<StateView>((resolve) => { resolveStart = resolve; });
+  mockInvokeImplementation(async (command) => {
+    if (command === "get_state") return stateFixture();
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [];
+    if (command === "serve_start") return startReply;
+    if (command === "get_runtime_state") return new Promise(() => undefined);
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: /启动代理/ }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
+  act(() => emitServe?.(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, agent_connected: true, running_revision: 1, instance_id: "new" })));
+  expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
+  await act(async () => { resolveStart(stateFixture({ serve: serveFixture({ phase: "starting" }) })); await startReply; });
+  expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
 });

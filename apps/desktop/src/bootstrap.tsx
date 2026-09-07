@@ -4,8 +4,8 @@ import { getRecoveryState, type RecoveryState } from "./api";
 import LaunchScreen, { type LaunchPhase } from "./components/LaunchScreen";
 import RecoveryShell from "./components/RecoveryShell";
 
-export const LAUNCH_MINIMUM_MS = 1_250;
-export const LAUNCH_EXIT_MS = 420;
+export const LAUNCH_MINIMUM_MS = 0;
+export const LAUNCH_EXIT_MS = 0;
 
 function reducedMotionRequested(): boolean {
   return typeof window.matchMedia === "function"
@@ -47,8 +47,8 @@ export function AppBootstrap() {
       setLaunchPhase("hidden");
       return undefined;
     }
-    if (!minimumElapsed) return undefined;
-    if (reducedMotionRequested()) {
+
+    if (startupOutcome === "ready" || reducedMotionRequested()) {
       setLaunchPhase("hidden");
       return undefined;
     }

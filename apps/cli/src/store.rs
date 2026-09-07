@@ -2395,6 +2395,8 @@ mod tests {
             models: BTreeMap::from([(
                 "claude".to_owned(),
                 ModelPrice {
+                    cache_write_5m_per_mtok: None,
+                    cache_write_1h_per_mtok: None,
                     input_per_mtok: 3_000_000,
                     output_per_mtok: 15_000_000,
                     cache_read_per_mtok: 300_000,

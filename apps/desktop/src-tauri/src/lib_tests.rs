@@ -1504,7 +1504,10 @@ fn newly_added_provider_refresh_persists_reported_model_limits() {
     let model = &state.providers[0].model_capabilities[0];
     assert_eq!(model.context_window, 257_550);
     assert_eq!(model.max_output_tokens, 32_768);
-    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     assert_eq!(
         model.max_output_tokens_source.as_deref(),
         Some(LIMIT_SOURCE_PROVIDER)
@@ -1588,13 +1591,10 @@ fn builtin_preset_does_not_reintroduce_context_conflicting_with_provider_output(
 
 #[test]
 fn partial_limit_refresh_prefers_fresh_fact_over_conflicting_cached_fact() {
-    const OUTPUT_ONLY: &str =
-        r#"{"data":[{"id":"partial-model","max_output_tokens":200000}]}"#;
-    const CONTEXT_ONLY: &str =
-        r#"{"data":[{"id":"partial-model","context_window":128000}]}"#;
+    const OUTPUT_ONLY: &str = r#"{"data":[{"id":"partial-model","max_output_tokens":200000}]}"#;
+    const CONTEXT_ONLY: &str = r#"{"data":[{"id":"partial-model","context_window":128000}]}"#;
     let root = scratch_home("partial-limit-refresh");
-    let (base_url, server) =
-        serve_model_catalog(vec![(200, OUTPUT_ONLY), (200, CONTEXT_ONLY)]);
+    let (base_url, server) = serve_model_catalog(vec![(200, OUTPUT_ONLY), (200, CONTEXT_ONLY)]);
     let app = tauri::test::mock_app();
     assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
         root.join("token-station.json"),
@@ -1644,8 +1644,7 @@ fn partial_limit_refresh_prefers_fresh_fact_over_conflicting_cached_fact() {
 
 #[test]
 fn complete_limit_refresh_replaces_older_provider_sourced_values() {
-    const OUTPUT_ONLY: &str =
-        r#"{"data":[{"id":"changing-model","max_output_tokens":200000}]}"#;
+    const OUTPUT_ONLY: &str = r#"{"data":[{"id":"changing-model","max_output_tokens":200000}]}"#;
     const COMPLETE: &str = r#"{"data":[{
         "id":"changing-model",
         "context_window":128000,
@@ -1681,7 +1680,10 @@ fn complete_limit_refresh_replaces_older_provider_sourced_values() {
     let model = &state.providers[0].model_capabilities[0];
     assert_eq!(model.context_window, 128_000);
     assert_eq!(model.max_output_tokens, 8_000);
-    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     assert_eq!(
         model.max_output_tokens_source.as_deref(),
         Some(LIMIT_SOURCE_PROVIDER)
@@ -1740,7 +1742,10 @@ fn add_provider_consumes_only_the_exact_live_catalog_revision() {
     let model = &state.providers[0].model_capabilities[0];
     assert_eq!(model.context_window, 257_550);
     assert_eq!(model.max_output_tokens, 32_768);
-    assert_eq!(model.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_eq!(
+        model.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     assert_eq!(
         model.max_output_tokens_source.as_deref(),
         Some(LIMIT_SOURCE_PROVIDER)
@@ -1779,7 +1784,10 @@ fn add_provider_consumes_only_the_exact_live_catalog_revision() {
         .and_then(|provider| provider.model_capabilities.first())
         .expect("the fallback Provider is still created");
     assert_eq!(fallback.max_output_tokens, 0);
-    assert_ne!(fallback.context_window_source.as_deref(), Some(LIMIT_SOURCE_PROVIDER));
+    assert_ne!(
+        fallback.context_window_source.as_deref(),
+        Some(LIMIT_SOURCE_PROVIDER)
+    );
     server.join().expect("model catalog fixture exits");
     std::fs::remove_dir_all(root).ok();
 }
@@ -4884,6 +4892,8 @@ fn save_and_apply_hands_new_requests_to_the_new_revision() {
         0,
         None,
         1,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(price_v2.version, 2);
@@ -5046,6 +5056,7 @@ fn invalid_proxy_settings_are_transactional_and_field_scoped() {
         vec!["localhost".to_owned()],
         String::new(),
         String::new(),
+        None,
     ) {
         Err(error) => error,
         Ok(_) => panic!("an unsupported proxy scheme is rejected"),
@@ -6358,10 +6369,43 @@ fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views()
         Vec::new(),
         String::new(),
         String::new(),
+        None,
     )
     .unwrap();
     assert!(!configured.settings.auth);
     assert!(!configured.settings.metrics);
+    let private = set_settings(
+        app.state(),
+        false,
+        false,
+        "direct".to_owned(),
+        String::new(),
+        Vec::new(),
+        String::new(),
+        String::new(),
+        Some(false),
+    )
+    .unwrap();
+    assert!(!private.settings.request_body_capture);
+    let unchanged = set_settings(
+        app.state(),
+        false,
+        false,
+        "direct".to_owned(),
+        String::new(),
+        Vec::new(),
+        String::new(),
+        String::new(),
+        None,
+    )
+    .unwrap();
+    assert!(!unchanged.settings.request_body_capture);
+    assert!(
+        !ClientConfig::load(&root.join("token-station.json"))
+            .unwrap()
+            .data
+            .request_body_capture
+    );
 
     let plugins = get_plugins(app.state()).unwrap();
     assert!(plugins.agent.contains("agent-openai"));
@@ -6942,6 +6986,8 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
         11,
         None,
         baseline_price_version,
+        None,
+        None,
     )
     .expect("retired scoped price fixture saves");
     set_model_price(
@@ -6953,6 +6999,8 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
         31,
         None,
         baseline_price_version + 1,
+        None,
+        None,
     )
     .expect("second retired scoped price fixture saves");
     set_model_price(
@@ -6964,6 +7012,8 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
         101,
         None,
         baseline_price_version + 2,
+        None,
+        None,
     )
     .expect("unrelated scoped price fixture saves");
     provider_tombstones::archive(
@@ -7086,15 +7136,35 @@ fn model_price_edits_append_versions_and_never_revalue_historical_receipts() {
         4_000_000,
         Some(5_000_000),
         0,
+        Some(6_000_000),
+        Some(9_000_000),
     )
     .unwrap();
     assert_eq!(v1.version, 1);
     assert_eq!(v1.models["model-a"].reasoning_per_mtok, Some(5_000_000));
-    assert!(
-        set_model_price(app.state(), "model-a".to_string(), 9, 9, 9, 9, None, 0,)
-            .unwrap_err()
-            .contains("版本冲突")
+    let saved_ttl = ClientConfig::load(&root.join("token-station.json")).unwrap();
+    assert_eq!(
+        saved_ttl.pricing.models["model-a"].cache_write_5m_per_mtok,
+        Some(6_000_000)
     );
+    assert_eq!(
+        saved_ttl.pricing.models["model-a"].cache_write_1h_per_mtok,
+        Some(9_000_000)
+    );
+    assert!(set_model_price(
+        app.state(),
+        "model-a".to_string(),
+        9,
+        9,
+        9,
+        9,
+        None,
+        0,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("版本冲突"));
 
     let v2 = set_model_price(
         app.state(),
@@ -7105,6 +7175,8 @@ fn model_price_edits_append_versions_and_never_revalue_historical_receipts() {
         4_000_000,
         None,
         1,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(v2.version, 2);
@@ -9150,6 +9222,56 @@ fn model_test_command_reuses_the_draft_gateway_records_details_and_cleans_regist
         .is_empty());
     fixture.join().unwrap();
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn metadata_only_draft_model_test_keeps_receipts_without_body_files() {
+    let root = scratch_home("model-test-metadata-only");
+    let (upstream, fixture) = serve_chat_completion("metadata-only", 1);
+    let mut draft = gateway_template_for_test(&root);
+    draft["data"]["metrics"] = json!(true);
+    draft["data"]["request_body_capture"] = json!(false);
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible", "base_url": upstream,
+        "models": [{"model": "small"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct", "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+    assert!(app.manage(ModelTestStreamState::default()));
+    let reply = tauri::async_runtime::block_on(run_model_test_chat(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        app.state::<ModelTestStreamState>().inner(),
+        vec![ModelTestMessage {
+            role: "user".to_owned(),
+            content: "private-prompt".to_owned(),
+        }],
+        "model-test-private".to_owned(),
+    ))
+    .unwrap();
+    assert_eq!(reply.content, "metadata-only");
+    fixture.join().unwrap();
+    let data_dir = root.join("token-station-data");
+    let receipts = SqliteStore::receipt_page(
+        &data_dir.join("metrics.sqlite"),
+        &ReceiptQuery::default(),
+        1,
+        0,
+    )
+    .unwrap();
+    assert_eq!(receipts.items.len(), 1);
+    assert!(!data_dir
+        .join(token_station_cli::bodylog::BODY_DIR_NAME)
+        .exists());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

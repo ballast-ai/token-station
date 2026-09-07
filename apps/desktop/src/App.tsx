@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addKeyword,
   addManagedEnterpriseRoute,
@@ -37,6 +37,7 @@ import {
   type StateView,
   type TierSlot,
 } from "./api";
+import { DraftNavigationBoundary, useDraftNavigation } from "./components/DraftNavigation";
 import AppShell, { type AppView } from "./components/AppShell";
 import FirstRunGuide, {
   FirstRunCompletionDialog,
@@ -71,14 +72,14 @@ import AddProviderPage, {
 } from "./pages/AddProviderPage";
 import AgentsPage from "./pages/AgentsPage";
 import AgentRoutePage from "./pages/AgentRoutePage";
-import FreeProviderConfigPage from "./pages/FreeProviderConfigPage";
+const FreeProviderConfigPage = lazy(() => import("./pages/FreeProviderConfigPage"));
 import HomePage from "./pages/HomePage";
 import OverviewPage from "./pages/OverviewPage";
 import ProvidersPage from "./pages/ProvidersPage";
-import QuotaUsagePage from "./pages/QuotaUsagePage";
-import SettingsHub from "./pages/SettingsHub";
-import UsageWorkspace from "./pages/UsageWorkspace";
-import BudgetPricingPage from "./pages/BudgetPricingPage";
+const QuotaUsagePage = lazy(() => import("./pages/QuotaUsagePage"));
+const SettingsHub = lazy(() => import("./pages/SettingsHub"));
+const UsageWorkspace = lazy(() => import("./pages/UsageWorkspace"));
+const BudgetPricingPage = lazy(() => import("./pages/BudgetPricingPage"));
 import "./App.css";
 import { humanizeAppError } from "./errors";
 import { resolveStatusMenuNavigation } from "./statusMenuNavigation";
@@ -277,6 +278,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const { language, copy } = useLanguage();
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
+  const confirmNavigation = useDraftNavigation();
   const [view, setView] = useState<AppView>("overview");
   const [modelEntryOpen, setModelEntryOpen] = useState(false);
   const [directRouteDraftDirty, setDirectRouteDraftDirty] = useState(false);
@@ -324,6 +326,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const observedServeRef = useRef<{ ready: boolean; instanceId: string | null } | null>(null);
   const agentConnectInFlightRef = useRef(false);
   const pendingServeRef = useRef<ServeView | null>(null);
+  const runtimeEventGeneration = useRef(0);
   const viewRef = useRef(view);
   const lastConnectionAgentIdRef = useRef<string | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
@@ -579,6 +582,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
 
     void load();
     void listenServeState((serve) => {
+      if (disposed) return;
+      runtimeEventGeneration.current += 1;
       pendingServeRef.current = serve;
       observeServeRuntime(serve);
       if (!disposed) setState((current) => current ? { ...current, serve } : current);
@@ -596,18 +601,33 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   }, [observeServeRuntime, revealAgents, showError]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      void getRuntimeState()
-        .then((serve) => {
-          pendingServeRef.current = serve;
-          observeServeRuntime(serve);
-          setState((current) => current ? { ...current, serve } : current);
-        })
-        .catch((caught) => {
+    let disposed = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (disposed || inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      const generation = runtimeEventGeneration.current;
+      try {
+        const serve = await getRuntimeState();
+        if (disposed || generation !== runtimeEventGeneration.current) return;
+        pendingServeRef.current = serve;
+        observeServeRuntime(serve);
+        setState((current) => current ? { ...current, serve } : current);
+      } catch (caught) {
+        if (!disposed && generation === runtimeEventGeneration.current) {
           showError(errorText(caught), "runtime-state-poll");
-        });
-    }, 500);
-    return () => window.clearInterval(timer);
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 500);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", poll);
+    };
   }, [observeServeRuntime, showError]);
 
   useEffect(() => {
@@ -745,9 +765,18 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     state?.serve.running_revision,
   ]);
 
-  const showState = (next: StateView, nextMessage?: string) => {
-    setState(next);
+  const showState = (next: StateView, nextMessage?: string, startedGeneration?: number) => {
+    // Child configuration snapshots do not own runtime state. A command may
+    // publish its runtime only when no newer event arrived while it awaited IPC.
+    const preserveObserved = pendingServeRef.current !== null
+      && (startedGeneration === undefined || startedGeneration !== runtimeEventGeneration.current);
+    const merged = preserveObserved ? { ...next, serve: pendingServeRef.current! } : next;
+    runtimeEventGeneration.current += 1;
+    pendingServeRef.current = merged.serve;
+    observeServeRuntime(merged.serve);
+    setState(merged);
     if (nextMessage) showSuccess(nextMessage);
+    return merged;
   };
 
   const run = async (
@@ -762,12 +791,13 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     if (recordApplyTarget) {
       showInfo(copy("Applying configuration…", "正在应用配置…", "正在應用配置…", "設定を適用中…"), "config-apply");
     }
+    const startedGeneration = runtimeEventGeneration.current;
     try {
       const next = await action();
       if (recordApplyTarget) {
         pendingApplyRevisionRef.current = next.saved_revision;
       }
-      showState(next, ok);
+      showState(next, ok, startedGeneration);
       return true;
     } catch (caught) {
       if (recordApplyTarget) pendingApplyRevisionRef.current = null;
@@ -800,11 +830,10 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
         : copy("Stopping proxy…", "正在停止代理…", "停止代理中…", "プロキシを停止中…"),
       "serve-toggle",
     );
+    const startedGeneration = runtimeEventGeneration.current;
     try {
-      const next = await (active ? serveStop() : serveStart());
-      showState(next);
+      const next = showState(await (active ? serveStop() : serveStart()), undefined, startedGeneration);
       const ready = next.serve.app_runtime === "running" && next.serve.listener_reachable;
-      observedServeRef.current = { ready, instanceId: next.serve.instance_id };
       if (detectedAgentIdsRef.current.size > 0 && (active || ready)) {
         await refreshCachedAgents();
       }
@@ -854,7 +883,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       setPendingNavigation(target);
       return;
     }
-    commitNavigation(target);
+    confirmNavigation(() => commitNavigation(target));
   };
   navigateRef.current = navigate;
 
@@ -866,7 +895,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     commitNavigation(target);
   };
 
-  const navigateBack = () => {
+  const navigateBack = () => confirmNavigation(() => {
     const previous = viewHistoryRef.current.pop() ?? "overview";
     if (
       previous.startsWith("agent:")
@@ -877,7 +906,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     } else {
       setView(previous);
     }
-  };
+  });
 
   const loadFreeCatalog = async () => {
     setFreeCatalogLoading(true);
@@ -1011,6 +1040,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       onNavigate={navigate}
       onToggleServe={() => void toggleServe()}
     >
+      <Suspense fallback={<div role="status" className="page-stack">{copy("Loading page…", "正在加载页面…", "正在載入頁面…", "ページを読み込み中…")}</div>}>
       {view === "overview" && (
         <OverviewPage
           state={state}
@@ -1425,6 +1455,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
           setView("agents");
         }}
       />
+      </Suspense>
     </AppShell>
   );
 }
@@ -1434,7 +1465,7 @@ export default function App({ onStartupSettled, launchComplete = true }: AppProp
     <ErrorToastBoundary>
       <LanguageBoundary>
         <ThemeBoundary>
-          <StationApp onStartupSettled={onStartupSettled} launchComplete={launchComplete} />
+          <DraftNavigationBoundary><StationApp onStartupSettled={onStartupSettled} launchComplete={launchComplete} /></DraftNavigationBoundary>
         </ThemeBoundary>
       </LanguageBoundary>
     </ErrorToastBoundary>

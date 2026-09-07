@@ -274,3 +274,32 @@ describe("versioned pricing editor", () => {
     }), 0));
   });
 });
+
+it("recovers a version conflict without replacing the entered price", async () => {
+  vi.mocked(getPriceTable).mockResolvedValueOnce(v7).mockResolvedValue({ ...v7, version: 8 });
+  vi.mocked(setModelPrice).mockRejectedValueOnce("定价表版本冲突：当前为 v8，页面基于 v7；请刷新后重试");
+  const user = userEvent.setup();
+  render(<ErrorToastProvider><PricingEditor /></ErrorToastProvider>);
+  await user.click(await screen.findByRole("button", { name: "编辑 model-a" }));
+  const input = screen.getByRole("spinbutton", { name: "输入价格" });
+  await user.clear(input); await user.type(input, "3.5");
+  await user.click(screen.getByRole("button", { name: "保存新版本" }));
+  expect(await screen.findByText("price v8")).toBeInTheDocument();
+  expect(input).toHaveValue(3.5);
+  await user.click(screen.getByRole("button", { name: "保存新版本" }));
+  await waitFor(() => expect(setModelPrice).toHaveBeenLastCalledWith("model-a", expect.objectContaining({ input_per_mtok: 3500000 }), 8));
+});
+
+it("preserves and explicitly clears TTL-specific cache prices", async () => {
+  const price = { ...v7.models["model-a"], cache_write_5m_per_mtok: 6000000, cache_write_1h_per_mtok: 9000000 };
+  vi.mocked(getPriceTable).mockResolvedValue({ version: 7, models: { "model-a": price } });
+  const user = userEvent.setup();
+  render(<PricingEditor />);
+  await user.click(await screen.findByRole("button", { name: "编辑 model-a" }));
+  expect(screen.getByRole("spinbutton", { name: "缓存写入价格（5 分钟）" })).toHaveValue(6);
+  await user.clear(screen.getByRole("spinbutton", { name: "缓存写入价格（1 小时）" }));
+  await user.click(screen.getByRole("button", { name: "保存新版本" }));
+  await waitFor(() => expect(setModelPrice).toHaveBeenCalledWith("model-a", expect.objectContaining({
+    cache_write_5m_per_mtok: 6000000, cache_write_1h_per_mtok: null,
+  }), 7));
+});

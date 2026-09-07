@@ -5805,15 +5805,18 @@ fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
         }],
         "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
     });
-    let primary = MockUpstream::start(vec![vec![http_json_with_headers(
-        200,
-        &ok.to_string(),
-        &[
-            ("x-ratelimit-limit-tokens", "1000"),
-            ("x-ratelimit-remaining-tokens", "250"),
-            ("x-ratelimit-reset-tokens", "300"),
-        ],
-    )]]);
+    let primary = MockUpstream::start(vec![
+        vec![http_json_with_headers(
+            200,
+            &ok.to_string(),
+            &[
+                ("x-ratelimit-limit-tokens", "1000"),
+                ("x-ratelimit-remaining-tokens", "250"),
+                ("x-ratelimit-reset-tokens", "300"),
+            ],
+        )],
+        vec![http_json(200, &ok.to_string())],
+    ]);
     let fallback = MockUpstream::start(vec![vec![http_json(200, &ok.to_string())]]);
     let key = key_file("quota-snapshot", "sk-test-key-abc\n");
     let proxy = start_quota_proxy_two(&primary, &fallback, &key);
@@ -5853,7 +5856,29 @@ fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
     let window = &primary_account["windows"][0];
     assert_eq!(window["limit"], 1000);
     assert_eq!(window["remaining_permille"], 250);
-    assert_eq!(window["ms_until_reset"], 300_000);
+    let remaining_ms = window["ms_until_reset"].as_u64().unwrap();
+    assert!(
+        (1..=300_000).contains(&remaining_ms),
+        "the reset countdown ages after the response"
+    );
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({ "model": "auto", "messages": [{ "role": "user", "content": "hi" }] }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(primary.hits(), 2);
+    let snapshot = proxy.gateway.quota_snapshot(quota_audit_now_ms());
+    let primary = snapshot["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["upstream"] == "mock_primary")
+        .unwrap();
+    assert_eq!(
+        primary["source"], "none",
+        "a response without quota headers invalidates the older authoritative reading"
+    );
 }
 
 fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> Proxy {
@@ -9725,4 +9750,165 @@ fn a_permanently_invalid_native_stream_fails_closed_without_buffering_forever() 
     );
     mock.finish_hanging();
     std::fs::remove_file(key).ok();
+}
+
+fn quota_audit_now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn quota_history_counts_tiered_native_without_usage_and_survives_gateway_rebuild() {
+    let answer = json!({
+        "id": "quota_without_usage", "type": "message", "role": "assistant",
+        "model": "deepseek-chat", "content": [{"type": "text", "text": "served"}]
+    });
+    let upstream = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("quota-rebuild", "sk-quota-rebuild");
+    let directory = std::env::temp_dir().join(format!("ts-quota-rebuild-{}", std::process::id()));
+    let mut document = json!({
+        "version": 1,
+        "server": {"listen": "127.0.0.1:0"},
+        "data": {"dir": directory, "metrics": false},
+        "plugins": {
+            "dir": plugins_dir(), "agents": ["agent-anthropic"],
+            "providers": {"anthropic": "provider-anthropic-v2"}
+        },
+        "upstreams": {"account": {
+            "provider": "anthropic", "api_dialect": "anthropic-native",
+            "base_url": upstream.base_url(),
+            "auth": {"slot": "provider_api_key", "file": key},
+            "models": [{"model": "deepseek-chat", "tool": true, "tool_state": "verified", "context_window": 128_000}],
+            "quota_plan": {"unit": "requests", "windows": [{"len_ms": 86_400_000, "limit": 1}]}
+        }},
+        "router": {"version": 1, "default_pool": "main", "pools": {
+            "main": [{"upstream": "account", "model": "deepseek-chat"}]
+        }}
+    });
+    let config: ClientConfig = serde_json::from_value(document.clone()).unwrap();
+    config.validate().unwrap();
+    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder)).unwrap();
+    let mut statuses = Vec::new();
+    gateway.chat(
+        "POST",
+        "/v1/messages",
+        &[],
+        &serde_json::to_vec(&native_server_tool_turn()).unwrap(),
+        &mut |reply| {
+            if let Reply::BeginJson(response) = reply {
+                statuses.push(response.status);
+            }
+            true
+        },
+    );
+    assert_eq!(statuses, vec![200]);
+    assert_eq!(
+        gateway.quota_snapshot(quota_audit_now_ms())["accounts"][0]["windows"][0]["used"],
+        1
+    );
+    drop(gateway);
+
+    document["router"] = json!({"version": 1, "routing_mode": "quota_first", "quota_accounts": [{"upstream": "account", "model": "deepseek-chat"}]});
+    let quota_config: ClientConfig = serde_json::from_value(document).unwrap();
+    quota_config.validate().unwrap();
+    let restored =
+        Gateway::new(&quota_config, Arc::new(token_station_metrics::NoopRecorder)).unwrap();
+    let snapshot = restored.quota_snapshot(quota_audit_now_ms());
+    assert_eq!(snapshot["accounts"][0]["history"], "recovered");
+    assert_eq!(snapshot["accounts"][0]["exhausted"], true);
+    statuses.clear();
+    restored.chat(
+        "POST",
+        "/v1/messages",
+        &[],
+        &serde_json::to_vec(&native_server_tool_turn()).unwrap(),
+        &mut |reply| {
+            if let Reply::BeginJson(response) = reply {
+                statuses.push(response.status);
+            }
+            true
+        },
+    );
+    assert!(statuses.iter().any(|status| *status >= 400));
+    assert_eq!(
+        upstream.hits(),
+        1,
+        "quota routing must see the tiered route's prior request"
+    );
+    drop(restored);
+    std::fs::remove_dir_all(directory).unwrap();
+    std::fs::remove_file(key).unwrap();
+}
+
+#[test]
+fn quota_fallback_lease_tracks_actual_provider_and_releases_on_drain() {
+    let primary = MockUpstream::start(vec![vec![http_json(
+        503,
+        r#"{"error":{"type":"api_error","message":"retry"}}"#,
+    )]]);
+    let backup = MockUpstream::start_hanging_buffered();
+    let key = key_file("quota-actual-lease", "sk-quota-actual-lease");
+    let proxy = start_quota_first_native_pair(&primary, &backup, &key);
+    std::thread::scope(|scope| {
+        let request =
+            scope.spawn(|| post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !backup.response_started() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(backup.response_started());
+        let snapshot = proxy.gateway.quota_snapshot(quota_audit_now_ms());
+        let accounts = snapshot["accounts"].as_array().unwrap();
+        let account = |name| {
+            accounts
+                .iter()
+                .find(|account| account["upstream"] == name)
+                .unwrap()
+        };
+        assert_eq!(account("account_a")["inflight"], 0);
+        assert_eq!(account("account_b")["inflight"], 1);
+        proxy.control.cancel_in_flight();
+        let (status, _) = request.join().unwrap();
+        assert_eq!(status, 503);
+        assert!(
+            proxy.gateway.quota_snapshot(quota_audit_now_ms())["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|account| account["inflight"] == 0)
+        );
+    });
+    backup.finish_hanging();
+    std::fs::remove_file(key).unwrap();
+}
+
+#[test]
+fn stalled_authenticated_upload_is_registered_and_released_by_drain() {
+    let upstream = MockUpstream::start(vec![]);
+    let key = key_file("upload-drain", "sk-upload-drain");
+    let proxy = start_proxy(&upstream, &key);
+    let mut socket = TcpStream::connect(proxy.url.trim_start_matches("http://")).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(socket,
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{",
+        proxy.virtual_key).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while proxy.control.in_flight() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(proxy.control.in_flight(), 1);
+    proxy.control.cancel_in_flight();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+    assert_eq!(proxy.control.in_flight(), 0);
+    assert_eq!(upstream.hits(), 0);
+    std::fs::remove_file(key).unwrap();
 }

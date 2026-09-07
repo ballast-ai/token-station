@@ -454,6 +454,9 @@ export interface QuotaWindowSnapshot {
 }
 
 export interface QuotaAccountSnapshot {
+  /** Completed requests with missing token usage in retained local history. */
+  unknown_usage_requests?: number;
+  history?: "new" | "recovered" | "plan_changed" | "unavailable";
   upstream: string;
   windows: QuotaWindowSnapshot[];
   rate_headroom_permille: number;
@@ -473,6 +476,7 @@ export interface SettingsView {
   listen: string;
   auth: boolean;
   metrics: boolean;
+  request_body_capture?: boolean;
   data_dir: string;
   plugins_dir: string;
   agent: string;
@@ -782,6 +786,8 @@ export interface ModelPriceView {
   output_per_mtok: number;
   cache_read_per_mtok: number;
   cache_write_per_mtok: number;
+  cache_write_5m_per_mtok?: number | null;
+  cache_write_1h_per_mtok?: number | null;
   reasoning_per_mtok: number | null;
 }
 
@@ -1239,6 +1245,8 @@ export const setModelPrice = (
   outputPerMtok: price.output_per_mtok,
   cacheReadPerMtok: price.cache_read_per_mtok,
   cacheWritePerMtok: price.cache_write_per_mtok,
+  ...(price.cache_write_5m_per_mtok !== undefined ? { cacheWrite5mPerMtok: price.cache_write_5m_per_mtok } : {}),
+  ...(price.cache_write_1h_per_mtok !== undefined ? { cacheWrite1hPerMtok: price.cache_write_1h_per_mtok } : {}),
   reasoningPerMtok: price.reasoning_per_mtok,
   expectedVersion,
 });
@@ -1322,10 +1330,11 @@ export const applySnapshotRestore = (operationId: string, confirmationToken: str
 export const setSettings = (
   auth: boolean,
   metrics: boolean,
-  egress: Pick<SettingsView, "egress_mode" | "egress_proxy_url" | "egress_no_proxy" | "egress_auth_username" | "egress_auth_slot">,
+  egress: Pick<SettingsView, "egress_mode" | "egress_proxy_url" | "egress_no_proxy" | "egress_auth_username" | "egress_auth_slot" | "request_body_capture">,
 ) => invoke<StateView>("set_settings", {
   auth,
   metrics,
+  ...(egress.request_body_capture !== undefined ? { requestBodyCapture: egress.request_body_capture } : {}),
   egressMode: egress.egress_mode,
   egressProxyUrl: egress.egress_proxy_url,
   egressNoProxy: egress.egress_no_proxy,

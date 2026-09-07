@@ -6,6 +6,8 @@ import ProviderModelManager from "./ProviderModelManager";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { ProviderIcon } from "../brandIcons";
+import { useDraftNavigation } from "./DraftNavigation";
+import { Input } from "./ui/input";
 import { useErrorToast } from "./ErrorToast";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -43,6 +45,11 @@ export default function ProviderList({
 }: ProviderListProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError } = useErrorToast();
+  const confirmNavigation = useDraftNavigation();
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matches = (text: string) => text.toLocaleLowerCase().includes(normalizedQuery);
+  const visibleProviders = providers.filter((provider) => matches(providerDisplayName(provider)) || provider.models.some(matches));
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -86,6 +93,9 @@ export default function ProviderList({
         </Badge>
       </div>
 
+      {modelCount > 0 && <Input type="search" aria-label={copy("Search connected models", "搜索已接入模型", "搜尋已接入模型", "接続済みモデルを検索")}
+        value={query} onChange={(event) => setQuery(event.target.value)} />}
+      {query && visibleProviders.length === 0 && <p role="status">{copy("No matching models", "没有匹配的模型", "沒有相符的模型", "一致するモデルがありません")}</p>}
       <div className="provider-list">
         {recoveryError && (
           <div className="manager-error">{humanizeAppError(recoveryError, language)}</div>
@@ -121,7 +131,7 @@ export default function ProviderList({
             )}</span>
           </div>
         )}
-        {providers.map((provider) => {
+        {visibleProviders.map((provider) => {
           const displayName = providerDisplayName(provider);
           return (
             <article
@@ -192,7 +202,7 @@ export default function ProviderList({
               data-layout="compact-model-index"
               data-surface="plain-model-grid"
             >
-              {provider.models.length > 0 ? provider.models.map((model) => (
+              {provider.models.length > 0 ? provider.models.filter((model) => matches(model) || matches(displayName)).map((model) => (
                 <li role="listitem" key={model} title={`${model} · ${displayName}`}>
                   <strong>{model}</strong>
                 </li>
@@ -207,7 +217,7 @@ export default function ProviderList({
         })}
       </div>
 
-      <Dialog open={Boolean(activeProvider)} onOpenChange={(open) => !open && setManagedProvider(null)}>
+      <Dialog open={Boolean(activeProvider)} onOpenChange={(open) => !open && confirmNavigation(() => setManagedProvider(null))}>
         {activeProvider && (
           <DialogContent
             className="provider-management-dialog"

@@ -24,6 +24,7 @@ import {
 } from "../modelCatalog";
 import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
+import { useDraftGuard } from "../components/DraftNavigation";
 import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
@@ -168,6 +169,7 @@ export default function AddProviderPage({
   const [credentialReference, setCredentialReference] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [extraModels, setExtraModels] = useState<string[]>([]);
+  useDraftGuard(Boolean(key || credentialReference || name || url || picked.length || extraModels.length));
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
   const [discovery, setDiscovery] = useState<ModelDiscoveryView | null>(null);
   const [discoveryIdentity, setDiscoveryIdentity] = useState<string | null>(null);

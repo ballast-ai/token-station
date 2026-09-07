@@ -645,13 +645,11 @@ impl Gateway {
 
         // L2 authoritative quota: harvest remaining/reset headers, never the body.
         let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
-        if !windows.is_empty() {
-            self.quota.lock().expect("quota lock").note_authoritative(
-                target.upstream.as_str(),
-                unix_millis(),
-                windows,
-            );
-        }
+        self.quota.lock().expect("quota lock").note_authoritative(
+            target.upstream.as_str(),
+            unix_millis(),
+            windows,
+        );
 
         // Upstream error: return its status + body VERBATIM (Claude Code depends
         // on the original error body to self-heal), never token-station's wrapped

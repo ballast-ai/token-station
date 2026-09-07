@@ -553,7 +553,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
               <div><ToneIcon type="request" /><span>{copy("Requests", "请求", "請求", "リクエスト")}</span><strong>{aggregate.requests.toLocaleString(language)}</strong></div>
               <div><ToneIcon type="cost" /><span>{copy("Estimated cost", "估算成本", "估算成本", "推定コスト")}</span><strong>{cost(aggregate.cost_micros)}</strong></div>
               <div><ToneIcon type="success" /><span>{copy("Success rate", "成功率", "成功率", "成功率")}</span><strong>{successRate(aggregate)}</strong></div>
-              <div><ToneIcon type="latency" /><span>{copy("p95 latency", "p95 延迟", "p95 延遲", "p95 レイテンシー")}</span><strong>{latency(aggregate.p95_latency_ms)}</strong></div>
+              <div><ToneIcon type="latency" /><span>{copy("p95 latency", "p95 延迟", "p95 延遲", "p95 レイテンシー")}</span><strong>{aggregate.requests > 0 ? latency(aggregate.p95_latency_ms) : "—"}</strong></div>
             </div>
           </section>
 
@@ -603,7 +603,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
                       <td>{item.requests.toLocaleString()}</td>
                       <td>{successRate(item)}</td>
                       <td title={(item.input_tokens + item.output_tokens).toLocaleString(language)}>{compact(item.input_tokens + item.output_tokens, language)}</td>
-                      <td>{latency(item.p95_latency_ms)}</td>
+                      <td>{item.requests > 0 ? latency(item.p95_latency_ms) : "—"}</td>
                       <td>{cost(item.cost_micros)}{item.unpriced_requests > 0 && (
                         <small title={copy(
                           `${item.unpriced_requests} unpriced requests`,

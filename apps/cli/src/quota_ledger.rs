@@ -19,6 +19,7 @@
 //! pure function of its inputs — replayable and unit-testable, matching the
 //! router core it feeds.
 
+use serde::{Deserialize, Serialize};
 use token_station_router_core::{QuotaState, ResetWindow};
 
 /// The instantaneous-rate window: how recent activity is measured for
@@ -33,7 +34,8 @@ pub const RATE_PRESSURE_PERMILLE: u16 = 100;
 /// A two-bucket sliding-window counter over a fixed period. Reset is implicit:
 /// the bucket index is `now / len`, so crossing a boundary ages the old count
 /// out without a timer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SlidingWindow {
     len_ms: u64,
     /// The allowance for one window (tokens, or requests for the rate window).
@@ -67,12 +69,16 @@ impl SlidingWindow {
     /// Roll the buckets forward to `now_ms` before recording into `curr`.
     fn advance(&mut self, now_ms: u64) {
         let idx = self.index_at(now_ms);
-        if idx == self.index {
+        if idx <= self.index {
             return;
         }
         // Adjacent bucket: the old current becomes previous. A gap of more than
         // one window means everything before is fully aged out.
-        self.prev = if idx == self.index + 1 { self.curr } else { 0 };
+        self.prev = if Some(idx) == self.index.checked_add(1) {
+            self.curr
+        } else {
+            0
+        };
         self.curr = 0;
         self.index = idx;
     }
@@ -80,7 +86,13 @@ impl SlidingWindow {
     /// Record `amount` of consumption at `now_ms`.
     pub fn record(&mut self, now_ms: u64, amount: u64) {
         self.advance(now_ms);
-        self.curr = self.curr.saturating_add(amount);
+        let index = self.index_at(now_ms);
+        if index == self.index {
+            self.curr = self.curr.saturating_add(amount);
+        } else if index.checked_add(1) == Some(self.index) {
+            self.prev = self.prev.saturating_add(amount);
+        }
+        // Older events have already aged out. Never move the live buckets back.
     }
 
     /// Effective consumption as seen at `now_ms`, without mutating: the current
@@ -89,9 +101,13 @@ impl SlidingWindow {
     #[must_use]
     pub fn effective_used(&self, now_ms: u64) -> u64 {
         let idx = self.index_at(now_ms);
+        if idx < self.index {
+            // A wall-clock correction must not expose consumed quota as available.
+            return self.curr.saturating_add(self.prev);
+        }
         let (curr, prev) = if idx == self.index {
             (self.curr, self.prev)
-        } else if idx == self.index + 1 {
+        } else if Some(idx) == self.index.checked_add(1) {
             (0, self.curr)
         } else {
             (0, 0)
@@ -156,7 +172,8 @@ pub struct WindowSnapshot {
 /// One account's self-counted quota: its (possibly several) reset windows and
 /// its instantaneous rate window. Produces the [`QuotaState`] the router ranks
 /// on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountLedger {
     /// The plan's reset windows (e.g. a 5-hour and a weekly one). Empty ⇒ the
     /// account is non-windowed (pay-as-you-go / unmeasured).
@@ -243,6 +260,24 @@ impl AccountLedger {
             .collect()
     }
 
+    /// Check restored dimensions against the current plan before using counters.
+    pub(crate) fn compatible_with(&self, expected: &Self) -> bool {
+        let same_window = |left: &SlidingWindow, right: &SlidingWindow| {
+            left.len_ms == right.len_ms && left.limit == right.limit
+        };
+        self.windows.len() == expected.windows.len()
+            && self
+                .windows
+                .iter()
+                .zip(&expected.windows)
+                .all(|(a, b)| same_window(a, b))
+            && match (&self.rate, &expected.rate) {
+                (Some(a), Some(b)) => same_window(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
     /// Instantaneous rate headroom (permille) from the local rate window, before
     /// any in-flight penalty. Full headroom when the account is not rate-tracked.
     #[must_use]
@@ -258,6 +293,25 @@ mod tests {
     use super::*;
 
     const FIVE_H: u64 = 5 * 60 * 60 * 1000;
+
+    #[test]
+    fn late_settlement_preserves_newer_bucket_consumption() {
+        let mut window = SlidingWindow::new(60_000, 1_000);
+        window.record(61_000, 100);
+        window.record(59_000, 1);
+        assert_eq!(window.effective_used(70_000), 100);
+        window.record(121_000, 10);
+        let before_expired = window.effective_used(130_000);
+        window.record(1, 500);
+        assert_eq!(window.effective_used(130_000), before_expired);
+    }
+
+    #[test]
+    fn a_clock_rollback_does_not_erase_known_consumption() {
+        let mut window = SlidingWindow::new(60_000, 1000);
+        window.record(121_000, 100);
+        assert_eq!(window.effective_used(59_000), 100);
+    }
 
     #[test]
     fn a_fresh_window_is_fully_available() {

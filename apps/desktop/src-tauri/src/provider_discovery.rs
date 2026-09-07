@@ -143,6 +143,8 @@ pub(crate) fn catalog_cost_to_model_price(
         None => input_per_mtok,
     };
     Some(ModelPrice {
+        cache_write_5m_per_mtok: None,
+        cache_write_1h_per_mtok: None,
         input_per_mtok,
         output_per_mtok: micros(cost.output?)?,
         cache_read_per_mtok: micros(cost.cache_read?)?,
@@ -294,11 +296,8 @@ pub(crate) fn apply_discovered_model_limits(
         let Some(fact) = facts.get(model).copied() else {
             continue;
         };
-        changed |= apply_provider_reported_limits(
-            capability,
-            fact.context_window,
-            fact.max_output_tokens,
-        );
+        changed |=
+            apply_provider_reported_limits(capability, fact.context_window, fact.max_output_tokens);
     }
     if !changed {
         return Ok(false);
@@ -341,14 +340,7 @@ pub(crate) async fn discover_provider_model_limits(
     name: String,
     base_url: String,
 ) -> Result<ModelDiscoveryView, String> {
-    discover_provider_models_impl(
-        state,
-        name,
-        base_url,
-        None,
-        DiscoveryMutation::LimitsOnly,
-    )
-    .await
+    discover_provider_models_impl(state, name, base_url, None, DiscoveryMutation::LimitsOnly).await
 }
 
 #[tauri::command]

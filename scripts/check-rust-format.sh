@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly frozen_router_tree="07f4b7bf643002daa1ecee46ea9acee90f73003a"
+readonly frozen_router_tree="ebb62b7c48f63dc175158b4c99c4d73cf5786f44"
 readonly workspace_packages=(
   token-station-cli
   token-station-conformance

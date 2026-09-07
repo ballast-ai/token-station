@@ -484,6 +484,9 @@ pub struct DataConfig {
     /// leaves the file log, which is always written.
     #[serde(default = "default_true")]
     pub metrics: bool,
+    /// Desktop body capture. Omitted legacy values retain capture behavior.
+    #[serde(default = "default_true")]
+    pub request_body_capture: bool,
 }
 
 impl Default for DataConfig {
@@ -491,6 +494,7 @@ impl Default for DataConfig {
         Self {
             dir: default_data_dir(),
             metrics: true,
+            request_body_capture: true,
         }
     }
 }

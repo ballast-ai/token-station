@@ -154,3 +154,13 @@ describe("ProvidersPage enterprise entry", () => {
     });
   });
 });
+
+it("searches connected models without changing their configuration", async () => {
+  const user = userEvent.setup();
+  const provider = { name: "sample", provider: "openai-compatible", base_url: "https://example.test/v1", models: ["model-one", "model-two"], has_auth: true };
+  render(<ProvidersPage {...baseProps} providers={[provider]} />);
+  await user.type(screen.getByRole("searchbox", { name: "搜索已接入模型" }), "two");
+  expect(screen.getByText("model-two")).toBeInTheDocument();
+  expect(screen.queryByText("model-one")).toBeNull();
+  expect(provider.models).toEqual(["model-one", "model-two"]);
+});

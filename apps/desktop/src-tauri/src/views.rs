@@ -224,6 +224,7 @@ pub(crate) struct SettingsView {
     pub(crate) listen: String,
     pub(crate) auth: bool,
     pub(crate) metrics: bool,
+    pub(crate) request_body_capture: bool,
     pub(crate) data_dir: String,
     pub(crate) plugins_dir: String,
     pub(crate) agent: String,

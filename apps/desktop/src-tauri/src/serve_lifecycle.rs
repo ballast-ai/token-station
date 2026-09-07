@@ -66,6 +66,7 @@ pub(crate) fn home_gateway_configs_match(
         && published.plugins.allow_unsigned == candidate.plugins.allow_unsigned
         && published_router == candidate_router
         && published.data.dir == candidate.data.dir
+        && published.data.request_body_capture == candidate.data.request_body_capture
         && published.health == candidate.health
         && published.concurrency == candidate.concurrency
         && published.pricing == candidate.pricing
@@ -533,17 +534,47 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
         })?));
     }
 
-    let body_log = Arc::new(timed_stage("body_log_open", || {
-        BodyLog::open(&config.data.dir)
-    })?);
+    let body_log = if config.data.request_body_capture
+        || config
+            .data
+            .dir
+            .join(token_station_cli::bodylog::BODY_DIR_NAME)
+            .exists()
+    {
+        Some(Arc::new(timed_stage("body_log_open", || {
+            BodyLog::open(&config.data.dir)
+        })?))
+    } else {
+        None
+    };
     let gateway = Arc::new(timed_stage("gateway_init", || {
         Gateway::new_with_provider_runtime(
             &config,
             Arc::new(Recorders(sinks)),
             runtime.handle().clone(),
         )
-        .map(|gateway| gateway.with_body_log(body_log))
+        .map(|gateway| {
+            match body_log
+                .as_ref()
+                .filter(|_| config.data.request_body_capture)
+            {
+                Some(log) => gateway.with_body_log(Arc::clone(log)),
+                None => gateway,
+            }
+        })
     })?);
+    if let Some(log) = body_log {
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                let log = Arc::clone(&log);
+                let result = tokio::task::spawn_blocking(move || log.maintain()).await;
+                if !matches!(result, Ok(Ok(_))) {
+                    eprintln!("Request body retention maintenance failed");
+                }
+            }
+        });
+    }
     let admin = Arc::new(timed_stage("admin_snapshot", || {
         token_station_cli::admin::AdminContext::from_config(&config)
     })?);
@@ -579,6 +610,36 @@ mod tests {
             .join("../../..")
             .join("plugins-dist");
         config
+    }
+
+    #[test]
+    fn capture_policy_change_requires_a_new_gateway() {
+        let published = test_config();
+        let mut candidate = published.clone();
+        candidate.data.request_body_capture = !published.data.request_body_capture;
+        assert!(!home_gateway_configs_match(&published, &candidate));
+    }
+
+    #[test]
+    fn metadata_only_start_does_not_create_body_storage() {
+        let mut config = test_config();
+        let root = std::env::temp_dir().join(format!(
+            "ts-metadata-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        config.data.dir = root.clone();
+        config.data.request_body_capture = false;
+        config.server.auth = false;
+        let prepared = prepare_server(config).expect("prepare metadata-only gateway");
+        assert!(!root
+            .join(token_station_cli::bodylog::BODY_DIR_NAME)
+            .exists());
+        drop(prepared);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -61,14 +61,7 @@ pub fn create_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
         .parent()
         .ok_or_else(|| invalid("private target has no parent"))?;
     ensure_real_parent_dir(parent)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = match options.open(path) {
+    let mut file = match create_new_private(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             verify_private_file(path)?;
@@ -107,14 +100,8 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
     let temporary = unique_temporary_path(path)?;
     let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
+        let mut file = create_new_private(&temporary)?;
+        verify_private_file(&temporary)?;
         file.write_all(bytes)?;
         file.flush()?;
         file.sync_all()?;
@@ -129,6 +116,24 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::remove_file(&temporary).ok();
     }
     result
+}
+
+fn create_new_private(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        windows::create_private(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
 }
 
 fn invalid(message: &'static str) -> std::io::Error {
@@ -332,7 +337,16 @@ mod windows {
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    pub(super) fn apply_owner_only_dacl(path: &Path) -> std::io::Result<()> {
+    struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl Drop for SecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: this descriptor was allocated by the SDDL conversion API.
+            unsafe { LocalFree(self.0.cast()) };
+        }
+    }
+
+    fn owner_only_descriptor() -> std::io::Result<SecurityDescriptor> {
         let current_user = current_user_sid()?;
         let sid = sid_string(current_user.as_ptr())?;
         let sddl = format!("O:{sid}D:P(A;;FA;;;{sid})")
@@ -340,9 +354,7 @@ mod windows {
             .chain(Some(0))
             .collect::<Vec<_>>();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: the SDDL buffer is NUL-terminated. On success Windows owns
-        // the allocation contract and we release it exactly once with
-        // LocalFree below.
+        // SAFETY: the SDDL is NUL-terminated and the output pointer is valid.
         let created = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_ptr(),
@@ -354,6 +366,47 @@ mod windows {
         if created == 0 || descriptor.is_null() {
             return Err(std::io::Error::last_os_error());
         }
+        Ok(SecurityDescriptor(descriptor))
+    }
+
+    pub(super) fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        let descriptor = owner_only_descriptor()?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                .expect("security attributes fit u32"),
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let encoded = wide(path);
+        // SAFETY: path and security descriptor remain alive for this call.
+        // CREATE_NEW cannot open or truncate an existing file.
+        let handle = unsafe {
+            CreateFileW(
+                encoded.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: CreateFileW returned a new owned handle. File closes it once.
+        Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+    }
+
+    pub(super) fn apply_owner_only_dacl(path: &Path) -> std::io::Result<()> {
+        let descriptor = owner_only_descriptor()?;
         let encoded = wide(path);
         // SAFETY: both pointers remain valid for this synchronous call.
         let applied = unsafe {
@@ -362,11 +415,9 @@ mod windows {
                 OWNER_SECURITY_INFORMATION
                     | DACL_SECURITY_INFORMATION
                     | PROTECTED_DACL_SECURITY_INFORMATION,
-                descriptor,
+                descriptor.0,
             )
         };
-        // SAFETY: `descriptor` came from the conversion API above.
-        unsafe { LocalFree(descriptor.cast()) };
         if applied == 0 {
             Err(std::io::Error::last_os_error())
         } else {
@@ -582,6 +633,20 @@ mod tests {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         ))
+    }
+
+    #[test]
+    fn new_private_files_are_protected_before_the_first_write() {
+        let root = std::env::temp_dir().join(format!("private-first-write-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("empty-private-file");
+        let _ = std::fs::remove_file(&path);
+        let file = super::create_new_private(&path).unwrap();
+        super::verify_private_file(&path)
+            .expect("creation must establish private permissions before writing");
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        drop(file);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

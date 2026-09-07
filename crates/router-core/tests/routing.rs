@@ -969,3 +969,30 @@ fn quota_first_reports_unavailable_when_every_account_is_ejected() {
         .expect_err("all ejected");
     assert!(matches!(error, NoRoute::Unavailable { .. }));
 }
+
+#[test]
+fn tool_and_output_schemas_contribute_to_context_input_but_not_conversation_difficulty() {
+    let mut request = ChatRequest::new("auto", vec![Message::text(Role::User, "hi")]);
+    request.tools.push(ToolDef {
+        name: "inspect".into(),
+        description: None,
+        parameters: serde_json::json!({}),
+    });
+    request.response_format = Some(ResponseFormat::JsonSchema {
+        json_schema: serde_json::json!({}),
+    });
+    let small = token_station_router_core::RequestFeatures::extract(&request, &[]);
+    request.tools[0].description = Some("tool instructions ".repeat(500));
+    request.tools[0].parameters =
+        serde_json::json!({"description": "parameter schema ".repeat(500)});
+    request.response_format = Some(ResponseFormat::JsonSchema {
+        json_schema: serde_json::json!({"description": "response schema ".repeat(500)}),
+    });
+    let large = token_station_router_core::RequestFeatures::extract(&request, &[]);
+    assert!(
+        large.estimated_input_tokens > 5_000,
+        "actual schema input must not fit a small context window"
+    );
+    assert!(large.estimated_input_tokens > small.estimated_input_tokens);
+    assert_eq!(large.conversation_tokens, small.conversation_tokens);
+}

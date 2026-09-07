@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use token_station_conformance::accepts_manifest;
 use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata, ManifestError};
 use token_station_protocol::{ErrorCode, ErrorEnvelope};
+use wasmtime::ResourceLimiter;
 use wasmtime::component::{Component, ResourceTable};
-use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::runtime::PluginRuntime;
@@ -40,13 +40,93 @@ const FORBIDDEN_EVERYWHERE: &[&str] = &["wasi:sockets/", "wasi:http/"];
 /// than failing instantiation with a generic link error.
 pub(crate) const FORBIDDEN_FOR_AGENTS: &[&str] = &["token-station:adapter/host"];
 
+/// Counts allocations across all core memories and tables in one component.
+/// Wasmtime retains these allocations for the Store lifetime.
+pub(crate) struct AggregateLimits {
+    memory_limit: usize,
+    memory_bytes: usize,
+    memory_reservation: usize,
+    table_elements: usize,
+    table_reservation: usize,
+}
+
+impl AggregateLimits {
+    fn new(memory_limit: usize) -> Self {
+        Self {
+            memory_limit,
+            memory_bytes: 0,
+            memory_reservation: 0,
+            table_elements: 0,
+            table_reservation: 0,
+        }
+    }
+}
+
+impl ResourceLimiter for AggregateLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.memory_reservation = 0;
+        let growth = desired.saturating_sub(current);
+        if maximum.is_some_and(|max| desired > max)
+            || growth > self.memory_limit.saturating_sub(self.memory_bytes)
+        {
+            return Ok(false);
+        }
+        self.memory_bytes += growth;
+        self.memory_reservation = growth;
+        Ok(true)
+    }
+
+    fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.memory_bytes -= std::mem::take(&mut self.memory_reservation);
+        Ok(())
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.table_reservation = 0;
+        let growth = desired.saturating_sub(current);
+        if maximum.is_some_and(|max| desired > max)
+            || growth > 65_536_usize.saturating_sub(self.table_elements)
+        {
+            return Ok(false);
+        }
+        self.table_elements += growth;
+        self.table_reservation = growth;
+        Ok(true)
+    }
+
+    fn table_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.table_elements -= std::mem::take(&mut self.table_reservation);
+        Ok(())
+    }
+
+    fn instances(&self) -> usize {
+        128
+    }
+    fn memories(&self) -> usize {
+        16
+    }
+    fn tables(&self) -> usize {
+        32
+    }
+}
+
 /// Everything one store carries: the locked-down WASI and the resource limits.
 /// Nothing here can reach a credential; the agent world has no import that
 /// could ask for one.
 pub(crate) struct Ctx {
     wasi: WasiCtx,
     table: ResourceTable,
-    pub(crate) limits: StoreLimits,
+    pub(crate) limits: AggregateLimits,
 }
 
 impl Ctx {
@@ -57,7 +137,7 @@ impl Ctx {
         Self {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new().memory_size(memory_bytes).build(),
+            limits: AggregateLimits::new(memory_bytes),
         }
     }
 }
@@ -326,6 +406,39 @@ pub(crate) fn from_json<T: for<'de> serde::Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::{UnreadableReason, read_file_limited};
+
+    #[test]
+    fn aggregate_memories_and_tables_are_bounded() {
+        let runtime = crate::PluginRuntime::new(crate::RuntimeLimits::default()).unwrap();
+        for source in [
+            "(module (memory 600) (memory 600))",
+            "(module (table 70000 funcref))",
+            "(module (table 40000 funcref) (table 40000 funcref))",
+        ] {
+            let module = wasmtime::Module::new(runtime.engine(), source).unwrap();
+            let mut store =
+                wasmtime::Store::new(runtime.engine(), super::Ctx::new(64 * 1024 * 1024));
+            store.limiter(|ctx| &mut ctx.limits);
+            store.set_epoch_deadline(runtime.deadline_ticks());
+            assert!(
+                wasmtime::Instance::new(&mut store, &module, &[]).is_err(),
+                "resource-heavy component core must be refused: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_small_memories_remain_usable_after_refused_growth() {
+        let runtime = crate::PluginRuntime::new(crate::RuntimeLimits::default()).unwrap();
+        let mut store = wasmtime::Store::new(runtime.engine(), super::Ctx::new(2 * 65_536));
+        store.limiter(|ctx| &mut ctx.limits);
+        let first =
+            wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(1, Some(1))).unwrap();
+        assert!(first.grow(&mut store, 1).is_err());
+        let second = wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(1, None)).unwrap();
+        assert_eq!(first.size(&store) + second.size(&store), 2);
+        assert!(second.grow(&mut store, 1).is_err());
+    }
 
     #[test]
     fn adapter_json_output_is_bounded_before_parsing() {

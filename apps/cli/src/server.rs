@@ -602,6 +602,39 @@ async fn admin_quota(State(state): State<AppState>, headers: HeaderMap) -> Respo
     )
 }
 
+async fn receive_body(ctx: &RequestContext, body: Body) -> Result<Bytes, StatusCode> {
+    let token = ctx.token();
+    let signal = token.async_token();
+    tokio::select! {
+        biased;
+        () = signal.cancelled() => Err(StatusCode::SERVICE_UNAVAILABLE),
+        () = tokio::time::sleep_until(ctx.deadline().into()) => {
+            token.cancel_with(CancelReason::Deadline);
+            Err(StatusCode::REQUEST_TIMEOUT)
+        }
+        result = to_bytes(body, MAX_INBOUND_BODY) => result.map_err(|_| StatusCode::PAYLOAD_TOO_LARGE),
+    }
+}
+
+async fn send_reply(ctx: &RequestContext, tx: &mpsc::Sender<Reply>, reply: Reply) -> bool {
+    // A cancellation response must remain deliverable after cancellation.
+    // It may use a free slot, but must never wait on a stalled receiver.
+    if matches!(&reply, Reply::BeginJson(json) if json.status >= 400) {
+        return tx.try_send(reply).is_ok();
+    }
+    let token = ctx.token();
+    let signal = token.async_token();
+    tokio::select! {
+        biased;
+        () = signal.cancelled() => false,
+        () = tokio::time::sleep_until(ctx.deadline().into()) => {
+            token.cancel_with(CancelReason::Deadline);
+            false
+        }
+        result = tx.send(reply) => result.is_ok(),
+    }
+}
+
 async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let method = parts.method;
@@ -620,8 +653,20 @@ async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response
     let Ok(worker_permit) = Arc::clone(&state.worker_slots).try_acquire_owned() else {
         return concurrency_refusal(scoped.canonical_path);
     };
-    let Ok(body) = to_bytes(body, MAX_INBOUND_BODY).await else {
-        return payload_too_large(scoped.canonical_path);
+    let ctx = state.control.request_context();
+    let cancel_on_drop = Some(CancelOnDrop(ctx.token()));
+    let in_flight = state.control.begin_request();
+    let body = match receive_body(&ctx, body).await {
+        Ok(body) => body,
+        Err(StatusCode::PAYLOAD_TOO_LARGE) => return payload_too_large(scoped.canonical_path),
+        Err(status) => {
+            return bounded_refusal(
+                scoped.canonical_path,
+                status,
+                "request_cancelled",
+                "request body receive stopped before completion",
+            );
+        }
     };
     let gateway = Arc::clone(&state.gateway);
     // The method and path feed the gateway's `match_inbound` step, which picks
@@ -644,12 +689,10 @@ async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response
 
     let (tx, mut rx) = mpsc::channel::<Reply>(STREAM_BACKLOG);
 
-    // The pipeline owns its thread for the whole exchange; `blocking_send`
-    // makes a slow reader slow the upstream read down, not buffer it.
-    //
-    let ctx = state.control.request_context();
-    let mut cancel_on_drop = Some(CancelOnDrop(ctx.token()));
-    let in_flight = state.control.begin_request();
+    // The pipeline retains bounded backpressure. Its send wait also observes
+    // the same cancellation and absolute deadline as the upstream request.
+    let runtime = tokio::runtime::Handle::current();
+    let response_token = ctx.token();
     let worker = tokio::task::spawn_blocking(move || {
         let _worker_permit = worker_permit;
         let _in_flight = in_flight;
@@ -661,14 +704,30 @@ async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response
             &path,
             &headers,
             &body,
-            &mut |reply| tx.blocking_send(reply).is_ok(),
+            &mut |reply| runtime.block_on(send_reply(&ctx, &tx, reply)),
         );
     });
 
     let first = rx.recv().await;
+    drop(worker);
+    worker_response(
+        first,
+        rx,
+        cancel_on_drop,
+        scoped.canonical_path,
+        &response_token,
+    )
+}
+
+fn worker_response(
+    first: Option<Reply>,
+    rx: mpsc::Receiver<Reply>,
+    cancel_on_drop: Option<CancelOnDrop>,
+    path: &str,
+    response_token: &CancelToken,
+) -> Response {
     match first {
         Some(Reply::BeginJson(reply)) => {
-            drop(worker);
             Response::builder()
                 .status(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY))
                 .header(header::CONTENT_TYPE, "application/json")
@@ -677,7 +736,6 @@ async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response
         }
         Some(Reply::BeginStream) => {
             let cancel_on_drop = cancel_on_drop
-                .take()
                 .expect("request cancellation guard is present");
             let chunks = ReceiverStream::new(rx).map(move |reply| {
                 let _keep_guard_alive = &cancel_on_drop;
@@ -695,6 +753,16 @@ async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response
                 .body(Body::from_stream(chunks))
                 .expect("a stream response builds")
         }
+        None if response_token.is_cancelled() => bounded_refusal(
+            path,
+            if response_token.cancel_reason() == Some(CancelReason::Deadline) {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            },
+            "request_cancelled",
+            "request stopped before the response started",
+        ),
         // The worker died before answering; its panic is in the logs.
         Some(Reply::Chunk(_)) | None => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -711,6 +779,89 @@ mod tests {
     use super::{ScopedInboundPath, ServerControl, parse_inbound_path, presented_virtual_keys};
     use axum::http::HeaderMap;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn cancellation_can_still_publish_a_terminal_error_without_waiting() {
+        let root = crate::cancel::CancelToken::root();
+        let ctx = crate::request_context::RequestContext::new(
+            &root,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        root.cancel_with(crate::cancel::CancelReason::ServerDrain);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        assert!(
+            super::send_reply(
+                &ctx,
+                &tx,
+                crate::gateway::Reply::BeginJson(crate::gateway::JsonReply {
+                    status: 503,
+                    body: "{}".to_owned(),
+                })
+            )
+            .await
+        );
+        assert!(
+            matches!(rx.recv().await, Some(crate::gateway::Reply::BeginJson(reply)) if reply.status == 503)
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_body_obeys_deadline_and_drain() {
+        for drain in [false, true] {
+            let root = crate::cancel::CancelToken::root();
+            let ctx = crate::request_context::RequestContext::new(
+                &root,
+                Duration::from_millis(10),
+                Duration::from_secs(1),
+            );
+            let (_tx, rx) = tokio::sync::mpsc::channel::<
+                Result<axum::body::Bytes, std::convert::Infallible>,
+            >(1);
+            let body =
+                axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+            if drain {
+                root.cancel_with(crate::cancel::CancelReason::ServerDrain);
+            }
+            let result =
+                tokio::time::timeout(Duration::from_millis(200), super::receive_body(&ctx, body))
+                    .await
+                    .expect("stalled upload must release the handler");
+            assert_eq!(
+                result.unwrap_err(),
+                if drain {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    axum::http::StatusCode::REQUEST_TIMEOUT
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_reply_obeys_deadline_and_drain() {
+        for drain in [false, true] {
+            let root = crate::cancel::CancelToken::root();
+            let ctx = crate::request_context::RequestContext::new(
+                &root,
+                Duration::from_millis(10),
+                Duration::from_secs(1),
+            );
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            tx.send(crate::gateway::Reply::BeginStream).await.unwrap();
+            if drain {
+                root.cancel_with(crate::cancel::CancelReason::ServerDrain);
+            }
+            assert!(
+                !tokio::time::timeout(
+                    Duration::from_millis(200),
+                    super::send_reply(&ctx, &tx, crate::gateway::Reply::BeginStream)
+                )
+                .await
+                .expect("stalled downstream must release the worker")
+            );
+        }
+    }
 
     #[test]
     fn presented_virtual_keys_reads_bearer_goog_header_and_query() {

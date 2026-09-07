@@ -1471,6 +1471,7 @@ impl AppInner {
                 .to_string(),
             auth: d["server"]["auth"].as_bool().unwrap_or(true),
             metrics: d["data"]["metrics"].as_bool().unwrap_or(true),
+            request_body_capture: d["data"]["request_body_capture"].as_bool().unwrap_or(true),
             data_dir: d["data"]["dir"].as_str().unwrap_or_default().to_string(),
             plugins_dir: d["plugins"]["dir"].as_str().unwrap_or_default().to_string(),
             agent: agents_display(&d["plugins"]),
@@ -1934,6 +1935,7 @@ pub(crate) fn set_settings(
     egress_no_proxy: Vec<String>,
     egress_auth_username: String,
     egress_auth_slot: String,
+    request_body_capture: Option<bool>,
 ) -> Result<StateView, SettingsCommandError> {
     let mut inner = state.0.lock().unwrap();
     inner
@@ -1944,6 +1946,9 @@ pub(crate) fn set_settings(
     let edit_result = inner.edit_validated_draft(|candidate| {
         candidate.draft["server"]["auth"] = json!(auth);
         candidate.draft["data"]["metrics"] = json!(metrics);
+        if let Some(capture) = request_body_capture {
+            candidate.draft["data"]["request_body_capture"] = json!(capture);
+        }
         candidate.draft["egress"] = if egress_mode == "direct" {
             json!({ "mode": "direct" })
         } else {

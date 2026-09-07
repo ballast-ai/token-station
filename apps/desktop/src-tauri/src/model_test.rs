@@ -805,15 +805,16 @@ pub(crate) async fn run_model_test_chat<R: Runtime>(
                             &config.data.dir.join("metrics.sqlite"),
                         )?));
                     }
-                    let body_log = Arc::new(BodyLog::open(&config.data.dir)?);
-                    let gateway = Arc::new(
-                        Gateway::new_with_provider_runtime(
-                            &config,
-                            Arc::new(token_station_cli::filelog::Recorders(sinks)),
-                            provider_runtime,
-                        )?
-                        .with_body_log(body_log),
-                    );
+                    let gateway = Gateway::new_with_provider_runtime(
+                        &config,
+                        Arc::new(token_station_cli::filelog::Recorders(sinks)),
+                        provider_runtime,
+                    )?;
+                    let gateway = Arc::new(if config.data.request_body_capture {
+                        gateway.with_body_log(Arc::new(BodyLog::open(&config.data.dir)?))
+                    } else {
+                        gateway
+                    });
                     ensure_model_test_plugin_identity_unchanged(
                         &config,
                         plugin_identity_fingerprint,

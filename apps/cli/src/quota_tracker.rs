@@ -14,7 +14,12 @@
 //! `DeepSeek` balance) covers every model reached through that one connection, so
 //! two candidate models on the same upstream share its window and its rate.
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
+use std::time::Duration;
+
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use serde::{Deserialize, Serialize};
 use token_station_protocol::Usage;
@@ -57,6 +62,10 @@ struct Authoritative {
 /// state, in-flight load, cooling, and where the figures came from.
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaAccountSnapshot {
+    /// Whether compatible local history exists. This never claims provider completeness.
+    pub history: QuotaHistory,
+    /// Successful requests whose provider did not report token usage.
+    pub unknown_usage_requests: u64,
     pub upstream: String,
     pub windows: Vec<QuotaWindowSnapshot>,
     pub rate_headroom_permille: u16,
@@ -156,8 +165,224 @@ pub struct QuotaPlan {
     pub unit: PlanUnit,
 }
 
-struct TrackedAccount {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaHistory {
+    New,
+    Recovered,
+    PlanChanged,
+    Unavailable,
+}
+
+const MAX_QUOTA_ACCOUNTS: usize = 4096;
+const MAX_PLAN_WINDOWS: usize = 64;
+const MAX_SETTLEMENT_IDS: usize = 256;
+const MAX_ACCOUNT_STATE_BYTES: usize = 128 * 1024;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedAccount {
     ledger: AccountLedger,
+    recent_requests: VecDeque<String>,
+    #[serde(default)]
+    unknown_usage_requests: u64,
+    #[serde(default)]
+    plan_changed_baseline: bool,
+}
+
+impl SavedAccount {
+    fn validate(&self, expected: &AccountLedger) -> Result<(), String> {
+        if !self.ledger.compatible_with(expected)
+            || self.recent_requests.len() > MAX_SETTLEMENT_IDS
+            || self.recent_requests.iter().any(|id| id.len() > 512)
+        {
+            return Err("Quota state does not match its account plan.".into());
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, request_id: Option<&str>, now_ms: u64, amount: u64, missing_usage: bool) {
+        if let Some(request_id) = request_id {
+            if self.recent_requests.iter().any(|id| id == request_id) {
+                return;
+            }
+            self.recent_requests.push_back(request_id.to_owned());
+            while self.recent_requests.len() > MAX_SETTLEMENT_IDS {
+                self.recent_requests.pop_front();
+            }
+        }
+        self.ledger.record(now_ms, amount);
+        self.unknown_usage_requests = self
+            .unknown_usage_requests
+            .saturating_add(u64::from(missing_usage));
+    }
+}
+
+/// Transactional snapshots avoid overwriting settlements from another Gateway.
+/// The database contains counters, plan dimensions and bounded opaque receipt IDs only.
+struct QuotaStore {
+    connection: Connection,
+    failure_marker: std::path::PathBuf,
+}
+
+impl QuotaStore {
+    fn open(directory: &Path) -> Result<Self, String> {
+        token_station_private_fs::ensure_private_dir(directory)
+            .map_err(|error| error.to_string())?;
+        let failure_marker = directory.join("quota-state-unavailable");
+        if failure_marker
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            return Err("Quota history needs repair after a failed write. Restore quota.sqlite from a known backup before removing quota-state-unavailable.".into());
+        }
+        let path = directory.join("quota.sqlite");
+        token_station_private_fs::create_private_file(&path, &[])
+            .map_err(|error| error.to_string())?;
+        token_station_private_fs::verify_private_file(&path).map_err(|error| error.to_string())?;
+        if std::fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .len()
+            > 16 * 1024 * 1024
+        {
+            return Err("Quota state exceeds its size limit.".into());
+        }
+        let connection = Connection::open(&path).map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(Duration::from_secs(2))
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=4096;",
+            )
+            .map_err(|error| error.to_string())?;
+        let version: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if version > 1 {
+            return Err("Quota state version is not supported.".into());
+        }
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS quota_accounts (
+                account TEXT NOT NULL,
+                plan TEXT NOT NULL,
+                state TEXT NOT NULL,
+                PRIMARY KEY(account, plan)
+             ); PRAGMA user_version=1;",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            connection,
+            failure_marker,
+        })
+    }
+
+    fn load(
+        connection: &Connection,
+        name: &str,
+        plan: &str,
+        expected: &AccountLedger,
+    ) -> Result<Option<SavedAccount>, String> {
+        let serialized: Option<String> = connection
+            .query_row(
+                "SELECT state FROM quota_accounts WHERE account=?1 AND plan=?2",
+                params![name, plan],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        serialized
+            .map(|serialized| {
+                if serialized.len() > MAX_ACCOUNT_STATE_BYTES {
+                    return Err("Quota account state exceeds its size limit.".into());
+                }
+                let saved: SavedAccount =
+                    serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+                saved.validate(expected)?;
+                Ok(saved)
+            })
+            .transpose()
+    }
+
+    fn prepare(
+        transaction: &rusqlite::Transaction<'_>,
+        name: &str,
+        account: &mut TrackedAccount,
+    ) -> Result<(), String> {
+        if let Some(saved) = Self::load(transaction, name, &account.plan, &account.saved.ledger)? {
+            account.saved = saved;
+            account.history = if account.saved.plan_changed_baseline {
+                QuotaHistory::PlanChanged
+            } else {
+                QuotaHistory::Recovered
+            };
+        } else {
+            let exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM quota_accounts WHERE account=?1)",
+                    [name],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if exists {
+                account.history = QuotaHistory::PlanChanged;
+                account.saved.plan_changed_baseline = true;
+            }
+            let count: u32 = transaction
+                .query_row("SELECT COUNT(*) FROM quota_accounts", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            if count >= u32::try_from(MAX_QUOTA_ACCOUNTS).expect("account limit fits u32") {
+                return Err("Quota state has reached its account limit.".into());
+            }
+            let serialized =
+                serde_json::to_string(&account.saved).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT INTO quota_accounts(account, plan, state) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(account, plan) DO NOTHING",
+                    params![name, account.plan, serialized],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn record(
+        &mut self,
+        name: &str,
+        account: &TrackedAccount,
+        request_id: Option<&str>,
+        now_ms: u64,
+        amount: u64,
+        missing_usage: bool,
+    ) -> Result<SavedAccount, String> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let mut saved = Self::load(&transaction, name, &account.plan, &account.saved.ledger)?
+            .ok_or_else(|| "The persisted quota account is missing.".to_owned())?;
+        saved.record(request_id, now_ms, amount, missing_usage);
+        let serialized = serde_json::to_string(&saved).map_err(|error| error.to_string())?;
+        if serialized.len() > MAX_ACCOUNT_STATE_BYTES {
+            return Err("Quota account state exceeds its size limit.".into());
+        }
+        transaction
+            .execute(
+                "UPDATE quota_accounts SET state=?3 WHERE account=?1 AND plan=?2",
+                params![name, account.plan, serialized],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(saved)
+    }
+}
+
+struct TrackedAccount {
+    saved: SavedAccount,
+    plan: String,
+    history: QuotaHistory,
     unit: PlanUnit,
     rate_limit_per_min: Option<u64>,
 }
@@ -170,7 +395,14 @@ impl TrackedAccount {
             .map(|spec| SlidingWindow::new(spec.len_ms, spec.limit))
             .collect();
         Self {
-            ledger: AccountLedger::new(windows, plan.rate_limit_per_min),
+            saved: SavedAccount {
+                ledger: AccountLedger::new(windows, plan.rate_limit_per_min),
+                recent_requests: VecDeque::new(),
+                unknown_usage_requests: 0,
+                plan_changed_baseline: false,
+            },
+            plan: serde_json::to_string(plan).expect("quota plan contains only JSON values"),
+            history: QuotaHistory::New,
             unit: plan.unit,
             rate_limit_per_min: plan.rate_limit_per_min,
         }
@@ -187,6 +419,8 @@ impl TrackedAccount {
 /// The gateway's live quota state, updated per request.
 pub struct QuotaTracker {
     accounts: HashMap<String, TrackedAccount>,
+    store: Option<QuotaStore>,
+    persistence_failed: Cell<bool>,
     leases: InflightLeases,
     sessions: HashMap<String, UpstreamModel>,
     session_order: VecDeque<String>,
@@ -215,6 +449,8 @@ impl QuotaTracker {
             .collect();
         Self {
             accounts,
+            store: None,
+            persistence_failed: Cell::new(false),
             leases: InflightLeases::new(DEFAULT_LEASE_MS),
             sessions: HashMap::new(),
             session_order: VecDeque::new(),
@@ -224,13 +460,92 @@ impl QuotaTracker {
         }
     }
 
+    /// Restore counters only when their serialized plan is unchanged.
+    /// No receipts or upstream calls are replayed during restoration.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid, oversized or inaccessible private store.
+    pub fn persistent(plans: HashMap<String, QuotaPlan>, directory: &Path) -> Result<Self, String> {
+        if plans.len() > MAX_QUOTA_ACCOUNTS
+            || plans
+                .iter()
+                .any(|(name, plan)| name.len() > 1024 || plan.windows.len() > MAX_PLAN_WINDOWS)
+        {
+            return Err("Quota plans exceed the state limits.".into());
+        }
+        let mut tracker = Self::new(plans);
+        if tracker.accounts.is_empty() {
+            return Ok(tracker);
+        }
+        let mut store = QuotaStore::open(directory)?;
+        {
+            let transaction = store
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            for (name, account) in &mut tracker.accounts {
+                QuotaStore::prepare(&transaction, name, account)?;
+            }
+            transaction.commit().map_err(|error| error.to_string())?;
+        }
+        tracker.store = Some(store);
+        Ok(tracker)
+    }
+
+    fn current_saved(&self, name: &str, account: &TrackedAccount) -> SavedAccount {
+        if let Some(store) = &self.store {
+            match QuotaStore::load(
+                &store.connection,
+                name,
+                &account.plan,
+                &account.saved.ledger,
+            ) {
+                Ok(Some(saved)) => return saved,
+                Ok(None) => self.persistence_error("The persisted quota account is missing."),
+                Err(error) => self.persistence_error(&error),
+            }
+        }
+        account.saved.clone()
+    }
+
+    fn current_ledger(&self, name: &str, account: &TrackedAccount) -> AccountLedger {
+        self.current_saved(name, account).ledger
+    }
+
+    fn persistence_error(&self, error: &str) {
+        if !self.persistence_failed.replace(true) {
+            eprintln!("Quota persistence failed. Quota routing is paused: {error}");
+            if let Some(store) = &self.store
+                && let Err(marker_error) =
+                    token_station_private_fs::create_private_file(&store.failure_marker, &[])
+            {
+                eprintln!(
+                    "Cannot persist the quota failure marker. Restore quota history before restarting: {marker_error}"
+                );
+            }
+        }
+    }
+
     /// Fresh provider-reported windows for `upstream`, or `None` if there is no
     /// reading or it has aged past [`AUTHORITATIVE_TTL_MS`].
-    fn fresh_authoritative(&self, upstream: &str, now_ms: u64) -> Option<&[WindowSnapshot]> {
-        self.authoritative.get(upstream).and_then(|a| {
-            (now_ms.saturating_sub(a.observed_at_ms) < AUTHORITATIVE_TTL_MS)
-                .then_some(a.windows.as_slice())
-        })
+    fn fresh_authoritative(&self, upstream: &str, now_ms: u64) -> Option<Vec<WindowSnapshot>> {
+        let reading = self.authoritative.get(upstream)?;
+        let elapsed = now_ms.checked_sub(reading.observed_at_ms)?;
+        if elapsed >= AUTHORITATIVE_TTL_MS {
+            return None;
+        }
+        let windows: Vec<_> = reading
+            .windows
+            .iter()
+            .filter_map(|window| {
+                let remaining = window.ms_until_reset.checked_sub(elapsed)?;
+                (remaining > 0).then_some(WindowSnapshot {
+                    ms_until_reset: remaining,
+                    ..*window
+                })
+            })
+            .collect();
+        (!windows.is_empty()).then_some(windows)
     }
 
     /// Whether `upstream` is cooling from a real rate/quota refusal at `now_ms`.
@@ -247,7 +562,7 @@ impl QuotaTracker {
     pub fn quota_state(&self, upstream: &str, now_ms: u64) -> QuotaState {
         let (mut state, rate_limit) = match self.accounts.get(upstream) {
             Some(account) => (
-                account.ledger.quota_state(now_ms),
+                self.current_ledger(upstream, account).quota_state(now_ms),
                 account.rate_limit_per_min,
             ),
             None => (QuotaState::non_windowed(), None),
@@ -256,7 +571,7 @@ impl QuotaTracker {
         // picture (reset + exhausted) — it has no blind spot. Rate headroom stays
         // local (instantaneous, and folded with in-flight below).
         if let Some(windows) = self.fresh_authoritative(upstream, now_ms) {
-            let (reset, exhausted) = binding_of(windows);
+            let (reset, exhausted) = binding_of(&windows);
             state.reset = reset;
             state.exhausted = exhausted;
         }
@@ -268,7 +583,9 @@ impl QuotaTracker {
         // Ground-truth override: while the upstream is cooling from a real
         // quota/rate refusal, the account is exhausted no matter what the ledger
         // or authoritative reading said. Nothing routes to it until it elapses.
-        if self.is_cooling(upstream, now_ms) {
+        if self.is_cooling(upstream, now_ms)
+            || (self.persistence_failed.get() && self.accounts.contains_key(upstream))
+        {
             state.exhausted = true;
         }
         state
@@ -321,9 +638,11 @@ impl QuotaTracker {
             .map(|upstream| {
                 let (windows, source) = if let Some(w) = self.fresh_authoritative(upstream, now_ms)
                 {
-                    (w.to_vec(), QuotaSource::Authoritative)
+                    (w, QuotaSource::Authoritative)
                 } else if let Some(account) = self.accounts.get(upstream) {
-                    let w = account.ledger.window_snapshots(now_ms);
+                    let w = self
+                        .current_ledger(upstream, account)
+                        .window_snapshots(now_ms);
                     let source = if w.is_empty() {
                         QuotaSource::None
                     } else {
@@ -339,10 +658,10 @@ impl QuotaTracker {
                     .accounts
                     .get(upstream)
                     .and_then(|a| a.rate_limit_per_min);
-                let ledger_headroom = self
-                    .accounts
-                    .get(upstream)
-                    .map_or(1000, |a| a.ledger.rate_headroom_permille(now_ms));
+                let ledger_headroom = self.accounts.get(upstream).map_or(1000, |a| {
+                    self.current_ledger(upstream, a)
+                        .rate_headroom_permille(now_ms)
+                });
                 let inflight = self.leases.inflight(now_ms, upstream);
                 let rate_headroom_permille =
                     apply_inflight_penalty(ledger_headroom, inflight, rate_limit);
@@ -351,13 +670,27 @@ impl QuotaTracker {
                     .get(upstream)
                     .map_or(0, |until| until.saturating_sub(now_ms));
 
+                let history =
+                    if self.persistence_failed.get() && self.accounts.contains_key(upstream) {
+                        QuotaHistory::Unavailable
+                    } else {
+                        self.accounts
+                            .get(upstream)
+                            .map_or(QuotaHistory::New, |account| account.history)
+                    };
                 QuotaAccountSnapshot {
+                    history,
+                    unknown_usage_requests: self.accounts.get(upstream).map_or(0, |account| {
+                        self.current_saved(upstream, account).unknown_usage_requests
+                    }),
                     upstream: upstream.clone(),
                     windows: windows.into_iter().map(Into::into).collect(),
                     rate_headroom_permille,
                     rate_pressured: rate_headroom_permille <= RATE_PRESSURE_PERMILLE,
                     inflight,
-                    exhausted: window_exhausted || self.is_cooling(upstream, now_ms),
+                    exhausted: window_exhausted
+                        || self.is_cooling(upstream, now_ms)
+                        || history == QuotaHistory::Unavailable,
                     cooling_ms_remaining: cooling,
                     source,
                 }
@@ -370,6 +703,11 @@ impl QuotaTracker {
         self.leases.grant(now_ms, upstream)
     }
 
+    /// Bound the lease to the host deadline, including long-running streams.
+    pub fn grant_for(&mut self, upstream: &str, now_ms: u64, lifetime_ms: u64) -> LeaseId {
+        self.leases.grant_for(now_ms, upstream, lifetime_ms)
+    }
+
     /// Release a lease when its request settles.
     pub fn release(&mut self, lease: &LeaseId) {
         self.leases.release(lease);
@@ -378,9 +716,73 @@ impl QuotaTracker {
     /// Record one settled exchange's consumption against its account's windows.
     /// A no-op for an account with no plan (nothing windowed to count).
     pub fn record(&mut self, upstream: &str, now_ms: u64, usage: &Usage) {
-        if let Some(account) = self.accounts.get_mut(upstream) {
-            let amount = account.amount(usage);
-            account.ledger.record(now_ms, amount);
+        self.record_consumption(upstream, None, now_ms, Some(usage));
+    }
+
+    /// Count successful requests even when token usage is unavailable.
+    /// A bounded receipt-ID window makes settlement retries idempotent.
+    pub fn record_settled(
+        &mut self,
+        upstream: &str,
+        request_id: &str,
+        now_ms: u64,
+        usage: Option<&Usage>,
+        completed: bool,
+    ) {
+        if completed || usage.is_some() {
+            if request_id.len() > 512 {
+                self.persistence_error("The receipt ID exceeds its size limit.");
+                return;
+            }
+            self.record_consumption(upstream, Some(request_id), now_ms, usage);
+        }
+    }
+
+    fn record_consumption(
+        &mut self,
+        upstream: &str,
+        request_id: Option<&str>,
+        now_ms: u64,
+        usage: Option<&Usage>,
+    ) {
+        let Some(account) = self.accounts.get(upstream) else {
+            return;
+        };
+        let amount = match account.unit {
+            PlanUnit::Requests => 1,
+            PlanUnit::Tokens => usage.map_or(0, |usage| account.amount(usage)),
+        };
+        let result = self.store.as_mut().map(|store| {
+            store.record(
+                upstream,
+                account,
+                request_id,
+                now_ms,
+                amount,
+                usage.is_none(),
+            )
+        });
+        match result {
+            Some(Ok(saved)) => {
+                self.accounts
+                    .get_mut(upstream)
+                    .expect("account exists")
+                    .saved = saved;
+            }
+            Some(Err(error)) => {
+                self.persistence_error(&error);
+                self.accounts
+                    .get_mut(upstream)
+                    .expect("account exists")
+                    .saved
+                    .record(request_id, now_ms, amount, usage.is_none());
+            }
+            None => self
+                .accounts
+                .get_mut(upstream)
+                .expect("account exists")
+                .saved
+                .record(request_id, now_ms, amount, usage.is_none()),
         }
     }
 
@@ -411,6 +813,25 @@ mod tests {
 
     const FIVE_H: u64 = 5 * 60 * 60 * 1000;
 
+    #[test]
+    fn authoritative_countdown_expires_at_provider_reset() {
+        let mut tracker = QuotaTracker::new(HashMap::new());
+        tracker.note_authoritative("a", 1_000, vec![window(0, 60_000)]);
+        assert_eq!(
+            tracker
+                .quota_state("a", 31_000)
+                .reset
+                .unwrap()
+                .ms_until_reset,
+            30_000
+        );
+        assert!(!tracker.quota_state("a", 61_000).exhausted);
+        assert!(matches!(
+            tracker.snapshot(&["a".into()], 61_000)[0].source,
+            QuotaSource::None
+        ));
+    }
+
     fn window(remaining_permille: u16, ms_until_reset: u64) -> WindowSnapshot {
         WindowSnapshot {
             len_ms: FIVE_H,
@@ -419,6 +840,211 @@ mod tests {
             remaining_permille,
             ms_until_reset,
         }
+    }
+
+    struct StateDirectory(std::path::PathBuf);
+
+    impl StateDirectory {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            Self(std::env::temp_dir().join(format!(
+                "ts-quota-state-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )))
+        }
+    }
+
+    impl Drop for StateDirectory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn successful_requests_without_usage_consume_request_and_rate_windows_once() {
+        let plan = QuotaPlan {
+            windows: vec![QuotaWindowSpec {
+                len_ms: FIVE_H,
+                limit: 10,
+            }],
+            rate_limit_per_min: Some(10),
+            unit: PlanUnit::Requests,
+        };
+        let mut tracker = tracker("a", plan);
+        tracker.record_settled("a", "same-receipt", 1_000, None, true);
+        tracker.record_settled("a", "same-receipt", 1_000, None, true);
+        tracker.record_settled("a", "cancelled-before-output", 1_000, None, false);
+        let state = tracker.quota_state("a", 1_000);
+        assert_eq!(state.reset.unwrap().remaining_permille, 900);
+        assert_eq!(state.rate_headroom_permille, 900);
+    }
+
+    #[test]
+    fn unknown_token_usage_still_counts_known_request_rate() {
+        let mut plan = token_plan(1000);
+        plan.rate_limit_per_min = Some(10);
+        let mut tracker = tracker("a", plan);
+        tracker.record_settled("a", "request", 1_000, None, true);
+        let state = tracker.quota_state("a", 1_000);
+        assert_eq!(state.reset.unwrap().remaining_permille, 1000);
+        assert_eq!(state.rate_headroom_permille, 900);
+        assert_eq!(
+            tracker.snapshot(&["a".into()], 1000)[0].unknown_usage_requests,
+            1
+        );
+    }
+
+    #[test]
+    fn unknown_usage_diagnostic_is_persistent_idempotent_and_backward_compatible() {
+        let directory = StateDirectory::new();
+        let plans = HashMap::from([("a".into(), token_plan(1000))]);
+        let mut tracker = QuotaTracker::persistent(plans.clone(), &directory.0).unwrap();
+        tracker.record_settled("a", "unknown", 1000, None, true);
+        tracker.record_settled("a", "unknown", 1000, None, true);
+        drop(tracker);
+        let restored = QuotaTracker::persistent(plans, &directory.0).unwrap();
+        assert_eq!(
+            restored.snapshot(&["a".into()], 1000)[0].unknown_usage_requests,
+            1
+        );
+        let mut legacy = serde_json::to_value(&restored.accounts["a"].saved).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("unknown_usage_requests");
+        let legacy: SavedAccount = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.unknown_usage_requests, 0);
+    }
+
+    #[test]
+    fn persisted_account_recovers_without_replaying_and_combines_live_gateways() {
+        let directory = StateDirectory::new();
+        let plans = HashMap::from([("a".into(), token_plan(1000))]);
+        let mut first = QuotaTracker::persistent(plans.clone(), &directory.0).unwrap();
+        let mut second = QuotaTracker::persistent(plans.clone(), &directory.0).unwrap();
+        first.record_settled("a", "first", 1_000, Some(&usage(100, 0)), true);
+        second.record_settled("a", "second", 1_000, Some(&usage(200, 0)), true);
+        assert_eq!(
+            first
+                .quota_state("a", 1_000)
+                .reset
+                .unwrap()
+                .remaining_permille,
+            700
+        );
+        drop(first);
+        drop(second);
+        let mut restored = QuotaTracker::persistent(plans.clone(), &directory.0).unwrap();
+        assert_eq!(
+            restored.snapshot(&["a".into()], 1_000)[0].history,
+            QuotaHistory::Recovered
+        );
+        restored.record_settled("a", "first", 1_000, Some(&usage(100, 0)), true);
+        restored.record_settled("a", "second", 1_000, Some(&usage(200, 0)), true);
+        assert_eq!(
+            restored
+                .quota_state("a", 1_000)
+                .reset
+                .unwrap()
+                .remaining_permille,
+            700
+        );
+        let changed = QuotaTracker::persistent(
+            HashMap::from([("a".into(), token_plan(2000))]),
+            &directory.0,
+        )
+        .unwrap();
+        assert_eq!(
+            changed.snapshot(&["a".into()], 1_000)[0].history,
+            QuotaHistory::PlanChanged
+        );
+        assert_eq!(
+            changed
+                .quota_state("a", 1_000)
+                .reset
+                .unwrap()
+                .remaining_permille,
+            1000
+        );
+        token_station_private_fs::verify_private_file(&directory.0.join("quota.sqlite")).unwrap();
+    }
+
+    #[test]
+    fn previewing_another_plan_preserves_active_gateway_and_its_late_settlements() {
+        let directory = StateDirectory::new();
+        let original = HashMap::from([("a".into(), token_plan(1000))]);
+        let mut old = QuotaTracker::persistent(original.clone(), &directory.0).unwrap();
+        old.record_settled("a", "old", 1000, Some(&usage(100, 0)), true);
+        let mut changed = QuotaTracker::persistent(
+            HashMap::from([("a".into(), token_plan(2000))]),
+            &directory.0,
+        )
+        .unwrap();
+        changed.record_settled("a", "changed", 1000, Some(&usage(200, 0)), true);
+        old.record_settled("a", "late-old", 1000, Some(&usage(300, 0)), true);
+        assert!(!old.quota_state("a", 1000).exhausted);
+        assert_eq!(
+            old.quota_state("a", 1000).reset.unwrap().remaining_permille,
+            600
+        );
+        assert_eq!(
+            changed
+                .quota_state("a", 1000)
+                .reset
+                .unwrap()
+                .remaining_permille,
+            900
+        );
+        let restored_plan = QuotaTracker::persistent(original, &directory.0).unwrap();
+        assert_eq!(
+            restored_plan.snapshot(&["a".into()], 1000)[0].history,
+            QuotaHistory::Recovered
+        );
+        assert_eq!(
+            restored_plan
+                .quota_state("a", 1000)
+                .reset
+                .unwrap()
+                .remaining_permille,
+            600
+        );
+    }
+
+    #[test]
+    fn persistent_write_failure_disables_quota_and_survives_restart() {
+        let directory = StateDirectory::new();
+        let plans = HashMap::from([("a".into(), token_plan(1000))]);
+        let mut tracker = QuotaTracker::persistent(plans.clone(), &directory.0).unwrap();
+        tracker.store.as_ref().unwrap().connection.execute_batch(
+            "CREATE TRIGGER refuse_quota BEFORE UPDATE ON quota_accounts BEGIN SELECT RAISE(FAIL, 'test write refusal'); END;"
+        ).unwrap();
+        tracker.record_settled("a", "first", 1_000, Some(&usage(100, 0)), true);
+        assert!(tracker.quota_state("a", 1_000).exhausted);
+        assert_eq!(
+            tracker.snapshot(&["a".into()], 1_000)[0].history,
+            QuotaHistory::Unavailable
+        );
+        drop(tracker);
+        assert!(QuotaTracker::persistent(plans, &directory.0).is_err());
+    }
+
+    #[test]
+    fn corrupt_or_incompatible_saved_state_never_becomes_an_empty_ledger() {
+        let directory = StateDirectory::new();
+        let plans = HashMap::from([("a".into(), token_plan(1000))]);
+        let mut tracker = QuotaTracker::persistent(plans.clone(), &directory.0).unwrap();
+        tracker.record_settled("a", "first", 1_000, Some(&usage(100, 0)), true);
+        tracker
+            .store
+            .as_ref()
+            .unwrap()
+            .connection
+            .execute("UPDATE quota_accounts SET state='{}'", [])
+            .unwrap();
+        assert!(tracker.quota_state("a", 1_000).exhausted);
+        drop(tracker);
+        assert!(QuotaTracker::persistent(plans, &directory.0).is_err());
     }
 
     fn token_plan(limit: u64) -> QuotaPlan {

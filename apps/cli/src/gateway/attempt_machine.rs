@@ -118,6 +118,23 @@ fn attempt_receipt(
     }
 }
 
+/// One actual provider attempt owns its load reservation, including media retries.
+struct AttemptQuotaLease<'a> {
+    quota: &'a std::sync::Mutex<crate::quota_tracker::QuotaTracker>,
+    lease: crate::quota_lease::LeaseId,
+}
+
+impl Drop for AttemptQuotaLease<'_> {
+    fn drop(&mut self) {
+        // Recover the guard during unwind so the original failure remains visible.
+        let mut quota = self
+            .quota
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        quota.release(&self.lease);
+    }
+}
+
 /// Marks a host-owned terminal attempt without changing the public error
 /// catalog. Dispatch consumes this private marker before the error can be
 /// rendered, persisted or returned to a caller.
@@ -354,42 +371,34 @@ impl Gateway {
                 exhausted: candidate.quota.exhausted,
             });
         }
-        // In quota mode, take an in-flight lease on the chosen account before
-        // dispatch so concurrent requests see the load and spread; settle the
-        // account below once the exchange finishes.
-        let lease = quota_now_ms.map(|now_ms| {
-            self.quota
-                .lock()
-                .expect("quota lock")
-                .grant(decision.chosen.upstream.as_str(), now_ms)
-        });
         let result = self.dispatch(ctx, agent, payload, inbound_tools, decision, emit, record);
-        if let Some(now_ms) = quota_now_ms {
-            self.settle_quota(session, lease.as_ref(), now_ms, record, &result);
-        }
+        self.settle_quota(session, unix_millis(), record, &result);
         result
     }
 
-    /// After a quota-first exchange: release its in-flight lease, charge the
-    /// account that actually served, and remember it for this conversation's
-    /// next turn (prompt-cache affinity).
+    /// Charge the serving account after every routing mode. Only quota routing
+    /// records conversation affinity. Actual attempts own their own leases.
     fn settle_quota(
         &self,
         session: &str,
-        lease: Option<&crate::quota_lease::LeaseId>,
         now_ms: u64,
         record: &RequestRecord,
         result: &Result<(UpstreamModel, StreamOutcome), ErrorEnvelope>,
     ) {
         let mut quota = self.quota.lock().expect("quota lock");
-        if let Some(lease) = lease {
-            quota.release(lease);
-        }
-        if let Ok((served, _)) = result {
-            if let Some(usage) = &record.usage {
-                quota.record(served.upstream.as_str(), now_ms, usage);
+        if let Ok((served, outcome)) = result {
+            quota.record_settled(
+                served.upstream.as_str(),
+                &record.request_id,
+                now_ms,
+                record.usage.as_ref(),
+                *outcome == StreamOutcome::Complete,
+            );
+            if !session.is_empty()
+                && (*outcome == StreamOutcome::Complete || record.usage.is_some())
+            {
+                quota.remember(session, served.clone());
             }
-            quota.remember(session, served.clone());
         }
     }
 
@@ -510,6 +519,14 @@ impl Gateway {
             if !budget.try_begin(None) {
                 break;
             }
+            let quota_lease = AttemptQuotaLease {
+                quota: &self.quota,
+                lease: self.quota.lock().expect("quota lock").grant_for(
+                    target.upstream.as_str(),
+                    unix_millis(),
+                    u64::try_from(ctx.remaining().as_millis()).unwrap_or(u64::MAX),
+                ),
+            };
             record.attempts = budget.attempts;
             record_actual_attempt_target(record, decision, target);
             let attempt_clock = Instant::now();
@@ -577,6 +594,7 @@ impl Gateway {
                         last_error = Some(error);
                         break;
                     }
+                    drop(quota_lease);
                     // Honor a `Retry-After` only when another real attempt can
                     // follow, bounded by both elapsed and request deadlines.
                     if let Some(retry_after_ms) = error
@@ -767,13 +785,11 @@ impl Gateway {
         // Mode-agnostic (cheap; only read in quota-first mode) so the data is
         // already warm whenever the user is in quota mode. Never touches the body.
         let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
-        if !windows.is_empty() {
-            self.quota.lock().expect("quota lock").note_authoritative(
-                target.upstream.as_str(),
-                unix_millis(),
-                windows,
-            );
-        }
+        self.quota.lock().expect("quota lock").note_authoritative(
+            target.upstream.as_str(),
+            unix_millis(),
+            windows,
+        );
 
         if request.stream {
             Self::translate_stream_response(
@@ -942,6 +958,8 @@ mod request_receipt_tests {
                     cache_read_per_mtok: 300_000,
                     cache_write_per_mtok: 400_000,
                     reasoning_per_mtok: None,
+                    cache_write_5m_per_mtok: None,
+                    cache_write_1h_per_mtok: None,
                 },
             )]),
             ..PriceTable::default()

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { setSettings } from "../api";
 import type { AgentUiMetadataView, ServeView, SettingsView } from "../api";
 import { ErrorToastProvider } from "../components/ErrorToast";
 import SettingsHub from "./SettingsHub";
@@ -9,6 +10,7 @@ vi.mock("../api", async (loadOriginal) => {
   const original = await loadOriginal<typeof import("../api")>();
   return {
     ...original,
+    setSettings: vi.fn().mockResolvedValue({ settings: { auth: true, metrics: true, request_body_capture: false, egress_mode: "direct", egress_proxy_url: "", egress_no_proxy: [], egress_auth_username: "", egress_auth_slot: "" } }),
     getEgress: vi.fn().mockResolvedValue({
       mode: "direct",
       proxy_url: null,
@@ -456,4 +458,38 @@ describe("SettingsHub clipboard feedback", () => {
     expect(screen.queryByText(message, { selector: ".settings-card .banner" }))
       .not.toBeInTheDocument();
   });
+});
+
+it("keeps an unsaved settings draft when keyboard navigation is cancelled", async () => {
+  const user = userEvent.setup();
+  render(<SettingsHub settings={settings} serve={serve} registry={registry}
+    visibleAgentIds={new Set()} onAgentVisibilityChange={vi.fn()} onOpenFirstRunGuide={vi.fn()}
+    onSaved={vi.fn()} initialSection="general" />);
+  const toggles = screen.getAllByRole("switch");
+  const editable = toggles.find((toggle) => !toggle.hasAttribute("disabled"))!;
+  await user.click(editable);
+  const original = editable.getAttribute("aria-checked");
+  const navigation = screen.getByRole("navigation", { name: "设置分类" });
+  const general = within(navigation).getByRole("button", { name: /代理/ });
+  general.focus();
+  await user.keyboard("{ArrowUp}");
+  await user.click(screen.getByRole("button", { name: "继续编辑" }));
+  expect(general).toHaveFocus();
+  expect(editable).toHaveAttribute("aria-checked", original);
+  await user.keyboard("{ArrowUp}");
+  await user.click(screen.getByRole("button", { name: "放弃更改并离开" }));
+  expect(general).not.toHaveAttribute("aria-current", "page");
+});
+
+it("saves metadata-only capture with explicit application and history boundaries", async () => {
+  const user = userEvent.setup();
+  render(<SettingsHub settings={settings} serve={serve} registry={registry}
+    visibleAgentIds={new Set()} onAgentVisibilityChange={vi.fn()} onOpenFirstRunGuide={vi.fn()}
+    onSaved={vi.fn()} initialSection="general" />);
+  const capture = screen.getByRole("switch", { name: /保存请求与响应正文/ });
+  expect(capture).toHaveAttribute("aria-checked", "true");
+  await user.click(capture);
+  expect(screen.getByText(/已有正文记录不会自动删除/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  expect(setSettings).toHaveBeenCalledWith(true, true, expect.objectContaining({ request_body_capture: false }));
 });

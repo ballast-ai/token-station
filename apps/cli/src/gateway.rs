@@ -1384,15 +1384,7 @@ fn model_cost_document(
     capability: &ModelCapability,
     pricing: &crate::pricing::PriceTable,
 ) -> Option<Value> {
-    capability
-        .extensions
-        .get("catalog_cost")
-        .and_then(sanitized_catalog_cost)
-        .or_else(|| {
-            pricing
-                .model_price(&capability.model)
-                .map(model_price_document)
-        })
+    model_cost_with_price(capability, pricing.model_price(&capability.model))
 }
 
 fn model_cost_document_for_upstream(
@@ -1400,27 +1392,41 @@ fn model_cost_document_for_upstream(
     capability: &ModelCapability,
     pricing: &crate::pricing::PriceTable,
 ) -> Option<Value> {
-    capability
+    model_cost_with_price(
+        capability,
+        pricing.model_price_for_upstream(upstream, &capability.model),
+    )
+}
+
+fn model_cost_with_price(
+    capability: &ModelCapability,
+    price: Option<&crate::pricing::ModelPrice>,
+) -> Option<Value> {
+    let mut cost = capability
         .extensions
         .get("catalog_cost")
         .and_then(sanitized_catalog_cost)
-        .or_else(|| {
-            pricing
-                .model_price_for_upstream(upstream, &capability.model)
-                .map(model_price_document)
-        })
+        .or_else(|| price.map(model_price_document))?;
+    // A catalog's single cache price cannot represent configured TTL rates.
+    if price.is_some_and(|price| price.uniform_cache_write_rate().is_none()) {
+        cost.as_object_mut()?.remove("cache_write");
+    }
+    Some(cost)
 }
 
 fn model_price_document(price: &crate::pricing::ModelPrice) -> Value {
     // Price display is decimal USD per million tokens; sub-cent rounding is acceptable here.
     #[allow(clippy::cast_precision_loss)]
     let dollars = |micros: u64| micros as f64 / 1_000_000.0;
-    json!({
+    let mut document = json!({
         "input": dollars(price.input_per_mtok),
         "output": dollars(price.output_per_mtok),
         "cache_read": dollars(price.cache_read_per_mtok),
-        "cache_write": dollars(price.cache_write_per_mtok),
-    })
+    });
+    if let Some(rate) = price.uniform_cache_write_rate() {
+        document["cache_write"] = json!(dollars(rate));
+    }
+    document
 }
 
 fn router_catalog_targets(router: &Router) -> Option<BTreeSet<UpstreamModel>> {
@@ -2109,6 +2115,9 @@ impl Gateway {
             }
         }
 
+        let quota = crate::quota_tracker::QuotaTracker::persistent(quota_plans, &config.data.dir)
+            .map_err(|error| format!("Cannot restore quota state: {error}"))?;
+
         Ok(Self {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
@@ -2123,7 +2132,7 @@ impl Gateway {
                 eject_after: config.health.eject_after,
                 cooldown: Duration::from_millis(config.health.cooldown_ms),
             })),
-            quota: std::sync::Mutex::new(crate::quota_tracker::QuotaTracker::new(quota_plans)),
+            quota: std::sync::Mutex::new(quota),
             admission: Admission::new(config.concurrency),
             pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config, &config.data.dir),
@@ -4751,6 +4760,46 @@ mod waiting_route_tests {
                 "gemini" => assert_eq!(body["error"]["status"], json!(expected.1)),
                 _ => unreachable!(),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ttl_model_projection_tests {
+    #[test]
+    fn ttl_model_metadata_omits_a_single_cache_rate_for_mixed_tiers() {
+        let price: crate::pricing::ModelPrice = serde_json::from_value(serde_json::json!({
+            "input_per_mtok": 3_000_000,
+            "output_per_mtok": 15_000_000,
+            "cache_write_per_mtok": 3_750_000,
+            "cache_write_1h_per_mtok": 6_000_000
+        }))
+        .unwrap();
+        let pricing = crate::pricing::PriceTable {
+            version: 1,
+            models: std::collections::BTreeMap::from([("provider/model".to_owned(), price)]),
+        };
+        for catalog in [false, true] {
+            let mut capability = token_station_protocol::ModelCapability {
+                model: "model".to_owned(),
+                ..Default::default()
+            };
+            if catalog {
+                capability.extensions.insert(
+                    "catalog_cost".to_owned(),
+                    serde_json::json!({
+                        "input": 3.0, "output": 15.0, "cache_write": 3.75
+                    }),
+                );
+            }
+            let cost =
+                super::model_cost_document_for_upstream("provider", &capability, &pricing).unwrap();
+            assert_eq!(cost["input"], 3.0);
+            assert_eq!(cost["output"], 15.0);
+            assert!(
+                cost.get("cache_write").is_none(),
+                "one published rate cannot represent mixed TTL prices"
+            );
         }
     }
 }

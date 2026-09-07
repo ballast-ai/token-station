@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ModelPriceView,
   ModelPriceSuggestionView,
@@ -10,9 +10,10 @@ import {
 } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { useDraftGuard, useDraftNavigation } from "./DraftNavigation";
 import { useErrorToast } from "./ErrorToast";
 
-function displayRate(rate: number | null): string {
+function displayRate(rate: number | null | undefined): string {
   return rate == null ? "" : String(rate / 1_000_000);
 }
 
@@ -38,8 +39,30 @@ export default function PricingEditor() {
   const [output, setOutput] = useState("0");
   const [cacheRead, setCacheRead] = useState("0");
   const [cacheWrite, setCacheWrite] = useState("0");
+  const [cacheWrite5m, setCacheWrite5m] = useState("");
+  const [cacheWrite1h, setCacheWrite1h] = useState("");
   const [reasoning, setReasoning] = useState("");
   const [error, setError] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const confirmNavigation = useDraftNavigation();
+  useDraftGuard(dirty);
+  const reloadAfterError = async (value: unknown) => {
+    showError(humanizeAppError(value), "model-price-write");
+    try {
+      const current = await getPriceTable();
+      setTable(current);
+      if (table && current.version !== table.version) setError(copy(
+        `Prices changed to v${current.version}. Your draft is preserved. Review the current table before saving again.`,
+        `价格表已更新为 v${current.version}，已保留输入。请核对当前价格表后再次保存。`,
+        `價格表已更新為 v${current.version}，已保留輸入。請核對目前價格表後再次儲存。`,
+        `価格表は v${current.version} に更新されました。入力は保持されています。現在の価格表を確認してから再保存してください。`,
+      ));
+    } catch {
+      setError(copy("Could not reload prices. Retry the refresh before saving.", "无法刷新价格表，请刷新后再保存。", "無法重新整理價格表，請重新整理後再儲存。", "価格表を再取得できません。更新してから保存してください。"));
+    }
+  };
   // A dirty price belongs to one model only. Reusing it after the model ID
   // changes can silently save one model's price under another model.
   const [touchedModel, setTouchedModel] = useState<string | null>(null);
@@ -80,6 +103,8 @@ export default function PricingEditor() {
           setCacheRead(displayRate(value.cache_read_per_mtok));
           setCacheWrite(displayRate(value.cache_write_per_mtok));
           setReasoning(displayRate(value.reasoning_per_mtok));
+          setCacheWrite5m(""); setCacheWrite1h("");
+          setDirty(true);
           setSuggestion(value);
           dismissToast(`model-price-suggest:${requestedModel}`);
         })
@@ -99,11 +124,14 @@ export default function PricingEditor() {
   }, [dismissToast, lookupRequestedFor, model, noPublicPriceMessage, showError, showInfo, table, touchedModel]);
 
   const edit = (name: string, price: ModelPriceView) => {
+    setDirty(false);
     setModel(name);
     setInput(displayRate(price.input_per_mtok));
     setOutput(displayRate(price.output_per_mtok));
     setCacheRead(displayRate(price.cache_read_per_mtok));
     setCacheWrite(displayRate(price.cache_write_per_mtok));
+    setCacheWrite5m(displayRate(price.cache_write_5m_per_mtok));
+    setCacheWrite1h(displayRate(price.cache_write_1h_per_mtok));
     setReasoning(displayRate(price.reasoning_per_mtok));
     setError("");
     setTouchedModel(name);
@@ -112,7 +140,7 @@ export default function PricingEditor() {
 
   const save = async () => {
     setError("");
-    if (!table) return;
+    if (!table || inFlight.current) return;
     if (!model || model.trim() !== model || model.length > 256) {
       setError(copy(
         "Model ID must be 1–256 characters with no leading or trailing spaces.",
@@ -122,7 +150,12 @@ export default function PricingEditor() {
     }
     let price: ModelPriceView;
     try {
+      const optionalRate = (raw: string) => raw === "" ? null : rateMicros(raw, copy(
+        "Cache TTL price must be a valid amount with at most 6 decimal places.",
+        "缓存 TTL 价格必须是最多 6 位小数的有效金额。", "快取 TTL 價格必須是最多 6 位小數的有效金額。", "キャッシュ TTL 価格は小数点以下最大 6 桁の有効な金額にしてください。"));
       price = {
+        ...(cacheWrite5m !== "" || table.models[model]?.cache_write_5m_per_mtok != null ? { cache_write_5m_per_mtok: optionalRate(cacheWrite5m) } : {}),
+        ...(cacheWrite1h !== "" || table.models[model]?.cache_write_1h_per_mtok != null ? { cache_write_1h_per_mtok: optionalRate(cacheWrite1h) } : {}),
         input_per_mtok: rateMicros(input, copy(
           "Input price must be a valid amount from 0 to 9 billion with at most 6 decimal places.",
           "输入价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。", "輸入價格必須介於 0 到 90 億之間，小數點後最多 6 位。", "入力価格は 0～90億の有効な金額で、小数点以下は最大6桁です。"
@@ -148,30 +181,38 @@ export default function PricingEditor() {
       setError(humanizeAppError(value));
       return;
     }
+    inFlight.current = true;
+    setBusy(true);
     try {
       const next = await setModelPrice(model, price, table.version);
       setTable(next);
+      setDirty(false);
       showSuccess(copy(
         `Created price v${next.version}. Reapply the configuration to update the running proxy.`,
         `已生成 price v${next.version}；正在运行的代理需重新应用配置。`, `已生成 price v${next.version}；正在執行的代理需重新應用配置。`, `price v${next.version} が生成されました；実行中のプロキシは構成を再適用する必要があります。`
       ), `model-price-save:${model}`);
     } catch (value) {
-      showError(humanizeAppError(value), `model-price-save:${model}`);
+      await reloadAfterError(value);
+    } finally {
+      inFlight.current = false; setBusy(false);
     }
   };
 
   const remove = async (name: string) => {
-    if (!table) return;
+    if (!table || inFlight.current) return;
+    inFlight.current = true; setBusy(true);
     setError("");
     try {
       const next = await removeModelPrice(name, table.version);
       setTable(next);
       if (model === name) {
+        setDirty(false);
         setModel("");
         setInput("0");
         setOutput("0");
         setCacheRead("0");
         setCacheWrite("0");
+        setCacheWrite5m(""); setCacheWrite1h("");
         setReasoning("");
         setTouchedModel(null);
         setLookupRequestedFor(null);
@@ -182,7 +223,9 @@ export default function PricingEditor() {
         `已生成 price v${next.version}；历史回执保持原成本。`, `已生成 price v${next.version}；歷史回執保持原成本。`, `price v${next.version} が生成されました；履歴レシートは元のコストを保持します。`
       ), `model-price-remove:${name}`);
     } catch (value) {
-      showError(humanizeAppError(value), `model-price-remove:${name}`);
+      await reloadAfterError(value);
+    } finally {
+      inFlight.current = false; setBusy(false);
     }
   };
 
@@ -230,10 +273,10 @@ export default function PricingEditor() {
                   ? copy("Same as output", "跟随输出", "跟隨輸出", "出力に従う")
                   : displayRate(price.reasoning_per_mtok)}</td>
                 <td className="price-actions">
-                  <button className="btn tiny" aria-label={copy(`Edit ${name}`, `编辑 ${name}`, `編輯 ${name}`, `編集 ${name}`)} onClick={() => edit(name, price)}>
+                  <button className="btn tiny" aria-label={copy(`Edit ${name}`, `编辑 ${name}`, `編輯 ${name}`, `編集 ${name}`)} disabled={busy} onClick={() => dirty ? confirmNavigation(() => edit(name, price)) : edit(name, price)}>
                     {copy("Edit", "编辑", "編輯", "編集")}
                   </button>
-                  <button className="btn tiny danger" aria-label={copy(`Delete ${name}`, `删除 ${name}`, `刪除 ${name}`, `削除 ${name}`)} onClick={() => remove(name)}>
+                  <button className="btn tiny danger" aria-label={copy(`Delete ${name}`, `删除 ${name}`, `刪除 ${name}`, `削除 ${name}`)} disabled={busy} onClick={() => remove(name)}>
                     {copy("Delete", "删除", "刪除", "削除")}
                   </button>
                 </td>
@@ -243,20 +286,24 @@ export default function PricingEditor() {
         </table>
       )}
 
+      <p className="sub">{copy("Optional TTL prices fall back to the general cache write price when blank.", "TTL 价格可选；留空时使用通用缓存写入价格。", "TTL 價格可選；留空時使用通用快取寫入價格。", "TTL 価格は任意です。空欄の場合は通常のキャッシュ書き込み価格を使用します。")}</p>
       <div className="price-form">
         <label className="field-label price-model-field">
           {copy("Model ID", "模型 ID", "模型 ID", "モデル ID")}
           <input
             aria-label={copy("Model ID", "模型 ID", "模型 ID", "モデル ID")}
             className="input"
+            disabled={busy}
             value={model}
             onChange={(event) => {
               // Changing the identity invalidates both an automatic suggestion
               // and any manually entered amount for the previous model.
+              setDirty(true);
               setInput("0");
               setOutput("0");
               setCacheRead("0");
               setCacheWrite("0");
+              setCacheWrite5m(""); setCacheWrite1h("");
               setReasoning("");
               setSuggestion(null);
               setTouchedModel(null);
@@ -270,18 +317,24 @@ export default function PricingEditor() {
           [copy("Output price", "输出价格", "輸出價格", "出力価格"), output, setOutput, false],
           [copy("Cache read price", "缓存读取价格", "快取讀取價格", "キャッシュ読み取り価格"), cacheRead, setCacheRead, false],
           [copy("Cache write price", "缓存写入价格", "快取寫入價格", "キャッシュ書き込み価格"), cacheWrite, setCacheWrite, false],
+          [copy("Cache write price (5 minutes)", "缓存写入价格（5 分钟）", "快取寫入價格（5 分鐘）", "キャッシュ書き込み価格（5 分）"), cacheWrite5m, setCacheWrite5m, true],
+          [copy("Cache write price (1 hour)", "缓存写入价格（1 小时）", "快取寫入價格（1 小時）", "キャッシュ書き込み価格（1 時間）"), cacheWrite1h, setCacheWrite1h, true],
           [copy("Reasoning price", "推理价格", "推理價格", "推論価格"), reasoning, setReasoning, true],
         ].map(([label, value, setter, optional]) => (
           <label className="field-label" key={label as string}>
-            {label as string}{optional ? copy(" (empty uses output price)", "（空=跟随输出）", "（空=使用輸出價格）", "（空=出力価格を使用）") : ""}
+            {label as string}{optional ? setter === setReasoning
+              ? copy(" (empty uses output price)", "（空=跟随输出）", "（空=使用輸出價格）", "（空=出力価格を使用）")
+              : copy(" (empty uses cache write price)", "（空=通用缓存写入价）", "（空=通用快取寫入價）", "（空=通常のキャッシュ書き込み価格）") : ""}
             <input
               aria-label={label as string}
               className="input"
+              disabled={busy}
               type="number"
               min="0"
               step="0.000001"
               value={value as string}
               onChange={(event) => {
+                setDirty(true);
                 setTouchedModel(model.trim());
                 setSuggestion(null);
                 (setter as (value: string) => void)(event.target.value);
@@ -292,12 +345,12 @@ export default function PricingEditor() {
         <div className="price-save-action">
           <button
             className="btn"
-            disabled={!table || model.trim().length === 0 || table.models[model.trim()] != null}
+            disabled={busy || !table || model.trim().length === 0 || table.models[model.trim()] != null}
             onClick={() => setLookupRequestedFor(model.trim())}
           >
             {copy("Look up public price", "查询公开价格", "查詢公開價格", "公開価格を照会")}
           </button>
-          <button className="btn primary" disabled={!table} onClick={save}>
+          <button className="btn primary" disabled={busy || !table} onClick={save}>
             {copy("Save new version", "保存新版本", "儲存新版本", "新しいバージョンを保存")}
           </button>
         </div>
@@ -310,7 +363,12 @@ export default function PricingEditor() {
           )}
         </div>
       )}
-      {error && <div className="banner err">{error}</div>}
+      {error && <div className="banner err" role="alert">{error}
+        <button type="button" className="btn" disabled={busy} onClick={async () => {
+          try { setTable(await getPriceTable()); setError(""); }
+          catch (value) { showError(humanizeAppError(value), "model-price-refresh"); }
+        }}>{copy("Refresh prices", "刷新价格表", "重新整理價格表", "価格表を更新")}</button>
+      </div>}
     </div>
   );
 }
