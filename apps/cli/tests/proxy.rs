@@ -6245,6 +6245,17 @@ fn a_failing_upstream_is_ejected_bypassed_probed_and_restored() {
     );
     assert_eq!(primary.hits(), 4, "the degraded primary took the probe");
 
+    // HTTP bytes arrive before the worker settles health. The fifth persisted
+    // receipt proves that the probe settled before the next route decision.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while request_count(&proxy.data_dir) < 5 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the successful probe must settle before checking restored health"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
     // The probe succeeded, so the primary is fully back: config order wins.
     let (status, _) = ask();
     assert_eq!(status, 200);
