@@ -1,0 +1,16 @@
+.usage-trend-chart .usage-chart-isolated-cost {
+  fill: var(--surface);
+  stroke: var(--usage-cost);
+  stroke-width: 2;
+}
+
+.usage-chart-cost-annotation {
+  fill: var(--usage-cost);
+  stroke: var(--surface);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}

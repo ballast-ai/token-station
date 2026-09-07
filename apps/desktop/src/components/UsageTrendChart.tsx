@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import "./UsageTrendChart.css";
 import type { AggView } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue, usageCoverageLabel } from "../usagePresentation";
@@ -282,6 +283,12 @@ export default function UsageTrendChart({
   const activeCount = buckets.filter(({ aggregate }) => isActive(aggregate)).length;
   const activeIndex = buckets.findIndex((bucket) => bucket.key === activeKey);
   const active = activeIndex >= 0 ? buckets[activeIndex] : null;
+  const isolatedCostIndexes = costValues.flatMap((value, index) => value != null && value > 0
+    && (index === 0 || costValues[index - 1] == null)
+    && (index === buckets.length - 1 || costValues[index + 1] == null) ? [index] : []);
+  const annotatedCostIndex = active
+    ? (isolatedCostIndexes.includes(activeIndex) ? activeIndex : -1)
+    : (isolatedCostIndexes[isolatedCostIndexes.length - 1] ?? -1);
   useLayoutEffect(() => {
     const bounds = tooltipRef.current?.getBoundingClientRect();
     if (bounds?.width && bounds.height) setTooltipSize((previous) => previous.width === bounds.width && previous.height === bounds.height
@@ -440,9 +447,19 @@ export default function UsageTrendChart({
           {tokenSeries.map((series) => series.values.map((value, index) => value != null && value > 0
             && (index === 0 || series.values[index - 1] == null) && (index === buckets.length - 1 || series.values[index + 1] == null)
             ? <circle key={`${series.key}-${index}`} data-usage-point className={`usage-chart-point ${series.className}`} cx={xForIndex(index)} cy={yForValue(value, tokenMaximum)} r="2.5" /> : null))}
-          {costValues.map((value, index) => value != null && value > 0
-            && (index === 0 || costValues[index - 1] == null) && (index === buckets.length - 1 || costValues[index + 1] == null)
-            ? <circle key={index} data-cost-point className="usage-chart-point cost" cx={xForIndex(index)} cy={yForValue(value, costMaximum)} r="2.5" /> : null)}
+          {isolatedCostIndexes.map((index) => (
+            <circle key={index} data-cost-point className="usage-chart-point cost usage-chart-isolated-cost" cx={xForIndex(index)} cy={yForValue(costValues[index]!, costMaximum)} r="2.5" />
+          ))}
+          {annotatedCostIndex >= 0 && (
+            <text
+              className="usage-chart-cost-annotation"
+              x={xForIndex(annotatedCostIndex) + (xForIndex(annotatedCostIndex) > WIDTH / 2 ? -10 : 10)}
+              y={Math.max(PLOT.top + 14, yForValue(costValues[annotatedCostIndex]!, costMaximum) - 10)}
+              textAnchor={xForIndex(annotatedCostIndex) > WIDTH / 2 ? "end" : "start"}
+            >
+              {copy("Cost", "成本", "成本", "コスト")} {costText(buckets[annotatedCostIndex].aggregate)}
+            </text>
+          )}
 
           {active && (
             <g className="usage-chart-crosshair" aria-hidden="true">
@@ -546,6 +563,14 @@ export default function UsageTrendChart({
               <i />{copy("Cost", "成本", "成本", "コスト")}
               <em>{costText(active.aggregate)}</em>
             </span>
+            {isolatedCostIndexes.includes(activeIndex) && (
+              <small>{copy(
+                "Adjacent periods lack cost data for a continuous curve.",
+                "相邻时段成本数据不足，无法形成连续曲线。",
+                "相鄰時段成本資料不足，無法形成連續曲線。",
+                "隣接する期間のコストデータが不足しているため、連続した曲線を描画できません。",
+              )}</small>
+            )}
             <small>{copy(
               `${active.aggregate.priced_requests} priced`,
               `${active.aggregate.priced_requests} 次已计价`,

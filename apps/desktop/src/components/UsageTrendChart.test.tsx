@@ -168,10 +168,49 @@ describe("UsageTrendChart", () => {
     const { container } = render(<UsageTrendChart groups={[[String(bucketMs), { ...aggregate, cost_micros: 1 }]]} range="all" nowMs={nowMs} />);
     expect(container.querySelectorAll("[data-usage-point]")).toHaveLength(4);
     expect(container.querySelector("[data-cost-point]")).toHaveAttribute("r", "2.5");
+    expect(container.querySelector(".usage-chart-cost-annotation")).toHaveTextContent("成本 $0.000001");
     await user.tab();
     expect(screen.getByRole("status")).toHaveTextContent("$0.000001");
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("explains an isolated partial cost at the current-hour edge without drawing through unknown costs", () => {
+    const missing = { ...aggregate, cost_micros: null, priced_requests: 0, unpriced_requests: 3 };
+    const partial = { ...aggregate, cost_micros: 8392, priced_requests: 1, unpriced_requests: 2 };
+    const current = bucketMs + 7200000;
+    const { container } = render(<UsageTrendChart groups={[[String(current - 3600000), missing], [String(current), partial]]} range="24h" nowMs={nowMs} />);
+    const label = container.querySelector(".usage-chart-cost-annotation");
+    expect(label).toHaveTextContent("成本 $0.008392（部分）");
+    expect(label).toHaveAttribute("text-anchor", "end");
+    expect(Number(label?.getAttribute("x"))).toBeLessThan(856);
+    expect(container.querySelector("[data-cost-point]")).toBeInTheDocument();
+    expect(container.querySelector(".usage-chart-cost-line")?.getAttribute("d")).toMatch(/M 856\.0 [\d.]+$/);
+    fireEvent.mouseEnter(container.querySelector(`[data-bucket-key="${current}"]`) as Element);
+    expect(screen.getByRole("status")).toHaveTextContent("相邻时段成本数据不足，无法形成连续曲线");
+    expect(screen.getByRole("status")).toHaveTextContent("13:00");
+    expect(container.querySelector("svg title")).toBeNull();
+  });
+
+  it("shows only one isolated cost annotation and follows keyboard inspection", () => {
+    const missing = { ...aggregate, cost_micros: null, priced_requests: 0, unpriced_requests: 3 };
+    const current = bucketMs + 7200000;
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs - 3600000), missing], [String(bucketMs), aggregate], [String(bucketMs + 3600000), missing], [String(current), { ...aggregate, cost_micros: 1 }]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelectorAll(".usage-chart-cost-annotation")).toHaveLength(1);
+    expect(container.querySelector(".usage-chart-cost-annotation")).toHaveTextContent("$0.000001");
+    fireEvent.focus(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
+    expect(container.querySelectorAll(".usage-chart-cost-annotation")).toHaveLength(1);
+    expect(container.querySelector(".usage-chart-cost-annotation")).toHaveTextContent("$0.42");
+    fireEvent.keyDown(screen.getByRole("img"), { key: "ArrowRight" });
+    expect(container.querySelector(".usage-chart-cost-annotation")).toBeNull();
+    expect(screen.getByRole("status")).not.toHaveTextContent("无法形成连续曲线");
+  });
+
+  it("does not annotate continuous cost curves or a known zero as an isolated positive cost", () => {
+    const { container, rerender } = render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelector(".usage-chart-cost-annotation")).toBeNull();
+    rerender(<UsageTrendChart groups={[[String(bucketMs), { ...aggregate, cost_micros: 0 }]]} range="all" nowMs={nowMs} />);
+    expect(container.querySelector(".usage-chart-cost-annotation")).toBeNull();
   });
 
   it("does not bridge missing token lines or area segments", async () => {
