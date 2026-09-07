@@ -79,12 +79,20 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+fn discard_legacy_search_target<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
+}
+
 /// The whole client configuration file.
 ///
 /// `deny_unknown_fields` for the same reason `RouterConfig` has it: a
 /// misspelled key must fail loudly at load, not deserialize into a default
 /// that silently serves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// The private unit field consumes a removed setting, not a non-exhaustive marker.
+#[allow(clippy::manual_non_exhaustive)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub version: u32,
@@ -98,9 +106,14 @@ pub struct ClientConfig {
     /// derive their mode from the embedded router-core document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<HostRoutingConfig>,
-    /// Explicit native search backend, independent of the normal model route.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub web_search_target: Option<UpstreamModel>,
+    // Consume the removed setting so upgrades do not reject an old config.
+    #[serde(
+        default,
+        rename = "web_search_target",
+        deserialize_with = "discard_legacy_search_target",
+        skip_serializing
+    )]
+    legacy_web_search_target: (),
     /// Optional per-Agent three-tier overrides. An absent entry inherits the
     /// home router, keeping every pre-Agent-routes configuration compatible.
     #[serde(
@@ -1052,34 +1065,6 @@ impl ClientConfig {
         Ok(())
     }
 
-    /// Compile the optional independent search route.
-    ///
-    /// # Errors
-    /// Reject missing targets and providers without a declared native search protocol.
-    pub fn web_search_router_config(&self) -> Result<Option<RouterConfig>, String> {
-        let Some(target) = &self.web_search_target else {
-            return Ok(None);
-        };
-        self.validate_direct_target("Web Search", target)?;
-        let upstream = &self.upstreams[target.upstream.as_str()];
-        if !matches!(
-            upstream.api_dialect,
-            ApiDialect::AnthropicNative | ApiDialect::ResponsesNative
-        ) {
-            return Err(
-                "Web Search requires an anthropic-native or responses-native backend".to_owned(),
-            );
-        }
-        validate_api_dialect(target.upstream.as_str(), upstream)?;
-        Self::compile_router_config(
-            self.router.clone(),
-            RoutingMode::Direct,
-            Some(target.clone()),
-            "Web Search",
-        )
-        .map(Some)
-    }
-
     fn validate_direct_target(&self, owner: &str, target: &UpstreamModel) -> Result<(), String> {
         let upstream = self
             .upstreams
@@ -1257,7 +1242,6 @@ impl ClientConfig {
     /// Returns the first closed, user-actionable semantic or cross-field
     /// validation failure.
     pub fn validate(&self) -> Result<(), String> {
-        self.web_search_router_config()?;
         if self.version != 1 {
             return Err(format!("config version {} is not 1", self.version));
         }
@@ -2847,39 +2831,5 @@ mod v1_2_4_upgrade_tests {
             error.to_string().contains("souht_component"),
             "the refusal must name the field: {error}"
         );
-    }
-}
-
-#[cfg(test)]
-mod web_search_config_tests {
-    use super::*;
-
-    #[test]
-    fn search_target_requires_a_declared_native_backend_and_catalog_model() {
-        let mut config: ClientConfig =
-            serde_json::from_str(include_str!("../example-config.json")).unwrap();
-        let (name, upstream) = config.upstreams.iter().next().unwrap();
-        let name = name.clone();
-        config.web_search_target = Some(UpstreamModel {
-            upstream: token_station_router_core::UpstreamRef::new(name.clone()).unwrap(),
-            model: upstream.models[0].model.clone(),
-        });
-        assert!(
-            config
-                .web_search_router_config()
-                .unwrap_err()
-                .contains("native")
-        );
-        config.upstreams.get_mut(&name).unwrap().api_dialect = ApiDialect::ResponsesNative;
-        assert!(config.web_search_router_config().unwrap().is_some());
-        config.web_search_target.as_mut().unwrap().model = "missing-model".to_owned();
-        assert!(
-            config
-                .web_search_router_config()
-                .unwrap_err()
-                .contains("not declared")
-        );
-        config.web_search_target = None;
-        assert!(config.web_search_router_config().unwrap().is_none());
     }
 }

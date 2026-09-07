@@ -953,7 +953,6 @@ mod cancelled_settlement_tests {
             ..QuotaPlan::default()
         };
         Gateway {
-            web_search_router: None,
             agents: Vec::new(),
             skipped_agents: Vec::new(),
             home_router: None,

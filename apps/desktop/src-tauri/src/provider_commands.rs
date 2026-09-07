@@ -1663,9 +1663,6 @@ pub(crate) fn replace_provider_models(
                 .is_some_and(|model| !normalized.iter().any(|candidate| candidate == model))
     };
     let mut direct_and_quota_blocked = Vec::new();
-    if removed_reference(&inner.draft["web_search_target"]) {
-        direct_and_quota_blocked.push("联网搜索".to_owned());
-    }
     if removed_reference(&inner.draft["routing"]["direct_target"]) {
         direct_and_quota_blocked.push("主页/单独路由".to_owned());
     }
@@ -2042,9 +2039,6 @@ pub(crate) fn set_provider_model_limits(
 
 pub(crate) fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
     let mut references = Vec::new();
-    if inner.draft["web_search_target"]["upstream"].as_str() == Some(name) {
-        references.push("联网搜索".to_owned());
-    }
     if inner.draft["routing"]["direct_target"]["upstream"].as_str() == Some(name) {
         references.push("主页/单独路由".to_owned());
     }

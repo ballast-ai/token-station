@@ -1606,7 +1606,6 @@ pub struct Gateway {
     /// gateway remains available for Agent setup and rejects model traffic
     /// until the user applies a personal or enterprise route.
     home_router: Option<Arc<Router>>,
-    web_search_router: Option<Arc<Router>>,
     /// Per-Agent fallback routers and exact Harness overlays. Missing fallback
     /// entries use Home. Harness overlays run before every fallback strategy.
     ///
@@ -2129,14 +2128,6 @@ impl Gateway {
         Ok(Self {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
-            web_search_router: config
-                .web_search_router_config()?
-                .map(|config| {
-                    Router::new(config)
-                        .map(Arc::new)
-                        .map_err(|error| error.to_string())
-                })
-                .transpose()?,
             home_router,
             agent_routers: std::sync::RwLock::new(agent_routers),
             supported_agent_ids,

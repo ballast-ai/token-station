@@ -15,23 +15,13 @@ Claude Code
 
 ### Web Search is a separate capability
 
-Chat Completions compatibility alone does not provide Claude Code's hosted WebSearch tool. Token Station can use a separate search backend while normal chat keeps its existing route. Model names do not determine search support.
+Chat Completions compatibility alone does not provide Claude Code's hosted WebSearch tool. Search follows the existing provider route. There is no separate search-provider setting.
 
-In **Settings → Proxy → Web Search**, select a configured provider and a model that support native search. An Anthropic provider uses native Messages search. An OpenAI-compatible provider must implement native Responses `web_search`. Confirm support with the provider before saving. The selection declares the native protocol; it is not a live capability test. Restart the proxy after saving.
+An `anthropic-native` route passes hosted search through to the provider. A `responses-native` route translates Anthropic search into Responses `web_search`. The provider and model must implement that capability. Token Station does not infer search support from a model name or select another provider for search.
 
-Search requests and their context go to this provider. Its existing credential and network policy apply. Search can have separate provider charges. Token Station does not create a search subscription or silently choose another provider.
+The Responses bridge preserves allowed domains, location, search limits, sources, and declared client function calls. It rejects unsupported filters and content instead of silently removing requirements. It buffers the response before emitting Claude-compatible JSON or SSE. Previous hosted search results are replayed as readable context.
 
-For file-based configuration, declare the provider's `api_dialect` as `anthropic-native` or `responses-native`, then add this top-level field:
-
-```json
-"web_search_target": { "upstream": "search-provider", "model": "search-capable-model" }
-```
-
-The target must name an existing upstream and one of its catalog models. Omit this field to use only the current route's native search capability. Clearing the target does not remove the provider's declared native protocol.
-
-The Responses bridge preserves allowed domains, location, direct tool selection, search limits, sources, and client function calls. It rejects blocked-domain filters, programmatic search callers, unsupported tool versions, and non-text media instead of silently removing those requirements. Use an Anthropic-native backend when those features are required. Prior hosted search results are replayed as readable context, not as reusable Anthropic encrypted citations.
-
-The first Responses bridge buffers the upstream response before emitting Claude-compatible JSON or SSE. It does not display incremental upstream search progress. A normal Chat Completions model still requires a separate search-capable backend.
+If the selected route only provides Chat Completions, WebSearch returns an unsupported-route error. Ordinary chat remains available.
 
 A provider must meet these minimum requirements:
 

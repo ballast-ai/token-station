@@ -1,4 +1,4 @@
-//! Native hosted search is independent of the normal chat model.
+//! Adapt hosted search through the existing provider route.
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use std::fmt::Write as _;
@@ -245,6 +245,7 @@ fn from_responses(
     name: &str,
     model: &str,
     max_uses: Option<u64>,
+    request: &Value,
 ) -> Result<Value, ErrorEnvelope> {
     if !matches!(body["status"].as_str(), Some("completed" | "incomplete")) {
         return Err(protocol_error(
@@ -254,6 +255,25 @@ fn from_responses(
     let output = body["output"]
         .as_array()
         .ok_or_else(|| protocol_error("The search backend response has no output array"))?;
+    // Bound object overhead as well as bytes before constructing the reply.
+    let entries = output.iter().fold(output.len(), |total, item| {
+        let blocks = item["content"].as_array();
+        let annotations = blocks.into_iter().flatten().fold(0_usize, |count, block| {
+            count.saturating_add(block["annotations"].as_array().map_or(0, Vec::len))
+        });
+        total
+            .saturating_add(blocks.map_or(0, Vec::len))
+            .saturating_add(annotations)
+            .saturating_add(item["action"]["sources"].as_array().map_or(0, Vec::len))
+    });
+    if entries > 4096 {
+        return Err(protocol_error(
+            "The search backend returned too many output items",
+        ));
+    }
+    let last_search = output
+        .iter()
+        .rposition(|item| item["type"] == "web_search_call");
     let mut content = Vec::new();
     let mut count = 0_u64;
     let mut has_function = false;
@@ -263,7 +283,7 @@ fn from_responses(
             citations.extend(sources(&block["annotations"]));
         }
     }
-    for item in output {
+    for (index, item) in output.iter().enumerate() {
         match item["type"].as_str() {
             Some("web_search_call") => {
                 count += 1;
@@ -285,9 +305,8 @@ fn from_responses(
                     let mut found = sources(&item["action"]["sources"]);
                     // Some compatible backends expose sources only as final citations.
                     // Assign them only to the final search when per-call sources are absent.
-                    let last = output.iter().rev().find(|v| v["type"] == "web_search_call");
-                    if found.is_empty() && last == Some(item) {
-                        found.clone_from(&citations);
+                    if found.is_empty() && last_search == Some(index) {
+                        found = std::mem::take(&mut citations);
                     }
                     json!(found)
                 };
@@ -318,6 +337,36 @@ fn from_responses(
                 }
             }
             Some("function_call") => {
+                let function_name = item["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| protocol_error("The search backend function name is invalid"))?;
+                let declared = request["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|tool| {
+                        !search_tool(tool)
+                            && tool["name"] == function_name
+                            && tool.get("input_schema").is_some_and(Value::is_object)
+                            && tool
+                                .get("allowed_callers")
+                                .is_none_or(|callers| callers == &json!(["direct"]))
+                    });
+                let choice = &request["tool_choice"];
+                if !declared
+                    || choice["type"] == "none"
+                    || (choice["type"] == "tool" && choice["name"] != function_name)
+                {
+                    return Err(protocol_error(
+                        "The search backend returned an unauthorized client tool call",
+                    ));
+                }
+                if item["call_id"].as_str().is_none_or(str::is_empty) {
+                    return Err(protocol_error(
+                        "The search backend function call ID is invalid",
+                    ));
+                }
                 let input: Value = serde_json::from_str(item["arguments"].as_str().unwrap_or(""))
                     .map_err(|_| {
                     protocol_error("The search backend returned invalid function arguments")
@@ -338,6 +387,22 @@ fn from_responses(
             }
         }
     }
+    if !content.iter().any(|block| {
+        block["type"] != "text"
+            || block["text"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty())
+    }) {
+        return Err(protocol_error(
+            "The search backend returned no usable output",
+        ));
+    }
+    // Count serialized bytes without allocating a second copy of the response.
+    let mut budget = ResponseBudget {
+        remaining: MAX_UPSTREAM_BODY,
+    };
+    serde_json::to_writer(&mut budget, &content)
+        .map_err(|_| protocol_error("The converted search response exceeds the size limit"))?;
     let input = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
     let cached = body["usage"]["input_tokens_details"]["cached_tokens"]
         .as_u64()
@@ -347,6 +412,25 @@ fn from_responses(
         "content":content,"stop_reason":if has_function {"tool_use"} else if body["status"] == "incomplete" {"max_tokens"} else {"end_turn"},"stop_sequence":null,
         "usage":{"input_tokens":input.saturating_sub(cached),"cache_read_input_tokens":cached,"output_tokens":body["usage"]["output_tokens"].as_u64().unwrap_or(0),"server_tool_use":{"web_search_requests":count}}}),
     )
+}
+
+struct ResponseBudget {
+    remaining: u64,
+}
+
+impl std::io::Write for ResponseBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let length = bytes.len() as u64;
+        if length > self.remaining {
+            return Err(std::io::Error::other("search response size limit"));
+        }
+        self.remaining -= length;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn sse(event: &str, body: &Value) -> String {
@@ -360,7 +444,16 @@ fn emit_message(message: &Value, stream: bool, emit: &mut dyn FnMut(Reply) -> bo
             body: message.to_string(),
         }));
     }
-    let mut start = message.clone();
+    // Do not clone the buffered content merely to clear it for message_start.
+    let mut start = Value::Object(
+        message
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| key.as_str() != "content")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
     start["content"] = json!([]);
     start["stop_reason"] = Value::Null;
     start["usage"]["output_tokens"] = json!(0);
@@ -442,7 +535,7 @@ impl Gateway {
         if !declares_search(&original) {
             return Ok(None);
         }
-        let search_router = self.web_search_router.as_deref().unwrap_or(router);
+        let search_router = router;
         if let Some(served) = self.try_anthropic_passthrough(
             ctx,
             agent,
@@ -474,24 +567,18 @@ impl Gateway {
             .and_then(|decision| self.upstreams.get(decision.chosen.upstream.as_str()))
             .is_some_and(|upstream| upstream.dialect == ApiDialect::ResponsesNative);
         if !native_responses {
-            if self.web_search_router.is_none() {
-                let error = unsupported(
-                    "Anthropic web_search requires an anthropic-native or responses-native search backend. Configure Web Search in Settings.",
-                );
-                record_conversion(
-                    record,
-                    ConversionStage::InboundNormalize,
-                    "anthropic-messages",
-                    CANONICAL_CHAT_PROTOCOL,
-                    false,
-                    Some(error.code),
-                );
-                annotate_conversion_failure(record, &error);
-                return Err(error);
-            }
-            return Err(unsupported(
-                "Web Search backend is unavailable. Check its model, health, and native search support in Settings.",
-            ));
+            let error =
+                unsupported("The selected provider route does not support native web_search.");
+            record_conversion(
+                record,
+                ConversionStage::InboundNormalize,
+                "anthropic-messages",
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                Some(error.code),
+            );
+            annotate_conversion_failure(record, &error);
+            return Err(error);
         }
         let (mut forwarded, name) = to_responses(&original)?;
         forwarded["model"] = json!(model);
@@ -516,7 +603,7 @@ impl Gateway {
         )?;
         let Some((target, outcome)) = result else {
             return Err(unsupported(
-                "Web Search backend is unavailable. Check Settings.",
+                "The selected provider route cannot execute native Web Search.",
             ));
         };
         record.stream = stream;
@@ -541,28 +628,36 @@ impl Gateway {
                 answer.status,
                 "The search backend rejected the request. Check native Web Search support, credentials, and limits.",
             );
+            record.status = error.http_status;
+            record.error_code = Some(error.code);
+            self.settle(record, &target, StreamOutcome::FailedBeforeOutput);
             return Err(error);
         }
-        let parsed: Value = serde_json::from_str(&answer.body)
-            .map_err(|_| protocol_error("The search backend returned invalid JSON"))?;
-        let message = from_responses(
-            &parsed,
-            &name,
-            original["model"].as_str().unwrap_or(model),
-            max_uses,
-        )
-        .inspect_err(|error| {
-            // The upstream already consumed tokens even when wire conversion fails.
-            settle_estimated_cost(&self.pricing, record, &target);
-            record_conversion(
-                record,
-                ConversionStage::OutboundRender,
-                "openai-responses",
-                "anthropic-messages",
-                false,
-                Some(error.code),
-            );
-        })?;
+        let message = serde_json::from_str::<Value>(&answer.body)
+            .map_err(|_| protocol_error("The search backend returned invalid JSON"))
+            .and_then(|parsed| {
+                from_responses(
+                    &parsed,
+                    &name,
+                    original["model"].as_str().unwrap_or(model),
+                    max_uses,
+                    &original,
+                )
+            })
+            .inspect_err(|error| {
+                // The upstream already consumed tokens even when wire conversion fails.
+                record.status = error.http_status;
+                record.error_code = Some(error.code);
+                self.settle(record, &target, StreamOutcome::FailedBeforeOutput);
+                record_conversion(
+                    record,
+                    ConversionStage::OutboundRender,
+                    "openai-responses",
+                    "anthropic-messages",
+                    false,
+                    Some(error.code),
+                );
+            })?;
         record_conversion(
             record,
             ConversionStage::OutboundRender,
@@ -630,7 +725,7 @@ mod tests {
         let result = from_responses(&json!({"id":"resp_1","status":"completed","output":[
             {"type":"web_search_call","id":"ws_1","status":"completed","action":{"query":"news","sources":[{"url":"https://example.com","title":"News"}]}},
             {"type":"message","content":[{"type":"output_text","text":"Today's news","annotations":[{"type":"url_citation","url":"https://example.com","title":"News"}]}]}
-        ],"usage":{"input_tokens":10,"output_tokens":20}}), "web_search", "main-model", Some(2)).unwrap();
+        ],"usage":{"input_tokens":10,"output_tokens":20}}), "web_search", "main-model", Some(2), &request()).unwrap();
         assert_eq!(result["content"][0]["type"], "server_tool_use");
         assert_eq!(
             result["content"][1]["tool_use_id"],
@@ -652,9 +747,78 @@ mod tests {
                 &json!({"status":"failed","output":[]}),
                 "web_search",
                 "model",
-                None
+                None,
+                &request()
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn identical_search_calls_receive_final_citations_only_once() {
+        let call = json!({"type":"web_search_call","id":"same","status":"completed","action":{"query":"news"}});
+        let mut output = vec![call; 1000];
+        output.push(json!({"type":"message","content":[{"type":"output_text","text":"news","annotations":[{"url":"https://example.com","title":"x".repeat(100_000)}]}]}));
+        let body = json!({"status":"completed","output":output});
+        let result = from_responses(&body, "web_search", "model", None, &request()).unwrap();
+        let assigned = result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| {
+                block["type"] == "web_search_tool_result"
+                    && block["content"]
+                        .as_array()
+                        .is_some_and(|sources| !sources.is_empty())
+            })
+            .count();
+        assert_eq!(assigned, 1);
+        assert!(result.to_string().len() < 1_000_000);
+    }
+
+    #[test]
+    fn client_calls_require_declaration_and_matching_tool_choice() {
+        let body = json!({"status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}]});
+        let mut original = request();
+        assert!(from_responses(&body, "web_search", "model", None, &original).is_err());
+        original["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"lookup","input_schema":{"type":"object"}}));
+        // The original forced hosted-search choice still forbids this client tool.
+        assert!(from_responses(&body, "web_search", "model", None, &original).is_err());
+        original["tool_choice"] = json!({"type":"none"});
+        assert!(from_responses(&body, "web_search", "model", None, &original).is_err());
+        for choice in [
+            json!({"type":"auto"}),
+            json!({"type":"tool","name":"lookup"}),
+        ] {
+            original["tool_choice"] = choice;
+            let result = from_responses(&body, "web_search", "model", None, &original).unwrap();
+            assert_eq!(result["content"][0]["name"], "lookup");
+            assert_eq!(result["stop_reason"], "tool_use");
+        }
+    }
+
+    #[test]
+    fn empty_or_reasoning_only_success_is_rejected() {
+        for output in [
+            json!([]),
+            json!([{"type":"reasoning"}]),
+            json!([{"type":"message","content":[{"type":"output_text","text":" "}]}]),
+        ] {
+            let body = json!({"status":"completed","output":output});
+            assert!(from_responses(&body, "web_search", "model", None, &request()).is_err());
+        }
+        let refusal = json!({"status":"completed","output":[{"type":"message","content":[{"type":"refusal","refusal":"Search is unavailable."}]}]});
+        assert!(from_responses(&refusal, "web_search", "model", None, &request()).is_ok());
+    }
+
+    #[test]
+    fn converted_output_has_byte_and_entry_limits() {
+        let body = json!({"status":"completed","output":vec![json!({"type":"reasoning"});4097]});
+        assert!(from_responses(&body, "web_search", "model", None, &request()).is_err());
+        let mut budget = ResponseBudget { remaining: 8 };
+        assert!(serde_json::to_writer(&mut budget, &json!("0123456789")).is_err());
     }
 }

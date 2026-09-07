@@ -3798,7 +3798,7 @@ fn translated_anthropic_server_tool_fails_before_upstream_with_receipt_reason() 
     assert_eq!(status, 400, "body={body}");
     let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
     assert_eq!(error["error"]["type"], json!("invalid_request_error"));
-    assert!(body.contains("anthropic-native"), "body={body}");
+    assert!(body.contains("selected provider route"), "body={body}");
     assert_eq!(
         mock.hits(),
         0,
@@ -9913,11 +9913,11 @@ fn stalled_authenticated_upload_is_registered_and_released_by_drain() {
     std::fs::remove_file(key).unwrap();
 }
 
-fn start_independent_search_proxy(chat: &MockUpstream, search: &MockUpstream, key: &Path) -> Proxy {
+fn current_route_search_config(chat: &MockUpstream, search: &MockUpstream, key: &Path) -> Value {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let config: ClientConfig = serde_json::from_value(json!({
+    json!({
         "version":1,"server":{"listen":"127.0.0.1:0"},
-        "data":{"dir":std::env::temp_dir().join(format!("ts-independent-search-{}-{}",std::process::id(),SEQ.fetch_add(1,Ordering::SeqCst))),"metrics":true},
+        "data":{"dir":std::env::temp_dir().join(format!("ts-current-route-search-{}-{}",std::process::id(),SEQ.fetch_add(1,Ordering::SeqCst))),"metrics":true},
         "plugins":{"dir":plugins_dir(),"agents":["agent-anthropic"],"providers":{"openai-compatible":"provider-openai-compatible-v2"}},
         "upstreams":{
             "chat":{"provider":"openai-compatible","base_url":chat.base_url(),"auth":{"slot":"provider_api_key","file":key},
@@ -9926,14 +9926,22 @@ fn start_independent_search_proxy(chat: &MockUpstream, search: &MockUpstream, ke
                 "models":[{"model":"arbitrary-search-model","tool":true,"context_window":200_000}]}
         },
         "pricing":{"version":7,"models":{"search/arbitrary-search-model":{"input_per_mtok":1_000_000,"output_per_mtok":1_000_000}}},
-        "web_search_target":{"upstream":"search","model":"arbitrary-search-model"},
-        "router":{"version":1,"pools":{"main":[{"upstream":"chat","model":"arbitrary-chat-model"}]},"default_pool":"main"}
-    })).unwrap();
+        "router":{"version":1,"pools":{"main":[{"upstream":"search","model":"arbitrary-search-model"}]},"default_pool":"main"}
+    })
+}
+
+fn start_current_route_search_proxy(
+    chat: &MockUpstream,
+    search: &MockUpstream,
+    key: &Path,
+) -> Proxy {
+    let config: ClientConfig =
+        serde_json::from_value(current_route_search_config(chat, search, key)).unwrap();
     config.validate().unwrap();
     spawn_proxy(&config)
 }
 
-fn independent_search_request(stream: bool) -> Value {
+fn current_route_search_request(stream: bool) -> Value {
     json!({"model":"auto","max_tokens":512,"stream":stream,
         "messages":[{"role":"user","content":"Find current news"}],
         "tools":[{"type":"web_search_20250305","name":"web_search","max_uses":2}],
@@ -9941,18 +9949,18 @@ fn independent_search_request(stream: bool) -> Value {
 }
 
 #[test]
-fn claude_search_uses_independent_backend_for_json_and_sse() {
+fn claude_search_uses_current_route_for_json_and_sse() {
     for stream in [false, true] {
         let chat = MockUpstream::start(Vec::new());
         let search = MockUpstream::start(vec![vec![http_json(200,&json!({"id":"resp_search","status":"completed",
             "output":[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"query":"news","sources":[{"url":"https://example.com","title":"News"}]}},
                 {"type":"message","content":[{"type":"output_text","text":"Verified news","annotations":[]}]}],
             "usage":{"input_tokens":12,"output_tokens":20}}).to_string())]]);
-        let key = key_file("independent-search", "sk-search-fixture");
-        let proxy = start_independent_search_proxy(&chat, &search, &key);
+        let key = key_file("current-route-search", "sk-search-fixture");
+        let proxy = start_current_route_search_proxy(&chat, &search, &key);
         let (status, body) = post_messages(
             &proxy,
-            &independent_search_request(stream),
+            &current_route_search_request(stream),
             &proxy.virtual_key,
         );
         assert_eq!(status, 200, "{body}");
@@ -9981,12 +9989,12 @@ fn claude_search_uses_independent_backend_for_json_and_sse() {
 }
 
 #[test]
-fn independent_search_rejects_unsupported_filters_before_network_io() {
+fn current_route_search_rejects_unsupported_filters_before_network_io() {
     let chat = MockUpstream::start(Vec::new());
     let search = MockUpstream::start(Vec::new());
     let key = key_file("search-filter", "sk-search-fixture");
-    let proxy = start_independent_search_proxy(&chat, &search, &key);
-    let mut request = independent_search_request(false);
+    let proxy = start_current_route_search_proxy(&chat, &search, &key);
+    let mut request = current_route_search_request(false);
     request["tools"][0]["blocked_domains"] = json!(["example.com"]);
     let (status, body) = post_messages(&proxy, &request, &proxy.virtual_key);
     assert_eq!(status, 400, "{body}");
@@ -9995,17 +10003,17 @@ fn independent_search_rejects_unsupported_filters_before_network_io() {
 }
 
 #[test]
-fn independent_search_preserves_upstream_failure_status() {
+fn current_route_search_preserves_upstream_failure_status() {
     let chat = MockUpstream::start(Vec::new());
     let search = MockUpstream::start(vec![vec![http_json(
         400,
         "{\"error\":{\"message\":\"unsupported search\"}}",
     )]]);
     let key = key_file("search-refusal", "sk-search-fixture");
-    let proxy = start_independent_search_proxy(&chat, &search, &key);
+    let proxy = start_current_route_search_proxy(&chat, &search, &key);
     let (status, body) = post_messages(
         &proxy,
-        &independent_search_request(false),
+        &current_route_search_request(false),
         &proxy.virtual_key,
     );
     assert_eq!(status, 400, "{body}");
@@ -10015,37 +10023,99 @@ fn independent_search_preserves_upstream_failure_status() {
 }
 
 #[test]
-fn independent_search_does_not_change_ordinary_chat_routing() {
-    let chat = MockUpstream::start(vec![vec![http_json(200,&json!({"id":"chat_1","object":"chat.completion","model":"arbitrary-chat-model",
-        "choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],
-        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}).to_string())]]);
+fn current_route_search_ignores_legacy_web_search_target() {
+    let chat = MockUpstream::start(Vec::new());
     let search = MockUpstream::start(Vec::new());
-    let key = key_file("search-chat-isolation", "sk-search-fixture");
-    let proxy = start_independent_search_proxy(&chat, &search, &key);
+    let key = key_file("search-legacy-target", "sk-search-fixture");
+    let mut config = current_route_search_config(&chat, &search, &key);
+    config["router"]["pools"]["main"] = json!([{"upstream":"chat","model":"arbitrary-chat-model"}]);
+    config["web_search_target"] = json!({"upstream":"search","model":"arbitrary-search-model"});
+    let config: ClientConfig = serde_json::from_value(config).unwrap();
+    config.validate().unwrap();
+    assert!(
+        serde_json::to_value(&config)
+            .unwrap()
+            .get("web_search_target")
+            .is_none()
+    );
+    let proxy = spawn_proxy(&config);
     let (status, body) = post_messages(
         &proxy,
-        &json!({"model":"auto","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}),
+        &current_route_search_request(false),
         &proxy.virtual_key,
     );
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(search.hits(), 0);
-    assert_eq!(chat.seen()[0].path, "/v1/chat/completions");
-    assert_eq!(chat.seen()[0].body["model"], "arbitrary-chat-model");
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        search.hits(),
+        0,
+        "The legacy target must not reroute search"
+    );
+    assert_eq!(
+        chat.hits(),
+        0,
+        "Unsupported search must fail before network I/O"
+    );
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn independent_search_conversion_failure_retains_consumed_cost() {
+fn current_route_search_conversion_failure_retains_consumed_cost() {
     let chat = MockUpstream::start(Vec::new());
     let search = MockUpstream::start(vec![vec![http_json(200,&json!({"id":"resp_bad","status":"failed","output":[],"usage":{"input_tokens":12,"output_tokens":20}}).to_string())]]);
     let key = key_file("search-conversion-cost", "sk-search-fixture");
-    let proxy = start_independent_search_proxy(&chat, &search, &key);
+    let proxy = start_current_route_search_proxy(&chat, &search, &key);
     let (status, body) = post_messages(
         &proxy,
-        &independent_search_request(false),
+        &current_route_search_request(false),
         &proxy.virtual_key,
     );
     assert_eq!(status, 502, "{body}");
     assert_eq!(last_row(&proxy.data_dir)["cost_micros"], "Integer(32)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn current_route_search_conversion_failures_eject_the_backend() {
+    let chat = MockUpstream::start(Vec::new());
+    let failed = http_json(
+        200,
+        &json!({"id":"resp_bad","status":"failed","output":[],
+        "usage":{"input_tokens":12,"output_tokens":20}})
+        .to_string(),
+    );
+    let search = MockUpstream::start(vec![vec![failed.clone()], vec![failed]]);
+    let key = key_file("search-conversion-health", "sk-search-fixture");
+    let mut config = current_route_search_config(&chat, &search, &key);
+    config["health"] = json!({"eject_after":2,"cooldown_ms":60_000});
+    // Keep another healthy candidate in the same route. A fully ejected pool
+    // deliberately allows a last-resort probe, which would hide the health change.
+    config["router"]["pools"]["main"] = json!([
+        {"upstream":"search","model":"arbitrary-search-model"},
+        {"upstream":"chat","model":"arbitrary-chat-model"}
+    ]);
+    let config: ClientConfig = serde_json::from_value(config).unwrap();
+    config.validate().unwrap();
+    let proxy = spawn_proxy(&config);
+    for expected_hits in 1..=2 {
+        let (status, body) = post_messages(
+            &proxy,
+            &current_route_search_request(false),
+            &proxy.virtual_key,
+        );
+        assert_eq!(status, 502, "{body}");
+        assert_eq!(search.hits(), expected_hits);
+    }
+    let (status, body) = post_messages(
+        &proxy,
+        &current_route_search_request(false),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(search.hits(), 2, "The failed backend must remain ejected");
+    assert_eq!(
+        chat.hits(),
+        0,
+        "Search must not switch to an unrelated provider"
+    );
     std::fs::remove_file(key).ok();
 }
