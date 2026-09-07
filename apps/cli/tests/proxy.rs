@@ -2160,14 +2160,15 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
     let proxy = start_proxy(&mock, &key);
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        let response = agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -2178,10 +2179,13 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
                 })
                 .to_string(),
             )
-            .expect("proxy sends stream headers");
-        let status = response.status().as_u16();
-        let _ = response.into_body().read_to_string();
-        status
+            .map(|response| {
+                let status = response.status().as_u16();
+                let _ = response.into_body().read_to_string();
+                status
+            })
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -2222,9 +2226,13 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
         mock.peer_closed(),
         "the cancelled worker closes the upstream socket"
     );
+    let status = result_rx
+        .recv_timeout(cleanup_deadline.saturating_duration_since(Instant::now()))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
     assert_eq!(
-        client.join().expect("client joins"),
-        503,
+        status, 503,
         "an uncommitted stream cancelled by server drain is explicitly retryable"
     );
 
@@ -2242,26 +2250,16 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let proxy = start_proxy(&mock, &key);
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                // `timeout_recv_response`, not `timeout_global`. The global
-                // clock starts inside `send`, so it also covers connecting and
-                // writing the request — and then keeps running while the main
-                // thread waits for arrival and decides to cancel. None of that
-                // is what this test claims. On a loaded 4-core runner sharing
-                // 128 parallel tests, that pre-cancel stretch is what expired,
-                // which is why the budget went 5s -> 15s -> 60s and still
-                // failed: each raise bought margin for the scheduler rather
-                // than for the proxy. This clock starts once the request is
-                // written and the client is waiting on the proxy, which is
-                // exactly the interval the claim is about, so 15s bounds a
-                // hang without re-proving the runner.
-                .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
+                // The test starts its completion deadline after cancellation.
+                .timeout_recv_response(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -2271,13 +2269,12 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the cancelled request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
-    // 10s, not 3s: a loaded runner can starve this thread before the client's
-    // request lands, and that delay no longer eats the client's budget.
+    // Bound arrival separately from completion after cancellation.
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while (mock.hits() == 0 || proxy.control.in_flight() == 0)
         && std::time::Instant::now() < arrival_deadline
@@ -2285,8 +2282,14 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(mock.hits(), 1);
+    assert_eq!(proxy.control.in_flight(), 1);
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the cancelled request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
     settle();
     let row = last_row(&proxy.data_dir);
     assert_eq!(row["status"], "Integer(503)");
@@ -6508,14 +6511,15 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
     let proxy = start_south_header_auth_production_proxy(&mock, "synthetic-azure-drain-secret");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -6525,9 +6529,9 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained Header Auth request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -6548,7 +6552,12 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
     assert_eq!(seen[0].authorization, None);
 
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -6917,14 +6926,15 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     let proxy = start_south_production_proxy(&mock, "sk-south-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -6934,9 +6944,9 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained South request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -6946,7 +6956,12 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     }
     assert_eq!(mock.hits(), 1, "South request reached the upstream once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -6985,14 +7000,15 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
     let proxy = start_south_streaming_production_proxy(&mock, "sk-south-stream-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -7003,9 +7019,9 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained South stream")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -7015,7 +7031,12 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
     }
     assert_eq!(mock.hits(), 1, "South stream reached the upstream once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -8747,24 +8768,25 @@ fn native_anthropic_south_stream_is_cancelled_by_server_drain_without_replay() {
     let proxy = start_native_anthropic_proxy_with_stored_secret(&mock, "sk-native-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let mut turn = native_server_tool_turn();
         turn["model"] = json!("claude-sonnet-4");
         turn["stream"] = json!(true);
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/messages"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .header("anthropic-version", "2023-06-01")
             .send(&turn.to_string())
-            .expect("proxy answers the drained native stream")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -8776,7 +8798,12 @@ fn native_anthropic_south_stream_is_cancelled_by_server_drain_without_replay() {
     assert!(mock.response_started(), "the native South read is active");
     assert_eq!(mock.hits(), 1, "the native stream reaches South once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
