@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AggView } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { cacheMetric, costCoverage, formatUsd, tokenMetric, formatUsageValue } from "../usagePresentation";
@@ -237,6 +237,9 @@ export default function UsageTrendChart({
     [groups, range, nowMs],
   );
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [pointer, setPointer] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [tooltipSize, setTooltipSize] = useState({ width: 260, height: 220 });
   const hasLegacyInput = buckets.some(({ aggregate }) => aggregate.legacy_input_requests > 0);
   const plotWidth = WIDTH - PLOT.left - PLOT.right;
   const plotHeight = HEIGHT - PLOT.top - PLOT.bottom;
@@ -279,6 +282,19 @@ export default function UsageTrendChart({
   const activeCount = buckets.filter(({ aggregate }) => isActive(aggregate)).length;
   const activeIndex = buckets.findIndex((bucket) => bucket.key === activeKey);
   const active = activeIndex >= 0 ? buckets[activeIndex] : null;
+  useLayoutEffect(() => {
+    const bounds = tooltipRef.current?.getBoundingClientRect();
+    if (bounds?.width && bounds.height) setTooltipSize((previous) => previous.width === bounds.width && previous.height === bounds.height
+      ? previous : { width: bounds.width, height: bounds.height });
+  }, [active, language, pointer?.width]);
+  const clearInspection = () => { setActiveKey(null); setPointer(null); };
+  const guideX = active ? xForIndex(activeIndex) : PLOT.left;
+  const pointerGuideX = pointer ? guideX / WIDTH * pointer.width : 0;
+  const tooltipLeft = pointer
+    ? Math.max(12, Math.min(pointer.width - tooltipSize.width - 12,
+      Math.max(pointer.x, pointerGuideX) + 16 + tooltipSize.width <= pointer.width - 12
+        ? Math.max(pointer.x, pointerGuideX) + 16 : Math.min(pointer.x, pointerGuideX) - tooltipSize.width - 16))
+    : `clamp(12px, calc(${guideX / WIDTH * 100}% ${guideX > WIDTH / 2 ? "- 276px" : "+ 16px"}), max(12px, calc(100% - 272px)))`;
   const unitName = unit === "hour" ? copy("hours", "小时", "小時", "時間") : copy("days", "天", "天", "日");
   const summary = copy(
     `Usage trend with ${buckets.length} ${unitName} and ${activeCount} active periods. Tokens use the left axis and cost uses the right axis.`,
@@ -289,7 +305,7 @@ export default function UsageTrendChart({
     key === "cache_read_tokens" || key === "cache_write_tokens" ? cacheMetric(aggregate, key) : tokenMetric(aggregate, key),
     (value) => value.toLocaleString(language), copy,
   );
-  const costText = (aggregate: AggView) => aggregate.cost_micros == null
+  const costText = (aggregate: AggView) => aggregate.requests === 0 ? formatUsd(aggregate.cost_micros ?? 0) : aggregate.cost_micros == null
     ? copy("Unknown", "未知", "未知", "不明")
     : formatUsd(aggregate.cost_micros) + (costCoverage(aggregate).complete || aggregate.requests === 0 ? "" : copy(" (partial)", "（部分）", "（部分）", "（一部）"));
   const partialTokens = buckets.some(({ aggregate }) => aggregate.requests > 0 && !tokenMetric(aggregate, "total").complete);
@@ -330,7 +346,32 @@ export default function UsageTrendChart({
           role="img"
           aria-label={summary}
           preserveAspectRatio="none"
-          onMouseLeave={() => setActiveKey(null)}
+          onMouseMove={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            if (!bounds.width || !bounds.height) return;
+            const x = (event.clientX - bounds.left) / bounds.width * WIDTH;
+            const y = (event.clientY - bounds.top) / bounds.height * HEIGHT;
+            if (x < PLOT.left || x > WIDTH - PLOT.right || y < PLOT.top || y > HEIGHT - PLOT.bottom) {
+              clearInspection();
+              return;
+            }
+            let nearest = 0;
+            for (let index = 1; index < buckets.length; index += 1) {
+              if (Math.abs(xForIndex(index) - x) < Math.abs(xForIndex(nearest) - x)) nearest = index;
+            }
+            setActiveKey(buckets[nearest].key);
+            setPointer({ x: event.clientX - bounds.left, y: event.clientY - bounds.top, width: bounds.width, height: bounds.height });
+          }}
+          onMouseLeave={clearInspection}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") { clearInspection(); event.preventDefault(); }
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              const next = Math.max(0, Math.min(buckets.length - 1, activeIndex + (event.key === "ArrowRight" ? 1 : -1)));
+              setPointer(null);
+              setActiveKey(buckets[next].key);
+            }
+          }}
         >
           <defs>
             {tokenSeries.map((series) => (
@@ -447,12 +488,10 @@ export default function UsageTrendChart({
                 tabIndex={isActive(aggregate) ? 0 : undefined}
                 role={isActive(aggregate) ? "button" : undefined}
                 aria-label={isActive(aggregate) ? label : undefined}
-                onKeyDown={(event) => { if (event.key === "Escape") setActiveKey(null); }}
-                onMouseEnter={() => setActiveKey(isActive(aggregate) ? bucket.key : null)}
-                onFocus={() => isActive(aggregate) && setActiveKey(bucket.key)}
-                onBlur={() => setActiveKey(null)}
+                onMouseEnter={() => setActiveKey(bucket.key)}
+                onFocus={() => { setPointer(null); setActiveKey(bucket.key); }}
+                onBlur={clearInspection}
               >
-                <title>{label}</title>
                 <rect
                   x={hitLeft}
                   y={PLOT.top}
@@ -481,21 +520,29 @@ export default function UsageTrendChart({
               )}
             </text>
           ))}
+          {active && (
+            <g className="usage-chart-time-badge" aria-hidden="true" transform={`translate(${Math.max(62, Math.min(WIDTH - 62, guideX))}, ${HEIGHT - 13})`}>
+              <rect x="-60" y="-12" width="120" height="22" rx="4" />
+              <text textAnchor="middle" y="3">{axisLabel(active.timestamp, unit, true, language)}</text>
+            </g>
+          )}
         </svg>
 
         {active && (
           <div
+            ref={tooltipRef}
             className="usage-chart-tooltip"
-            style={{ left: `clamp(12px, calc(${(xForIndex(activeIndex) / WIDTH) * 100}% - 130px), max(12px, calc(100% - 272px)))` }}
+            style={{ left: tooltipLeft, top: pointer ? Math.max(12, Math.min(pointer.y + 12, pointer.height - tooltipSize.height - 42)) : 16 }}
             role="status"
           >
             <strong>{detailedLabel(active.timestamp, unit, language)}</strong>
+            <div className="usage-chart-tooltip-unit">{unit === "hour" ? copy("Hourly total", "小时合计", "小時合計", "時間ごとの合計") : copy("Daily total", "每日合计", "每日合計", "日別合計")}</div>
             {tokenSeries.map((series) => (
-              <span className={series.className} key={series.key}>
+              <span className={`series-${series.className}`} key={series.key}>
                 <i />{series.label}<em>{usageText(active.aggregate, series.key)}</em>
               </span>
             ))}
-            <span className="cost">
+            <span className="series-cost">
               <i />{copy("Cost", "成本", "成本", "コスト")}
               <em>{costText(active.aggregate)}</em>
             </span>

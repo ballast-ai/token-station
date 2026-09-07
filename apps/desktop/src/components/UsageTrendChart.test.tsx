@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AggView } from "../api";
 import UsageTrendChart from "./UsageTrendChart";
 import { within } from "@testing-library/react";
@@ -28,6 +28,65 @@ const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
 const bucketMs = new Date(2026, 6, 23, 11).getTime();
 
 describe("UsageTrendChart", () => {
+  it("updates the guide and time badge while moving from activity to an empty hour without clicking", () => {
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
+    const svg = screen.getByRole("img");
+    vi.spyOn(svg, "getBoundingClientRect").mockReturnValue({ left: 100, top: 200, width: 460, height: 300 } as DOMRect);
+    const x = (index: number) => 58 + index * (920 - 58 - 64) / 24;
+    fireEvent.mouseMove(svg, { clientX: 100 + x(22) / 2, clientY: 300 });
+    expect(screen.getByRole("status")).toHaveTextContent("11:00");
+    expect(container.querySelector(".usage-chart-time-badge")).toHaveTextContent("11:00");
+    expect(container.querySelector(".usage-chart-crosshair line")).toHaveAttribute("x1", String(x(22)));
+    fireEvent.mouseMove(svg, { clientX: 100 + x(23) / 2, clientY: 360 });
+    expect(screen.getByRole("status")).toHaveTextContent("12:00");
+    expect(screen.getByRole("status")).toHaveTextContent("0 次请求");
+    expect(screen.getByRole("status")).toHaveTextContent("$0.00");
+    expect(container.querySelector(".usage-chart-time-badge")).toHaveTextContent("12:00");
+    fireEvent.mouseLeave(svg);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("uses only the custom tooltip and avoids generic form classes in its rows", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
+    expect(container.querySelector("[data-usage-bucket] title")).toBeNull();
+    await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
+    expect(screen.getByRole("status").querySelector(".input")).toBeNull();
+  });
+
+  it("keeps edge tooltips inside the plot and clears inspection outside it or on Escape", () => {
+    const { container } = render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
+    const svg = screen.getByRole("img");
+    vi.spyOn(svg, "getBoundingClientRect").mockReturnValue({ left: 50, top: 100, width: 600, height: 300 } as DOMRect);
+    for (const x of [58, 550, 856]) {
+      fireEvent.mouseMove(svg, { clientX: 50 + x / 920 * 600, clientY: 350 });
+      const tooltip = screen.getByRole("status");
+      expect(parseFloat(tooltip.style.left)).toBeGreaterThanOrEqual(12);
+      expect(parseFloat(tooltip.style.left) + 260).toBeLessThanOrEqual(588);
+      expect(parseFloat(tooltip.style.top)).toBeGreaterThanOrEqual(12);
+      expect(container.querySelector(".usage-chart-time-badge")).toBeInTheDocument();
+    }
+    fireEvent.keyDown(svg, { key: "Escape" });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    fireEvent.mouseMove(svg, { clientX: 350, clientY: 200 });
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    fireEvent.mouseMove(svg, { clientX: 50, clientY: 200 });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("supports keyboard time inspection through empty neighboring hours", async () => {
+    const user = userEvent.setup();
+    render(<UsageTrendChart groups={[[String(bucketMs), aggregate]]} range="24h" nowMs={nowMs} />);
+    await user.tab();
+    expect(screen.getByRole("status")).toHaveTextContent("11:00");
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("status")).toHaveTextContent("12:00");
+    expect(screen.getByRole("status")).toHaveTextContent("0 次请求");
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.getByRole("status")).toHaveTextContent("11:00");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
   it("does not present missing token reports as a zero peak", () => {
     const missing = { ...aggregate, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
       input_reported_requests: 0, output_reported_requests: 0, total_reported_requests: 0,
@@ -106,7 +165,7 @@ describe("UsageTrendChart", () => {
     await user.hover(container.querySelector(`[data-bucket-key="${bucketMs}"]`) as Element);
     expect(container.querySelector(".usage-chart-crosshair circle.input")).toBeNull();
     await user.hover(container.querySelector("[data-usage-bucket]") as Element);
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("0 次请求");
   });
 
   it("retains historical input labels and localizes unknown cost", () => {

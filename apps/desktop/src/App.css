@@ -4877,6 +4877,10 @@ pre.block {
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
+.usage-chart-crosshair, .usage-chart-time-badge { pointer-events: none; }
+.usage-chart-time-badge rect { fill: var(--surface); stroke: var(--signal); stroke-width: 1; }
+.usage-chart-time-badge text { fill: var(--ink); font: 10px "SF Mono", Menlo, monospace; }
+.usage-chart-tooltip-unit { color: var(--muted); font-size: 9px; margin-bottom: 3px; }
 .usage-chart-crosshair circle {
   fill: var(--surface);
   stroke-width: 2.2;
@@ -4933,11 +4937,11 @@ pre.block {
   font: 650 9.5px/1 "SF Mono", Menlo, monospace;
   font-style: normal;
 }
-.usage-chart-tooltip .input { color: var(--signal); }
-.usage-chart-tooltip .output { color: var(--usage-output); }
-.usage-chart-tooltip .cache-write { color: var(--usage-cache-write); }
-.usage-chart-tooltip .cache-read { color: var(--usage-cache); }
-.usage-chart-tooltip .cost { color: var(--usage-cost); }
+.usage-chart-tooltip .series-input { color: var(--signal); }
+.usage-chart-tooltip .series-output { color: var(--usage-output); }
+.usage-chart-tooltip .series-cache-write { color: var(--usage-cache-write); }
+.usage-chart-tooltip .series-cache-read { color: var(--usage-cache); }
+.usage-chart-tooltip .series-cost { color: var(--usage-cost); }
 .usage-chart-tooltip small {
   padding-top: 6px;
   border-top: 1px solid var(--line);
