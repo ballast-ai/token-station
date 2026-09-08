@@ -273,6 +273,8 @@ pub(crate) fn apply_public_model_prices(
         additions.insert(
             scoped_model,
             ModelPrice {
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
                 input_per_mtok: suggestion.input_per_mtok,
                 output_per_mtok: suggestion.output_per_mtok,
                 cache_read_per_mtok: suggestion.cache_read_per_mtok,
@@ -376,7 +378,7 @@ pub(crate) async fn import_model_prices_for_provider(
 #[tauri::command]
 #[allow(
     clippy::too_many_arguments,
-    reason = "Tauri maps the five price classes and expected version to named form fields"
+    reason = "Tauri maps price classes and expected version to named form fields"
 )]
 pub(crate) fn set_model_price(
     state: State<'_, AppStateManaged>,
@@ -387,6 +389,8 @@ pub(crate) fn set_model_price(
     cache_write_per_mtok: u64,
     reasoning_per_mtok: Option<u64>,
     expected_version: u32,
+    cache_write_5m_per_mtok: Option<u64>,
+    cache_write_1h_per_mtok: Option<u64>,
 ) -> Result<PriceTable, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
@@ -400,6 +404,8 @@ pub(crate) fn set_model_price(
     let next = current.next_with_model(
         &model,
         ModelPrice {
+            cache_write_5m_per_mtok,
+            cache_write_1h_per_mtok,
             input_per_mtok,
             output_per_mtok,
             cache_read_per_mtok,
@@ -407,9 +413,7 @@ pub(crate) fn set_model_price(
             reasoning_per_mtok,
         },
     )?;
-    inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
-    inner.observe_draft()?;
-    inner.save_draft()?;
+    save_manual_price_edit(&mut inner, &model, false, &next)?;
     Ok(next)
 }
 
@@ -429,8 +433,31 @@ pub(crate) fn remove_model_price(
         ));
     }
     let next = current.next_without_model(&model)?;
-    inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
-    inner.observe_draft()?;
-    inner.save_draft()?;
+    save_manual_price_edit(&mut inner, &model, true, &next)?;
     Ok(next)
+}
+
+fn save_manual_price_edit(
+    inner: &mut AppInner,
+    model: &str,
+    deleted: bool,
+    next: &PriceTable,
+) -> Result<(), String> {
+    let pricing = serde_json::to_value(next).map_err(|error| error.to_string())?;
+    crate::price_sync::mark_manual(inner, model, deleted, |inner| {
+        let previous = inner.draft.clone();
+        inner.draft["pricing"] = pricing;
+        if let Err(error) = inner.observe_draft().and_then(|_| inner.save_draft()) {
+            // Restore content through the current state so allocated revisions
+            // remain reserved even when the configuration file cannot be saved.
+            inner.draft = previous;
+            return match inner.observe_draft() {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "{error} Price draft rollback also failed: {rollback_error}"
+                )),
+            };
+        }
+        Ok(())
+    })
 }

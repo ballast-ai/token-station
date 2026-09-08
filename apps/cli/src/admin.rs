@@ -228,6 +228,21 @@ fn agg_view(aggregate: &stats::Aggregate) -> Value {
         "cost_micros": aggregate.cost_micros,
         "priced_requests": aggregate.priced_requests,
         "unpriced_requests": aggregate.unpriced_requests,
+        "missing_price_requests": aggregate.missing_price_requests,
+        "missing_usage_requests": aggregate.missing_usage_requests,
+        "actual_cost_requests": aggregate.actual_cost_requests,
+        "estimated_cost_requests": aggregate.estimated_cost_requests,
+        "cache_read_reported_requests": aggregate.cache_read_reported_requests,
+        "cache_write_reported_requests": aggregate.cache_write_reported_requests,
+        "input_reported_requests": aggregate.input_reported_requests,
+        "output_reported_requests": aggregate.output_reported_requests,
+        "total_reported_requests": aggregate.total_reported_requests,
+        "incomplete_usage_requests": aggregate.incomplete_usage_requests,
+        "usage_expected_requests": aggregate.usage_expected_requests,
+        "failed_without_usage_requests": aggregate.failed_without_usage_requests,
+        "unpriced_failed_without_usage_requests": aggregate.unpriced_failed_without_usage_requests,
+        "cache_read_unrecorded_requests": aggregate.cache_read_unrecorded_requests,
+        "cache_write_unrecorded_requests": aggregate.cache_write_unrecorded_requests,
         "legacy_input_requests": aggregate.legacy_input_requests,
     })
 }
@@ -246,6 +261,21 @@ fn agg_zero() -> Value {
         "cost_micros": null,
         "priced_requests": 0,
         "unpriced_requests": 0,
+        "missing_price_requests": 0,
+        "missing_usage_requests": 0,
+        "actual_cost_requests": 0,
+        "estimated_cost_requests": 0,
+        "cache_read_reported_requests": 0,
+        "cache_write_reported_requests": 0,
+        "input_reported_requests": 0,
+        "output_reported_requests": 0,
+        "total_reported_requests": 0,
+        "incomplete_usage_requests": 0,
+        "usage_expected_requests": 0,
+        "failed_without_usage_requests": 0,
+        "unpriced_failed_without_usage_requests": 0,
+        "cache_read_unrecorded_requests": 0,
+        "cache_write_unrecorded_requests": 0,
         "legacy_input_requests": 0,
     })
 }
@@ -258,10 +288,33 @@ mod tests {
     fn both_stats_transports_expose_legacy_usage_semantics() {
         let aggregate = crate::stats::Aggregate {
             legacy_input_requests: 3,
+            input_reported_requests: 3,
+            output_reported_requests: 2,
+            total_reported_requests: 1,
+            incomplete_usage_requests: 1,
+            usage_expected_requests: 4,
+            failed_without_usage_requests: 2,
+            unpriced_failed_without_usage_requests: 1,
+            cache_read_unrecorded_requests: 2,
+            cache_write_unrecorded_requests: 3,
             ..crate::stats::Aggregate::default()
         };
 
         assert_eq!(agg_view(&aggregate)["legacy_input_requests"], 3);
         assert_eq!(agg_zero()["legacy_input_requests"], 0);
+        for (field, count) in [
+            ("input_reported_requests", 3),
+            ("output_reported_requests", 2),
+            ("total_reported_requests", 1),
+            ("incomplete_usage_requests", 1),
+            ("usage_expected_requests", 4),
+            ("failed_without_usage_requests", 2),
+            ("unpriced_failed_without_usage_requests", 1),
+            ("cache_read_unrecorded_requests", 2),
+            ("cache_write_unrecorded_requests", 3),
+        ] {
+            assert_eq!(agg_view(&aggregate)[field], count);
+            assert_eq!(agg_zero()[field], 0);
+        }
     }
 }

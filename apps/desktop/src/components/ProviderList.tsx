@@ -6,6 +6,9 @@ import ProviderModelManager from "./ProviderModelManager";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { ProviderIcon } from "../brandIcons";
+import { useDraftNavigation } from "./DraftNavigation";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "./ui/input-group";
+import { Search, X } from "lucide-react";
 import { useErrorToast } from "./ErrorToast";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -43,6 +46,11 @@ export default function ProviderList({
 }: ProviderListProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError } = useErrorToast();
+  const confirmNavigation = useDraftNavigation();
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matches = (text: string) => text.toLocaleLowerCase().includes(normalizedQuery);
+  const visibleProviders = providers.filter((provider) => matches(providerDisplayName(provider)) || provider.models.some(matches));
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -54,6 +62,8 @@ export default function ProviderList({
   const purgeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const removalRequestRef = useRef(0);
   const modelCount = providers.reduce((total, provider) => total + provider.models.length, 0);
+  const matchedModelCount = visibleProviders.reduce((total, provider) => total + provider.models.filter((model) => matches(model) || matches(providerDisplayName(provider))).length, 0);
+  const searchRef = useRef<HTMLInputElement>(null);
   const activeProvider = providers.find((provider) => provider.name === managedProvider);
 
   const inspectRemoval = async (name: string) => {
@@ -82,10 +92,21 @@ export default function ProviderList({
           <h2>{copy("Managed models", "已接入模型", "已接入模型", "接続済みモデル")}</h2>
         </div>
         <Badge variant="secondary" className="count-badge provider-total-badge">
-          {copy(`${modelCount} models`, `${modelCount} 个模型`, `${modelCount} 個模型`, `${modelCount} 個モデル`)}
+          {normalizedQuery
+            ? copy(`${matchedModelCount} / ${modelCount} models`, `${matchedModelCount} / ${modelCount} 个模型`, `${matchedModelCount} / ${modelCount} 個模型`, `${matchedModelCount} / ${modelCount} 個モデル`)
+            : copy(`${modelCount} models`, `${modelCount} 个模型`, `${modelCount} 個模型`, `${modelCount} 個モデル`)}
         </Badge>
       </div>
 
+      {modelCount > 0 && <InputGroup className="connected-model-search">
+        <InputGroupAddon><Search aria-hidden="true" /></InputGroupAddon>
+        <InputGroupInput ref={searchRef} type="search" aria-label={copy("Search connected models", "搜索已接入模型", "搜尋已接入模型", "接続済みモデルを検索")}
+          placeholder={copy("Search models or providers", "搜索模型或供应商", "搜尋模型或供應商", "モデルまたはプロバイダーを検索")}
+          value={query} onChange={(event) => setQuery(event.target.value)} />
+        {query && <InputGroupAddon align="inline-end"><Button variant="ghost" size="icon" aria-label={copy("Clear search", "清空搜索", "清空搜尋", "検索をクリア")}
+          onClick={() => { setQuery(""); searchRef.current?.focus(); }}><X data-icon="inline-start" /></Button></InputGroupAddon>}
+      </InputGroup>}
+      {query && visibleProviders.length === 0 && <p role="status">{copy("No matching models", "没有匹配的模型", "沒有相符的模型", "一致するモデルがありません")}</p>}
       <div className="provider-list">
         {recoveryError && (
           <div className="manager-error">{humanizeAppError(recoveryError, language)}</div>
@@ -121,7 +142,7 @@ export default function ProviderList({
             )}</span>
           </div>
         )}
-        {providers.map((provider) => {
+        {visibleProviders.map((provider) => {
           const displayName = providerDisplayName(provider);
           return (
             <article
@@ -192,7 +213,7 @@ export default function ProviderList({
               data-layout="compact-model-index"
               data-surface="plain-model-grid"
             >
-              {provider.models.length > 0 ? provider.models.map((model) => (
+              {provider.models.length > 0 ? provider.models.filter((model) => matches(model) || matches(displayName)).map((model) => (
                 <li role="listitem" key={model} title={`${model} · ${displayName}`}>
                   <strong>{model}</strong>
                 </li>
@@ -207,7 +228,7 @@ export default function ProviderList({
         })}
       </div>
 
-      <Dialog open={Boolean(activeProvider)} onOpenChange={(open) => !open && setManagedProvider(null)}>
+      <Dialog open={Boolean(activeProvider)} onOpenChange={(open) => !open && confirmNavigation(() => setManagedProvider(null))}>
         {activeProvider && (
           <DialogContent
             className="provider-management-dialog"

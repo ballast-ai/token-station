@@ -523,6 +523,7 @@ impl AppInner {
             south_approved_dialects,
             upstream_epochs: BTreeMap::new(),
             discovery_generations: BTreeMap::new(),
+            price_sync_running: false,
         }
     }
 
@@ -573,6 +574,15 @@ impl AppInner {
     }
 
     pub(crate) fn save_draft(&mut self) -> Result<u64, String> {
+        self.save_draft_with_backfill(true)
+    }
+
+    /// Persist configuration without scanning the metrics database under the App lock.
+    pub(crate) fn save_draft_without_backfill(&mut self) -> Result<u64, String> {
+        self.save_draft_with_backfill(false)
+    }
+
+    fn save_draft_with_backfill(&mut self, backfill: bool) -> Result<u64, String> {
         self.ensure_editable()?;
         let config = self.materialize()?;
         let draft = self.draft.clone();
@@ -650,13 +660,16 @@ impl AppInner {
             // failure as a failed config save.
             eprintln!("configuration saved but revision finalization failed: {error}");
         }
-        if let Err(error) =
-            SqliteStore::backfill_unknown_costs(&data_dir.join("metrics.sqlite"), &config.pricing)
-        {
-            // The configuration is already atomically committed. Keep save
-            // semantics truthful and retry this idempotent backfill on the next
-            // save or startup instead of reporting a rollback that did not occur.
-            eprintln!("configuration saved but historical cost backfill failed: {error}");
+        if backfill {
+            if let Err(error) = SqliteStore::backfill_unknown_costs(
+                &data_dir.join("metrics.sqlite"),
+                &config.pricing,
+            ) {
+                // The configuration is already atomically committed. Keep save
+                // semantics truthful and retry this idempotent backfill on the next
+                // save or startup instead of reporting a rollback that did not occur.
+                eprintln!("configuration saved but historical cost backfill failed: {error}");
+            }
         }
         let committed_key_upstreams = self
             .pending_provider_keys
@@ -987,6 +1000,12 @@ impl AppInner {
         }
     }
 
+    pub(crate) fn agent_harness_model_mapping_enabled(&self, agent_id: &str) -> bool {
+        self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"]
+            .as_bool()
+            .unwrap_or(false)
+    }
+
     pub(crate) fn agent_harness_model_routes(&self, agent_id: &str) -> BTreeMap<String, TierView> {
         if let Some(routes) = self.agent_harness_route_drafts.get(agent_id) {
             return routes.clone();
@@ -1059,7 +1078,8 @@ impl AppInner {
                 let inherits_global = !self.agent_route_drafts.contains_key(&agent_id)
                     && self.agent_route_mode(&agent_id) == "inherit"
                     && stored_route["routing_mode"].is_null()
-                    && stored_route["direct_target"].is_null();
+                    && stored_route["direct_target"].is_null()
+                    && !self.agent_harness_model_mapping_enabled(&agent_id);
                 let routing_mode = self.draft["agent_routes"][&agent_id]["routing_mode"]
                     .as_str()
                     .unwrap_or(home_mode)
@@ -1101,11 +1121,16 @@ impl AppInner {
                         inherits_global,
                         tiers,
                         config_error,
-                        harness_config_error,
+                        harness_config_error: if self.agent_harness_model_mapping_enabled(&agent_id) {
+                            harness_config_error
+                        } else {
+                            None
+                        },
                         profile: self.agent_profile(&agent_id),
                         routing_mode,
                         direct_target,
                         harness_model_routes: self.agent_harness_model_routes(&agent_id),
+                        harness_model_mapping_enabled: self.agent_harness_model_mapping_enabled(&agent_id),
                     },
                 )
             })
@@ -1471,6 +1496,7 @@ impl AppInner {
                 .to_string(),
             auth: d["server"]["auth"].as_bool().unwrap_or(true),
             metrics: d["data"]["metrics"].as_bool().unwrap_or(true),
+            request_body_capture: d["data"]["request_body_capture"].as_bool().unwrap_or(true),
             data_dir: d["data"]["dir"].as_str().unwrap_or_default().to_string(),
             plugins_dir: d["plugins"]["dir"].as_str().unwrap_or_default().to_string(),
             agent: agents_display(&d["plugins"]),
@@ -1777,6 +1803,9 @@ impl AppInner {
         &mut self,
         agent_id: &str,
     ) -> Result<(), String> {
+        if !self.agent_harness_model_mapping_enabled(agent_id) {
+            return Ok(());
+        }
         let Some(routes) = self.agent_harness_route_drafts.get(agent_id) else {
             return Ok(());
         };
@@ -1806,6 +1835,7 @@ impl AppInner {
             route.remove("direct_target");
         }
         self.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
+        self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"] = json!(false);
     }
 
     pub(crate) fn save_home_route_as_profile_value(&mut self, name: &str) -> Result<(), String> {
@@ -1934,6 +1964,7 @@ pub(crate) fn set_settings(
     egress_no_proxy: Vec<String>,
     egress_auth_username: String,
     egress_auth_slot: String,
+    request_body_capture: Option<bool>,
 ) -> Result<StateView, SettingsCommandError> {
     let mut inner = state.0.lock().unwrap();
     inner
@@ -1944,6 +1975,9 @@ pub(crate) fn set_settings(
     let edit_result = inner.edit_validated_draft(|candidate| {
         candidate.draft["server"]["auth"] = json!(auth);
         candidate.draft["data"]["metrics"] = json!(metrics);
+        if let Some(capture) = request_body_capture {
+            candidate.draft["data"]["request_body_capture"] = json!(capture);
+        }
         candidate.draft["egress"] = if egress_mode == "direct" {
             json!({ "mode": "direct" })
         } else {

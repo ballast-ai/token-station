@@ -13,6 +13,16 @@ Claude Code
 
 ## 1. Determine whether direct configuration is sufficient
 
+### Web Search is a separate capability
+
+Chat Completions compatibility alone does not provide Claude Code's hosted WebSearch tool. Search follows the existing provider route. There is no separate search-provider setting.
+
+An `anthropic-native` route passes hosted search through to the provider. A `responses-native` route translates Anthropic search into Responses `web_search`. The provider and model must implement that capability. Token Station does not infer search support from a model name or select another provider for search.
+
+The Responses bridge preserves allowed domains, location, search limits, sources, and declared client function calls. It rejects unsupported filters and content instead of silently removing requirements. It buffers the response before emitting Claude-compatible JSON or SSE. Previous hosted search results are replayed as readable context.
+
+If the selected route only provides Chat Completions, WebSearch returns an unsupported-route error. Ordinary chat remains available.
+
 A provider must meet these minimum requirements:
 
 - Accept `POST <base_url>/chat/completions`.

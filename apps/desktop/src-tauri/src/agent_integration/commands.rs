@@ -684,7 +684,10 @@ fn agent_model_metadata_for_router(
             .get("catalog_cost")
             .and_then(|value| serde_json::from_value::<AgentModelCost>(value.clone()).ok())
             .filter(AgentModelCost::is_valid);
-        let configured_cost = config.pricing.models.get(&candidate.model).map(|price| {
+        let configured_price = config
+            .pricing
+            .model_price_for_upstream(candidate.upstream.as_str(), &candidate.model);
+        let configured_cost = configured_price.map(|price| {
             // Price display is decimal USD per million tokens; sub-cent rounding is acceptable here.
             #[allow(clippy::cast_precision_loss)]
             let dollars = |micros: u64| micros as f64 / 1_000_000.0;
@@ -692,10 +695,16 @@ fn agent_model_metadata_for_router(
                 input: dollars(price.input_per_mtok),
                 output: dollars(price.output_per_mtok),
                 cache_read: Some(dollars(price.cache_read_per_mtok)),
-                cache_write: Some(dollars(price.cache_write_per_mtok)),
+                cache_write: price.uniform_cache_write_rate().map(dollars),
             }
         });
-        costs.push(catalog_cost.or(configured_cost));
+        let mut cost = catalog_cost.or(configured_cost);
+        if let Some(cost) = cost.as_mut().filter(|_| {
+            configured_price.is_some_and(|price| price.uniform_cache_write_rate().is_none())
+        }) {
+            cost.cache_write = None;
+        }
+        costs.push(cost);
     }
 
     let cost = costs.first().cloned().flatten().filter(|first| {
@@ -3331,6 +3340,41 @@ mod tests {
         assert_eq!(claude.context, 128_000);
         assert_eq!(claude.output, 32_000);
         assert_eq!(claude.max_input, 96_000);
+    }
+
+    #[test]
+    fn ttl_agent_metadata_uses_scoped_prices_without_a_false_single_cache_rate() {
+        let root = scratch("ttl-scoped-projection");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
+        draft["upstreams"]["provider_a"] = json!({
+            "provider": "openai-compatible", "base_url": "https://provider.example/v1",
+            "models": [{"model": "test-model", "context_window": 128_000, "max_output_tokens": 32_000}]
+        });
+        draft["router"]["pools"] =
+            json!({"tier_low": [{"upstream": "provider_a", "model": "test-model"}]});
+        draft["router"]["default_pool"] = json!("tier_low");
+        draft["pricing"] = json!({"version": 1, "models": {
+            "provider_a/test-model": {"input_per_mtok": 3_000_000, "output_per_mtok": 15_000_000,
+                "cache_write_per_mtok": 3_750_000, "cache_write_1h_per_mtok": 6_000_000}
+        }});
+        for catalog in [false, true] {
+            if catalog {
+                draft["upstreams"]["provider_a"]["models"][0]["catalog_cost"] =
+                    json!({"input": 3.0, "output": 15.0, "cache_write": 3.75});
+            }
+            let config = serde_json::from_value(draft.clone()).unwrap();
+            let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
+            let cost = metadata
+                .cost
+                .expect("scoped configured prices must be projected");
+            assert_eq!(cost.input, 3.0);
+            assert_eq!(cost.output, 15.0);
+            assert_eq!(
+                cost.cache_write, None,
+                "one cache rate cannot represent mixed TTL prices"
+            );
+        }
     }
 
     #[test]

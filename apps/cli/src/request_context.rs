@@ -27,6 +27,7 @@ pub struct RequestContext {
     per_attempt_timeout: Duration,
     upstream_response_limit: Option<u64>,
     http_trace: Mutex<Option<HttpTraceCapture>>,
+    accounting: Mutex<crate::accounting::AccountingTap>,
 }
 
 const MAX_HTTP_TRACE_BODY_BYTES: usize = 1024 * 1024;
@@ -124,6 +125,7 @@ impl RequestContext {
             per_attempt_timeout: per_attempt,
             upstream_response_limit: None,
             http_trace: Mutex::new(None),
+            accounting: Mutex::new(crate::accounting::AccountingTap::default()),
         }
     }
 
@@ -214,6 +216,15 @@ impl RequestContext {
 
     pub(crate) fn enable_http_trace(&self) {
         *self.http_trace.lock().unwrap() = Some(HttpTraceCapture::new());
+    }
+
+    pub(crate) fn begin_accounting(&self, endpoint: &str) {
+        *self.accounting.lock().expect("accounting lock") =
+            crate::accounting::AccountingTap::new(endpoint);
+    }
+
+    pub(crate) fn finish_accounting(&self, record: &mut token_station_metrics::RequestRecord) {
+        std::mem::take(&mut *self.accounting.lock().expect("accounting lock")).finish(record);
     }
 
     fn captured_headers<'a>(
@@ -328,6 +339,14 @@ impl RequestContext {
         status: u16,
         headers: &BTreeMap<String, String>,
     ) {
+        let content_type = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map_or("", |(_, value)| value.as_str());
+        self.accounting
+            .lock()
+            .expect("accounting lock")
+            .head(status, content_type);
         let mut trace = self.http_trace.lock().unwrap();
         let Some(trace) = trace.as_mut() else {
             return;
@@ -346,6 +365,7 @@ impl RequestContext {
     }
 
     pub(crate) fn append_upstream_response_body(&self, value: &[u8]) {
+        self.accounting.lock().expect("accounting lock").push(value);
         let mut trace = self.http_trace.lock().unwrap();
         let Some(trace) = trace.as_mut() else {
             return;

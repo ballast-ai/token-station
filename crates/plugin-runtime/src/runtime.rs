@@ -6,7 +6,7 @@ use wasmtime::{Config, Engine};
 /// What a guest may consume before it is cut off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeLimits {
-    /// Ceiling on a store's linear memory. A guest allocation that would grow
+    /// Aggregate ceiling on a store's linear memories. A guest allocation that would grow
     /// past it fails inside the guest, which typically traps.
     pub memory_bytes: usize,
     /// Wall-clock deadline for one guest call. A guest still running at the

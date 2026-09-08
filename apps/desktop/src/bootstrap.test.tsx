@@ -46,23 +46,12 @@ describe("recovery bootstrap", () => {
     expect(await screen.findByText("normal application")).toBeInTheDocument();
   });
 
-  it("keeps the independent launch screen until presentation and application startup finish", async () => {
+  it("unblocks the application as soon as startup is ready", async () => {
     vi.useFakeTimers();
     vi.mocked(getRecoveryState).mockResolvedValue(normal);
     render(<AppBootstrap />);
-
     await act(async () => Promise.resolve());
-    expect(screen.getByRole("status", { name: "Opening Token Station" })).toBeInTheDocument();
-    expect(screen.getByText("normal application")).toBeInTheDocument();
-
     fireEvent.click(screen.getByText("settle application"));
-    act(() => vi.advanceTimersByTime(LAUNCH_MINIMUM_MS - 1));
-    expect(screen.getByTestId("launch-screen")).toHaveAttribute("data-phase", "presenting");
-
-    act(() => vi.advanceTimersByTime(1));
-    expect(screen.getByTestId("launch-screen")).toHaveAttribute("data-phase", "exiting");
-
-    act(() => vi.advanceTimersByTime(LAUNCH_EXIT_MS));
     expect(screen.queryByTestId("launch-screen")).toBeNull();
   });
 

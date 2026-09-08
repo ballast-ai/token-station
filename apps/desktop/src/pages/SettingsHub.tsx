@@ -42,6 +42,7 @@ import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { useErrorToast } from "../components/ErrorToast";
 import { usePageTransition } from "../components/use-page-transition";
 import About from "./About";
+import { DraftNavigationBoundary, useDraftNavigation } from "../components/DraftNavigation";
 import Settings from "./Settings";
 import RequestLogsPage from "./RequestLogsPage";
 
@@ -487,11 +488,19 @@ function SettingsHubContent({
     resetScroll();
   }, [initialSection]);
 
+  const confirmNavigation = useDraftNavigation();
   const activateSection = (index: number) => {
     const nextIndex = (index + SECTIONS.length) % SECTIONS.length;
-    navigationRefs.current[nextIndex]?.focus({ preventScroll: true });
-    resetScroll();
-    setSection(SECTIONS[nextIndex].id);
+    if (SECTIONS[nextIndex].id === section) {
+      navigationRefs.current[nextIndex]?.focus({ preventScroll: true });
+      resetScroll();
+      return;
+    }
+    confirmNavigation(() => {
+      navigationRefs.current[nextIndex]?.focus({ preventScroll: true });
+      resetScroll();
+      setSection(SECTIONS[nextIndex].id);
+    });
   };
   const activeSection = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0];
   const activeSectionDescription = activeSection.englishDescription ? copy(
@@ -622,7 +631,7 @@ export default function SettingsHub(props: SettingsHubProps) {
   return (
     <LanguageBoundary>
       <ThemeBoundary>
-        <SettingsHubContent {...props} />
+        <DraftNavigationBoundary><SettingsHubContent {...props} /></DraftNavigationBoundary>
       </ThemeBoundary>
     </LanguageBoundary>
   );

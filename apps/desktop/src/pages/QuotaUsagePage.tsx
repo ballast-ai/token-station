@@ -84,6 +84,7 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
   const accounts = snapshot?.accounts ?? [];
   const shown = accounts.filter(
     (account) =>
+      account.source !== "none" || account.history === "unavailable" || (account.unknown_usage_requests ?? 0) > 0 ||
       account.windows.length > 0 ||
       account.cooling_ms_remaining > 0 ||
       account.rate_pressured ||
@@ -116,8 +117,8 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
         <section className="panel quota-usage-empty">
           <strong>{copy("No quota activity yet", "还没有额度活动", "還沒有額度活動", "まだクォータ活動はありません")}</strong>
           <p>{copy(
-            "Accounts appear here once they report limits, are counted locally, or hit a cooldown. Declare a plan or send some traffic in quota-first mode.",
-            "账户在上报限额、被本地计数或触发冷却后会出现在这里。可以先声明额度计划,或在额度优先模式下跑一些流量。", "帳號在上報限制、被本地計數或觸發冷卻後會出現在這裡。可以先宣告額度計劃，或在額度優先模式下跑一些流量。", "アカウントは制限を報告したり、ローカルでカウントされたり、クールダウンをトリガーした後、ここに表示されます。まずクォータプランを宣言するか、クォータ優先モードでいくつかのトラフィックを送信してください。"
+            "Accounts appear here once they report limits, are counted locally, or hit a cooldown. Declare a plan or send traffic through a configured account.",
+            "账户在上报限额、被本地计数或触发冷却后会出现在这里。可以先声明额度计划,或通过已配置账户发送请求。", "帳號在上報限制、被本地計數或觸發冷卻後會出現在這裡。可以先宣告額度計劃，或透過已設定帳戶傳送請求。", "アカウントは制限を報告したり、ローカルでカウントされたり、クールダウンをトリガーした後、ここに表示されます。まずクォータプランを宣言するか、設定済みアカウントを通してリクエストを送信してください。"
           )}</p>
         </section>
       ) : (
@@ -163,6 +164,11 @@ function QuotaAccountCard({
 }) {
   const source = sourceLabel(account.source);
   const cooling = account.cooling_ms_remaining > 0;
+  const history = account.history;
+  const historyNote = history === "new" ? copy("Local tracking starts now; earlier provider usage is unknown.", "本地跟踪从本次开始，供应商此前用量未知。", "本機追蹤從本次開始，供應商先前用量未知。", "ローカル追跡は今回から開始します。以前のプロバイダー使用量は不明です。")
+    : history === "plan_changed" ? copy("The plan changed. Earlier local counters are incompatible; this is a new baseline.", "额度计划已改变，旧计数不兼容；当前为新统计基准。", "額度計畫已變更，舊計數不相容；目前為新統計基準。", "プランが変更されたため、以前のカウンターは使用できません。新しい基準から追跡します。")
+    : history === "unavailable" ? copy("Local quota storage is unavailable. This account is excluded from quota routing.", "本地额度存储不可用，此账户已排除出额度路由。", "本機額度儲存不可用，此帳戶已從額度路由排除。", "ローカルクォータストレージを利用できません。このアカウントはクォータルーティングから除外されています。")
+    : history === "recovered" ? copy("Compatible local usage history restored.", "已恢复兼容的本地用量历史。", "已恢復相容的本機用量歷史。", "互換性のあるローカル使用履歴を復元しました。") : null;
   return (
     <section className="panel quota-account-card">
       <div className="quota-account-head">
@@ -190,6 +196,13 @@ function QuotaAccountCard({
         </div>
       </div>
 
+      {historyNote && <p role="status" className="quota-window-none">{historyNote}</p>}
+      {(account.unknown_usage_requests ?? 0) > 0 && <p role="status" className="quota-window-none">{copy(
+        `${account.unknown_usage_requests} requests in local history have no token usage. Estimated remaining quota may be too high.`,
+        `本地历史中有 ${account.unknown_usage_requests} 次请求缺少 Token 用量，估算余量可能偏高。`,
+        `本機歷史中有 ${account.unknown_usage_requests} 次請求缺少 Token 用量，估算餘量可能偏高。`,
+        `ローカル履歴の ${account.unknown_usage_requests} 件のリクエストでトークン使用量が不明です。推定残量は実際より多い可能性があります。`,
+      )}</p>}
       {account.windows.length > 0 ? (
         <div className="quota-window-list">
           {account.windows.map((window, index) => {

@@ -61,7 +61,12 @@ impl InflightLeases {
     /// Take a lease on `account` at `now_ms`. Drop expired leases on the account
     /// first so a long-lived key does not accumulate dead entries.
     pub fn grant(&mut self, now_ms: u64, account: &str) -> LeaseId {
-        let expiry = now_ms.saturating_add(self.lease_ms);
+        self.grant_for(now_ms, account, self.lease_ms)
+    }
+
+    /// Keep a real request visible for at least its remaining host deadline.
+    pub fn grant_for(&mut self, now_ms: u64, account: &str, lifetime_ms: u64) -> LeaseId {
+        let expiry = now_ms.saturating_add(lifetime_ms.max(self.lease_ms));
         let serial = self.next_serial;
         self.next_serial = self.next_serial.wrapping_add(1);
         let leases = self.by_account.entry(account.to_owned()).or_default();
@@ -126,6 +131,15 @@ pub fn apply_inflight_penalty(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_stream_lease_covers_its_host_deadline() {
+        let mut leases = InflightLeases::new(DEFAULT_LEASE_MS);
+        let lease = leases.grant_for(0, "a", 600_000);
+        assert_eq!(leases.inflight(300_000, "a"), 1);
+        leases.release(&lease);
+        assert_eq!(leases.inflight(300_000, "a"), 0);
+    }
 
     #[test]
     fn a_granted_lease_is_counted_until_released() {

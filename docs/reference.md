@@ -78,18 +78,30 @@ Cursor uses a separate macOS-only path. Quit Cursor first. Token Station private
 
 Provider labels and model names alone are not proof of locality. A loopback endpoint only proves the first network hop.
 
+## Local quota estimates
+
+Configured account plans share local consumption tracking across routing modes. `quota.sqlite` stores private counters for each account and compatible plan. Gateway rebuilds recover those counters without replaying requests. Preparing a different plan does not replace the running plan's history.
+
+The quota page distinguishes new, recovered, changed-plan, and unavailable history. Missing Token usage is counted separately. Requests made outside Token Station and consumption under different plans are not included in a plan's estimate. Provider responses without quota headers invalidate an older cached provider reading.
+
+If quota persistence fails, Token Station reports the failure instead of starting with empty counters. Restore `quota.sqlite` from a known backup before removing the `quota-state-unavailable` marker. Do not remove that marker to claim a recovered balance.
+
 ## Security
 
 | Boundary | Current behavior |
 |---|---|
 | Listener | Non-loopback listen addresses are rejected. Local authentication is enabled by default with a per-installation virtual key. |
-| Desktop request bodies | The desktop gateway stores client input, Provider exchanges, and final client-facing output as owner-only plaintext JSON so Request logs can inspect them. This includes requests from the model-test console. Cleanup uses a 7-day retention threshold and a target of 1,000 request files. Each body is capped at 256 KiB. One HTTP trace has a 1 MiB aggregate body budget. Header names are captured, but values are kept only for an explicit diagnostics-safe allowlist. All other Header values are stored as `<redacted>`. Host-injected Provider credentials are never captured. Secrets inside a request or response body are retained as body content. Cleanup runs at startup and periodically while writing. |
+| Desktop request bodies | The desktop gateway stores client input, Provider exchanges, and final client-facing output as owner-only plaintext JSON so Request logs can inspect them. This includes requests from the model-test console. Cleanup uses a 7-day retention threshold and a target of 1,000 request files. Each body is capped at 256 KiB. One HTTP trace has a 1 MiB aggregate body budget. Header names are captured, but values are kept only for an explicit diagnostics-safe allowlist. All other Header values are stored as `<redacted>`. Host-injected Provider credentials are never captured. Secrets inside a request or response body are retained as body content. Cleanup runs at startup, during writes, and hourly while the desktop gateway is prepared or running. Expired files cannot be opened through Request logs. |
 | Receipt logs and metrics | Rotating `requests.log` receipts and `metrics.sqlite` do not contain prompt or response bodies. The CLI gateway does not enable the separate body store by default. |
 | Cloud routing | A cloud upstream receives requests routed to it. Token Station cannot override that provider's retention, logging, or training policy. |
 | Provider credentials | The default store is plaintext `secrets.json` with owner-only permissions. Other processes running as the same operating-system user may still read it. Environment-variable and standalone-file sources are supported. Credential values are excluded from logs, errors, and sandboxed plugins. |
 | Plugin sandbox | WASM adapters receive no direct network, filesystem, environment, arguments, inherited standard I/O, or plaintext credential access. Memory and call time are limited. |
 | Outbound authorization | Before attaching a credential, the host checks that the destination origin, path boundary, and credential slot match the configured provider. |
 | Agent configuration | Built-in connectors use revision and ownership checks, private AES-256-GCM snapshots, atomic private writes, and recovery flows. The snapshot key is an owner-only local file, not an operating-system keychain entry. Cursor uses the separate SQLite path above. |
+
+The Settings page can disable request-body capture with `data.request_body_capture: false`. The change applies when the gateway starts with the saved settings. Existing configurations keep capture enabled. Requests already in flight keep their original capture policy. Disabling capture keeps metadata receipts and does not immediately delete existing bodies. Retention cleanup still applies to existing bodies.
+
+Model prices support optional `cache_write_5m_per_mtok` and `cache_write_1h_per_mtok` rates, in micro-USD per million tokens. Each missing rate uses `cache_write_per_mtok`. Usage without a TTL breakdown also uses that fallback rate. Historical receipts keep their recorded cost and price version. Agent metadata omits a single cache-write price when configured TTL rates differ.
 
 Private file permissions isolate local state from other operating-system accounts. Request-body history and the default credential store are not encrypted at rest. Use the [request-body cleanup script](../scripts/cleanup-request-bodies.sh) to prune files older than a chosen retention window. The Bash script defaults to the macOS app data path. Pass `--data-dir` for another Unix-like location. Use environment variables or a separately managed secret file when your credential custody requirements differ.
 

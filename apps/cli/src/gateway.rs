@@ -24,6 +24,7 @@ mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
+mod web_search;
 
 #[allow(clippy::wildcard_imports)]
 use attempt_machine::*;
@@ -1384,15 +1385,7 @@ fn model_cost_document(
     capability: &ModelCapability,
     pricing: &crate::pricing::PriceTable,
 ) -> Option<Value> {
-    capability
-        .extensions
-        .get("catalog_cost")
-        .and_then(sanitized_catalog_cost)
-        .or_else(|| {
-            pricing
-                .model_price(&capability.model)
-                .map(model_price_document)
-        })
+    model_cost_with_price(capability, pricing.model_price(&capability.model))
 }
 
 fn model_cost_document_for_upstream(
@@ -1400,27 +1393,41 @@ fn model_cost_document_for_upstream(
     capability: &ModelCapability,
     pricing: &crate::pricing::PriceTable,
 ) -> Option<Value> {
-    capability
+    model_cost_with_price(
+        capability,
+        pricing.model_price_for_upstream(upstream, &capability.model),
+    )
+}
+
+fn model_cost_with_price(
+    capability: &ModelCapability,
+    price: Option<&crate::pricing::ModelPrice>,
+) -> Option<Value> {
+    let mut cost = capability
         .extensions
         .get("catalog_cost")
         .and_then(sanitized_catalog_cost)
-        .or_else(|| {
-            pricing
-                .model_price_for_upstream(upstream, &capability.model)
-                .map(model_price_document)
-        })
+        .or_else(|| price.map(model_price_document))?;
+    // A catalog's single cache price cannot represent configured TTL rates.
+    if price.is_some_and(|price| price.uniform_cache_write_rate().is_none()) {
+        cost.as_object_mut()?.remove("cache_write");
+    }
+    Some(cost)
 }
 
 fn model_price_document(price: &crate::pricing::ModelPrice) -> Value {
     // Price display is decimal USD per million tokens; sub-cent rounding is acceptable here.
     #[allow(clippy::cast_precision_loss)]
     let dollars = |micros: u64| micros as f64 / 1_000_000.0;
-    json!({
+    let mut document = json!({
         "input": dollars(price.input_per_mtok),
         "output": dollars(price.output_per_mtok),
         "cache_read": dollars(price.cache_read_per_mtok),
-        "cache_write": dollars(price.cache_write_per_mtok),
-    })
+    });
+    if let Some(rate) = price.uniform_cache_write_rate() {
+        document["cache_write"] = json!(dollars(rate));
+    }
+    document
 }
 
 fn router_catalog_targets(router: &Router) -> Option<BTreeSet<UpstreamModel>> {
@@ -1702,9 +1709,15 @@ fn settle_estimated_cost(
     record: &mut RequestRecord,
     served: &UpstreamModel,
 ) {
+    if record.cost_kind == CostKind::Actual {
+        return;
+    }
     let Some(usage) = record.usage else {
         return;
     };
+    if !crate::accounting::can_estimate(&usage, record.usage_observation) {
+        return;
+    }
     if let Some((cost, version)) =
         pricing.price_for_upstream(served.upstream.as_str(), &served.model, &usage)
     {
@@ -2138,6 +2151,9 @@ impl Gateway {
             }
         }
 
+        let quota = crate::quota_tracker::QuotaTracker::persistent(quota_plans, &config.data.dir)
+            .map_err(|error| format!("Cannot restore quota state: {error}"))?;
+
         Ok(Self {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
@@ -2153,7 +2169,7 @@ impl Gateway {
                 eject_after: config.health.eject_after,
                 cooldown: Duration::from_millis(config.health.cooldown_ms),
             })),
-            quota: std::sync::Mutex::new(crate::quota_tracker::QuotaTracker::new(quota_plans)),
+            quota: std::sync::Mutex::new(quota),
             admission: Admission::new(config.concurrency),
             pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config, &config.data.dir),
@@ -3677,6 +3693,20 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        if agent.protocol == "anthropic-messages"
+            && let Some(served) = self.try_web_search(
+                ctx,
+                agent,
+                router,
+                headers,
+                body,
+                routing_model,
+                emit,
+                record,
+            )?
+        {
+            return Ok(served);
+        }
         // Native Anthropic passthrough, the server-tool escape hatch: an
         // anthropic-messages request that routes to an `anthropic-native`
         // upstream *and declares a server tool* (web_search, code_execution, …)
@@ -4791,6 +4821,211 @@ mod waiting_route_tests {
                 "gemini" => assert_eq!(body["error"]["status"], json!(expected.1)),
                 _ => unreachable!(),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ttl_model_projection_tests {
+    #[test]
+    fn ttl_model_metadata_omits_a_single_cache_rate_for_mixed_tiers() {
+        let price: crate::pricing::ModelPrice = serde_json::from_value(serde_json::json!({
+            "input_per_mtok": 3_000_000,
+            "output_per_mtok": 15_000_000,
+            "cache_write_per_mtok": 3_750_000,
+            "cache_write_1h_per_mtok": 6_000_000
+        }))
+        .unwrap();
+        let pricing = crate::pricing::PriceTable {
+            version: 1,
+            models: std::collections::BTreeMap::from([("provider/model".to_owned(), price)]),
+        };
+        for catalog in [false, true] {
+            let mut capability = token_station_protocol::ModelCapability {
+                model: "model".to_owned(),
+                ..Default::default()
+            };
+            if catalog {
+                capability.extensions.insert(
+                    "catalog_cost".to_owned(),
+                    serde_json::json!({
+                        "input": 3.0, "output": 15.0, "cache_write": 3.75
+                    }),
+                );
+            }
+            let cost =
+                super::model_cost_document_for_upstream("provider", &capability, &pricing).unwrap();
+            assert_eq!(cost["input"], 3.0);
+            assert_eq!(cost["output"], 15.0);
+            assert!(
+                cost.get("cache_write").is_none(),
+                "one published rate cannot represent mixed TTL prices"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod estimation_eligibility_tests {
+    use super::{
+        CostKind, RequestRecord, UpstreamModel, UpstreamRef, Usage, settle_estimated_cost,
+    };
+    use token_station_metrics::UsageObservation;
+
+    #[test]
+    fn estimation_eligibility_checks_presence_cache_and_ttl_boundaries() {
+        let valid = Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_tokens: 5,
+            cache_write_tokens: 5,
+            cache_write_5m_tokens: 2,
+            cache_write_1h_tokens: 3,
+            ..Usage::default()
+        };
+        let observed = UsageObservation {
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            ..UsageObservation::default()
+        };
+        assert!(crate::accounting::can_estimate(&valid, None));
+        assert!(crate::accounting::can_estimate(&valid, Some(observed)));
+        assert!(crate::accounting::can_estimate(
+            &Usage::default(),
+            Some(UsageObservation {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                ..UsageObservation::default()
+            })
+        ));
+        for incomplete in [
+            UsageObservation {
+                input_tokens: None,
+                ..observed
+            },
+            UsageObservation {
+                output_tokens: None,
+                ..observed
+            },
+            UsageObservation {
+                incomplete: true,
+                ..observed
+            },
+        ] {
+            assert!(!crate::accounting::can_estimate(&valid, Some(incomplete)));
+        }
+        for invalid in [
+            Usage {
+                cache_read_tokens: 6,
+                ..valid
+            },
+            Usage {
+                cache_read_tokens: u64::MAX,
+                ..valid
+            },
+            Usage {
+                cache_write_1h_tokens: 4,
+                ..valid
+            },
+            Usage {
+                cache_write_5m_tokens: u64::MAX,
+                ..valid
+            },
+        ] {
+            assert!(!crate::accounting::can_estimate(&invalid, None));
+        }
+        assert!(!crate::accounting::can_estimate(
+            &valid,
+            Some(UsageObservation {
+                cache_write_1h_tokens: Some(4),
+                ..observed
+            })
+        ));
+    }
+
+    #[test]
+    fn estimation_eligibility_realtime_rejects_ttl_overlap_but_preserves_actual_cost() {
+        let pricing = crate::pricing::PriceTable::builtin();
+        let target = UpstreamModel {
+            upstream: UpstreamRef::new("test").unwrap(),
+            model: "deepseek-v4-pro".to_owned(),
+        };
+        let mut record = RequestRecord::begin(0, "openai");
+        record.usage = Some(Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_write_tokens: 5,
+            cache_write_5m_tokens: 4,
+            cache_write_1h_tokens: 3,
+            ..Usage::default()
+        });
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(
+            (record.cost_kind, record.cost_micros),
+            (CostKind::Unknown, None)
+        );
+        record.cost_kind = CostKind::Actual;
+        record.cost_micros = Some(17);
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(
+            (record.cost_kind, record.cost_micros),
+            (CostKind::Actual, Some(17))
+        );
+        record.cost_kind = CostKind::Unknown;
+        record.cost_micros = None;
+        record.usage.as_mut().unwrap().cache_write_5m_tokens = 2;
+        record.usage_observation = Some(UsageObservation {
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            incomplete: true,
+            ..UsageObservation::default()
+        });
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(record.cost_kind, CostKind::Unknown);
+        record.usage_observation.as_mut().unwrap().incomplete = false;
+        settle_estimated_cost(&pricing, &mut record, &target);
+        assert_eq!(record.cost_kind, CostKind::Estimated);
+        assert!(record.cost_micros.is_some());
+    }
+
+    #[test]
+    fn estimation_rejects_reasoning_above_output_and_preserves_actual_charge() {
+        let pricing = crate::pricing::PriceTable::builtin();
+        let target = UpstreamModel::new(UpstreamRef::new("test").unwrap(), "deepseek-v4-pro");
+        for observed in [false, true] {
+            let mut record = RequestRecord::begin(0, "openai");
+            record.usage = Some(Usage {
+                input_tokens: 10,
+                output_tokens: 2,
+                reasoning_tokens: 100,
+                ..Usage::default()
+            });
+            record.usage_observation = observed.then_some(UsageObservation {
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                reasoning_tokens: Some(100),
+                ..UsageObservation::default()
+            });
+            settle_estimated_cost(&pricing, &mut record, &target);
+            assert_eq!(
+                (record.cost_kind, record.cost_micros),
+                (CostKind::Unknown, None)
+            );
+            record.cost_kind = CostKind::Actual;
+            record.cost_micros = Some(17);
+            settle_estimated_cost(&pricing, &mut record, &target);
+            assert_eq!(
+                (record.cost_kind, record.cost_micros),
+                (CostKind::Actual, Some(17))
+            );
+            record.cost_kind = CostKind::Unknown;
+            record.cost_micros = None;
+            record.usage.as_mut().unwrap().reasoning_tokens = 2;
+            if let Some(observation) = record.usage_observation.as_mut() {
+                observation.reasoning_tokens = Some(2);
+            }
+            settle_estimated_cost(&pricing, &mut record, &target);
+            assert_eq!(record.cost_kind, CostKind::Estimated);
         }
     }
 }

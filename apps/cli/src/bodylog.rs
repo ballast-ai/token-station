@@ -143,6 +143,18 @@ impl BodyLog {
         Ok(log)
     }
 
+    /// Removes expired snapshots and applies the file-count limit.
+    /// Call this periodically even when no new requests arrive.
+    ///
+    /// # Errors
+    /// Returns a directory inspection or deletion error.
+    pub fn maintain(&self) -> Result<CleanupReport, String> {
+        self.cleanup(
+            Duration::from_secs(DEFAULT_RETENTION_DAYS * 24 * 60 * 60),
+            MAX_BODY_FILES,
+        )
+    }
+
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
@@ -220,6 +232,26 @@ impl BodyLog {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("verify request body snapshot: {error}")),
+        }
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("inspect request body snapshot: {error}")),
+        };
+        let modified = metadata
+            .modified()
+            .map_err(|error| format!("inspect request body age: {error}"))?;
+        if SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or_default()
+            >= Duration::from_secs(DEFAULT_RETENTION_DAYS * 24 * 60 * 60)
+        {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("delete expired request body snapshot: {error}")),
+            }
+            return Ok(None);
         }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -324,6 +356,60 @@ mod tests {
             "token-station-bodylog-{label}-{}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn an_expired_snapshot_is_not_returned_without_new_writes() {
+        let root = temp_dir("expired-read");
+        fs::remove_dir_all(&root).ok();
+        let log = BodyLog::open(&root).unwrap();
+        let request_id = "req_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        log.record(
+            request_id,
+            42,
+            BoundedBody::from_bytes(b"private"),
+            BoundedBody::default(),
+        )
+        .unwrap();
+        let path = log.directory().join(format!("{request_id}.json"));
+        let old = std::time::SystemTime::now() - Duration::from_hours(192);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        assert!(
+            log.read(request_id).unwrap().is_none(),
+            "expired plaintext must not be returned"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn maintenance_removes_expired_files_without_request_writes() {
+        let root = temp_dir("idle-maintenance");
+        fs::remove_dir_all(&root).ok();
+        let log = BodyLog::open(&root).unwrap();
+        let request_id = "req_dddddddddddddddddddddddddddddddd";
+        log.record(
+            request_id,
+            42,
+            BoundedBody::default(),
+            BoundedBody::default(),
+        )
+        .unwrap();
+        let path = log.directory().join(format!("{request_id}.json"));
+        let old = std::time::SystemTime::now() - Duration::from_hours(192);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        assert_eq!(log.maintain().unwrap().deleted, 1);
+        assert!(!path.exists());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -2160,14 +2160,15 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
     let proxy = start_proxy(&mock, &key);
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        let response = agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -2178,10 +2179,13 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
                 })
                 .to_string(),
             )
-            .expect("proxy sends stream headers");
-        let status = response.status().as_u16();
-        let _ = response.into_body().read_to_string();
-        status
+            .map(|response| {
+                let status = response.status().as_u16();
+                let _ = response.into_body().read_to_string();
+                status
+            })
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -2222,9 +2226,13 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
         mock.peer_closed(),
         "the cancelled worker closes the upstream socket"
     );
+    let status = result_rx
+        .recv_timeout(cleanup_deadline.saturating_duration_since(Instant::now()))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
     assert_eq!(
-        client.join().expect("client joins"),
-        503,
+        status, 503,
         "an uncommitted stream cancelled by server drain is explicitly retryable"
     );
 
@@ -2242,26 +2250,16 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let proxy = start_proxy(&mock, &key);
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                // `timeout_recv_response`, not `timeout_global`. The global
-                // clock starts inside `send`, so it also covers connecting and
-                // writing the request — and then keeps running while the main
-                // thread waits for arrival and decides to cancel. None of that
-                // is what this test claims. On a loaded 4-core runner sharing
-                // 128 parallel tests, that pre-cancel stretch is what expired,
-                // which is why the budget went 5s -> 15s -> 60s and still
-                // failed: each raise bought margin for the scheduler rather
-                // than for the proxy. This clock starts once the request is
-                // written and the client is waiting on the proxy, which is
-                // exactly the interval the claim is about, so 15s bounds a
-                // hang without re-proving the runner.
-                .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
+                // The test starts its completion deadline after cancellation.
+                .timeout_recv_response(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -2271,13 +2269,12 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the cancelled request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
-    // 10s, not 3s: a loaded runner can starve this thread before the client's
-    // request lands, and that delay no longer eats the client's budget.
+    // Bound arrival separately from completion after cancellation.
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while (mock.hits() == 0 || proxy.control.in_flight() == 0)
         && std::time::Instant::now() < arrival_deadline
@@ -2285,8 +2282,14 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(mock.hits(), 1);
+    assert_eq!(proxy.control.in_flight(), 1);
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the cancelled request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
     settle();
     let row = last_row(&proxy.data_dir);
     assert_eq!(row["status"], "Integer(503)");
@@ -3798,7 +3801,7 @@ fn translated_anthropic_server_tool_fails_before_upstream_with_receipt_reason() 
     assert_eq!(status, 400, "body={body}");
     let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
     assert_eq!(error["error"]["type"], json!("invalid_request_error"));
-    assert!(body.contains("anthropic-native"), "body={body}");
+    assert!(body.contains("selected provider route"), "body={body}");
     assert_eq!(
         mock.hits(),
         0,
@@ -5805,15 +5808,18 @@ fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
         }],
         "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
     });
-    let primary = MockUpstream::start(vec![vec![http_json_with_headers(
-        200,
-        &ok.to_string(),
-        &[
-            ("x-ratelimit-limit-tokens", "1000"),
-            ("x-ratelimit-remaining-tokens", "250"),
-            ("x-ratelimit-reset-tokens", "300"),
-        ],
-    )]]);
+    let primary = MockUpstream::start(vec![
+        vec![http_json_with_headers(
+            200,
+            &ok.to_string(),
+            &[
+                ("x-ratelimit-limit-tokens", "1000"),
+                ("x-ratelimit-remaining-tokens", "250"),
+                ("x-ratelimit-reset-tokens", "300"),
+            ],
+        )],
+        vec![http_json(200, &ok.to_string())],
+    ]);
     let fallback = MockUpstream::start(vec![vec![http_json(200, &ok.to_string())]]);
     let key = key_file("quota-snapshot", "sk-test-key-abc\n");
     let proxy = start_quota_proxy_two(&primary, &fallback, &key);
@@ -5853,7 +5859,29 @@ fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
     let window = &primary_account["windows"][0];
     assert_eq!(window["limit"], 1000);
     assert_eq!(window["remaining_permille"], 250);
-    assert_eq!(window["ms_until_reset"], 300_000);
+    let remaining_ms = window["ms_until_reset"].as_u64().unwrap();
+    assert!(
+        (1..=300_000).contains(&remaining_ms),
+        "the reset countdown ages after the response"
+    );
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({ "model": "auto", "messages": [{ "role": "user", "content": "hi" }] }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(primary.hits(), 2);
+    let snapshot = proxy.gateway.quota_snapshot(quota_audit_now_ms());
+    let primary = snapshot["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["upstream"] == "mock_primary")
+        .unwrap();
+    assert_eq!(
+        primary["source"], "none",
+        "a response without quota headers invalidates the older authoritative reading"
+    );
 }
 
 fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> Proxy {
@@ -6220,6 +6248,17 @@ fn a_failing_upstream_is_ejected_bypassed_probed_and_restored() {
     );
     assert_eq!(primary.hits(), 4, "the degraded primary took the probe");
 
+    // HTTP bytes arrive before the worker settles health. The fifth persisted
+    // receipt proves that the probe settled before the next route decision.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while request_count(&proxy.data_dir) < 5 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the successful probe must settle before checking restored health"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
     // The probe succeeded, so the primary is fully back: config order wins.
     let (status, _) = ask();
     assert_eq!(status, 200);
@@ -6472,14 +6511,15 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
     let proxy = start_south_header_auth_production_proxy(&mock, "synthetic-azure-drain-secret");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -6489,9 +6529,9 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained Header Auth request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -6512,7 +6552,12 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
     assert_eq!(seen[0].authorization, None);
 
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -6881,14 +6926,15 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     let proxy = start_south_production_proxy(&mock, "sk-south-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -6898,9 +6944,9 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained South request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -6910,7 +6956,12 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     }
     assert_eq!(mock.hits(), 1, "South request reached the upstream once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -6949,14 +7000,15 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
     let proxy = start_south_streaming_production_proxy(&mock, "sk-south-stream-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -6967,9 +7019,9 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained South stream")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -6979,7 +7031,12 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
     }
     assert_eq!(mock.hits(), 1, "South stream reached the upstream once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -8711,24 +8768,25 @@ fn native_anthropic_south_stream_is_cancelled_by_server_drain_without_replay() {
     let proxy = start_native_anthropic_proxy_with_stored_secret(&mock, "sk-native-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let mut turn = native_server_tool_turn();
         turn["model"] = json!("claude-sonnet-4");
         turn["stream"] = json!(true);
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/messages"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .header("anthropic-version", "2023-06-01")
             .send(&turn.to_string())
-            .expect("proxy answers the drained native stream")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -8740,7 +8798,12 @@ fn native_anthropic_south_stream_is_cancelled_by_server_drain_without_replay() {
     assert!(mock.response_started(), "the native South read is active");
     assert_eq!(mock.hits(), 1, "the native stream reaches South once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -9724,5 +9787,373 @@ fn a_permanently_invalid_native_stream_fails_closed_without_buffering_forever() 
         "rejecting the stream drops the upstream reader"
     );
     mock.finish_hanging();
+    std::fs::remove_file(key).ok();
+}
+
+fn quota_audit_now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn quota_history_counts_tiered_native_without_usage_and_survives_gateway_rebuild() {
+    let answer = json!({
+        "id": "quota_without_usage", "type": "message", "role": "assistant",
+        "model": "deepseek-chat", "content": [{"type": "text", "text": "served"}]
+    });
+    let upstream = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("quota-rebuild", "sk-quota-rebuild");
+    let directory = std::env::temp_dir().join(format!("ts-quota-rebuild-{}", std::process::id()));
+    let mut document = json!({
+        "version": 1,
+        "server": {"listen": "127.0.0.1:0"},
+        "data": {"dir": directory, "metrics": false},
+        "plugins": {
+            "dir": plugins_dir(), "agents": ["agent-anthropic"],
+            "providers": {"anthropic": "provider-anthropic-v2"}
+        },
+        "upstreams": {"account": {
+            "provider": "anthropic", "api_dialect": "anthropic-native",
+            "base_url": upstream.base_url(),
+            "auth": {"slot": "provider_api_key", "file": key},
+            "models": [{"model": "deepseek-chat", "tool": true, "tool_state": "verified", "context_window": 128_000}],
+            "quota_plan": {"unit": "requests", "windows": [{"len_ms": 86_400_000, "limit": 1}]}
+        }},
+        "router": {"version": 1, "default_pool": "main", "pools": {
+            "main": [{"upstream": "account", "model": "deepseek-chat"}]
+        }}
+    });
+    let config: ClientConfig = serde_json::from_value(document.clone()).unwrap();
+    config.validate().unwrap();
+    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder)).unwrap();
+    let mut statuses = Vec::new();
+    gateway.chat(
+        "POST",
+        "/v1/messages",
+        &[],
+        &serde_json::to_vec(&native_server_tool_turn()).unwrap(),
+        &mut |reply| {
+            if let Reply::BeginJson(response) = reply {
+                statuses.push(response.status);
+            }
+            true
+        },
+    );
+    assert_eq!(statuses, vec![200]);
+    assert_eq!(
+        gateway.quota_snapshot(quota_audit_now_ms())["accounts"][0]["windows"][0]["used"],
+        1
+    );
+    drop(gateway);
+
+    document["router"] = json!({"version": 1, "routing_mode": "quota_first", "quota_accounts": [{"upstream": "account", "model": "deepseek-chat"}]});
+    let quota_config: ClientConfig = serde_json::from_value(document).unwrap();
+    quota_config.validate().unwrap();
+    let restored =
+        Gateway::new(&quota_config, Arc::new(token_station_metrics::NoopRecorder)).unwrap();
+    let snapshot = restored.quota_snapshot(quota_audit_now_ms());
+    assert_eq!(snapshot["accounts"][0]["history"], "recovered");
+    assert_eq!(snapshot["accounts"][0]["exhausted"], true);
+    statuses.clear();
+    restored.chat(
+        "POST",
+        "/v1/messages",
+        &[],
+        &serde_json::to_vec(&native_server_tool_turn()).unwrap(),
+        &mut |reply| {
+            if let Reply::BeginJson(response) = reply {
+                statuses.push(response.status);
+            }
+            true
+        },
+    );
+    assert!(statuses.iter().any(|status| *status >= 400));
+    assert_eq!(
+        upstream.hits(),
+        1,
+        "quota routing must see the tiered route's prior request"
+    );
+    drop(restored);
+    std::fs::remove_dir_all(directory).unwrap();
+    std::fs::remove_file(key).unwrap();
+}
+
+#[test]
+fn quota_fallback_lease_tracks_actual_provider_and_releases_on_drain() {
+    let primary = MockUpstream::start(vec![vec![http_json(
+        503,
+        r#"{"error":{"type":"api_error","message":"retry"}}"#,
+    )]]);
+    let backup = MockUpstream::start_hanging_buffered();
+    let key = key_file("quota-actual-lease", "sk-quota-actual-lease");
+    let proxy = start_quota_first_native_pair(&primary, &backup, &key);
+    std::thread::scope(|scope| {
+        let request =
+            scope.spawn(|| post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !backup.response_started() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(backup.response_started());
+        let snapshot = proxy.gateway.quota_snapshot(quota_audit_now_ms());
+        let accounts = snapshot["accounts"].as_array().unwrap();
+        let account = |name| {
+            accounts
+                .iter()
+                .find(|account| account["upstream"] == name)
+                .unwrap()
+        };
+        assert_eq!(account("account_a")["inflight"], 0);
+        assert_eq!(account("account_b")["inflight"], 1);
+        proxy.control.cancel_in_flight();
+        let (status, _) = request.join().unwrap();
+        assert_eq!(status, 503);
+        assert!(
+            proxy.gateway.quota_snapshot(quota_audit_now_ms())["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|account| account["inflight"] == 0)
+        );
+    });
+    backup.finish_hanging();
+    std::fs::remove_file(key).unwrap();
+}
+
+#[test]
+fn stalled_authenticated_upload_is_registered_and_released_by_drain() {
+    let upstream = MockUpstream::start(vec![]);
+    let key = key_file("upload-drain", "sk-upload-drain");
+    let proxy = start_proxy(&upstream, &key);
+    let mut socket = TcpStream::connect(proxy.url.trim_start_matches("http://")).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(socket,
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{",
+        proxy.virtual_key).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while proxy.control.in_flight() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(proxy.control.in_flight(), 1);
+    proxy.control.cancel_in_flight();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+    assert_eq!(proxy.control.in_flight(), 0);
+    assert_eq!(upstream.hits(), 0);
+    std::fs::remove_file(key).unwrap();
+}
+
+fn current_route_search_config(chat: &MockUpstream, search: &MockUpstream, key: &Path) -> Value {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    json!({
+        "version":1,"server":{"listen":"127.0.0.1:0"},
+        "data":{"dir":std::env::temp_dir().join(format!("ts-current-route-search-{}-{}",std::process::id(),SEQ.fetch_add(1,Ordering::SeqCst))),"metrics":true},
+        "plugins":{"dir":plugins_dir(),"agents":["agent-anthropic"],"providers":{"openai-compatible":"provider-openai-compatible-v2"}},
+        "upstreams":{
+            "chat":{"provider":"openai-compatible","base_url":chat.base_url(),"auth":{"slot":"provider_api_key","file":key},
+                "models":[{"model":"arbitrary-chat-model","tool":true,"context_window":200_000}]},
+            "search":{"provider":"openai-compatible","base_url":search.base_url(),"api_dialect":"responses-native","auth":{"slot":"provider_api_key","file":key},
+                "models":[{"model":"arbitrary-search-model","tool":true,"context_window":200_000}]}
+        },
+        "pricing":{"version":7,"models":{"search/arbitrary-search-model":{"input_per_mtok":1_000_000,"output_per_mtok":1_000_000}}},
+        "router":{"version":1,"pools":{"main":[{"upstream":"search","model":"arbitrary-search-model"}]},"default_pool":"main"}
+    })
+}
+
+fn start_current_route_search_proxy(
+    chat: &MockUpstream,
+    search: &MockUpstream,
+    key: &Path,
+) -> Proxy {
+    let config: ClientConfig =
+        serde_json::from_value(current_route_search_config(chat, search, key)).unwrap();
+    config.validate().unwrap();
+    spawn_proxy(&config)
+}
+
+fn current_route_search_request(stream: bool) -> Value {
+    json!({"model":"auto","max_tokens":512,"stream":stream,
+        "messages":[{"role":"user","content":"Find current news"}],
+        "tools":[{"type":"web_search_20250305","name":"web_search","max_uses":2}],
+        "tool_choice":{"type":"tool","name":"web_search"}})
+}
+
+#[test]
+fn claude_search_uses_current_route_for_json_and_sse() {
+    for stream in [false, true] {
+        let chat = MockUpstream::start(Vec::new());
+        let search = MockUpstream::start(vec![vec![http_json(200,&json!({"id":"resp_search","status":"completed",
+            "output":[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"query":"news","sources":[{"url":"https://example.com","title":"News"}]}},
+                {"type":"message","content":[{"type":"output_text","text":"Verified news","annotations":[]}]}],
+            "usage":{"input_tokens":12,"output_tokens":20}}).to_string())]]);
+        let key = key_file("current-route-search", "sk-search-fixture");
+        let proxy = start_current_route_search_proxy(&chat, &search, &key);
+        let (status, body) = post_messages(
+            &proxy,
+            &current_route_search_request(stream),
+            &proxy.virtual_key,
+        );
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(chat.hits(), 0);
+        let seen = search.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].path, "/v1/responses");
+        assert_eq!(seen[0].body["model"], "arbitrary-search-model");
+        assert_eq!(
+            seen[0].authorization.as_deref(),
+            Some("Bearer sk-search-fixture")
+        );
+        assert_eq!(seen[0].body["max_tool_calls"], 2);
+        assert!(body.contains("web_search_tool_result"));
+        assert!(body.contains("https://example.com"));
+        if stream {
+            assert!(body.contains("event: message_stop"));
+        } else {
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap()["stop_reason"],
+                "end_turn"
+            );
+        }
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn current_route_search_rejects_unsupported_filters_before_network_io() {
+    let chat = MockUpstream::start(Vec::new());
+    let search = MockUpstream::start(Vec::new());
+    let key = key_file("search-filter", "sk-search-fixture");
+    let proxy = start_current_route_search_proxy(&chat, &search, &key);
+    let mut request = current_route_search_request(false);
+    request["tools"][0]["blocked_domains"] = json!(["example.com"]);
+    let (status, body) = post_messages(&proxy, &request, &proxy.virtual_key);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(chat.hits() + search.hits(), 0);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn current_route_search_preserves_upstream_failure_status() {
+    let chat = MockUpstream::start(Vec::new());
+    let search = MockUpstream::start(vec![vec![http_json(
+        400,
+        "{\"error\":{\"message\":\"unsupported search\"}}",
+    )]]);
+    let key = key_file("search-refusal", "sk-search-fixture");
+    let proxy = start_current_route_search_proxy(&chat, &search, &key);
+    let (status, body) = post_messages(
+        &proxy,
+        &current_route_search_request(false),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("error"));
+    assert_eq!(chat.hits(), 0);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn current_route_search_ignores_legacy_web_search_target() {
+    let chat = MockUpstream::start(Vec::new());
+    let search = MockUpstream::start(Vec::new());
+    let key = key_file("search-legacy-target", "sk-search-fixture");
+    let mut config = current_route_search_config(&chat, &search, &key);
+    config["router"]["pools"]["main"] = json!([{"upstream":"chat","model":"arbitrary-chat-model"}]);
+    config["web_search_target"] = json!({"upstream":"search","model":"arbitrary-search-model"});
+    let config: ClientConfig = serde_json::from_value(config).unwrap();
+    config.validate().unwrap();
+    assert!(
+        serde_json::to_value(&config)
+            .unwrap()
+            .get("web_search_target")
+            .is_none()
+    );
+    let proxy = spawn_proxy(&config);
+    let (status, body) = post_messages(
+        &proxy,
+        &current_route_search_request(false),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        search.hits(),
+        0,
+        "The legacy target must not reroute search"
+    );
+    assert_eq!(
+        chat.hits(),
+        0,
+        "Unsupported search must fail before network I/O"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn current_route_search_conversion_failure_retains_consumed_cost() {
+    let chat = MockUpstream::start(Vec::new());
+    let search = MockUpstream::start(vec![vec![http_json(200,&json!({"id":"resp_bad","status":"failed","output":[],"usage":{"input_tokens":12,"output_tokens":20}}).to_string())]]);
+    let key = key_file("search-conversion-cost", "sk-search-fixture");
+    let proxy = start_current_route_search_proxy(&chat, &search, &key);
+    let (status, body) = post_messages(
+        &proxy,
+        &current_route_search_request(false),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(last_row(&proxy.data_dir)["cost_micros"], "Integer(32)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn current_route_search_conversion_failures_eject_the_backend() {
+    let chat = MockUpstream::start(Vec::new());
+    let failed = http_json(
+        200,
+        &json!({"id":"resp_bad","status":"failed","output":[],
+        "usage":{"input_tokens":12,"output_tokens":20}})
+        .to_string(),
+    );
+    let search = MockUpstream::start(vec![vec![failed.clone()], vec![failed]]);
+    let key = key_file("search-conversion-health", "sk-search-fixture");
+    let mut config = current_route_search_config(&chat, &search, &key);
+    config["health"] = json!({"eject_after":2,"cooldown_ms":60_000});
+    // Keep another healthy candidate in the same route. A fully ejected pool
+    // deliberately allows a last-resort probe, which would hide the health change.
+    config["router"]["pools"]["main"] = json!([
+        {"upstream":"search","model":"arbitrary-search-model"},
+        {"upstream":"chat","model":"arbitrary-chat-model"}
+    ]);
+    let config: ClientConfig = serde_json::from_value(config).unwrap();
+    config.validate().unwrap();
+    let proxy = spawn_proxy(&config);
+    for expected_hits in 1..=2 {
+        let (status, body) = post_messages(
+            &proxy,
+            &current_route_search_request(false),
+            &proxy.virtual_key,
+        );
+        assert_eq!(status, 502, "{body}");
+        assert_eq!(search.hits(), expected_hits);
+    }
+    let (status, body) = post_messages(
+        &proxy,
+        &current_route_search_request(false),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(search.hits(), 2, "The failed backend must remain ejected");
+    assert_eq!(
+        chat.hits(),
+        0,
+        "Search must not switch to an unrelated provider"
+    );
     std::fs::remove_file(key).ok();
 }

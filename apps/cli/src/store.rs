@@ -436,6 +436,10 @@ const MIGRATIONS: &[Migration] = &[
                 DEFAULT 'provider_reported_v1'
                 CHECK (usage_semantics IN ('provider_reported_v1', 'canonical_total_v2'));",
     },
+    Migration {
+        to: 14,
+        sql: "ALTER TABLE requests ADD COLUMN usage_observation TEXT;",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -479,6 +483,7 @@ CREATE TABLE IF NOT EXISTS requests (
     cache_read_tokens   INTEGER,
     cache_write_tokens  INTEGER,
     reasoning_tokens    INTEGER,
+    usage_observation   TEXT,
     usage_semantics     TEXT NOT NULL DEFAULT 'canonical_total_v2'
         CHECK (usage_semantics IN ('provider_reported_v1', 'canonical_total_v2')),
     -- micro-units; NULL when the model has no price (unknown, not zero)
@@ -790,7 +795,7 @@ impl SqliteStore {
                         requires_json_schema, code_block_count, requested_max_output_tokens,
                         hint_count, input_tokens, output_tokens, cache_read_tokens,
                         cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
-                        attempts, request_method, path_kind, usage_semantics
+                        attempts, request_method, path_kind, usage_semantics, usage_observation
                    FROM requests
                   {where_sql}
                   ORDER BY started_at_ms DESC, request_id DESC, id DESC
@@ -843,10 +848,13 @@ impl SqliteStore {
         pricing: &crate::pricing::PriceTable,
     ) -> Result<usize, String> {
         const BATCH_SIZE: usize = 500;
-        if !path.exists() || pricing.models.is_empty() {
+        if !path.exists() {
             return Ok(0);
         }
         let store = Self::open(path)?;
+        if pricing.models.is_empty() {
+            return Ok(0);
+        }
         let mut connection = store
             .connection
             .lock()
@@ -861,15 +869,16 @@ impl SqliteStore {
                 let mut statement = transaction
                     .prepare(
                         "SELECT id, upstream, model,
-                                COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+                                input_tokens, output_tokens,
                                 COALESCE(cache_read_tokens, 0), COALESCE(cache_write_tokens, 0),
-                                COALESCE(reasoning_tokens, 0)
+                                COALESCE(reasoning_tokens, 0), usage_observation
                            FROM requests
                           WHERE id > ?1
                             AND cost_kind = 'unknown'
                             AND usage_semantics = 'canonical_total_v2'
                             AND model IS NOT NULL
-                            AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
+                            AND input_tokens IS NOT NULL
+                            AND output_tokens IS NOT NULL
                           ORDER BY id
                           LIMIT ?2",
                     )
@@ -890,6 +899,7 @@ impl SqliteStore {
                                     reasoning_tokens: narrow(row.get::<_, i64>(7)?),
                                     ..Usage::default()
                                 },
+                                read_usage_observation(row, 8)?,
                             ))
                         },
                     )
@@ -897,8 +907,14 @@ impl SqliteStore {
                     .map_err(|error| format!("cost backfill decode: {error}"))?
             };
             let batch_len = candidates.len();
-            for (id, upstream, model, usage) in candidates {
+            for (id, upstream, model, mut usage, observation) in candidates {
                 last_id = id;
+                if !crate::accounting::can_estimate(&usage, observation) {
+                    continue;
+                }
+                if let Some(observation) = observation {
+                    observation.apply(&mut usage);
+                }
                 let priced = upstream.as_deref().map_or_else(
                     || pricing.price(&model, &usage),
                     |upstream| pricing.price_for_upstream(upstream, &model, &usage),
@@ -1031,7 +1047,7 @@ impl SqliteStore {
                 est_input_tokens, message_count, tool_count, has_images,
                 requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, usage_semantics, cost_micros, cost_kind, price_version
+                reasoning_tokens, usage_semantics, cost_micros, cost_kind, price_version, usage_observation
             ) VALUES (
                 :request_id, :agent_id, :running_revision, :request_method, :path_kind,
                 :started_at_ms, :latency_ms, :protocol, :requested_model, :stream, :status,
@@ -1041,7 +1057,7 @@ impl SqliteStore {
                 :est_input_tokens, :message_count, :tool_count, :has_images,
                 :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
                 :input_tokens, :output_tokens, :cache_read_tokens, :cache_write_tokens,
-                :reasoning_tokens, 'canonical_total_v2', :cost_micros, :cost_kind, :price_version
+                :reasoning_tokens, 'canonical_total_v2', :cost_micros, :cost_kind, :price_version, :usage_observation
             )",
             named_params! {
                 ":request_id": record.request_id,
@@ -1080,6 +1096,7 @@ impl SqliteStore {
                 ":cache_read_tokens": record.usage.map(|value| wide(value.cache_read_tokens)),
                 ":cache_write_tokens": record.usage.map(|value| wide(value.cache_write_tokens)),
                 ":reasoning_tokens": record.usage.map(|value| wide(value.reasoning_tokens)),
+                ":usage_observation": record.usage_observation.map(|value| serde_json::to_string(&value).expect("numeric usage observation")),
                 ":cost_micros": cost_micros,
                 ":cost_kind": cost_kind.as_str(),
                 ":price_version": price_version,
@@ -1459,7 +1476,7 @@ impl SqliteStore {
                         requires_json_schema, code_block_count, requested_max_output_tokens,
                         hint_count, input_tokens, output_tokens, cache_read_tokens,
                         cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
-                        attempts, request_method, path_kind, usage_semantics
+                        attempts, request_method, path_kind, usage_semantics, usage_observation
                    FROM requests
                   ORDER BY started_at_ms DESC, request_id DESC, id DESC
                   LIMIT ?1",
@@ -1485,6 +1502,23 @@ impl SqliteStore {
         }
         Ok(seeds.into_iter().map(|seed| seed.view).collect())
     }
+}
+
+pub(crate) fn read_usage_observation(
+    row: &Row<'_>,
+    column: usize,
+) -> Result<Option<token_station_metrics::UsageObservation>, rusqlite::Error> {
+    row.get::<_, Option<String>>(column)?
+        .map(|raw| {
+            serde_json::from_str(&raw).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    column,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
 }
 
 fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
@@ -1533,7 +1567,8 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
     let cache_read_tokens = row.get::<_, Option<i64>>(31)?.map(narrow);
     let cache_write_tokens = row.get::<_, Option<i64>>(32)?.map(narrow);
     let reasoning_tokens = row.get::<_, Option<i64>>(33)?.map(narrow);
-    let usage = (input_tokens.is_some()
+    let usage_observation = read_usage_observation(row, 41)?;
+    let mut usage = (input_tokens.is_some()
         || output_tokens.is_some()
         || cache_read_tokens.is_some()
         || cache_write_tokens.is_some()
@@ -1546,6 +1581,9 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
         reasoning_tokens: reasoning_tokens.unwrap_or(0),
         ..Usage::default()
     });
+    if let (Some(observation), Some(usage)) = (usage_observation, usage.as_mut()) {
+        observation.apply(usage);
+    }
     let cost_kind = cost_kind(34, &row.get::<_, String>(34)?)?;
     let (cost_micros, price_version) = match cost_kind {
         CostKind::Unknown => (None, None),
@@ -1576,6 +1614,7 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
             routing,
             usage,
             usage_semantics: usage_semantics(40, &row.get::<_, String>(40)?)?,
+            usage_observation,
             cost_kind,
             cost_micros,
             price_version,
@@ -1913,6 +1952,47 @@ mod tests {
             ON requests (request_id) WHERE request_id <> '';
         PRAGMA user_version = 3;
     ";
+
+    #[test]
+    fn v13_migration_preserves_unknown_presence_and_new_receipts_keep_ttl_detail() {
+        let path = scratch("migrate-v13-observation");
+        std::fs::remove_file(&path).ok();
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch(V3_SCHEMA).unwrap();
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=13).contains(&migration.to))
+            {
+                connection.execute_batch(migration.sql).unwrap();
+            }
+            connection.execute("INSERT INTO requests (request_id,started_at_ms,latency_ms,protocol,requested_model,stream,status,attempts,input_tokens,output_tokens,cache_write_tokens) VALUES ('old',1,1,'openai','m',0,200,1,10,2,0)", []).unwrap();
+            connection.pragma_update(None, "user_version", 13).unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let mut value = receipt("new", 2);
+        value.usage_observation = Some(token_station_metrics::UsageObservation {
+            input_tokens: Some(40),
+            output_tokens: Some(2),
+            cache_write_tokens: Some(30),
+            cache_write_5m_tokens: Some(10),
+            cache_write_1h_tokens: Some(20),
+            ..token_station_metrics::UsageObservation::default()
+        });
+        value
+            .usage_observation
+            .unwrap()
+            .apply(value.usage.as_mut().unwrap());
+        store.record(&value);
+        let receipts = store.read_recent(5).unwrap();
+        assert_eq!(receipts[0].usage_observation, value.usage_observation);
+        assert_eq!(receipts[0].usage.unwrap().cache_write_1h_tokens, 20);
+        assert_eq!(receipts[1].usage_observation, None);
+        assert_eq!(receipts[1].usage.unwrap().cache_write_tokens, 0);
+        drop(store);
+        std::fs::remove_file(path.with_extension("v13.bak")).ok();
+        std::fs::remove_file(path).ok();
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("ts-store-{}-{name}.sqlite", std::process::id()))
@@ -2395,6 +2475,8 @@ mod tests {
             models: BTreeMap::from([(
                 "claude".to_owned(),
                 ModelPrice {
+                    cache_write_5m_per_mtok: None,
+                    cache_write_1h_per_mtok: None,
                     input_per_mtok: 3_000_000,
                     output_per_mtok: 15_000_000,
                     cache_read_per_mtok: 300_000,
@@ -2667,6 +2749,90 @@ mod tests {
             ],
         );
 
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn backfill_keeps_invalid_cache_and_incomplete_usage_unknown() {
+        let path = scratch("invalid-usage-price-backfill");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for (id, cache_read, short, long, observed) in [
+            ("invalid-cache", 11, 0, 0, true),
+            ("invalid-ttl", 0, 4, 3, true),
+            ("invalid-reasoning", 0, 0, 0, true),
+            ("invalid-historical-reasoning", 0, 0, 0, false),
+            ("missing-observed-output", 0, 0, 0, true),
+            ("incomplete-observation", 0, 0, 0, true),
+            ("missing-historical-input", 0, 0, 0, false),
+            ("missing-historical-output", 0, 0, 0, false),
+            ("valid", 0, 2, 3, true),
+        ] {
+            let mut record = receipt(id, 1);
+            record.routing.as_mut().unwrap().model = "deepseek-v4-pro".to_owned();
+            record.usage = Some(Usage {
+                input_tokens: 10,
+                output_tokens: 2,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: 5,
+                cache_write_5m_tokens: short,
+                cache_write_1h_tokens: long,
+                reasoning_tokens: if id.contains("reasoning") { 100 } else { 2 },
+            });
+            record.usage_observation =
+                observed.then_some(token_station_metrics::UsageObservation {
+                    incomplete: id == "incomplete-observation",
+                    input_tokens: Some(10),
+                    output_tokens: (id != "missing-observed-output").then_some(2),
+                    cache_read_tokens: Some(cache_read),
+                    cache_write_tokens: Some(5),
+                    cache_write_5m_tokens: Some(short),
+                    cache_write_1h_tokens: Some(long),
+                    reasoning_tokens: Some(if id.contains("reasoning") { 100 } else { 2 }),
+                });
+            record.cost_kind = CostKind::Unknown;
+            record.cost_micros = None;
+            record.price_version = None;
+            store.record(&record);
+        }
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE requests SET input_tokens = NULL WHERE request_id = 'missing-historical-input';
+                 UPDATE requests SET output_tokens = NULL WHERE request_id = 'missing-historical-output';",
+            )
+            .unwrap();
+        drop(store);
+
+        let pricing = crate::pricing::PriceTable::builtin();
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).unwrap(),
+            1
+        );
+        let store = SqliteStore::open(&path).unwrap();
+        let rows = store.read_recent(10).unwrap();
+        assert_eq!(rows.len(), 9);
+        for row in rows {
+            if row.request_id == "valid" {
+                assert_eq!(row.cost_kind, CostKind::Estimated);
+                assert!(row.cost_micros.is_some());
+                assert_eq!(row.price_version, Some(pricing.version));
+            } else {
+                assert_eq!(
+                    (row.cost_kind, row.cost_micros, row.price_version),
+                    (CostKind::Unknown, None, None),
+                    "{} must stay unknown",
+                    row.request_id,
+                );
+            }
+        }
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).unwrap(),
+            0
+        );
+        drop(store);
         std::fs::remove_file(path).ok();
     }
 

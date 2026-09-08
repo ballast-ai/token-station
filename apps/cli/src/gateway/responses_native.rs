@@ -321,13 +321,11 @@ impl Gateway {
             return Err(error);
         }
         let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
-        if !windows.is_empty() {
-            self.quota.lock().expect("quota lock").note_authoritative(
-                target.upstream.as_str(),
-                unix_millis(),
-                windows,
-            );
-        }
+        self.quota.lock().expect("quota lock").note_authoritative(
+            target.upstream.as_str(),
+            unix_millis(),
+            windows,
+        );
 
         if response.status >= 400 {
             let code = responses_error_code(response.status);

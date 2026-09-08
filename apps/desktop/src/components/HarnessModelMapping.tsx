@@ -5,12 +5,15 @@ import type {
 } from "../api";
 import { ProviderIcon } from "../brandIcons";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
+import { Switch } from "./ui/switch";
 import { useLocalizedCopy } from "./LanguageProvider";
 
 interface HarnessModelMappingProps {
   agentId: AgentId;
   providers: ProviderView[];
   routes?: Record<string, HarnessModelTarget>;
+  enabled?: boolean;
+  onEnabledChange?: (enabled: boolean) => void | Promise<void>;
   readOnly?: boolean;
   disabled?: boolean;
   saveDisabled?: boolean;
@@ -28,6 +31,8 @@ export default function HarnessModelMapping({
   agentId,
   providers,
   routes,
+  enabled = false,
+  onEnabledChange,
   readOnly = false,
   disabled = false,
   saveDisabled = false,
@@ -53,7 +58,7 @@ export default function HarnessModelMapping({
       : [];
   if (rows.length === 0) return null;
 
-  const controlsDisabled = disabled || readOnly;
+  const controlsDisabled = disabled || readOnly || !enabled;
   const staleSuffix = copy(
     " (unavailable — reselect)",
     "（已失效·请重选）",
@@ -72,7 +77,14 @@ export default function HarnessModelMapping({
       <div className="harness-model-mapping-head">
         <div>
           <h3>{copy("Harness model mapping", "Harness 模型映射", "Harness 模型映射", "Harness モデルマッピング")}</h3>
-          <p>{readOnly
+          <p>{!enabled
+            ? copy(
+              "Off by default. Requests follow the Agent route. Save and restart to apply changes.",
+              "默认关闭，请求跟随 Agent 路由。修改后保存并重启生效。",
+              "預設關閉，請求跟隨 Agent 路由。修改後儲存並重新啟動生效。",
+              "既定ではオフです。Agent のルートに従います。変更後に保存して再起動してください。",
+            )
+            : readOnly
             ? copy(
               "Inherited mapping. Set independent routing to edit it.",
               "当前继承全局映射。设置独立路由后可编辑。",
@@ -92,6 +104,10 @@ export default function HarnessModelMapping({
           </button>
         ) : null}
       </div>
+      <label className="harness-model-mapping-toggle">
+        <Switch checked={enabled} disabled={disabled || readOnly} onCheckedChange={(value) => void onEnabledChange?.(value)} />
+        <span>{copy("Enable model mapping", "启用模型映射", "啟用模型映射", "モデルマッピングを有効化")}</span>
+      </label>
       {error ? <p className="harness-model-mapping-error" role="alert">{error}</p> : null}
       <div className="harness-model-mapping-grid" role="table">
         <div className="harness-model-mapping-columns" role="row">

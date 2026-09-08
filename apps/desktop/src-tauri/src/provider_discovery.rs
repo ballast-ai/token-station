@@ -143,6 +143,8 @@ pub(crate) fn catalog_cost_to_model_price(
         None => input_per_mtok,
     };
     Some(ModelPrice {
+        cache_write_5m_per_mtok: None,
+        cache_write_1h_per_mtok: None,
         input_per_mtok,
         output_per_mtok: micros(cost.output?)?,
         cache_read_per_mtok: micros(cost.cache_read?)?,
