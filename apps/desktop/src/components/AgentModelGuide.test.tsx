@@ -48,9 +48,15 @@ describe("Agent model selection guide", () => {
     expect(screen.queryByText("OpenAI")).not.toBeInTheDocument();
   });
 
-  it("explains the variable Claude Code suffix without guessing a context size", () => {
+  it("keeps instructions out of the layout and reveals them with keyboard focus", async () => {
+    const user = userEvent.setup();
     render(<AgentModelGuide metadata={{ ...metadata, agent_id: "claude-code", display_name: "Claude Code" }} connected />);
-    expect(screen.getByText(/\/model/)).toHaveTextContent("上下文");
+    expect(screen.queryByText(/\/model/)).not.toBeInTheDocument();
+    await user.tab();
+    await user.tab();
+    expect(screen.getByRole("button", { name: "查看使用说明" })).toHaveFocus();
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("/model");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("上下文");
     expect(screen.queryByText(/200K|1M/)).not.toBeInTheDocument();
     expect(screen.queryByText("供应商")).not.toBeInTheDocument();
   });
@@ -58,7 +64,8 @@ describe("Agent model selection guide", () => {
   it.each(["gemini-cli", "claude-desktop"])("does not invent a model or copy action for %s", (agent_id) => {
     render(<AgentModelGuide metadata={{ ...metadata, agent_id }} connected />);
     expect(screen.getByText("沿用原有模型选项")).toBeInTheDocument();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "复制模型名称" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看使用说明" })).toBeInTheDocument();
   });
 
   it("does not guess an entry for an unknown Agent", () => {

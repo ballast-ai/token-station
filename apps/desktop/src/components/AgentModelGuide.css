@@ -1,44 +1,52 @@
 .agent-model-guide {
+  display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
   min-width: 0;
-  padding: 18px 22px;
-  border-radius: 12px;
+  padding: 10px 16px;
+  border-radius: 9px;
   background: var(--surface-2);
 }
 
-.agent-model-guide h3 {
-  margin: 0 0 12px;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 600;
+.agent-model-guide-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .agent-model-guide-values {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 32px;
+  align-items: center;
+  gap: 4px 16px;
+  min-width: 0;
   margin: 0;
 }
 
 .agent-model-guide-values > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
   max-width: 100%;
 }
 
 .agent-model-guide-values dt {
-  margin-bottom: 4px;
   color: var(--muted);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .agent-model-guide-values dd {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 28px;
+  gap: 4px;
+  min-width: 0;
   margin: 0;
   color: var(--ink);
-  font-size: 14px;
+  font-size: 13px;
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -48,16 +56,12 @@
   font-weight: 600;
 }
 
-.agent-model-guide p {
-  margin: 10px 0 0;
+.agent-model-guide-help {
+  margin-left: auto;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-  overflow-wrap: anywhere;
 }
 
-@media (max-width: 640px) {
-  .agent-model-guide {
-    padding: 16px;
-  }
+.agent-model-guide-tooltip {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }

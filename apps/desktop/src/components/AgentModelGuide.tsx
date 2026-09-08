@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Info } from "lucide-react";
 import type { AgentUiMetadataView } from "../api";
 import { useLocalizedCopy, type LocalizedCopy } from "./LanguageProvider";
 import { useErrorToast } from "./ErrorToast";
 import { Button } from "./ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import "./AgentModelGuide.css";
 
 interface ModelGuide {
@@ -149,7 +150,10 @@ export default function AgentModelGuide({ metadata, connected }: {
 
   return (
     <section className="agent-model-guide agent-flat-surface" aria-label={heading}>
-      <h3>{heading}</h3>
+      <h3 className="sr-only">{heading}</h3>
+      <span className="agent-model-guide-label" aria-hidden="true">{connected
+        ? copy("Model entry", "模型入口", "模型入口", "モデル入口")
+        : copy("Select after connection", "接入后选择", "接入後選擇", "接続後に選択")}</span>
       <dl className="agent-model-guide-values">
         {guide.provider && <div><dt>{copy("Provider", "供应商", "供應商", "プロバイダー")}</dt><dd>{guide.provider}</dd></div>}
         <div>
@@ -164,7 +168,17 @@ export default function AgentModelGuide({ metadata, connected }: {
           </dd>
         </div>
       </dl>
-      <p>{guide.instruction}</p>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button className="agent-model-guide-help" variant="ghost" size="icon-sm" type="button"
+              aria-label={copy("View usage instructions", "查看使用说明", "檢視使用說明", "使用方法を表示")}>
+              <Info aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="agent-model-guide-tooltip">{guide.instruction}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <span className="sr-only" role="status">{copied ? copy("Copied", "已复制", "已複製", "コピーしました") : ""}</span>
     </section>
   );
