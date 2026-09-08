@@ -1,0 +1,67 @@
+.agent-model-guide {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  min-width: 0;
+  padding: 10px 16px;
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.agent-model-guide-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.agent-model-guide-values {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  min-width: 0;
+  margin: 0;
+}
+
+.agent-model-guide-values > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.agent-model-guide-values dt {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.agent-model-guide-values dd {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.agent-model-guide-values strong {
+  min-width: 0;
+  font-weight: 600;
+}
+
+.agent-model-guide-help {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.agent-model-guide-tooltip {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}

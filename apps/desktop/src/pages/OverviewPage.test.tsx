@@ -136,7 +136,7 @@ beforeEach(() => {
 });
 
 describe("OverviewPage summaries", () => {
-  it("renders the Overview title and content in Japanese", () => {
+  it("renders the Home title and content in Japanese", () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "ja");
 
     render(
@@ -145,7 +145,7 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
 
-    expect(screen.getByRole("heading", { name: "概要" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "ホーム" })).toBeInTheDocument();
     expect(screen.getByText("プロキシのステータス、現在のルーティング、リクエストとコストを一画面で確認できます。"))
       .toBeInTheDocument();
     expect(screen.getByText("プロキシステータス")).toBeInTheDocument();
@@ -154,7 +154,7 @@ describe("OverviewPage summaries", () => {
     expect(screen.queryByRole("heading", { name: "Overview" })).toBeNull();
   });
 
-  it("renders the Overview title and content in Traditional Chinese", () => {
+  it("renders the Home title and content in Traditional Chinese", () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-TW");
 
     render(
@@ -163,7 +163,7 @@ describe("OverviewPage summaries", () => {
       </LanguageProvider>,
     );
 
-    expect(screen.getByRole("heading", { name: "概覽" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "首頁" })).toBeInTheDocument();
     expect(screen.getByText("代理執行狀態、當前路由、請求與成本，一屏看清。"))
       .toBeInTheDocument();
     expect(screen.getByText("代理狀態")).toBeInTheDocument();

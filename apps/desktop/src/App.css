@@ -4657,7 +4657,6 @@ pre.block {
 }
 .usage-chart-legend i.tone-cache-write { background: var(--usage-cache-write); }
 .usage-chart-legend i.tone-cache-read { background: var(--usage-cache); }
-.usage-chart-legend i.tone-cost { background: var(--usage-cost); }
 .usage-rail-track {
   height: 10px;
   display: flex;
@@ -4798,8 +4797,8 @@ pre.block {
   color: var(--muted);
   font-size: 9.5px;
 }
-.usage-chart-legend .tone-cost {
-  width: 10px;
+.usage-chart-legend i.tone-cost {
+  width: 20px;
   height: 0;
   border-top: 2px dashed var(--usage-cost);
   border-radius: 0;
