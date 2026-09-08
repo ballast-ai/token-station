@@ -17,7 +17,7 @@ import { useDraftGuard, useDraftNavigation } from "./DraftNavigation";
 import { useErrorToast } from "./ErrorToast";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
-import { Field, FieldGroup, FieldLabel } from "./ui/field";
+import { Field, FieldLabel } from "./ui/field";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 function displayRate(rate: number | null | undefined): string {
@@ -366,12 +366,10 @@ export default function PricingEditor() {
             `${configured} / ${offerings.length} 経路価格設定済み・${fallback} 共通参考価格・${pending} 未設定`,
           )}</p>
           <div className="flex flex-wrap items-center gap-4">
-            <FieldGroup className="w-auto">
-              <Field orientation="horizontal" data-disabled={dirty || busy}>
-                <FieldLabel htmlFor="price-auto-sync">{copy("Automatic price sync", "自动同步价格", "自動同步價格", "価格の自動同期")}</FieldLabel>
-                <Switch id="price-auto-sync" checked={inventory.sync.enabled} disabled={dirty || busy} onCheckedChange={(enabled) => void updateSync(enabled)} />
-              </Field>
-            </FieldGroup>
+            <Field orientation="horizontal" className="w-auto shrink-0" data-disabled={dirty || busy}>
+              <FieldLabel htmlFor="price-auto-sync" className="whitespace-nowrap">{copy("Automatic price sync", "自动同步价格", "自動同步價格", "価格の自動同期")}</FieldLabel>
+              <Switch id="price-auto-sync" checked={inventory.sync.enabled} disabled={dirty || busy} onCheckedChange={(enabled) => void updateSync(enabled)} />
+            </Field>
             <Button variant="outline" size="sm" disabled={dirty || busy} onClick={() => void updateSync()}>
               {busy ? copy("Synchronizing…", "同步中…", "同步中…", "同期中…") : copy("Sync now", "立即同步", "立即同步", "今すぐ同期")}
             </Button>
