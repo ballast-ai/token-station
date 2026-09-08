@@ -173,11 +173,11 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
     <div
       className="page-stack overview-page"
       role="region"
-      aria-label={copy("Overview page", "概览页", "概覽頁", "概要ページ")}
+      aria-label={copy("Home", "主页", "首頁", "ホーム")}
     >
       <header className="overview-heading">
         <div>
-          <h1>{copy("Overview", "概览", "概覽", "概要")}</h1>
+          <h1>{copy("Home", "主页", "首頁", "ホーム")}</h1>
           <p>{copy(
             "Proxy status, current routing, requests, and cost at a glance.",
             "代理运行状态、当前路由、请求与成本，一屏看清。", "代理執行狀態、當前路由、請求與成本，一屏看清。", "プロキシのステータス、現在のルーティング、リクエストとコストを一画面で確認できます。"
