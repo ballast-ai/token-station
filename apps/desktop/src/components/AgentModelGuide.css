@@ -1,0 +1,63 @@
+.agent-model-guide {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 18px 22px;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.agent-model-guide h3 {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agent-model-guide-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 32px;
+  margin: 0;
+}
+
+.agent-model-guide-values > div {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.agent-model-guide-values dt {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.agent-model-guide-values dd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.agent-model-guide-values strong {
+  min-width: 0;
+  font-weight: 600;
+}
+
+.agent-model-guide p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .agent-model-guide {
+    padding: 16px;
+  }
+}
