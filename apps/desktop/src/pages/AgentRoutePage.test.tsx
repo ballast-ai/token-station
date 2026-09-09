@@ -1842,6 +1842,32 @@ describe("AgentRoutePage split page modes", () => {
     expect(screen.queryByRole("button", { name: "发现路径已复制" })).toBeNull();
   });
 
+  it("does not claim an unknown selected version is unselected", () => {
+    vi.mocked(getAgentBackupDirectory).mockResolvedValue("/tmp/backups");
+    const selected = installation("/Users/x/.local/bin/openclaw", "");
+    selected.discovery.version_raw = null;
+    selected.discovery.version_normalized = null;
+    render(<ErrorToastProvider><AgentRoutePage {...props}
+      agent={{ ...agent, installations: [selected, installation("/other/openclaw", "1.0.0")] }}
+      selectedInstallationPath={selected.discovery.canonical_path} pageMode="connection" />
+    </ErrorToastProvider>);
+    expect(screen.getByText("版本未知")).toBeInTheDocument();
+    expect(screen.queryByText("未选择")).not.toBeInTheDocument();
+  });
+
+  it.each(["MULTIPLE_INSTALLATIONS", "INSTALLED_BROKEN", "DETECTED_VERIFIED"] as const)("does not admit a broken selected installation with status %s", (status) => {
+    vi.mocked(getAgentBackupDirectory).mockResolvedValue("/tmp/backups");
+    const selected = installation("/Users/x/.local/bin/openclaw", "");
+    selected.discovery.runnable = false;
+    selected.compatibility.status = status;
+    render(<ErrorToastProvider><AgentRoutePage {...props}
+      agent={{ ...agent, installations: [selected, installation("/other/openclaw", "1.0.0")] }}
+      selectedInstallationPath={selected.discovery.canonical_path} pageMode="connection" />
+    </ErrorToastProvider>);
+    expect(screen.getByRole("button", { name: "预览并接入" })).toBeDisabled();
+    expect(screen.queryByText("可接入")).not.toBeInTheDocument();
+  });
+
   it("shows the complete concise prompt when an Agent has multiple installations", () => {
     const multiAgent = {
       ...agent,

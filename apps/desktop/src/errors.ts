@@ -463,6 +463,13 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     ja: "Kimi Code には、現在のルートで検証済みのコンテキストウィンドウ上限が必要です。Provider でモデルの上限を設定し、プロキシを再起動してから再接続してください。",
   },
   {
+    matches: /\bEXECUTABLE_NOT_RUNNABLE\b|The Node launcher|The declared Node|The package does not declare this launcher/i,
+    en: "The Agent launcher could not be verified. Select another installation, or repair its Node runtime and package entry, then rescan.",
+    zh: "无法验证 Agent 启动入口。请选择其他安装，或修复该入口的 Node 运行时与程序路径后重新扫描。",
+    zhTW: "無法驗證 Agent 啟動入口。請選擇其他安裝，或修復該入口的 Node 執行環境與程式路徑後重新掃描。",
+    ja: "Agent の起動エントリを検証できません。別のインストールを選択するか、Node とプログラムのパスを修復して再スキャンしてください。",
+  },
+  {
     matches: /\bVERSION_PROBE_TIMEOUT\b/i,
     en: "Agent version detection timed out. Rescan; if it still fails, check that the Agent installation is complete.",
     zh: "Agent 版本检测超时。请重新扫描；如果仍然失败，请检查该 Agent 的安装是否完整。",

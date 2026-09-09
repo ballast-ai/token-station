@@ -1586,7 +1586,7 @@ impl AgentCommandState {
         let connector_id = decision
             .connector_id
             .as_deref()
-            .ok_or_else(|| AgentCommandError::boundary("not_admitted", "当前版本不能接入"))?;
+            .ok_or_else(|| AgentCommandError::boundary("not_admitted", decision.message.clone()))?;
         match (record.version_normalized.as_deref(), expected_version) {
             (Some(_), None) => {
                 return Err(AgentCommandError::boundary(
@@ -4483,6 +4483,7 @@ mod tests {
             .err()
             .expect("blocked version cannot produce a plan");
         assert_eq!(blocked.code, "not_admitted");
+        assert_eq!(blocked.message, "fixture blocked");
 
         let mut unknown_record = record(&target, false);
         unknown_record.version_raw = Some("99.0.0".to_string());

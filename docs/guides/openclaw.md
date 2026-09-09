@@ -27,6 +27,16 @@ The scan does not run install, update, doctor, or repair. It does not create an
 OpenClaw directory. It does not start Gateway. If the scan finds multiple
 installations, select one target.
 
+The scanner supports native executables, standard Node package entries, Windows npm shims,
+and literal shell launchers that pin an absolute Node path and an npm package entry.
+It reads supported launchers without running a shell. The declared entry must match the package's `bin` field.
+An optional `export PATH` line must prepend only the declared Node directory.
+Additional commands, shell substitutions, and other environment overrides are not supported.
+
+Each installation must pass its runtime, configuration, and compatibility checks before connection.
+Selecting a path does not bypass these checks. If the selected installation fails, select another installation
+or repair its launcher and runtime, then rescan. An unknown version does not mean that no installation is selected.
+
 ## 2. Connection changes
 
 Select OpenClaw on the Agents page and select **One-click Connect**.
