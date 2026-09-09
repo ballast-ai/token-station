@@ -9465,6 +9465,77 @@ fn metadata_only_draft_model_test_keeps_receipts_without_body_files() {
 }
 
 #[test]
+fn agent_route_probe_uses_the_running_agent_route_and_returns_body_free_evidence() {
+    let root = scratch_home("agent-route-probe");
+    let (upstream, fixture) = serve_chat_completion("agent-route-ok", 1);
+    let mut draft = gateway_template_for_test(&root);
+    draft["server"]["listen"] = json!("127.0.0.1:0");
+    draft["server"]["auth"] = json!(false);
+    draft["data"]["metrics"] = json!(true);
+    draft["upstreams"]["fixture"] = json!({
+        "provider": "openai-compatible", "base_url": upstream,
+        "models": [{"model": "small"}]
+    });
+    draft["upstreams"]["home_only"] = json!({
+        "provider": "openai-compatible", "base_url": "http://127.0.0.1:9/v1",
+        "models": [{"model": "unused"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct", "direct_target": {"upstream": "home_only", "model": "unused"}
+    });
+    draft["agent_routes"]["deepseek-harness"] = json!({
+        "mode": "inherit", "routing_mode": "direct",
+        "direct_target": {"upstream": "fixture", "model": "small"}
+    });
+    let config: ClientConfig = serde_json::from_value(draft.clone()).unwrap();
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    let running = prepare_server(config)
+        .unwrap()
+        .bind()
+        .unwrap()
+        .publish(7, inner.upstream_epochs.clone())
+        .unwrap();
+    inner.server = ServerLifecycle::Running {
+        generation: 1,
+        server: running,
+        apply_error: None,
+    };
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+    assert!(app.manage(ModelTestStreamState::default()));
+    let reply = tauri::async_runtime::block_on(run_agent_route_probe(
+        app.handle().clone(),
+        app.state::<AppStateManaged>().inner(),
+        app.state::<ModelTestStreamState>().inner(),
+        "deepseek-harness".to_owned(),
+        "agent-route-probe".to_owned(),
+    ))
+    .unwrap();
+    assert_eq!(reply.content, "agent-route-ok");
+    fixture.join().unwrap();
+    let receipts = get_agent_request_evidence(
+        app.state::<AppStateManaged>(),
+        "deepseek-harness".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(receipts.len(), 1);
+    let wire = serde_json::to_value(&receipts[0]).unwrap();
+    assert_eq!(wire["running_revision"], 7);
+    assert_eq!(wire["routing"]["upstream"], "fixture");
+    assert!(!wire.to_string().contains("agent-route-ok"));
+    assert!(
+        get_agent_request_evidence(app.state::<AppStateManaged>(), "kimi-code".to_owned())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        get_agent_request_evidence(app.state::<AppStateManaged>(), "unknown".to_owned()).is_err()
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn model_test_command_reuses_the_running_gateway_and_records_request_details() {
     let root = scratch_home("model-test-running-gateway");
     let (upstream, fixture) = serve_chat_completion("model-test-live", 1);

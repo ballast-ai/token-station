@@ -190,7 +190,30 @@ pub(crate) fn get_recent_receipts(
     SqliteStore::recent_receipts(&db, limit)
 }
 
-/// Read the complete body-free Request Receipt ledger with pagination for the usage page.
+/// Read recent Agent receipt metadata without opening the conversation body store.
+#[tauri::command]
+pub(crate) fn get_agent_request_evidence(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+) -> Result<Vec<ReceiptView>, String> {
+    ensure_known_agent_id(&agent_id)?;
+    let data_dir = state.0.lock().unwrap().data_dir();
+    let result = SqliteStore::receipt_page(
+        &data_dir.join("metrics.sqlite"),
+        &ReceiptQuery {
+            since_ms: None,
+            agent_id: Some(agent_id),
+            upstream: None,
+            model: None,
+            status: None,
+        },
+        50,
+        0,
+    )?;
+    Ok(result.items)
+}
+
+/// Read the Request Receipt ledger and available bodies for the usage page.
 #[tauri::command]
 #[allow(
     clippy::too_many_arguments,

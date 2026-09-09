@@ -615,6 +615,13 @@ export interface AgentCompatibilityView {
   allowed_actions: string[];
 }
 
+export interface AgentConnectionLimitsView {
+  context: number;
+  output: number;
+  max_input: number;
+  source: "configured" | "compatibility";
+}
+
 export interface AgentInstallationView {
   discovery: AgentDiscoveryView;
   compatibility: AgentCompatibilityView;
@@ -626,6 +633,7 @@ export interface AgentInstallationView {
   } | null;
   managed: boolean;
   connected: boolean;
+  model_limits?: AgentConnectionLimitsView | null;
 }
 
 export interface AgentView {
@@ -1136,6 +1144,9 @@ export const testModelChatStream = async (
 export const cancelModelTestChat = (requestId: string) =>
   invoke<void>("cancel_model_test_chat", { requestId });
 
+export const testAgentRoute = (agentId: AgentId, requestId: string) =>
+  invoke<ModelTestReply>("test_agent_route", { agentId, requestId });
+
 export const setProviderModelVision = (name: string, model: string, supported: boolean) =>
   invoke<StateView>("set_provider_model_vision", { name, model, supported });
 
@@ -1473,6 +1484,10 @@ export const getRecentReceipts = (limit = 5) => {
     invoke<ReceiptView[]>("get_recent_receipts", { limit: bounded }),
   );
 };
+
+/** Read receipt metadata only. Native capability diagnostics do not need conversation bodies. */
+export const getAgentRequestEvidence = (agentId: AgentId) =>
+  invoke<ReceiptView[]>("get_agent_request_evidence", { agentId });
 
 export const getRequestReceipts = ({
   since,

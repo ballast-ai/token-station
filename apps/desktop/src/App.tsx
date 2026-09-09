@@ -1136,6 +1136,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
               providers={state.providers}
               quotaAccounts={state.quota_accounts ?? []}
               serveRunning={runtimeHealthy}
+              runningRevision={state.serve.running_revision}
               applying={state.serve.phase === "starting"}
               onStateChange={showState}
               onRefreshAgents={refreshCachedAgents}

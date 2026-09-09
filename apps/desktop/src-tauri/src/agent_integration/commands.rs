@@ -79,6 +79,15 @@ pub struct AgentInstallationView {
     pub connection_issue: Option<AgentConnectionIssueView>,
     pub managed: bool,
     pub connected: bool,
+    pub model_limits: Option<AgentConnectionLimitsView>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct AgentConnectionLimitsView {
+    pub context: u32,
+    pub output: u32,
+    pub max_input: u32,
+    pub source: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1453,6 +1462,21 @@ impl AgentCommandState {
                             self.installation_connected(&record, runtime)
                                 .unwrap_or(false)
                         });
+                        let model_limits = runtime
+                            .and_then(|runtime| runtime.model_metadata(&record.agent_id))
+                            .and_then(|metadata| {
+                                let (context, output) = metadata.connection_limits()?;
+                                Some(AgentConnectionLimitsView {
+                                    context,
+                                    output,
+                                    max_input: metadata.connection_max_input()?,
+                                    source: if metadata.has_compatibility_limits() {
+                                        "compatibility"
+                                    } else {
+                                        "configured"
+                                    },
+                                })
+                            });
                         Ok(AgentInstallationView {
                             discovery: record,
                             compatibility,
@@ -1460,6 +1484,7 @@ impl AgentCommandState {
                             connection_issue,
                             managed,
                             connected,
+                            model_limits,
                         })
                     })
                     .collect();
