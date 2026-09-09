@@ -47,7 +47,6 @@ import TierRouteEditor from "../components/TierRouteEditor";
 import HarnessModelMapping from "../components/HarnessModelMapping";
 import InstallationPicker from "../components/InstallationPicker";
 import AgentModelGuide from "../components/AgentModelGuide";
-import AgentDiagnostics from "../components/AgentDiagnostics";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
@@ -97,7 +96,6 @@ interface AgentRoutePageProps {
   profiles: string[];
   quotaAccounts: QuotaAccount[];
   serveRunning: boolean;
-  runningRevision?: number | null;
   applying: boolean;
   onStateChange: (state: StateView, message?: string) => void;
   onRefreshAgents: () => void | Promise<void>;
@@ -389,7 +387,6 @@ export default function AgentRoutePage({
   profiles,
   quotaAccounts,
   serveRunning,
-  runningRevision,
   applying,
   onStateChange,
   onRefreshAgents,
@@ -961,16 +958,6 @@ export default function AgentRoutePage({
         metadata={metadata}
         connected={metadata.agent_id === "cursor" ? cursorStatus?.state === "connected" : installation?.connected === true}
       />
-
-      {["kimi-code", "openclaw", "workbuddy", "deepseek-harness", "grok-build"].includes(metadata.agent_id) && (
-        <AgentDiagnostics
-          key={metadata.agent_id}
-          agentId={metadata.agent_id}
-          configured={installation?.connected === true}
-          runningRevision={serveRunning ? runningRevision : null}
-          modelLimits={installation?.model_limits}
-        />
-      )}
 
       <section className="agent-connection-detail agent-flat-surface" aria-label={copy("Agent connection details", "Agent 接入详情", "Agent 連線詳情", "Agent 接続詳細")}>
         <dl className="agent-connection-facts">

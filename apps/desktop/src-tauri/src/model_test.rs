@@ -745,79 +745,9 @@ pub(crate) async fn run_model_test_chat<R: Runtime>(
     messages: Vec<ModelTestMessage>,
     request_id: String,
 ) -> Result<ModelTestReply, String> {
-    run_model_test_chat_scoped(app, state, stream_state, messages, request_id, None).await
-}
-
-#[tauri::command]
-pub(crate) async fn test_agent_route(
-    app: AppHandle,
-    state: State<'_, AppStateManaged>,
-    stream_state: State<'_, ModelTestStreamState>,
-    agent_id: String,
-    request_id: String,
-) -> Result<ModelTestReply, String> {
-    run_agent_route_probe(
-        app,
-        state.inner(),
-        stream_state.inner(),
-        agent_id,
-        request_id,
-    )
-    .await
-}
-
-pub(crate) async fn run_agent_route_probe<R: Runtime>(
-    app: AppHandle<R>,
-    state: &AppStateManaged,
-    stream_state: &ModelTestStreamState,
-    agent_id: String,
-    request_id: String,
-) -> Result<ModelTestReply, String> {
-    ensure_known_agent_id(&agent_id)?;
-    run_model_test_chat_scoped(
-        app,
-        state,
-        stream_state,
-        vec![ModelTestMessage {
-            role: "user".to_owned(),
-            content: "Reply with a short greeting to confirm this model route works.".to_owned(),
-        }],
-        request_id,
-        Some(agent_id),
-    )
-    .await
-}
-
-async fn run_model_test_chat_scoped<R: Runtime>(
-    app: AppHandle<R>,
-    state: &AppStateManaged,
-    stream_state: &ModelTestStreamState,
-    messages: Vec<ModelTestMessage>,
-    request_id: String,
-    agent_id: Option<String>,
-) -> Result<ModelTestReply, String> {
     validate_model_test_messages(&messages)?;
     validate_model_test_request_id(&request_id)?;
-    let gateway_source = {
-        let inner = state.0.lock().unwrap();
-        if agent_id.is_some() {
-            let ServerLifecycle::Running { server, .. } = &inner.server else {
-                return Err("Start the proxy before testing the Agent route".to_owned());
-            };
-            if !server.is_task_alive() {
-                return Err("Restart the proxy before testing the Agent route".to_owned());
-            }
-            ModelTestGatewaySource::Running {
-                gateway: server.gateway(),
-                running_revision: server.running_revision(),
-                request: server
-                    .begin_gateway_request(Duration::from_secs(60), Duration::from_secs(30))
-                    .with_upstream_response_limit(MODEL_TEST_MAX_STREAM_BYTES as u64),
-            }
-        } else {
-            model_test_gateway_source(&inner)?
-        }
-    };
+    let gateway_source = model_test_gateway_source(&state.0.lock().unwrap())?;
 
     let registry = Arc::clone(&stream_state.0);
     {
@@ -918,7 +848,7 @@ async fn run_model_test_chat_scoped<R: Runtime>(
         let mut stream_error = None;
         gateway.chat_scoped(
             request_context,
-            agent_id.as_deref(),
+            None,
             running_revision,
             "POST",
             "/v1/chat/completions",

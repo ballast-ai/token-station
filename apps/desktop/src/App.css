@@ -8631,42 +8631,6 @@ pre.block {
   background: color-mix(in srgb, var(--surface-2) 76%, var(--surface));
 }
 
-.agent-diagnostics > button {
-  justify-self: start;
-  max-width: 100%;
-  white-space: normal;
-}
-
-.agent-diagnostics p {
-  margin: 4px 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.agent-diagnostics .agent-connection-facts {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-  margin: 12px 0;
-}
-
-.agent-native-guide summary {
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.agent-native-guide dt {
-  margin-top: 12px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.agent-native-guide dd {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
 .agent-connection-facts {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
