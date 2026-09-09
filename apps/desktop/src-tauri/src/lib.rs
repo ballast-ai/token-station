@@ -515,6 +515,7 @@ pub fn run() {
             set_agent_route_mode,
             set_agent_tier,
             set_agent_harness_model_route,
+            set_agent_harness_model_mapping_enabled,
             save_home_route_as_profile,
             mount_agent_profile,
             delete_profile,

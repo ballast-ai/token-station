@@ -61,6 +61,27 @@
 
 .harness-model-mapping-head > .btn { flex: 0 0 auto; }
 
+.agent-route-advanced-toggle {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.agent-route-advanced-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.agent-route-advanced-toggle svg.expanded { transform: rotate(180deg); }
+
+.agent-route-advanced .harness-model-mapping { margin-top: 16px; }
+
+.harness-model-mapping-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  align-self: flex-start;
+  cursor: pointer;
+}
+
 .harness-model-mapping-error {
   margin: 0;
   color: var(--danger);
@@ -13960,6 +13981,53 @@ samp {
 }
 
 /* Agent routing: use filled hierarchy instead of framed panels. */
+.agent-route-advanced {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-route-advanced-toggle[data-slot="button"] {
+  justify-content: flex-start;
+  padding-inline: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-route-advanced-toggle[data-slot="button"]:hover:not(:disabled) {
+  background: transparent;
+  color: var(--signal);
+}
+
+.agent-route-advanced .harness-model-mapping-row {
+  border: 0;
+  background: var(--content-block-surface);
+  box-shadow: none;
+}
+
+.agent-route-advanced .compact-combobox-trigger {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-route-advanced .compact-combobox-trigger:hover:not(:disabled),
+.agent-route-advanced .compact-combobox-trigger[aria-expanded="true"] {
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+.agent-route-advanced-toggle[data-slot="button"]:focus-visible,
+.agent-route-advanced .compact-combobox-trigger:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
 .agent-route-routing-heading {
   margin-bottom: 0;
   border: 0;

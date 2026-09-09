@@ -37,6 +37,17 @@ function renderMapping(element: React.ReactElement) {
 }
 
 describe("HarnessModelMapping", () => {
+  it("defaults populated legacy mappings to off and requires explicit opt-in", async () => {
+    const user = userEvent.setup();
+    const onEnabledChange = vi.fn();
+    renderMapping(<HarnessModelMapping agentId="claude-code" providers={providers} routes={routes} onEnabledChange={onEnabledChange} />);
+    const toggle = screen.getByRole("switch", { name: "启用模型映射" });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByRole("combobox", { name: "Sonnet 供应商" })).toBeDisabled();
+    await user.click(toggle);
+    expect(onEnabledChange).toHaveBeenCalledWith(true);
+  });
+
   it("shows Claude roles plus the exact Fable model and follows read-only inheritance", () => {
     renderMapping(
       <HarnessModelMapping
@@ -60,6 +71,7 @@ describe("HarnessModelMapping", () => {
     renderMapping(
       <HarnessModelMapping
         agentId="opencode"
+        enabled
         providers={providers}
         routes={routes}
         onChange={onChange}

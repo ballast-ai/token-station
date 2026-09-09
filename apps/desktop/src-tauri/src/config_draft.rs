@@ -1000,6 +1000,12 @@ impl AppInner {
         }
     }
 
+    pub(crate) fn agent_harness_model_mapping_enabled(&self, agent_id: &str) -> bool {
+        self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"]
+            .as_bool()
+            .unwrap_or(false)
+    }
+
     pub(crate) fn agent_harness_model_routes(&self, agent_id: &str) -> BTreeMap<String, TierView> {
         if let Some(routes) = self.agent_harness_route_drafts.get(agent_id) {
             return routes.clone();
@@ -1072,7 +1078,8 @@ impl AppInner {
                 let inherits_global = !self.agent_route_drafts.contains_key(&agent_id)
                     && self.agent_route_mode(&agent_id) == "inherit"
                     && stored_route["routing_mode"].is_null()
-                    && stored_route["direct_target"].is_null();
+                    && stored_route["direct_target"].is_null()
+                    && !self.agent_harness_model_mapping_enabled(&agent_id);
                 let routing_mode = self.draft["agent_routes"][&agent_id]["routing_mode"]
                     .as_str()
                     .unwrap_or(home_mode)
@@ -1114,11 +1121,16 @@ impl AppInner {
                         inherits_global,
                         tiers,
                         config_error,
-                        harness_config_error,
+                        harness_config_error: if self.agent_harness_model_mapping_enabled(&agent_id) {
+                            harness_config_error
+                        } else {
+                            None
+                        },
                         profile: self.agent_profile(&agent_id),
                         routing_mode,
                         direct_target,
                         harness_model_routes: self.agent_harness_model_routes(&agent_id),
+                        harness_model_mapping_enabled: self.agent_harness_model_mapping_enabled(&agent_id),
                     },
                 )
             })
@@ -1791,6 +1803,9 @@ impl AppInner {
         &mut self,
         agent_id: &str,
     ) -> Result<(), String> {
+        if !self.agent_harness_model_mapping_enabled(agent_id) {
+            return Ok(());
+        }
         let Some(routes) = self.agent_harness_route_drafts.get(agent_id) else {
             return Ok(());
         };
@@ -1820,6 +1835,7 @@ impl AppInner {
             route.remove("direct_target");
         }
         self.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
+        self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"] = json!(false);
     }
 
     pub(crate) fn save_home_route_as_profile_value(&mut self, name: &str) -> Result<(), String> {

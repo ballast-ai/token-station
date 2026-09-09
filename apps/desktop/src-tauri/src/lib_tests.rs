@@ -3361,6 +3361,40 @@ fn completing_and_saving_an_agent_editor_commits_one_valid_custom_route() {
 }
 
 #[test]
+fn saving_legacy_harness_mapping_does_not_enable_it() {
+    let root = scratch_home("harness-mapping-opt-in");
+    let config_path = root.join("token-station.json");
+    let mut draft = template_for_test(&root);
+    draft["agent_routes"]["claude-code"] = json!({
+        "mode": "inherit",
+        "harness_model_routes": {
+            "balanced": { "upstream": "removed", "model": "removed" }
+        }
+    });
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        config_path.clone(),
+        draft,
+        None
+    )))));
+    let snapshot = restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    assert!(!snapshot.agent_routes["claude-code"].harness_model_mapping_enabled);
+    assert!(snapshot.agent_routes["claude-code"]
+        .harness_config_error
+        .is_none());
+    let config = ClientConfig::load(&config_path).unwrap();
+    assert!(config
+        .harness_router_for_agent("claude-code")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        config.agent_routes["claude-code"].harness_model_routes["balanced"].upstream,
+        "removed"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
     let root = scratch_home("agent-harness-mapping-save");
     let config_path = root.join("token-station.json");
@@ -3410,6 +3444,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         Some("provider".to_owned())
     );
 
+    set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
     restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
     let config = ClientConfig::load(&config_path).unwrap();
     assert_eq!(
@@ -3431,6 +3466,29 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         "provider"
     );
     assert_eq!(router.pools[&rule.route_to][0].model, "model");
+    let disabled =
+        set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), false)
+            .unwrap();
+    assert!(!disabled.agent_routes["claude-code"].harness_model_mapping_enabled);
+    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    let disabled_config = ClientConfig::load(&config_path).unwrap();
+    assert!(disabled_config
+        .harness_router_for_agent("claude-code")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        disabled_config.agent_routes["claude-code"]
+            .harness_model_routes
+            .len(),
+        4
+    );
+    set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
+    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    assert!(ClientConfig::load(&config_path)
+        .unwrap()
+        .harness_router_for_agent("claude-code")
+        .unwrap()
+        .is_some());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -3462,6 +3520,9 @@ fn harness_mapping_save_does_not_change_the_agent_route_mode_or_tiers() {
         Some("model".to_owned()),
     )
     .unwrap();
+    let enabled =
+        set_agent_harness_model_mapping_enabled(app.state(), "opencode".to_owned(), true).unwrap();
+    assert!(!enabled.agent_routes["opencode"].inherits_global);
     restart_agent_harness_routes(app.state(), "opencode".to_owned()).unwrap();
 
     let config = ClientConfig::load(&config_path).unwrap();
@@ -4060,6 +4121,7 @@ fn applying_home_routes_replaces_running_agent_overrides() {
         "mode": "inherit",
         "routing_mode": "direct",
         "direct_target": {"upstream": "local", "model": "small"},
+        "harness_model_mapping_enabled": true,
         "harness_model_routes": {
             "fast": {"upstream": "local", "model": "small"}
         }
@@ -4107,7 +4169,7 @@ fn applying_home_routes_replaces_running_agent_overrides() {
     assert!(persisted
         .harness_router_for_agent("opencode")
         .unwrap()
-        .is_some());
+        .is_none());
     let lifecycle = std::mem::replace(
         &mut inner.server,
         ServerLifecycle::Stopped { generation: 8 },

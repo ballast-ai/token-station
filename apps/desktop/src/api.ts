@@ -436,6 +436,7 @@ export interface AgentRouteView {
   direct_target?: DirectRouteTarget | null;
   /** Effective request-model mappings, including unsaved independent edits. */
   harness_model_routes?: Record<string, HarnessModelTarget>;
+  harness_model_mapping_enabled?: boolean;
 }
 
 export interface QuotaAccount {
@@ -1176,6 +1177,9 @@ export const setAgentTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
+
+export const setAgentHarnessModelMappingEnabled = (agentId: AgentId, enabled: boolean) =>
+  invoke<StateView>("set_agent_harness_model_mapping_enabled", { agentId, enabled });
 
 export const setAgentHarnessModelRoute = (
   agentId: AgentId,

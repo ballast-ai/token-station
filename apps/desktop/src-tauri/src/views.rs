@@ -112,6 +112,7 @@ pub(crate) struct AgentRouteView {
     pub(crate) direct_target: Option<DirectTargetView>,
     /// Effective request-model mappings, including unsaved independent edits.
     pub(crate) harness_model_routes: std::collections::BTreeMap<String, TierView>,
+    pub(crate) harness_model_mapping_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

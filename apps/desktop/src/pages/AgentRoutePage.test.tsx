@@ -1935,8 +1935,8 @@ describe("AgentRoutePage split page modes", () => {
     render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="routing" embedded /></ErrorToastProvider>);
 
     expect(screen.getByText("跟随全局路由")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Harness 模型映射" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Haiku 供应商" })).toBeEnabled();
+    expect(screen.queryByRole("region", { name: "Harness 模型映射" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "高级设置" })).toBeNull();
     expect(screen.queryByRole("tablist", { name: "Agent 路由策略" })).toBeNull();
     expect(screen.queryByText("选择请求如何分配")).toBeNull();
     expect(screen.queryByRole("button", { name: "预览并接入" })).toBeNull();
@@ -1945,6 +1945,16 @@ describe("AgentRoutePage split page modes", () => {
     await user.click(screen.getByRole("button", { name: "设置独立路由" }));
     expect(screen.getByRole("tablist", { name: "Agent 路由策略" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "收起设置" })).toBeInTheDocument();
+    const advanced = screen.getByRole("button", { name: "高级设置" });
+    expect(advanced).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "Harness 模型映射" })).toBeNull();
+    await user.click(advanced);
+    expect(advanced).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("region", { name: "Harness 模型映射" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "启用模型映射" })).not.toBeChecked();
+    expect(screen.getByRole("combobox", { name: "Sonnet 供应商" })).toBeDisabled();
+    await user.click(advanced);
+    expect(screen.queryByRole("region", { name: "Harness 模型映射" })).toBeNull();
   });
 
   it("opens an existing independent route directly with a global restore action", () => {
@@ -1952,7 +1962,7 @@ describe("AgentRoutePage split page modes", () => {
       <ErrorToastProvider>
         <AgentRoutePage
           {...props}
-          route={{ ...route, inherits_global: false }}
+          route={{ ...route, inherits_global: false, harness_model_mapping_enabled: true }}
           pageMode="routing"
           embedded
         />
@@ -1961,6 +1971,8 @@ describe("AgentRoutePage split page modes", () => {
 
     expect(screen.getByRole("tablist", { name: "Agent 路由策略" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "恢复跟随全局" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "高级设置" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "Harness 模型映射" })).toBeNull();
     expect(screen.queryByRole("button", { name: "设置独立路由" })).toBeNull();
   });
 });
