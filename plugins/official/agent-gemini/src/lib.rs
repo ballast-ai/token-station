@@ -298,14 +298,29 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
                     .get("description")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                parameters: declaration
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type": "object"})),
+                parameters: function_parameters(declaration)?,
             });
         }
     }
     Ok(definitions)
+}
+
+fn function_parameters(declaration: &Value) -> Result<Value, String> {
+    // New Gemini clients use JSON Schema. An empty fallback would erase tool
+    // argument names and constraints before the upstream sees the request.
+    match (
+        declaration.get("parameters"),
+        declaration.get("parametersJsonSchema"),
+    ) {
+        (Some(_), Some(_)) => Err(invalid(
+            "function declaration must not combine parameters and parametersJsonSchema",
+        )),
+        (Some(schema), None) | (None, Some(schema)) if schema.is_object() => Ok(schema.clone()),
+        (None, None) => Ok(json!({"type": "object"})),
+        _ => Err(invalid(
+            "function declaration parameters must be a schema object",
+        )),
+    }
 }
 
 fn string_array(value: Option<&Value>, field: &str) -> Result<Vec<String>, String> {

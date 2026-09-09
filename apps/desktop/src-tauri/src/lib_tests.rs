@@ -8321,6 +8321,72 @@ fn an_explicit_incomplete_agent_direct_target_does_not_inherit_home() {
 }
 
 #[test]
+fn restoring_deepseek_harness_removes_its_direct_pin_and_keeps_other_routes() {
+    let root = scratch_home("restore-deepseek-harness-direct-pin");
+    let mut draft = template_for_test(&root);
+    draft["upstreams"]["provider"] = json!({
+        "provider": "openai-compatible", "base_url": "https://example.com/v1",
+        "models": [{"model": "home"}, {"model": "pinned"}]
+    });
+    draft["routing"] = json!({
+        "mode": "direct", "direct_target": {"upstream": "provider", "model": "home"}
+    });
+    let pinned = json!({
+        "mode": "inherit", "routing_mode": "direct",
+        "direct_target": {"upstream": "provider", "model": "pinned"}
+    });
+    draft["agent_routes"]["deepseek-harness"] = pinned.clone();
+    draft["agent_routes"]["codex"] = pinned.clone();
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None,
+    )))));
+    let before = get_state(app.state());
+    assert!(!before.agent_routes["deepseek-harness"].inherits_global);
+    assert_eq!(
+        before.agent_routes["deepseek-harness"]
+            .direct_target
+            .as_ref()
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("pinned")
+    );
+
+    let after = set_agent_route_mode(
+        app.state(),
+        "deepseek-harness".to_owned(),
+        "inherit".to_owned(),
+    )
+    .unwrap();
+    assert!(after.agent_routes["deepseek-harness"].inherits_global);
+    assert_eq!(
+        after.agent_routes["deepseek-harness"]
+            .direct_target
+            .as_ref()
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("home")
+    );
+    let state = app.state::<AppStateManaged>();
+    let inner = state.0.lock().unwrap();
+    assert_eq!(inner.draft["agent_routes"]["codex"], pinned);
+    let config = inner
+        .materialize()
+        .expect("restored configuration is valid");
+    assert!(config
+        .custom_router_for_agent("deepseek-harness")
+        .unwrap()
+        .is_none());
+    assert!(config.custom_router_for_agent("codex").unwrap().is_some());
+    drop(inner);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn direct_config_saves_without_a_dummy_tier_pool() {
     let root = scratch_home("direct-save");
     let mut draft = template_for_test(&root);

@@ -47,6 +47,7 @@ import TierRouteEditor from "../components/TierRouteEditor";
 import HarnessModelMapping from "../components/HarnessModelMapping";
 import InstallationPicker from "../components/InstallationPicker";
 import AgentModelGuide from "../components/AgentModelGuide";
+import AgentCapabilityGuide from "../components/AgentCapabilityGuide";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
@@ -971,6 +972,8 @@ export default function AgentRoutePage({
         metadata={metadata}
         connected={metadata.agent_id === "cursor" ? cursorStatus?.state === "connected" : installation?.connected === true}
       />
+
+      <AgentCapabilityGuide agentId={metadata.agent_id} route={route} />
 
       <section className="agent-connection-detail agent-flat-surface" aria-label={copy("Agent connection details", "Agent 接入详情", "Agent 連線詳情", "Agent 接続詳細")}>
         <dl className="agent-connection-facts">

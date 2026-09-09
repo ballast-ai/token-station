@@ -1,0 +1,72 @@
+.agent-capability-guide {
+  padding: 12px 16px;
+  min-width: 0;
+}
+
+.agent-capability-route {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.agent-capability-route > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.agent-capability-route dt,
+.agent-search-disclosure {
+  color: var(--muted);
+}
+
+.agent-capability-route dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.agent-search-guidance {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.agent-search-guidance summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.agent-search-guidance summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 3px;
+}
+
+.agent-search-guidance p {
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-search-commands {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.agent-search-commands span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.agent-search-commands code {
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
