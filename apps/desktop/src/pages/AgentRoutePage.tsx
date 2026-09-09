@@ -973,7 +973,7 @@ export default function AgentRoutePage({
         connected={metadata.agent_id === "cursor" ? cursorStatus?.state === "connected" : installation?.connected === true}
       />
 
-      <AgentCapabilityGuide agentId={metadata.agent_id} route={route} />
+      <AgentCapabilityGuide route={route} />
 
       <section className="agent-connection-detail agent-flat-surface" aria-label={copy("Agent connection details", "Agent 接入详情", "Agent 連線詳情", "Agent 接続詳細")}>
         <dl className="agent-connection-facts">
