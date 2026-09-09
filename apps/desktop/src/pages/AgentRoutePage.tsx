@@ -303,6 +303,17 @@ function statusCopy(
       ),
     };
   }
+  if (installation && !installation.discovery.runnable) {
+    return {
+      tone: "danger",
+      label: copy("Unavailable", "暂不可接入", "不可用", "利用不可"),
+      detail: humanizeAppError({
+        code: installation.discovery.diagnostics.find((diagnostic) => diagnostic.reason_code !== "MULTIPLE_CANONICAL_PATHS")?.reason_code
+          ?? "EXECUTABLE_NOT_RUNNABLE",
+        message: installation.compatibility.message,
+      }, language),
+    };
+  }
   if (installation
     && installation.compatibility.status !== "DETECTED_VERIFIED"
     && !isExactMultiInstallSelection(agent, installation)
@@ -374,6 +385,7 @@ function isExactMultiInstallSelection(
     agent
       && agent.installations.length > 1
       && installation
+      && installation.discovery.runnable
       && installation.compatibility.status === "MULTIPLE_INSTALLATIONS"
       && installation.discovery.conflict_group,
   );
@@ -506,6 +518,7 @@ export default function AgentRoutePage({
     : installation?.managed ?? false;
   const canConnect = Boolean(
     installation
+      && installation.discovery.runnable
       && installation.adapter_ready !== false
       && !installation.connection_issue
       && installation.compatibility.reason_code !== "READ_ONLY_PREFLIGHT_FAILED"
@@ -522,9 +535,9 @@ export default function AgentRoutePage({
   const discoveredPathCopied = copiedDiscoveryPath?.path === discoveredPath;
   const installationVersion = installation?.discovery.version_normalized
     ?? installation?.discovery.version_raw
-    ?? ((agent?.installations.length ?? 0) > 1
-      ? copy("Not selected", "未选择", "未選擇", "選択されていません")
-      : copy("Unknown", "未知", "未知", "不明"));
+    ?? (installation
+      ? copy("Unknown version", "版本未知", "版本未知", "バージョン不明")
+      : copy("Not selected", "未选择", "未選擇", "選択されていません"));
   const inheritedStrategyName = route.routing_mode === "direct"
     ? copy("Simple routing", "简单路由", "簡單路由", "シンプルルーティング")
     : route.routing_mode === "quota_first"
@@ -956,6 +969,7 @@ export default function AgentRoutePage({
       <AgentModelGuide
         key={metadata.agent_id}
         metadata={metadata}
+        route={route}
         connected={metadata.agent_id === "cursor" ? cursorStatus?.state === "connected" : installation?.connected === true}
       />
 

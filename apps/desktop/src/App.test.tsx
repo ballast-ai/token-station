@@ -82,7 +82,7 @@ const registryFixture: AgentUiMetadataView[] = [
   { agent_id: "future-agent", legacy_kind: null, display_name: "Future Agent", icon_key: "future", admission: "discovery_only" },
 ];
 const supportedRegistryFixture = registryFixture.filter(
-  (metadata) => metadata.admission === "supported" || metadata.agent_id === "cursor",
+  (metadata) => metadata.admission === "supported",
 );
 const agentIds = supportedRegistryFixture.map((metadata) => metadata.agent_id);
 const agentDisplayNames = supportedRegistryFixture.map(
@@ -322,7 +322,7 @@ async function openAgentRoute(user: ReturnType<typeof userEvent.setup>, name: st
 
 async function openAgentVisibility(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole("button", { name: "设置" }));
-  await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
+  await user.click(await screen.findByRole("button", { name: /Agent 显示/ }));
   await screen.findByRole("heading", { name: "Agent 显示" });
 }
 
@@ -354,6 +354,29 @@ beforeEach(() => {
     if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
     throw new Error(`unexpected IPC command: ${command}`);
   });
+});
+
+it("excludes discovered Cursor from connections, routing, and visibility settings", async () => {
+  const user = userEvent.setup();
+  const cursor = structuredClone(detectedAgentsFixture[0]);
+  cursor.metadata = registryFixture.find((metadata) => metadata.agent_id === "cursor")!;
+  cursor.installations[0].discovery.agent_id = "cursor";
+  window.localStorage.setItem(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY, JSON.stringify(["cursor"]));
+  mockInvokeImplementation(async (command) => {
+    if (command === "get_state") return stateFixture();
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [...detectedAgentsFixture, cursor];
+    if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+  render(<App />);
+  await openAgents(user);
+  expect(await screen.findByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+  expect(screen.queryAllByText("Cursor")).toHaveLength(0);
+  await openAgentRoute(user, "Claude Code");
+  expect(screen.queryAllByText("Cursor")).toHaveLength(0);
+  await openAgentVisibility(user);
+  expect(screen.queryAllByText("Cursor")).toHaveLength(0);
 });
 
 it("每次启动完成后都进入主页", async () => {

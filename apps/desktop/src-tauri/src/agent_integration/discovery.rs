@@ -95,6 +95,7 @@ struct ResolvedProbeCommand {
     observed_program: PathBuf,
     canonical_program: PathBuf,
     arguments: Vec<std::ffi::OsString>,
+    script_binding: Option<(PathBuf, PathBuf)>,
 }
 
 fn run_probe_once(
@@ -330,6 +331,7 @@ fn resolve_probe_command(
             canonical_executable: canonical_executable.clone(),
             observed_program: observed_entry.to_path_buf(),
             canonical_program: canonical_executable,
+            script_binding: None,
             arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
         }),
         ProbeRuntime::PassiveFile => Err(broken_probe(
@@ -364,6 +366,7 @@ fn resolve_probe_command(
                 observed_program,
                 canonical_program,
                 arguments,
+                script_binding: None,
             })
         }
         ProbeRuntime::NodePackage {
@@ -377,6 +380,7 @@ fn resolve_probe_command(
                     canonical_executable: canonical_executable.clone(),
                     observed_program: observed_entry.to_path_buf(),
                     canonical_program: canonical_executable,
+                    script_binding: None,
                     arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
                 });
             }
@@ -385,10 +389,13 @@ fn resolve_probe_command(
                     .map_err(|message| broken_probe(ReasonCode::ExecutableNotRunnable, message))?
             } else {
                 if !matches_declared_env_shebang(&canonical_executable, interpreter_candidates) {
-                    return Err(broken_probe(
-                        ReasonCode::ExecutableNotRunnable,
-                        "版本探测脚本既不是受支持的 npm shim，也不匹配内置 node shebang",
-                    ));
+                    return resolve_literal_node_launcher(
+                        &canonical_executable,
+                        observed_entry,
+                        probe,
+                        environment,
+                    )
+                    .map_err(|message| broken_probe(ReasonCode::ExecutableNotRunnable, message));
                 }
                 NpmShimEntry::NodeScript(canonical_executable.clone())
             };
@@ -398,6 +405,7 @@ fn resolve_probe_command(
                     canonical_executable,
                     observed_program: program.clone(),
                     canonical_program: program,
+                    script_binding: None,
                     arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
                 });
             }
@@ -421,9 +429,202 @@ fn resolve_probe_command(
                 observed_program,
                 canonical_program,
                 arguments,
+                script_binding: None,
             })
         }
     }
+}
+
+const NODE_PACKAGE_MANIFEST_LIMIT: u64 = 1024 * 1024;
+
+fn read_node_package_manifest(path: &Path) -> Result<serde_json::Value, &'static str> {
+    if !std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= NODE_PACKAGE_MANIFEST_LIMIT)
+    {
+        return Err("The Node package manifest must be a regular file of at most 1 MiB.");
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|_| "Cannot read the Node package manifest.")?
+        .take(NODE_PACKAGE_MANIFEST_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read the Node package manifest.")?;
+    if bytes.len() as u64 > NODE_PACKAGE_MANIFEST_LIMIT {
+        return Err("The Node package manifest exceeds 1 MiB.");
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "The Node package manifest is invalid.")
+}
+
+// Parse a literal launcher, not shell syntax. The wrapper is never executed.
+fn launcher_path(input: &str) -> Result<(PathBuf, &str), &'static str> {
+    let input = input.trim_start();
+    let (value, rest) = if input.starts_with(['\'', '"']) {
+        let quote = input.chars().next().unwrap();
+        let end = input[1..]
+            .find(quote)
+            .ok_or("The launcher path has an unmatched quote.")?
+            + 1;
+        (&input[1..end], &input[end + 1..])
+    } else {
+        let end = input.find(char::is_whitespace).unwrap_or(input.len());
+        (&input[..end], &input[end..])
+    };
+    if value.is_empty()
+        || value.chars().any(|c| {
+            c.is_control()
+                || matches!(
+                    c,
+                    '$' | '`'
+                        | '\\'
+                        | ';'
+                        | '&'
+                        | '|'
+                        | '<'
+                        | '>'
+                        | '('
+                        | ')'
+                        | '*'
+                        | '?'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '\''
+                        | '"'
+                )
+        })
+        || (!rest.is_empty() && !rest.starts_with(char::is_whitespace))
+    {
+        return Err("The launcher must use literal paths without shell expressions.");
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("The launcher must use absolute paths without parent traversal.");
+    }
+    Ok((path, rest.trim_start()))
+}
+
+fn resolve_literal_node_launcher(
+    launcher: &Path,
+    observed_entry: &Path,
+    probe: &VersionProbe,
+    environment: &ScanEnvironment,
+) -> Result<ResolvedProbeCommand, &'static str> {
+    if !std::fs::metadata(launcher)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 65536)
+    {
+        return Err("The Node launcher must be a bounded regular file.");
+    }
+    let mut text = String::new();
+    std::fs::File::open(launcher)
+        .map_err(|_| "Cannot read the Node launcher.")?
+        .take(65537)
+        .read_to_string(&mut text)
+        .map_err(|_| "Cannot read the Node launcher.")?;
+    if text.len() > 65536 || text.contains('\0') {
+        return Err("The Node launcher exceeds the supported size.");
+    }
+    let lines: Vec<_> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if !(2..=3).contains(&lines.len())
+        || !matches!(
+            lines[0],
+            "#!/bin/sh" | "#!/bin/bash" | "#!/usr/bin/env sh" | "#!/usr/bin/env bash"
+        )
+    {
+        return Err("The Node launcher has an unsupported shebang or structure. Use a standard package entry or a literal Node launcher, then rescan.");
+    }
+    let args = lines
+        .last()
+        .unwrap()
+        .strip_prefix("exec ")
+        .ok_or("The Node launcher must contain one exec command.")?;
+    let (node, args) = launcher_path(args)?;
+    let (script, args) = launcher_path(args)?;
+    if args != "\"$@\"" || node.file_name().and_then(|name| name.to_str()) != Some("node") {
+        return Err("The Node launcher must forward arguments to a literal Node executable.");
+    }
+    if lines.len() == 3 {
+        let directory = node
+            .parent()
+            .ok_or("The Node runtime has no parent directory.")?
+            .to_string_lossy();
+        if lines[1] != format!("export PATH=\"{directory}:$PATH\"") {
+            return Err("The Node launcher has an unsupported environment override.");
+        }
+    }
+    let canonical_program = canonical_native_executable(&node, environment.platform)
+        .ok_or("The declared Node runtime is not a native executable.")?;
+    let canonical_script = std::fs::canonicalize(&script)
+        .map_err(|_| "The declared Node package entry is missing.")?;
+    let package_root = script
+        .ancestors()
+        .skip(1)
+        .find(|directory| {
+            let Some(parent) = directory.parent() else {
+                return false;
+            };
+            parent
+                .file_name()
+                .is_some_and(|name| name == "node_modules")
+                || (parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('@'))
+                    && parent
+                        .parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|name| name == "node_modules"))
+        })
+        .ok_or("The Node launcher must reference an installed npm package.")?;
+    let canonical_root =
+        std::fs::canonicalize(package_root).map_err(|_| "Cannot resolve the Node package.")?;
+    let package = read_node_package_manifest(&package_root.join("package.json"))?;
+    let name = observed_entry
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("The launcher name is invalid.")?;
+    let bin = match package.get("bin") {
+        Some(serde_json::Value::String(bin)) => Some(bin.as_str()),
+        Some(serde_json::Value::Object(bins)) => bins.get(name).and_then(serde_json::Value::as_str),
+        _ => None,
+    }
+    .ok_or("The package does not declare this launcher.")?;
+    let bin = Path::new(bin);
+    if bin.is_absolute()
+        || bin.components().any(|part| {
+            !matches!(
+                part,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+        || !matches!(
+            bin.extension().and_then(|ext| ext.to_str()),
+            Some("js" | "mjs" | "cjs")
+        )
+        || !canonical_script.starts_with(&canonical_root)
+        || !std::fs::metadata(&canonical_script).is_ok_and(|metadata| metadata.is_file())
+        || !std::fs::canonicalize(package_root.join(bin)).is_ok_and(|path| path == canonical_script)
+    {
+        return Err("The Node launcher does not match the package bin declaration.");
+    }
+    let mut arguments = vec![canonical_script.as_os_str().to_os_string()];
+    arguments.extend(probe.argv.iter().map(std::ffi::OsString::from));
+    Ok(ResolvedProbeCommand {
+        observed_executable: observed_entry.to_path_buf(),
+        canonical_executable: launcher.to_path_buf(),
+        observed_program: node,
+        canonical_program,
+        arguments,
+        script_binding: Some((script, canonical_script)),
+    })
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -434,7 +635,6 @@ enum NpmShimEntry {
 
 fn resolve_npm_shim_entry(shim: &Path) -> Result<NpmShimEntry, &'static str> {
     const SHIM_LIMIT: u64 = 64 * 1024;
-    const PACKAGE_LIMIT: u64 = 64 * 1024;
 
     let metadata = std::fs::metadata(shim).map_err(|_| "无法读取 npm shim")?;
     if !metadata.is_file() || metadata.len() > SHIM_LIMIT {
@@ -484,16 +684,7 @@ fn resolve_npm_shim_entry(shim: &Path) -> Result<NpmShimEntry, &'static str> {
     if !package_root.starts_with(&node_modules) {
         return Err("npm shim 包目录逃逸 node_modules");
     }
-    let package_json = package_root.join("package.json");
-    let package_metadata =
-        std::fs::metadata(&package_json).map_err(|_| "npm 包缺少 package.json")?;
-    if !package_metadata.is_file() || package_metadata.len() > PACKAGE_LIMIT {
-        return Err("npm package.json 超出安全解析边界");
-    }
-    let package: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&package_json).map_err(|_| "无法读取 npm package.json")?,
-    )
-    .map_err(|_| "npm package.json 不是有效 JSON")?;
+    let package = read_node_package_manifest(&package_root.join("package.json"))?;
     let command_name = shim
         .file_stem()
         .and_then(std::ffi::OsStr::to_str)
@@ -625,6 +816,9 @@ fn resolve_interpreter(
 ) -> Result<(PathBuf, PathBuf), &'static str> {
     for source in sources {
         let paths: Vec<PathBuf> = match source {
+            RuntimeResolutionSource::WorkbuddyBundledNode => {
+                workbuddy_active_node(environment)?.into_iter().collect()
+            }
             RuntimeResolutionSource::ObservedEntrySibling => observed_entry
                 .parent()
                 .into_iter()
@@ -676,6 +870,62 @@ fn resolve_interpreter(
     Err("未找到与安装入口匹配的版本探测运行时")
 }
 
+fn workbuddy_active_node(environment: &ScanEnvironment) -> Result<Option<PathBuf>, &'static str> {
+    if environment.platform != Platform::Macos {
+        return Ok(None);
+    }
+    let Some(home) = environment
+        .variables
+        .get("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    else {
+        return Ok(None);
+    };
+    let versions = home.join(".workbuddy/binaries/node/versions");
+    let marker = versions.join("current");
+    let metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot read the WorkBuddy active runtime marker"),
+    };
+    if !metadata.is_file() || metadata.len() > 128 {
+        return Err("The WorkBuddy active runtime marker must be a bounded regular file");
+    }
+    let mut value = String::new();
+    std::fs::File::open(&marker)
+        .and_then(|file| file.take(129).read_to_string(&mut value))
+        .map_err(|_| "Cannot read the WorkBuddy active runtime marker")?;
+    let version = value.trim();
+    if value.len() > 128
+        || version.is_empty()
+        || !version.starts_with(|c: char| c.is_ascii_digit())
+        || !version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_'))
+        || version.contains("..")
+    {
+        return Err("The WorkBuddy active runtime version is invalid");
+    }
+    let canonical_home =
+        std::fs::canonicalize(&home).map_err(|_| "Cannot resolve the WorkBuddy home")?;
+    let canonical_versions = std::fs::canonicalize(&versions)
+        .map_err(|_| "Cannot resolve WorkBuddy runtime versions")?;
+    let version_directory = versions.join(version);
+    let canonical_version = std::fs::canonicalize(&version_directory)
+        .map_err(|_| "The active WorkBuddy runtime is missing")?;
+    let node = version_directory.join("bin/node");
+    let canonical = canonical_native_executable(&node, environment.platform)
+        .ok_or("The active WorkBuddy runtime is not a native executable")?;
+    if canonical_versions != canonical_home.join(".workbuddy/binaries/node/versions")
+        || canonical_version != canonical_versions.join(version)
+        || canonical != canonical_version.join("bin/node")
+    {
+        return Err("The active WorkBuddy runtime escapes its version directory");
+    }
+    Ok(Some(node))
+}
+
 fn canonical_native_executable(path: &Path, platform: Platform) -> Option<PathBuf> {
     let entry = std::fs::symlink_metadata(path).ok()?;
     if !entry.is_file() && !entry.file_type().is_symlink() {
@@ -716,6 +966,12 @@ fn probe_command_still_matches(command: &ResolvedProbeCommand) -> bool {
         .is_ok_and(|path| path == command.canonical_executable)
         && std::fs::canonicalize(&command.observed_program)
             .is_ok_and(|path| path == command.canonical_program)
+        && command
+            .script_binding
+            .as_ref()
+            .is_none_or(|(observed, canonical)| {
+                std::fs::canonicalize(observed).is_ok_and(|path| path == *canonical)
+            })
 }
 
 fn probe_child_path(
@@ -915,6 +1171,9 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                 );
                 let (modified_at_ms, binary_sha256) = binary_facts(&installation.identity_path);
                 DiscoveryRecord {
+                    runtime_paths: (descriptor.agent_id == "openclaw")
+                        .then(|| super::platform::openclaw_runtime_paths(&self.environment).ok())
+                        .flatten(),
                     agent_id: descriptor.agent_id.clone(),
                     executable_path: installation
                         .observed_probe_path
@@ -2468,7 +2727,11 @@ mod tests {
         std::fs::write(&entry, b"#!/usr/bin/env node\n").unwrap();
         std::fs::write(
             package.join("package.json"),
-            br#"{"name":"@google/gemini-cli","bin":{"gemini":"dist/index.js"}}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "name": "@google/gemini-cli", "bin": {"gemini": "dist/index.js"},
+                "exports": "x".repeat(140_000),
+            }))
+            .unwrap(),
         )
         .unwrap();
         let shim = npm.join("gemini.cmd");
@@ -2486,6 +2749,12 @@ mod tests {
         std::fs::write(
             package.join("package.json"),
             br#"{"name":"@google/gemini-cli","bin":{"gemini":"../outside.js"}}"#,
+        )
+        .unwrap();
+        assert!(resolve_npm_shim_entry(&shim).is_err());
+        std::fs::write(
+            package.join("package.json"),
+            vec![b' '; (NODE_PACKAGE_MANIFEST_LIMIT + 1) as usize],
         )
         .unwrap();
         assert!(resolve_npm_shim_entry(&shim).is_err());
@@ -3205,6 +3474,80 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discovery_openclaw_literal_node_launcher_uses_pinned_runtime_without_shell() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = scratch("openclaw literal launcher");
+        let package = root.join("lib/node_modules/openclaw");
+        std::fs::create_dir_all(&package).unwrap();
+        let script = package.join("openclaw.mjs");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env node\nprintf 'OpenClaw 2026.9.3 (fixture)\\n'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "bin": {"openclaw": "openclaw.mjs"},
+                "exports": "x".repeat(140_000),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let node = root.join("runtime/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        symlink("/bin/sh", &node).unwrap();
+        let launcher = root.join("bin/openclaw");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        // A conflicting sibling must not override the launcher's pinned runtime.
+        symlink("/usr/bin/false", launcher.parent().unwrap().join("node")).unwrap();
+        let registry = AgentRegistry::builtin().unwrap();
+        let probe = &registry
+            .descriptors()
+            .iter()
+            .find(|entry| entry.agent_id == "openclaw")
+            .unwrap()
+            .version_probe;
+        let context = environment(&root);
+        let exec = format!(
+            "exec \"{}\" \"{}\" \"$@\"",
+            node.display(),
+            script.display()
+        );
+        for prefix in [
+            String::new(),
+            format!(
+                "export PATH=\"{}:$PATH\"\n",
+                node.parent().unwrap().display()
+            ),
+        ] {
+            std::fs::write(&launcher, format!("#!/bin/sh\n{prefix}{exec}\n")).unwrap();
+            std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = SystemProbeRunner.run(&launcher, &launcher, probe, &context);
+            assert!(result.runnable, "{:?}", result.diagnostics);
+            assert_eq!(result.version_normalized.as_deref(), Some("2026.9.3"));
+        }
+        let marker_file = root.join("must-not-exist");
+        for text in [
+            format!("#!/bin/sh\ntouch '{}'\n{exec}\n", marker_file.display()),
+            format!("#!/bin/sh\n{exec}; touch '{}'\n", marker_file.display()),
+            format!(
+                "#!/bin/sh\nexport PATH=\"$(touch '{}'):$PATH\"\n{exec}\n",
+                marker_file.display()
+            ),
+            format!("#!/bin/sh\n{}\n", exec.replace("openclaw.mjs", "other.mjs")),
+            format!("#!/bin/sh\n{}\n", exec.replace("exec ", "exec -- ")),
+        ] {
+            std::fs::write(&launcher, text).unwrap();
+            let result = SystemProbeRunner.run(&launcher, &launcher, probe, &context);
+            assert!(!result.runnable);
+            assert!(!marker_file.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn discovery_env_shebang_runtime_uses_the_observed_entry_sibling_with_a_slim_path() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
@@ -3295,6 +3638,147 @@ mod tests {
                 && diagnostic.message.contains("shebang")
         }));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workbuddy_upgrade_resolves_active_bundled_node_without_system_node() {
+        let root = scratch("workbuddy-active-node");
+        let versions = root.join(".workbuddy/binaries/node/versions");
+        let node = versions.join("22.22.2-2/bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::copy("/bin/echo", &node).unwrap();
+        std::fs::write(versions.join("current"), "22.22.2-2\n").unwrap();
+        let entry = root.join("codebuddy");
+        std::fs::write(&entry, "#!/usr/bin/env node\n").unwrap();
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|agent| agent.agent_id == "workbuddy")
+            .unwrap();
+        let resolved = resolve_probe_command(
+            &entry,
+            &entry,
+            &descriptor.version_probe,
+            &environment(&root),
+        )
+        .unwrap_or_else(|_| panic!("the active WorkBuddy runtime must resolve after an upgrade"));
+        assert_eq!(
+            resolved.canonical_program,
+            std::fs::canonicalize(&node).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workbuddy_active_marker_rejects_unsafe_and_missing_runtime_targets() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("workbuddy-invalid-marker");
+        let versions = root.join(".workbuddy/binaries/node/versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        let marker = versions.join("current");
+        let context = environment(&root);
+        assert!(workbuddy_active_node(&context).unwrap().is_none());
+        for value in [
+            "",
+            "../escape",
+            "/tmp/node",
+            "22.22.2/../../escape",
+            "22.22.2\0",
+            "missing",
+            "22.22.2",
+        ] {
+            std::fs::write(&marker, value).unwrap();
+            assert!(
+                workbuddy_active_node(&context).is_err(),
+                "accepted {value:?}"
+            );
+        }
+        std::fs::write(&marker, "2".repeat(129)).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        let external_marker = root.join("external-current");
+        std::fs::write(&external_marker, "22.22.2").unwrap();
+        symlink(&external_marker, &marker).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(&marker, "22.22.2").unwrap();
+        let node = versions.join("22.22.2/bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        symlink("/bin/echo", &node).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_file(&node).unwrap();
+        std::fs::copy("/bin/echo", &node).unwrap();
+        assert_eq!(workbuddy_active_node(&context).unwrap(), Some(node.clone()));
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::write(&node, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_dir_all(versions.join("22.22.2")).unwrap();
+        let external_version = root.join("external-version");
+        std::fs::create_dir_all(external_version.join("bin")).unwrap();
+        std::fs::copy("/bin/echo", external_version.join("bin/node")).unwrap();
+        symlink(&external_version, versions.join("22.22.2")).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workbuddy_active_version_wins_over_old_and_system_runtimes() {
+        let root = scratch("workbuddy-runtime-priority");
+        let versions = root.join(".workbuddy/binaries/node/versions");
+        for version in ["22.22.2", "22.22.2-2"] {
+            let node = versions.join(version).join("bin/node");
+            std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+            std::fs::copy("/bin/echo", node).unwrap();
+        }
+        std::fs::write(versions.join("current"), "22.22.2-2").unwrap();
+        let system_node = root.join("system/bin/node");
+        std::fs::create_dir_all(system_node.parent().unwrap()).unwrap();
+        std::fs::copy("/bin/echo", &system_node).unwrap();
+        let known = BTreeMap::from([(
+            Platform::Macos,
+            vec![
+                versions
+                    .join("22.22.2/bin/node")
+                    .to_string_lossy()
+                    .into_owned(),
+                system_node.to_string_lossy().into_owned(),
+            ],
+        )]);
+        let sources = [
+            RuntimeResolutionSource::WorkbuddyBundledNode,
+            RuntimeResolutionSource::KnownInstallLocations,
+        ];
+        let context = environment(&root);
+        let resolve = || {
+            resolve_interpreter(
+                &root.join("codebuddy"),
+                &["node".into()],
+                &sources,
+                &known,
+                &context,
+            )
+        };
+        assert!(resolve().unwrap().0.ends_with("22.22.2-2/bin/node"));
+        std::fs::write(versions.join("current"), "../invalid").unwrap();
+        assert!(
+            resolve().is_err(),
+            "invalid active marker must not fall through"
+        );
+        std::fs::remove_file(versions.join("current")).unwrap();
+        assert!(
+            resolve().is_err(),
+            "legacy same-priority conflicts remain explicit"
+        );
+        std::fs::remove_file(system_node).unwrap();
+        assert!(resolve().unwrap().0.ends_with("22.22.2/bin/node"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -3408,6 +3892,7 @@ mod tests {
             observed_program: observed.clone(),
             canonical_program: original,
             arguments: Vec::new(),
+            script_binding: None,
         };
         assert!(probe_command_still_matches(&command));
 
@@ -3527,6 +4012,44 @@ mod tests {
         assert_eq!(std::fs::metadata(&config).unwrap().len(), before.len());
         assert!(!root.join(".codex").exists());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_captures_openclaw_runtime_paths_from_its_injected_environment() {
+        let root = scratch("openclaw-runtime-context");
+        executable(&root.join("bin/openclaw"));
+        let mut context = environment(&root);
+        context.variables.insert(
+            "OPENCLAW_CONFIG_PATH".into(),
+            root.join("config/selected.json").to_str().unwrap().into(),
+        );
+        context.variables.insert(
+            "OPENCLAW_STATE_DIR".into(),
+            root.join("state").to_str().unwrap().into(),
+        );
+        context.variables.insert(
+            "OPENCLAW_HOME".into(),
+            root.join("effective-home").to_str().unwrap().into(),
+        );
+        let expected = super::super::platform::openclaw_runtime_paths(&context).unwrap();
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|entry| entry.agent_id == "openclaw")
+            .unwrap();
+        let records = DiscoveryScanner::new(context, FixedProbe).scan_descriptor(descriptor);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].runtime_paths.as_ref(), Some(&expected));
+        assert_eq!(
+            records[0].config_candidates,
+            vec![expected.primary_config_path.to_str().unwrap()]
+        );
+        let public = serde_json::to_value(&records[0]).unwrap();
+        assert!(public.get("runtime_paths").is_none());
+        assert_eq!(records[0].clone().runtime_paths, Some(expected));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

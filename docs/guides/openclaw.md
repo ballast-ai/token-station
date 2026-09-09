@@ -27,6 +27,16 @@ The scan does not run install, update, doctor, or repair. It does not create an
 OpenClaw directory. It does not start Gateway. If the scan finds multiple
 installations, select one target.
 
+The scanner supports native executables, standard Node package entries, Windows npm shims,
+and literal shell launchers that pin an absolute Node path and an npm package entry.
+It reads supported launchers without running a shell. The declared entry must match the package's `bin` field.
+An optional `export PATH` line must prepend only the declared Node directory.
+Additional commands, shell substitutions, and other environment overrides are not supported.
+
+Each installation must pass its runtime, configuration, and compatibility checks before connection.
+Selecting a path does not bypass these checks. If the selected installation fails, select another installation
+or repair its launcher and runtime, then rescan. An unknown version does not mean that no installation is selected.
+
 ## 2. Connection changes
 
 Select OpenClaw on the Agents page and select **One-click Connect**.
@@ -49,6 +59,7 @@ The Connector writes this core structure:
       tokenstation: {
         baseUrl: "http://127.0.0.1:8787/v1",
         apiKey: "<local virtual key>",
+        auth: "api-key",
         api: "openai-completions",
         models: [{
           id: "auto",
@@ -124,3 +135,24 @@ are outside this feature.
 
 This connection does not change `crates/router-core/**`. The Router receives
 normalized Canonical IR and has no special case for the name “OpenClaw.”
+
+## Runtime credentials and authentication errors
+
+After connection, restart the OpenClaw Gateway before testing a conversation.
+Token Station sets explicit API key authentication for its provider. This prevents automatic selection of an old authentication profile.
+An explicitly pinned session profile remains a user override. Remove that pin if the session must use the managed key.
+
+OpenClaw can retain a separate key in each agent's `models.json`.
+Token Station synchronizes existing tokenstation keys and URLs in these catalogs during connection.
+The scan resolves runtime catalogs from `OPENCLAW_STATE_DIR`, independently from `OPENCLAW_CONFIG_PATH`.
+Without a state override, it uses `.openclaw` under `OPENCLAW_HOME`, `HOME`, or `USERPROFILE`, in that order.
+Custom `agentDir` paths beginning with `~` use the same effective home.
+If only a legacy `.clawdbot` directory exists, set `OPENCLAW_STATE_DIR` explicitly and rescan.
+Invalid or missing runtime path context blocks connection. Rescan after changing these environment settings.
+It includes these fields in encrypted snapshots, revision checks, rollback, restore, and disconnect.
+It preserves other providers and model definitions. It does not create missing catalogs or edit the authentication database.
+
+Connection status also checks existing runtime catalogs. A matching main configuration alone cannot establish a valid connection.
+If an older connection does not own these companion fields, disconnect and reconnect to establish their ownership.
+If authentication fails, compare the active runtime credential with the managed credential without displaying either secret.
+A listener on port 8787 does not prove that authentication succeeds.

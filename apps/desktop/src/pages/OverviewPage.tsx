@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, ArrowUpRight, Bot, Boxes, Clock3, MessageSquareText, Route, WalletCards } from "lucide-react";
+import { Activity, ArrowUpRight, Bot, Boxes, Clock3, MessageSquareText, RefreshCw, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
 import { useLocalizedCopy } from "../components/LanguageProvider";
@@ -199,7 +199,8 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <CardTitle className="overview-cost-value">{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价", "成本未定價", "コストが未設定") : "—")}</CardTitle>
             <strong className="overview-request-count"><Clock3 />{stats ? copy(`${stats.total.requests} requests`, `${stats.total.requests} 次请求`, `${stats.total.requests} 次請求`, `${stats.total.requests} 回のリクエスト`) : "—"}</strong>
             <p role="status">{statsSummary}</p>
-            <Button size="sm" variant="ghost" disabled={refreshing} aria-busy={refreshing} onClick={() => refreshStatsRef.current()}>
+            <Button className="overview-refresh-stats" size="xs" variant="ghost" disabled={refreshing} aria-busy={refreshing} onClick={() => refreshStatsRef.current()}>
+              <RefreshCw aria-hidden="true" />
               {copy("Refresh statistics", "刷新统计", "重新整理統計", "統計を更新")}
             </Button>
           </CardHeader>
