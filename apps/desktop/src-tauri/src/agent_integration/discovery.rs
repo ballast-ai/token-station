@@ -549,6 +549,9 @@ fn resolve_interpreter(
 ) -> Result<(PathBuf, PathBuf), &'static str> {
     for source in sources {
         let paths: Vec<PathBuf> = match source {
+            RuntimeResolutionSource::WorkbuddyBundledNode => {
+                workbuddy_active_node(environment)?.into_iter().collect()
+            }
             RuntimeResolutionSource::ObservedEntrySibling => observed_entry
                 .parent()
                 .into_iter()
@@ -598,6 +601,62 @@ fn resolve_interpreter(
         }
     }
     Err("未找到与安装入口匹配的版本探测运行时")
+}
+
+fn workbuddy_active_node(environment: &ScanEnvironment) -> Result<Option<PathBuf>, &'static str> {
+    if environment.platform != Platform::Macos {
+        return Ok(None);
+    }
+    let Some(home) = environment
+        .variables
+        .get("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    else {
+        return Ok(None);
+    };
+    let versions = home.join(".workbuddy/binaries/node/versions");
+    let marker = versions.join("current");
+    let metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot read the WorkBuddy active runtime marker"),
+    };
+    if !metadata.is_file() || metadata.len() > 128 {
+        return Err("The WorkBuddy active runtime marker must be a bounded regular file");
+    }
+    let mut value = String::new();
+    std::fs::File::open(&marker)
+        .and_then(|file| file.take(129).read_to_string(&mut value))
+        .map_err(|_| "Cannot read the WorkBuddy active runtime marker")?;
+    let version = value.trim();
+    if value.len() > 128
+        || version.is_empty()
+        || !version.starts_with(|c: char| c.is_ascii_digit())
+        || !version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_'))
+        || version.contains("..")
+    {
+        return Err("The WorkBuddy active runtime version is invalid");
+    }
+    let canonical_home =
+        std::fs::canonicalize(&home).map_err(|_| "Cannot resolve the WorkBuddy home")?;
+    let canonical_versions = std::fs::canonicalize(&versions)
+        .map_err(|_| "Cannot resolve WorkBuddy runtime versions")?;
+    let version_directory = versions.join(version);
+    let canonical_version = std::fs::canonicalize(&version_directory)
+        .map_err(|_| "The active WorkBuddy runtime is missing")?;
+    let node = version_directory.join("bin/node");
+    let canonical = canonical_native_executable(&node, environment.platform)
+        .ok_or("The active WorkBuddy runtime is not a native executable")?;
+    if canonical_versions != canonical_home.join(".workbuddy/binaries/node/versions")
+        || canonical_version != canonical_versions.join(version)
+        || canonical != canonical_version.join("bin/node")
+    {
+        return Err("The active WorkBuddy runtime escapes its version directory");
+    }
+    Ok(Some(node))
 }
 
 fn canonical_native_executable(path: &Path, platform: Platform) -> Option<PathBuf> {
@@ -2767,6 +2826,147 @@ mod tests {
                 && diagnostic.message.contains("shebang")
         }));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workbuddy_upgrade_resolves_active_bundled_node_without_system_node() {
+        let root = scratch("workbuddy-active-node");
+        let versions = root.join(".workbuddy/binaries/node/versions");
+        let node = versions.join("22.22.2-2/bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::copy("/bin/echo", &node).unwrap();
+        std::fs::write(versions.join("current"), "22.22.2-2\n").unwrap();
+        let entry = root.join("codebuddy");
+        std::fs::write(&entry, "#!/usr/bin/env node\n").unwrap();
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|agent| agent.agent_id == "workbuddy")
+            .unwrap();
+        let resolved = resolve_probe_command(
+            &entry,
+            &entry,
+            &descriptor.version_probe,
+            &environment(&root),
+        )
+        .unwrap_or_else(|_| panic!("the active WorkBuddy runtime must resolve after an upgrade"));
+        assert_eq!(
+            resolved.canonical_program,
+            std::fs::canonicalize(&node).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workbuddy_active_marker_rejects_unsafe_and_missing_runtime_targets() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("workbuddy-invalid-marker");
+        let versions = root.join(".workbuddy/binaries/node/versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        let marker = versions.join("current");
+        let context = environment(&root);
+        assert!(workbuddy_active_node(&context).unwrap().is_none());
+        for value in [
+            "",
+            "../escape",
+            "/tmp/node",
+            "22.22.2/../../escape",
+            "22.22.2\0",
+            "missing",
+            "22.22.2",
+        ] {
+            std::fs::write(&marker, value).unwrap();
+            assert!(
+                workbuddy_active_node(&context).is_err(),
+                "accepted {value:?}"
+            );
+        }
+        std::fs::write(&marker, "2".repeat(129)).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        let external_marker = root.join("external-current");
+        std::fs::write(&external_marker, "22.22.2").unwrap();
+        symlink(&external_marker, &marker).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(&marker, "22.22.2").unwrap();
+        let node = versions.join("22.22.2/bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        symlink("/bin/echo", &node).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_file(&node).unwrap();
+        std::fs::copy("/bin/echo", &node).unwrap();
+        assert_eq!(workbuddy_active_node(&context).unwrap(), Some(node.clone()));
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::write(&node, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_dir_all(versions.join("22.22.2")).unwrap();
+        let external_version = root.join("external-version");
+        std::fs::create_dir_all(external_version.join("bin")).unwrap();
+        std::fs::copy("/bin/echo", external_version.join("bin/node")).unwrap();
+        symlink(&external_version, versions.join("22.22.2")).unwrap();
+        assert!(workbuddy_active_node(&context).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workbuddy_active_version_wins_over_old_and_system_runtimes() {
+        let root = scratch("workbuddy-runtime-priority");
+        let versions = root.join(".workbuddy/binaries/node/versions");
+        for version in ["22.22.2", "22.22.2-2"] {
+            let node = versions.join(version).join("bin/node");
+            std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+            std::fs::copy("/bin/echo", node).unwrap();
+        }
+        std::fs::write(versions.join("current"), "22.22.2-2").unwrap();
+        let system_node = root.join("system/bin/node");
+        std::fs::create_dir_all(system_node.parent().unwrap()).unwrap();
+        std::fs::copy("/bin/echo", &system_node).unwrap();
+        let known = BTreeMap::from([(
+            Platform::Macos,
+            vec![
+                versions
+                    .join("22.22.2/bin/node")
+                    .to_string_lossy()
+                    .into_owned(),
+                system_node.to_string_lossy().into_owned(),
+            ],
+        )]);
+        let sources = [
+            RuntimeResolutionSource::WorkbuddyBundledNode,
+            RuntimeResolutionSource::KnownInstallLocations,
+        ];
+        let context = environment(&root);
+        let resolve = || {
+            resolve_interpreter(
+                &root.join("codebuddy"),
+                &["node".into()],
+                &sources,
+                &known,
+                &context,
+            )
+        };
+        assert!(resolve().unwrap().0.ends_with("22.22.2-2/bin/node"));
+        std::fs::write(versions.join("current"), "../invalid").unwrap();
+        assert!(
+            resolve().is_err(),
+            "invalid active marker must not fall through"
+        );
+        std::fs::remove_file(versions.join("current")).unwrap();
+        assert!(
+            resolve().is_err(),
+            "legacy same-priority conflicts remain explicit"
+        );
+        std::fs::remove_file(system_node).unwrap();
+        assert!(resolve().unwrap().0.ends_with("22.22.2/bin/node"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

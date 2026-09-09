@@ -263,7 +263,9 @@ fn workbuddy_signing_identity_is_allowed(bytes: &[u8]) -> bool {
         .find_map(|line| line.strip_prefix("TeamIdentifier="));
     matches!(
         identifier,
-        Some("com.workbuddy.workbuddy" | "com.workbuddy.workbuddy-ai")
+        Some(
+            "com.workbuddy.workbuddy" | "com.workbuddy.workbuddy-ai" | "com.tencent.workbuddy.mac"
+        )
     ) && team == Some("FN2V63AD2J")
 }
 
@@ -951,8 +953,12 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_dynamic_scan_accepts_only_the_two_signed_product_identities() {
-        for identifier in ["com.workbuddy.workbuddy", "com.workbuddy.workbuddy-ai"] {
+    fn workbuddy_dynamic_scan_accepts_only_the_known_signed_product_identities() {
+        for identifier in [
+            "com.workbuddy.workbuddy",
+            "com.workbuddy.workbuddy-ai",
+            "com.tencent.workbuddy.mac",
+        ] {
             assert!(workbuddy_signing_identity_is_allowed(
                 format!("Identifier={identifier}\nTeamIdentifier=FN2V63AD2J\n").as_bytes(),
             ));
