@@ -16,12 +16,9 @@ export default function AgentCapabilityGuide({ route }: { route: AgentRouteView 
       : copy("Selected by three-tier routing", "按三档路由选择", "依三檔路由選擇", "三段階ルーティングで選択");
 
   return (
-    <section className="agent-capability-guide agent-flat-surface" aria-label={copy("Routing configuration", "路由配置", "路由設定", "ルーティング設定")}>
-      <dl className="agent-capability-route">
-        <div><dt>{copy("Routing source", "路由来源", "路由來源", "ルーティングソース")}</dt><dd>{source}</dd></div>
-        <div><dt>{copy("Configured target", "配置目标", "設定目標", "設定対象")}</dt><dd>{target}</dd></div>
-      </dl>
-
-    </section>
+    <dl className="agent-capability-route" aria-label={copy("Routing configuration", "路由配置", "路由設定", "ルーティング設定")}>
+      <div><dt className="sr-only">{copy("Routing source", "路由来源", "路由來源", "ルーティングソース")}</dt><dd>{source}</dd></div>
+      <div className="agent-capability-target"><dt className="sr-only">{copy("Configured target", "配置目标", "設定目標", "設定対象")}</dt><dd><span aria-hidden="true">·</span>{target}</dd></div>
+    </dl>
   );
 }
