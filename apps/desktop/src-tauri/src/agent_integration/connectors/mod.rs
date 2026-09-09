@@ -290,6 +290,14 @@ pub trait Connector: Sync {
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
     ) -> Result<(), String>;
+    fn validate_connected_configuration(
+        &self,
+        _primary_target: &Path,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+    ) -> Result<(), String> {
+        self.validate_projected(document, input)
+    }
     fn validate_refresh_projected(
         &self,
         document: &ConfigDocument,

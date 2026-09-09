@@ -59,6 +59,7 @@ The Connector writes this core structure:
       tokenstation: {
         baseUrl: "http://127.0.0.1:8787/v1",
         apiKey: "<local virtual key>",
+        auth: "api-key",
         api: "openai-completions",
         models: [{
           id: "auto",
@@ -134,3 +135,19 @@ are outside this feature.
 
 This connection does not change `crates/router-core/**`. The Router receives
 normalized Canonical IR and has no special case for the name “OpenClaw.”
+
+## Runtime credentials and authentication errors
+
+After connection, restart the OpenClaw Gateway before testing a conversation.
+Token Station sets explicit API key authentication for its provider. This prevents automatic selection of an old authentication profile.
+An explicitly pinned session profile remains a user override. Remove that pin if the session must use the managed key.
+
+OpenClaw can retain a separate key in each agent's `models.json`.
+Token Station synchronizes existing tokenstation keys and URLs in these catalogs during connection.
+It includes these fields in encrypted snapshots, revision checks, rollback, restore, and disconnect.
+It preserves other providers and model definitions. It does not create missing catalogs or edit the authentication database.
+
+Connection status also checks existing runtime catalogs. A matching main configuration alone cannot establish a valid connection.
+If an older connection does not own these companion fields, disconnect and reconnect to establish their ownership.
+If authentication fails, compare the active runtime credential with the managed credential without displaying either secret.
+A listener on port 8787 does not prove that authentication succeeds.

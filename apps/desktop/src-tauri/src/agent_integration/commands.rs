@@ -1519,7 +1519,14 @@ impl AgentCommandState {
             else {
                 continue;
             };
-            if connector.validate_projected(&document, &input).is_ok() {
+            if connector
+                .validate_connected_configuration(
+                    Path::new(&owned.target_config_path),
+                    &document,
+                    &input,
+                )
+                .is_ok()
+            {
                 return Ok(true);
             }
         }
