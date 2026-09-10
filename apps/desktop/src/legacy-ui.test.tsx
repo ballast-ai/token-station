@@ -970,14 +970,42 @@ describe("model selection and provider model management", () => {
         { model: "model-a", tool: "unknown", vision: "unknown", json_schema: "unknown" },
       ], has_auth: true,
     };
-    vi.mocked(verifyProviderModelVision).mockResolvedValue({ outcome: "blocked", detail: "Rate limit", state });
+    vi.mocked(verifyProviderModelVision).mockResolvedValue({ outcome: "blocked", reason: "rate_limit", http_status: 429, detail: "Rate limit", state });
     const onSaved = vi.fn();
-    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={onSaved} />);
+    render(<ErrorToastProvider><ProviderModelManager provider={provider} serveRunning={false} onSaved={onSaved} /></ErrorToastProvider>);
     await userEvent.setup().click(screen.getByRole("button", { name: "验证 model-a 的视觉能力" }));
     await waitFor(() => expect(verifyProviderModelVision).toHaveBeenCalledWith("matrix", "model-a"));
-    expect(await screen.findByText(/请求受阻，未修改视觉能力/)).toBeInTheDocument();
+    expect(await screen.findByText(/供应商限流.*HTTP 429/)).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByText("错误详情"));
+    expect(screen.getByText("Rate limit")).toBeInTheDocument();
+    expect(screen.getByTestId("error-toast-viewport")).toBeEmptyDOMElement();
     expect(setProviderModelVision).not.toHaveBeenCalled();
     expect(onSaved).toHaveBeenCalledWith(state);
+  });
+
+  it("keeps retries and command failures on the selected model row without notifications", async () => {
+    const provider: ProviderView = {
+      name: "matrix", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["model-a", "model-b"], has_auth: true,
+    };
+    const user = userEvent.setup();
+    let finish!: (value: Awaited<ReturnType<typeof verifyProviderModelVision>>) => void;
+    vi.mocked(verifyProviderModelVision).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<ErrorToastProvider><ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} /></ErrorToastProvider>);
+    await user.click(screen.getByRole("button", { name: "验证 model-a 的视觉能力" }));
+    expect(screen.getByText(/仅验证 model-a/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "验证 model-b 的视觉能力" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "验证 model-a 的视觉能力" }));
+    expect(verifyProviderModelVision).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ outcome: "blocked", reason: "timeout", http_status: 504, detail: "deadline", state }));
+    expect(screen.getByRole("button", { name: "验证 model-b 的视觉能力" })).toBeEnabled();
+    expect(screen.getByText(/请求超时/)).toBeInTheDocument();
+    vi.mocked(verifyProviderModelVision).mockRejectedValueOnce("The Provider changed during verification. Run verification again.");
+    await user.click(screen.getByRole("button", { name: "验证 model-a 的视觉能力" }));
+    expect(await screen.findByText(/验证未能完成/)).toBeInTheDocument();
+    expect(screen.queryByText(/请求超时/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("error-toast-viewport")).toBeEmptyDOMElement();
+    expect(setProviderModelVision).not.toHaveBeenCalled();
   });
 
   it("allows a user to complete missing model limits and rejects output above context", async () => {

@@ -9868,7 +9868,7 @@ fn verify_image_transport_fixture(responses: bool) {
     let address = listener.local_addr().unwrap();
     let fixture = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(30);
-        for attempt in 0..4 {
+        for attempt in 0..5 {
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -9948,6 +9948,10 @@ fn verify_image_transport_fixture(responses: bool) {
                 }
             }
             let (status, reply) = match attempt {
+                4 => (
+                    400,
+                    json!({"error":{"code":"invalid_parameter_error","message":"Unexpected item type in content. sk-fixture-secret"}}),
+                ),
                 1 => (429, json!({"error":{"message":"rate limit"}})),
                 3 => (
                     400,
@@ -9984,6 +9988,7 @@ fn verify_image_transport_fixture(responses: bool) {
         ("blocked", "verified"),
         ("inconclusive", "verified"),
         ("unsupported", "unsupported"),
+        ("blocked", "unsupported"),
     ] {
         let reply = tauri::async_runtime::block_on(vision_probe::verify_provider_model_vision(
             app.handle().clone(),
@@ -9994,6 +9999,19 @@ fn verify_image_transport_fixture(responses: bool) {
         .unwrap();
         let reply = serde_json::to_value(reply).unwrap();
         assert_eq!(reply["outcome"], outcome, "{reply}");
+        if outcome == "blocked" {
+            if capability == "unsupported" {
+                assert_eq!(reply["http_status"], 400);
+                assert_eq!(reply["reason"], "invalid_request");
+                let detail = reply["detail"].as_str().unwrap();
+                assert!(detail.contains("invalid_parameter_error"));
+                assert!(detail.contains("Unexpected item type in content"));
+                assert!(!detail.contains("sk-fixture-secret"));
+            } else {
+                assert_eq!(reply["http_status"], 429);
+                assert_eq!(reply["reason"], "rate_limit");
+            }
+        }
         let state = app.state::<AppStateManaged>();
         let inner = state.0.lock().unwrap();
         assert_eq!(
