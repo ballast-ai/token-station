@@ -1987,6 +1987,13 @@ pub(crate) fn ensure_capability_change_ready(inner: &AppInner) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    // Pause after observation to exercise a real manual stop before application.
+    pub(crate) static CAPABILITY_APPLY_OBSERVED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 pub(crate) fn apply_saved_capabilities<R: Runtime>(
     app: AppHandle<R>,
     state: &AppStateManaged,
@@ -1994,11 +2001,20 @@ pub(crate) fn apply_saved_capabilities<R: Runtime>(
     let inner = state.0.lock().unwrap();
     ensure_capability_change_ready(&inner)
         .map_err(|error| format!("Model capabilities were saved but not applied: {error}"))?;
-    let running = matches!(inner.server, ServerLifecycle::Running { .. });
+    let running_generation = match inner.server {
+        ServerLifecycle::Running { generation, .. } => Some(generation),
+        _ => None,
+    };
     let snapshot = inner.snapshot();
     drop(inner);
-    if running {
-        begin_serve_start(app, state, prepare_server)
+    #[cfg(test)]
+    CAPABILITY_APPLY_OBSERVED.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    if let Some(generation) = running_generation {
+        begin_serve_apply_if_generation(app, state, generation, prepare_server)
             .map_err(|error| format!("Model capabilities were saved but not applied: {error}"))
     } else {
         Ok(snapshot)

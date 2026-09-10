@@ -521,12 +521,15 @@ impl Gateway {
             );
             let result = result.map_err(|error| {
                 let has_images = match payload {
-                    AttemptPayload::Canonical(request) => request.messages.iter()
-                        .filter_map(|message| message.content.as_ref())
-                        .any(|content| matches!(content, Content::Parts(parts) if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. })))),
-                    AttemptPayload::AnthropicNative { body, .. } | AttemptPayload::ResponsesNative { body, .. } => raw_contains_images(body),
+                    AttemptPayload::Canonical(request) => request_contains_images(request),
+                    AttemptPayload::AnthropicNative { body, .. }
+                    | AttemptPayload::ResponsesNative { body, .. } => raw_contains_images(body),
                 };
-                if has_images && is_unsupported_media_error(&error) { upstream_image_error() } else { error }
+                if has_images && is_unsupported_media_error(&error) {
+                    upstream_image_error()
+                } else {
+                    error
+                }
             });
             let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
             let attempt = attempt_receipt_for_result(

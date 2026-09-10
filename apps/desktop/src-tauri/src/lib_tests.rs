@@ -2313,6 +2313,91 @@ fn a_desktop_legacy_zero_concurrency_config_loads_writable_without_rewriting_sou
 }
 
 #[test]
+fn capability_application_does_not_restart_a_manually_stopped_gateway() {
+    check_capability_application_after_manual_stop(false);
+}
+
+#[test]
+fn capability_application_does_not_replace_a_new_running_generation() {
+    check_capability_application_after_manual_stop(true);
+}
+
+fn check_capability_application_after_manual_stop(restart: bool) {
+    let root = scratch_home("capability-apply-manual-stop");
+    let (draft, server) = published_agent_route_fixture(&root);
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    inner.server = ServerLifecycle::Running {
+        generation: 1,
+        server,
+        apply_error: None,
+    };
+    let app = std::rc::Rc::new(tauri::test::mock_app());
+    manage_test_agent_state(&app, &root);
+    assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+    let stop_app = std::rc::Rc::clone(&app);
+    CAPABILITY_APPLY_OBSERVED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            begin_serve_stop(
+                stop_app.handle().clone(),
+                stop_app.state::<AppStateManaged>().inner(),
+            );
+            wait_for_serve_phase(&stop_app, ServePhase::Stopped);
+            if restart {
+                begin_serve_start(
+                    stop_app.handle().clone(),
+                    stop_app.state::<AppStateManaged>().inner(),
+                    prepare_server,
+                )
+                .unwrap();
+                wait_for_serve_phase(&stop_app, ServePhase::Running);
+            }
+        }));
+    });
+    let result = set_provider_model_vision(
+        app.handle().clone(),
+        app.state(),
+        "local".into(),
+        "small".into(),
+        true,
+    )
+    .unwrap();
+    let generation = app
+        .state::<AppStateManaged>()
+        .0
+        .lock()
+        .unwrap()
+        .server
+        .generation();
+    // Clean up even on the old implementation, which incorrectly starts a new Gateway.
+    if result.serve.phase == ServePhase::Starting {
+        wait_for_serve_phase(&app, ServePhase::Running);
+    }
+    if restart || result.serve.phase == ServePhase::Starting {
+        begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+    }
+    std::fs::remove_dir_all(root).ok();
+    assert_eq!(
+        result.serve.phase,
+        if restart {
+            ServePhase::Running
+        } else {
+            ServePhase::Stopped
+        },
+        "capability application must preserve the manual lifecycle operation"
+    );
+    assert_eq!(
+        generation,
+        if restart { 2 } else { 1 },
+        "an obsolete capability application must not create another generation"
+    );
+    assert_eq!(
+        result.providers[0].model_capabilities[0].vision,
+        CapabilityState::Declared
+    );
+}
+
+#[test]
 fn provider_model_vision_declaration_updates_the_running_gateway() {
     let root = scratch_home("model-vision-runtime");
     let (draft, server) = published_agent_route_fixture(&root);

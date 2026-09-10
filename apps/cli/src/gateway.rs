@@ -391,6 +391,12 @@ fn upstream_image_error() -> ErrorEnvelope {
     )
 }
 
+fn request_contains_images(request: &ChatRequest) -> bool {
+    request.messages.iter().filter_map(|message| message.content.as_ref()).any(|content| {
+        matches!(content, Content::Parts(parts) if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. })))
+    })
+}
+
 fn raw_contains_images(value: &Value) -> bool {
     match value {
         Value::Array(items) => items.iter().any(raw_contains_images),
@@ -2215,6 +2221,14 @@ impl Gateway {
         })
     }
 
+    /// Pin captured Provider and egress credentials before this Gateway sends requests.
+    /// The snapshot has no live source fallback and never writes credentials to disk.
+    #[must_use]
+    pub fn with_secret_snapshot(mut self, snapshot: crate::secrets::SecretSnapshot) -> Self {
+        self.secrets = snapshot.into_store();
+        self
+    }
+
     /// Attach the Desktop's dedicated owner-only request-body store.
     #[must_use]
     pub fn with_body_log(mut self, body_log: Arc<BodyLog>) -> Self {
@@ -3810,6 +3824,28 @@ impl Gateway {
             decision.decided_by,
             decision.fallbacks.len()
         );
+
+        if agent.protocol == "openai-responses"
+            && request_contains_images(&request)
+            && self
+                .upstreams
+                .get(decision.chosen.upstream.as_str())
+                .is_some_and(|upstream| upstream.dialect == ApiDialect::ResponsesNative)
+        {
+            return self.execute_normalized_responses(
+                ctx,
+                agent,
+                &request,
+                headers,
+                body,
+                &decision,
+                &candidates,
+                quota_now_ms,
+                &session,
+                emit,
+                record,
+            );
+        }
 
         self.execute_routed_attempt(
             ctx,

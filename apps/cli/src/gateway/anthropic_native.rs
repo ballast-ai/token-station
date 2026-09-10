@@ -452,6 +452,11 @@ impl Gateway {
         let Ok(mut body_value) = serde_json::from_slice::<Value>(body) else {
             return Ok(None);
         };
+        // Ordinary messages need the full text and Agent hints for routing.
+        // Only server tools require this non-normalizing escape hatch.
+        if !anthropic_request_declares_server_tool(&body_value) {
+            return Ok(None);
+        }
         let Some(model) = body_value
             .get("model")
             .and_then(Value::as_str)

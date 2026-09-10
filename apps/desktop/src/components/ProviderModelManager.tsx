@@ -16,11 +16,11 @@ import {
   ProviderTestResult,
   setProviderModelLimits,
   setProviderModelVision,
-  verifyProviderModelVision,
   VisionVerificationView,
   testProvider,
   updateProviderModels,
 } from "../api";
+import { useVisionVerificationTasks, type VisionVerificationTasks } from "./useVisionVerificationTasks";
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
 import { useLocalizedCopy, type Language, type LocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
@@ -43,6 +43,7 @@ interface ProviderModelManagerProps {
   serveRunning: boolean;
   disabled?: boolean;
   onSaved: (state: StateView) => void;
+  visionTasks?: VisionVerificationTasks;
 }
 
 const mergeModels = (...groups: string[][]) => [...new Set(groups.flat())];
@@ -133,6 +134,7 @@ export default function ProviderModelManager({
   serveRunning,
   disabled = false,
   onSaved,
+  visionTasks: sharedVisionTasks,
 }: ProviderModelManagerProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError, showSuccess, showInfo } = useErrorToast();
@@ -152,12 +154,9 @@ export default function ProviderModelManager({
   const [testResults, setTestResults] = useState<ProviderTestResult[]>([]);
   const [testedAtMs, setTestedAtMs] = useState<number | null>(null);
   const [testing, setTesting] = useState(false);
-  const [visionChecking, setVisionChecking] = useState<string | null>(null);
-  const [visionResults, setVisionResults] = useState<Record<string, VisionVerificationView>>({});
-  const [visionErrors, setVisionErrors] = useState<Record<string, string>>({});
-  const visionInFlight = useRef(false);
-  useEffect(() => { setVisionResults({}); setVisionErrors({}); }, [provider.name, provider.base_url, provider.provider_call,
-    provider.credential_source, provider.credential_reference]);
+  const localVisionTasks = useVisionVerificationTasks(useMemo(() => [provider], [provider]), onSaved);
+  const visionTasks = sharedVisionTasks ?? localVisionTasks;
+  const { checking: visionChecking, results: visionResults, errors: visionErrors } = visionTasks.snapshot(provider);
   const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
   const [limitSaving, setLimitSaving] = useState<string | null>(null);
   const [limitDrafts, setLimitDrafts] = useState<Record<string, ModelLimitDraft>>({});
@@ -436,7 +435,7 @@ export default function ProviderModelManager({
           : null,
       ));
       setEditKey("");
-      setVisionResults({});
+      visionTasks.clear(provider.name);
       showSuccess(
         copy(`Provider ${provider.name} details saved`, `${provider.name} 的基本信息已保存`, `${provider.name} 的基本資訊已儲存`, `${provider.name} の基本情報が保存されました`),
         `provider-edit:${provider.name}`,
@@ -483,21 +482,8 @@ export default function ProviderModelManager({
   })[reason ?? "request_failed"];
 
   const verifyVision = async (model: string) => {
-    if (operationDisabled || visionInFlight.current) return;
-    visionInFlight.current = true;
-    setVisionChecking(model);
-    setVisionErrors((previous) => { const next = { ...previous }; delete next[model]; return next; });
-    setVisionResults((previous) => { const next = { ...previous }; delete next[model]; return next; });
-    try {
-      const result = await verifyProviderModelVision(provider.name, model);
-      onSaved(result.state);
-      setVisionResults((previous) => ({ ...previous, [model]: result }));
-    } catch (caught) {
-      setVisionErrors((previous) => ({ ...previous, [model]: humanizeAppError(caught) }));
-    } finally {
-      visionInFlight.current = false;
-      setVisionChecking(null);
-    }
+    if (operationDisabled) return;
+    await visionTasks.verify(provider, model);
   };
 
   const toggleVision = async (model: string, state: CapabilityState) => {
@@ -680,7 +666,7 @@ export default function ProviderModelManager({
             const nextSource = value as typeof credentialSource;
             setCredentialSource(nextSource);
             setEditKey("");
-      setVisionResults({});
+            visionTasks.clear(provider.name);
             setCredentialReference("");
           }}
         >
