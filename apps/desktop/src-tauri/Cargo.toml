@@ -45,6 +45,8 @@ semver = "=1.0.28"
 sha2 = "=0.10.9"
 command-group = { version = "=5.0.1", default-features = false }
 getrandom = "=0.4.3"
+png = "=0.18.1"
+base64 = "=0.22.1"
 ring = "=0.17.14"
 subtle = "=2.6.1"
 rusqlite = "=0.40.1"

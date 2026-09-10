@@ -353,36 +353,6 @@ fn replace_anthropic_documents(body: &mut Value) -> DocumentFallbackStats {
     stats
 }
 
-fn replace_anthropic_images(body: &mut Value) -> usize {
-    let marker = if raw_request_prefers_chinese(body) {
-        MEDIA_FALLBACK_ZH
-    } else {
-        MEDIA_FALLBACK_EN
-    };
-    body.get_mut("messages")
-        .and_then(Value::as_array_mut)
-        .into_iter()
-        .flatten()
-        .filter_map(|message| message.get_mut("content").and_then(Value::as_array_mut))
-        .map(|parts| {
-            let mut replaced = 0;
-            for part in parts {
-                if part.get("type").and_then(Value::as_str) == Some("image") {
-                    let cache_control = part.get("cache_control").cloned();
-                    *part = json!({ "type": "text", "text": marker });
-                    if let (Some(cache_control), Some(object)) =
-                        (cache_control, part.as_object_mut())
-                    {
-                        object.insert("cache_control".to_owned(), cache_control);
-                    }
-                    replaced += 1;
-                }
-            }
-            replaced
-        })
-        .sum()
-}
-
 /// A receipt-only [`ErrorCode`] for an upstream HTTP status on the passthrough
 /// path. The client already received the verbatim body; this only shapes the
 /// receipt and the health verdict — a 5xx counts toward ejection (real server
@@ -482,6 +452,11 @@ impl Gateway {
         let Ok(mut body_value) = serde_json::from_slice::<Value>(body) else {
             return Ok(None);
         };
+        // Ordinary messages need the full text and Agent hints for routing.
+        // Only server tools require this non-normalizing escape hatch.
+        if !anthropic_request_declares_server_tool(&body_value) {
+            return Ok(None);
+        }
         let Some(model) = body_value
             .get("model")
             .and_then(Value::as_str)
@@ -501,6 +476,7 @@ impl Gateway {
         let route_model = routing_model.unwrap_or(&model);
         let mut mini = ChatRequest::new(route_model, Vec::new());
         mini.stream = stream;
+        add_native_image_requirement(&mut mini, &body_value);
         // Preserve the one feature the router needs for its hard tool gate
         // without parsing or rewriting Anthropic's native tool vocabulary.
         // The fixed marker never leaves this routing probe; the original array
@@ -525,8 +501,10 @@ impl Gateway {
         let (quota_now_ms, session) =
             Self::quota_preamble(router, || native_quota_session_key(&body_value));
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let Ok(decision) = self.route_with_mode(router, &mini, &[], &candidates, &session) else {
-            return Ok(None);
+        let decision = match self.route_with_mode(router, &mini, &[], &candidates, &session) {
+            Ok(decision) => decision,
+            Err(error) if raw_contains_images(&body_value) => return Err(route_error(&error)),
+            Err(_) => return Ok(None),
         };
         let Some(upstream) = self.upstreams.get(decision.chosen.upstream.as_str()) else {
             return Ok(None);
@@ -549,12 +527,6 @@ impl Gateway {
                 candidate.capability.vision_state()
             });
         if vision_state == CapabilityState::Unsupported {
-            let replaced = replace_anthropic_images(&mut body_value);
-            if replaced > 0 {
-                eprintln!(
-                    "media fallback -> replaced {replaced} Anthropic image block(s) before native passthrough"
-                );
-            }
             let documents = replace_anthropic_documents(&mut body_value);
             if documents != DocumentFallbackStats::default() {
                 eprintln!(
@@ -600,11 +572,11 @@ impl Gateway {
         // failure. The passthrough contract still holds for the answer the
         // client finally gets: relay the last upstream's own status and body,
         // not a token-station envelope built from them.
-        if let Some(raw) = last_upstream_error
-            .borrow_mut()
-            .take()
-            .filter(|_| result.is_err())
-        {
+        if let Some(raw) = last_upstream_error.borrow_mut().take().filter(|_| {
+            result
+                .as_ref()
+                .is_err_and(|error| error.code != ErrorCode::Capability)
+        }) {
             record.status = raw.status;
             record.error_code = Some(passthrough_error_code(raw.status));
             emit(Reply::BeginJson(JsonReply {
@@ -764,6 +736,10 @@ impl Gateway {
             let code = passthrough_error_code(response.status);
             let parts = response.into_parts()?;
             ctx.append_upstream_response_body(parts.body.as_bytes());
+            if raw_contains_images(body) && native_rejects_image(parts.status, &parts.body) {
+                return Err(upstream_image_error());
+            }
+
             record_conversion(
                 record,
                 ConversionStage::ProviderResponse,

@@ -224,6 +224,42 @@ pub struct SecretStore {
     store_error: Option<String>,
 }
 
+/// An immutable, memory-only resolver for exactly the slots captured from a config.
+/// Only `SecretStore::snapshot_for_config` can create this type. It has no live fallback.
+pub struct SecretSnapshot(SecretStore);
+
+impl SecretSnapshot {
+    /// Read a captured Provider slot without consulting files or environment variables.
+    ///
+    /// # Errors
+    /// The exact owner and slot were not captured.
+    pub fn resolve(&self, upstream: &str, slot: &str) -> Result<String, String> {
+        self.0.resolve(upstream, slot)
+    }
+
+    /// Read a captured egress slot without consulting its original source.
+    ///
+    /// # Errors
+    /// The egress slot was not captured.
+    pub fn resolve_egress(&self, slot: &str) -> Result<String, String> {
+        self.0.resolve_egress(slot)
+    }
+
+    pub(crate) fn into_store(self) -> SecretStore {
+        self.0
+    }
+}
+
+impl Drop for SecretStore {
+    fn drop(&mut self) {
+        for value in self.store.values_mut() {
+            // SecretValue takes ownership of the String allocation and zeroizes it
+            // on drop. This does not cover copies owned by downstream transports.
+            drop(south_core::SecretValue::new(std::mem::take(value)));
+        }
+    }
+}
+
 fn source_of(auth: &AuthConfig) -> Option<Source> {
     if auth.store {
         Some(Source::Store)
@@ -238,6 +274,45 @@ fn source_of(auth: &AuthConfig) -> Option<Source> {
 }
 
 impl SecretStore {
+    /// Resolve each configured Provider and egress slot once into immutable memory.
+    /// No files or environment variables are written. Unconfigured slots stay unavailable.
+    ///
+    /// # Errors
+    /// A configured slot has an invalid source or cannot be resolved. No partial snapshot escapes.
+    pub fn snapshot_for_config(
+        config: &ClientConfig,
+        data_dir: &Path,
+    ) -> Result<SecretSnapshot, String> {
+        let live = Self::from_config(config, data_dir);
+        let mut frozen = Self::default();
+        let slots = config
+            .upstreams
+            .iter()
+            .filter_map(|(name, upstream)| upstream.auth.as_ref().map(|auth| (name.as_str(), auth)))
+            .chain(
+                config
+                    .egress
+                    .auth
+                    .iter()
+                    .map(|auth| (EGRESS_SECRET_OWNER, &auth.credential)),
+            );
+        for (owner, auth) in slots {
+            if usize::from(auth.store)
+                + usize::from(auth.env.is_some())
+                + usize::from(auth.file.is_some())
+                != 1
+            {
+                return Err("A snapshot credential must have exactly one source".to_owned());
+            }
+            let value = live.resolve(owner, &auth.slot)?;
+            frozen
+                .sources
+                .insert((owner.to_owned(), auth.slot.clone()), Source::Store);
+            frozen.store.insert(store_key(owner, &auth.slot), value);
+        }
+        Ok(SecretSnapshot(frozen))
+    }
+
     /// Build the resolver from a full client config, loading the local secrets
     /// store from `data_dir` for any slot that lives in it.
     #[must_use]
@@ -398,6 +473,82 @@ mod tests {
             SecretStore::from_config(&config, &std::env::temp_dir()),
             key_path,
         )
+    }
+
+    #[test]
+    fn snapshot_freezes_provider_and_egress_without_changing_live_file_resolution() {
+        let dir = scratch_dir("snapshot-file-isolation");
+        let provider_file = dir.join("provider.key");
+        let proxy_file = dir.join("proxy.key");
+        fs::write(&provider_file, "provider-A\n").unwrap();
+        fs::write(&proxy_file, "proxy-A\n").unwrap();
+        let mut config: serde_json::Value = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        config["upstreams"] = serde_json::json!({
+            "p": {"provider":"openai-compatible", "base_url":"https://example.test/v1",
+                "auth":{"slot":"shared", "file":provider_file}, "models":[]}
+        });
+        config["egress"] = serde_json::json!({"mode":"http", "proxy_url":"http://127.0.0.1:3128",
+            "auth":{"username":"fixture", "credential":{"slot":"shared", "file":proxy_file}}});
+        let config: ClientConfig = serde_json::from_value(config).unwrap();
+        let live = SecretStore::from_config(&config, &dir);
+        let snapshot = SecretStore::snapshot_for_config(&config, &dir).unwrap();
+        assert!(!dir.join(super::SECRETS_FILE).exists());
+        assert!(!dir.join(super::SECRETS_LOCK_FILE).exists());
+        fs::write(&provider_file, "provider-B").unwrap();
+        fs::write(&proxy_file, "proxy-B").unwrap();
+        assert_eq!(live.resolve("p", "shared").unwrap(), "provider-B");
+        assert_eq!(live.resolve_egress("shared").unwrap(), "proxy-B");
+        assert_eq!(snapshot.resolve("p", "shared").unwrap(), "provider-A");
+        assert_eq!(snapshot.resolve_egress("shared").unwrap(), "proxy-A");
+        let frozen = snapshot.into_store();
+        fs::remove_file(provider_file).unwrap();
+        fs::remove_file(proxy_file).unwrap();
+        assert!(live.resolve("p", "shared").is_err());
+        assert_eq!(frozen.resolve("p", "shared").unwrap(), "provider-A");
+        assert_eq!(frozen.resolve_egress("shared").unwrap(), "proxy-A");
+        assert!(frozen.resolve("other", "shared").is_err());
+        assert!(frozen.resolve("p", "other").is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_captures_only_configured_store_slots_and_does_not_write() {
+        let dir = scratch_dir("snapshot-exact-store-slots");
+        store_set(&dir, "p", "key", "captured-A").unwrap();
+        store_set(&dir, "unconfigured", "key", "private-unrelated").unwrap();
+        let mut config: serde_json::Value = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        config["upstreams"] = serde_json::json!({
+            "p": {"provider":"openai-compatible", "base_url":"https://example.test/v1",
+                "auth":{"slot":"key", "store":true}, "models":[]}
+        });
+        let config: ClientConfig = serde_json::from_value(config).unwrap();
+        let original = fs::read(dir.join(super::SECRETS_FILE)).unwrap();
+        let snapshot = SecretStore::snapshot_for_config(&config, &dir).unwrap();
+        assert_eq!(fs::read(dir.join(super::SECRETS_FILE)).unwrap(), original);
+        assert!(snapshot.resolve("unconfigured", "key").is_err());
+        assert_eq!(snapshot.0.store.len(), 1);
+        store_set(&dir, "p", "key", "rotated-B").unwrap();
+        assert_eq!(snapshot.resolve("p", "key").unwrap(), "captured-A");
+        let live = SecretStore::from_config(&config, &dir);
+        assert_eq!(live.resolve("p", "key").unwrap(), "rotated-B");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_rejects_missing_or_ambiguous_sources_without_writes() {
+        let dir = scratch_dir("snapshot-invalid-source");
+        let mut config: serde_json::Value = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        config["upstreams"] = serde_json::json!({
+            "p": {"provider":"openai-compatible", "base_url":"https://example.test/v1",
+                "auth":{"slot":"key", "file":dir.join("missing")}, "models":[]}
+        });
+        let missing: ClientConfig = serde_json::from_value(config.clone()).unwrap();
+        assert!(SecretStore::snapshot_for_config(&missing, &dir).is_err());
+        config["upstreams"]["p"]["auth"]["store"] = serde_json::json!(true);
+        let ambiguous: ClientConfig = serde_json::from_value(config).unwrap();
+        assert!(SecretStore::snapshot_for_config(&ambiguous, &dir).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

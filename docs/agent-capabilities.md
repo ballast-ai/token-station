@@ -14,6 +14,20 @@ The connection page labels this state as independent routing.
 To remove that override, open the Agent's routing page and select **Restore global routing**.
 This operation does not change other Agents' routes.
 
+## Image input
+
+Codex Auto accepts text and image input. Reopen an existing Codex session once to reload its model catalog.
+The selected model offering must support images. Token Station returns an explicit error when the configured route cannot accept an image.
+It never retries an image request with the image removed. Free Tiered routes do not fall back to paid channels.
+
+Open a model's management panel and select **Verify vision** to test that exact offering.
+The check sends one synthetic image challenge through the configured transport. It does not send your images or conversations.
+A correct answer marks the offering **Verified**. An explicit image refusal marks it **Unsupported**.
+Authentication failures, rate limits, malformed replies, and inconclusive answers preserve the existing capability state.
+The result and safe error details appear on the model row. Closing and reopening the panel preserves a running check and its feedback.
+Changed credentials or plugins invalidate an in-flight result. Saved capability changes apply to a running Gateway automatically.
+If you stop the Gateway, capability application does not start it again.
+
 ## Search requirements
 
 | Agent | Requirement or limit |

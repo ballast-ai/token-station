@@ -386,7 +386,7 @@ fn normalize_kind(kind: &str) -> &'static str {
     }
 }
 
-fn redact_and_bound(value: &str, limit: usize) -> String {
+pub(crate) fn redact_and_bound(value: &str, limit: usize) -> String {
     let mut redacted = value.replace('\0', "�");
     if let Some(home) = std::env::var_os("HOME").and_then(|value| value.into_string().ok()) {
         if !home.is_empty() {

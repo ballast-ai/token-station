@@ -1,6 +1,19 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Release a normalized request reservation on every exit, including admission
+/// failures before the first upstream attempt. Completed histories survive it.
+struct NativeContinuationGuard<'a> {
+    agent: &'a LoadedAgent,
+    context: Value,
+}
+
+impl Drop for NativeContinuationGuard<'_> {
+    fn drop(&mut self) {
+        Gateway::clear_stream_state(self.agent, &self.context);
+    }
+}
+
 fn responses_error_code(status: u16) -> ErrorCode {
     match status {
         401 | 403 => ErrorCode::Auth,
@@ -48,6 +61,7 @@ struct ResponsesSseUsageTap {
     usage: Option<Usage>,
     saw_terminal: bool,
     abandoned: bool,
+    terminal_response: Option<Value>,
 }
 
 impl ResponsesSseUsageTap {
@@ -82,6 +96,11 @@ impl ResponsesSseUsageTap {
         ) {
             self.saw_terminal = true;
         }
+        if line.len() <= Self::MAX_LINE
+            && event.get("type").and_then(Value::as_str) == Some("response.completed")
+        {
+            self.terminal_response = event.get("response").cloned();
+        }
         let found = event
             .get("response")
             .and_then(|response| response.get("usage"))
@@ -102,7 +121,7 @@ impl ResponsesSseUsageTap {
 }
 
 impl Gateway {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // native admission, routing, and relay form one pipeline
     pub(super) fn try_responses_passthrough(
         &self,
         ctx: &RequestContext,
@@ -136,6 +155,7 @@ impl Gateway {
 
         let mut mini = ChatRequest::new(&model, Vec::new());
         mini.stream = stream;
+        add_native_image_requirement(&mut mini, &body_value);
         mini.tools.push(ToolDef {
             name: "responses_native_routing_probe".to_owned(),
             description: None,
@@ -152,9 +172,10 @@ impl Gateway {
                     .is_some_and(|upstream| upstream.dialect == ApiDialect::ResponsesNative)
             })
             .collect();
-        let Ok(mut decision) = self.route_with_mode(router, &mini, &[], &candidates, &session)
-        else {
-            return Ok(None);
+        let mut decision = match self.route_with_mode(router, &mini, &[], &candidates, &session) {
+            Ok(decision) => decision,
+            Err(error) if raw_contains_images(&body_value) => return Err(route_error(&error)),
+            Err(_) => return Ok(None),
         };
         let Some(upstream) = self.upstreams.get(decision.chosen.upstream.as_str()) else {
             return Ok(None);
@@ -191,11 +212,11 @@ impl Gateway {
             emit,
             record,
         );
-        if let Some(raw) = last_upstream_error
-            .borrow_mut()
-            .take()
-            .filter(|_| result.is_err())
-        {
+        if let Some(raw) = last_upstream_error.borrow_mut().take().filter(|_| {
+            result
+                .as_ref()
+                .is_err_and(|error| error.code != ErrorCode::Capability)
+        }) {
             record.status = raw.status;
             record.error_code = Some(responses_error_code(raw.status));
             emit(Reply::BeginJson(JsonReply {
@@ -205,6 +226,137 @@ impl Gateway {
             return Ok(Some((raw.target, StreamOutcome::FailedBeforeOutput)));
         }
         result.map(Some)
+    }
+
+    /// Execute an ordinary Responses request after its single normalization and
+    /// the shared policy gates. Native transport must not choose another route.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn execute_normalized_responses(
+        &self,
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        request: &ChatRequest,
+        raw_headers: &[(String, String)],
+        body: &[u8],
+        decision: &Decision,
+        candidates: &[Candidate],
+        quota_now_ms: Option<u64>,
+        session: &str,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        let mut render_context = json!({
+            "stream_id": record.request_id,
+            "response_id": record.request_id,
+            "model": request.model,
+        });
+        if let Some(key) = request.extensions.get(CONTINUATION_KEY_EXTENSION) {
+            render_context[CONTINUATION_KEY_EXTENSION] = key.clone();
+        }
+        let continuation = NativeContinuationGuard {
+            agent,
+            context: render_context,
+        };
+        let render_context = &continuation.context;
+        let mut forwarded: Value = serde_json::from_slice(body)
+            .map_err(|_| ErrorEnvelope::new(ErrorCode::InvalidRequest, 400, "body is not JSON"))?;
+        if let Some(input) = request.extensions.get("token_station_private_native_input") {
+            forwarded["input"] = input.clone();
+            forwarded
+                .as_object_mut()
+                .expect("normalized Responses object")
+                .remove("previous_response_id");
+        } else if forwarded
+            .get("previous_response_id")
+            .is_some_and(|id| !id.is_null())
+        {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::Capability,
+                400,
+                "Native continuation history is unavailable. Send the complete conversation again.",
+            ));
+        }
+        forwarded
+            .as_object_mut()
+            .expect("normalized Responses object")
+            .retain(|key, _| !key.starts_with("token_station_private_"));
+        let headers = Self::curate_responses_headers(raw_headers)?;
+        let mut decision = decision.clone();
+        decision.fallbacks.retain(|target| {
+            self.upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| upstream.dialect == ApiDialect::ResponsesNative)
+        });
+        let mut tap = ResponsesSseUsageTap::default();
+        let last_upstream_error = RefCell::new(None);
+        let result = self.execute_routed_attempt(
+            ctx,
+            agent,
+            &AttemptPayload::ResponsesNative {
+                body: &forwarded,
+                headers: &headers,
+                stream: request.stream,
+                last_upstream_error: &last_upstream_error,
+            },
+            &Value::Null,
+            &decision,
+            candidates,
+            quota_now_ms,
+            session,
+            &mut |reply| {
+                let completed = match &reply {
+                    Reply::BeginJson(reply) if reply.status == 200 => {
+                        serde_json::from_str::<Value>(&reply.body).ok()
+                    }
+                    Reply::Chunk(chunk) => {
+                        tap.observe(chunk);
+                        tap.terminal_response.take()
+                    }
+                    _ => None,
+                };
+                if let Some(response) = completed {
+                    Self::remember_native_response(agent, render_context, response);
+                }
+                emit(reply)
+            },
+            record,
+        );
+        tap.finish();
+        if let Some(response) = tap.terminal_response.take() {
+            Self::remember_native_response(agent, render_context, response);
+        }
+        if let Some(raw) = last_upstream_error.borrow_mut().take().filter(|_| {
+            result
+                .as_ref()
+                .is_err_and(|error| error.code != ErrorCode::Capability)
+        }) {
+            record.status = raw.status;
+            record.error_code = Some(responses_error_code(raw.status));
+            emit(Reply::BeginJson(JsonReply {
+                status: raw.status,
+                body: raw.body,
+            }));
+            return Ok((raw.target, StreamOutcome::FailedBeforeOutput));
+        }
+        result
+    }
+
+    fn remember_native_response(agent: &LoadedAgent, context: &Value, native: Value) {
+        if context.get(CONTINUATION_KEY_EXTENSION).is_none() {
+            return;
+        }
+        let mut context = context.clone();
+        context["token_station_private_native_response"] = native;
+        let placeholder = ChatResponse {
+            id: String::new(),
+            model: String::new(),
+            choices: Vec::new(),
+            usage: Usage::default(),
+            extensions: token_station_protocol::Extensions::new(),
+        };
+        // Protocol validation and bounded continuation retention belong to the
+        // Responses adapter. An unsupported history must not alter a raw reply.
+        let _ = agent.plugin.render_response(&placeholder, &context);
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -331,6 +483,10 @@ impl Gateway {
             let code = responses_error_code(response.status);
             let parts = response.into_parts()?;
             ctx.append_upstream_response_body(parts.body.as_bytes());
+            if raw_contains_images(body) && native_rejects_image(parts.status, &parts.body) {
+                return Err(upstream_image_error());
+            }
+
             record_conversion(
                 record,
                 ConversionStage::ProviderResponse,
@@ -588,5 +744,105 @@ mod tests {
         let usage = tap.usage.expect("terminal usage");
         assert_eq!(usage.input_tokens, 13);
         assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    #[cfg(feature = "builtin-plugins")]
+    fn missing_native_history_releases_pending_continuation_on_early_return() {
+        use super::{CONTINUATION_KEY_EXTENSION, Gateway, RequestContext, RequestRecord};
+        use serde_json::json;
+        use std::{sync::Arc, time::Duration};
+        use token_station_protocol::ErrorCode;
+        use token_station_router_core::{
+            DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
+        };
+
+        // A waiting gateway loads the real builtin Agent but has no upstream
+        // or credential. This test cannot send a provider request.
+        let directory =
+            std::env::temp_dir().join(format!("ts-native-pending-cleanup-{}", std::process::id()));
+        let config = serde_json::from_value(json!({
+            "version": 1,
+            "server": {"listen": "127.0.0.1:0"},
+            "data": {"dir": directory, "metrics": false},
+            "plugins": {"dir": directory.join("absent-plugins"),
+                "agents": ["agent-openai-responses"], "providers": {}},
+            "upstreams": {}, "routing": {"mode": "direct"},
+            "router": {"version": 1, "pools": {}, "default_pool": ""}
+        }))
+        .expect("waiting gateway config parses");
+        let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))
+            .expect("builtin Responses Agent loads without an upstream");
+        let agent = gateway
+            .agents
+            .iter()
+            .find(|agent| agent.protocol == "openai-responses")
+            .expect("real Responses Agent is loaded");
+        let original = json!({"model": "auto", "input": [{"role": "user", "content": [
+            {"type": "input_image", "image_url": "data:image/png;base64,cGl4ZWxz"}
+        ]}]})
+        .to_string()
+        .into_bytes();
+        let mut record = RequestRecord::begin(1, "openai-responses");
+        record.request_id = "native-pending-cleanup".into();
+        let normalize = |record: &mut RequestRecord| {
+            Gateway::normalize_request(agent, "POST", "/v1/responses", &[], &original, record)
+        };
+        let (mut request, _, _) =
+            normalize(&mut record).expect("first normalization reserves the key");
+        let key = request.extensions[CONTINUATION_KEY_EXTENSION].clone();
+        assert!(key.is_string(), "a real pending reservation is required");
+        // Establish that reusing the key really fails while the reservation
+        // exists. The success below therefore proves cleanup, not cache bypass.
+        let duplicate = normalize(&mut record).expect_err("the key is already reserved");
+        assert!(duplicate.message.contains("already in flight"));
+        assert!(
+            request
+                .extensions
+                .remove("token_station_private_native_input")
+                .is_some()
+        );
+        let decision = Decision {
+            chosen: UpstreamModel::new(UpstreamRef::new("unreachable").unwrap(), "model"),
+            fallbacks: Vec::new(),
+            decided_by: DecidedBy::Default,
+            features: RequestFeatures::extract(&request, &[]),
+            pool: "unreachable".into(),
+        };
+        let mut continued: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        continued["previous_response_id"] = json!("resp_prior_translated");
+        let ctx = RequestContext::detached(Duration::from_secs(2), Duration::from_secs(1));
+        let mut emitted = false;
+        let error = gateway
+            .execute_normalized_responses(
+                &ctx,
+                agent,
+                &request,
+                &[],
+                continued.to_string().as_bytes(),
+                &decision,
+                &[],
+                None,
+                "",
+                &mut |_| {
+                    emitted = true;
+                    true
+                },
+                &mut record,
+            )
+            .expect_err("missing native history refuses before dispatch");
+        assert_eq!(error.code, ErrorCode::Capability);
+        assert_eq!(error.http_status, 400);
+        assert!(
+            error
+                .message
+                .contains("Native continuation history is unavailable")
+        );
+        assert!(!emitted);
+        assert_eq!(record.attempts, 0);
+
+        let (again, _, _) = normalize(&mut record)
+            .expect("early refusal must release the pending key before returning");
+        assert_eq!(again.extensions[CONTINUATION_KEY_EXTENSION], key);
     }
 }

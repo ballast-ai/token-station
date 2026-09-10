@@ -141,7 +141,7 @@ fn attempt_receipt(
     }
 }
 
-/// One actual provider attempt owns its load reservation, including media retries.
+/// One actual provider attempt owns its load reservation.
 struct AttemptQuotaLease<'a> {
     quota: &'a std::sync::Mutex<crate::quota_tracker::QuotaTracker>,
     lease: crate::quota_lease::LeaseId,
@@ -450,74 +450,6 @@ impl Gateway {
         );
     }
 
-    /// Retries one upstream after replacing visual blocks when that upstream
-    /// explicitly rejects media. `None` means no retry was applicable or the
-    /// request had no remaining attempt budget.
-    #[allow(clippy::too_many_arguments)] // retry needs the same render context as `try_upstream`
-    fn retry_without_media(
-        &self,
-        ctx: &RequestContext,
-        agent: &LoadedAgent,
-        payload: &AttemptPayload<'_>,
-        inbound_tools: &Value,
-        decision: &Decision,
-        target: &UpstreamModel,
-        emit: &mut dyn FnMut(Reply) -> bool,
-        record: &mut RequestRecord,
-        budget: &mut AttemptBudget,
-        media_retried: &mut bool,
-        error: &ErrorEnvelope,
-    ) -> Option<Result<StreamOutcome, ErrorEnvelope>> {
-        if *media_retried || !is_unsupported_media_error(error) {
-            return None;
-        }
-        // Media fallback rewrites Canonical content parts. A verbatim payload
-        // has already had its own fallback applied before it reached the wire,
-        // and rewriting it here would mean editing the caller's bytes.
-        let AttemptPayload::Canonical(request) = payload else {
-            return None;
-        };
-        let mut fallback_request = (*request).clone();
-        let replaced = replace_canonical_images(&mut fallback_request);
-        if replaced == 0 || !budget.try_begin(None) {
-            return None;
-        }
-
-        *media_retried = true;
-        record.attempts = budget.attempts;
-        record_actual_attempt_target(record, decision, target);
-        eprintln!(
-            "media fallback -> upstream rejected visual input; retrying {target} with {replaced} image block(s) replaced"
-        );
-        let retry_clock = Instant::now();
-        let mut retry_status = None;
-        let mut retry_engine = ProviderCallOutcome::default();
-        let retry = self.try_upstream(
-            ctx,
-            budget.per_attempt_timeout,
-            agent,
-            &AttemptPayload::Canonical(&fallback_request),
-            inbound_tools,
-            target,
-            emit,
-            record,
-            &mut retry_status,
-            &mut retry_engine,
-        );
-        let retry_latency = u64::try_from(retry_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let attempt = attempt_receipt_for_result(
-            target,
-            budget.attempts,
-            retry_latency,
-            retry_status,
-            retry_engine,
-            &retry,
-            record,
-        );
-        record.attempt_records.push(attempt);
-        Some(retry)
-    }
-
     /// Tries the decision's targets in order; moves on only while the error
     /// says another upstream is worth trying, and only before first byte out.
     #[allow(clippy::too_many_arguments)] // one dispatch keeps request + render context explicit
@@ -534,7 +466,6 @@ impl Gateway {
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
         let mut last_error = None;
         let mut budget = AttemptBudget::for_request(ctx);
-        let mut media_retried = false;
 
         let mut targets = std::iter::once(&decision.chosen)
             .chain(&decision.fallbacks)
@@ -588,6 +519,18 @@ impl Gateway {
                 &mut upstream_http_status,
                 &mut provider_call_engine,
             );
+            let result = result.map_err(|error| {
+                let has_images = match payload {
+                    AttemptPayload::Canonical(request) => request_contains_images(request),
+                    AttemptPayload::AnthropicNative { body, .. }
+                    | AttemptPayload::ResponsesNative { body, .. } => raw_contains_images(body),
+                };
+                if has_images && is_unsupported_media_error(&error) {
+                    upstream_image_error()
+                } else {
+                    error
+                }
+            });
             let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
             let attempt = attempt_receipt_for_result(
                 target,
@@ -606,27 +549,6 @@ impl Gateway {
                 // the fallback sweep can eject a bad upstream mid-flight.
                 Ok(outcome) => return Ok((target.clone(), outcome)),
                 Err(mut error) => {
-                    if let Some(lifecycle) = Self::lifecycle_cancellation(ctx) {
-                        return Err(lifecycle);
-                    }
-                    if let Some(retry) = self.retry_without_media(
-                        ctx,
-                        agent,
-                        payload,
-                        inbound_tools,
-                        decision,
-                        target,
-                        emit,
-                        record,
-                        &mut budget,
-                        &mut media_retried,
-                        &error,
-                    ) {
-                        match retry {
-                            Ok(outcome) => return Ok((target.clone(), outcome)),
-                            Err(retry_error) => error = retry_error,
-                        }
-                    }
                     if let Some(lifecycle) = Self::lifecycle_cancellation(ctx) {
                         return Err(lifecycle);
                     }

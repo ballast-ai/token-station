@@ -318,7 +318,7 @@ impl MockUpstream {
                         return None;
                     }
                     match listener.accept() {
-                        Ok((stream, _)) => return Some(stream),
+                        Ok((stream, _)) => return Some(blocking_mock_stream(stream)),
                         Err(error)
                             if error.kind() == std::io::ErrorKind::WouldBlock
                                 && deadline.is_none_or(|deadline| Instant::now() < deadline) =>
@@ -412,7 +412,20 @@ impl MockUpstream {
         let closed = Arc::clone(&peer_closed);
         let stop = Arc::clone(&hanging_stop);
         let hanging_worker = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("hanging upstream accepts");
+            listener.set_nonblocking(true).expect("cancellable accept");
+            let stream = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("hanging upstream accept failed: {error}"),
+                }
+            };
+            let mut stream = blocking_mock_stream(stream);
             record
                 .lock()
                 .expect("recorder")
@@ -487,6 +500,18 @@ impl MockUpstream {
             worker.join().expect("hanging upstream exits cleanly");
         }
     }
+}
+
+fn blocking_mock_stream(stream: TcpStream) -> TcpStream {
+    // macOS inherits nonblocking mode from the listener. A read timeout alone
+    // does not make accepted sockets wait for the request's first bytes.
+    stream
+        .set_nonblocking(false)
+        .expect("accepted mock stream becomes blocking");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("bounded mock request read");
+    stream
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Seen {
@@ -670,6 +695,14 @@ fn start_proxy_with_agent(
 }
 
 fn start_native_responses_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    start_native_responses_proxy_with_vision(upstream, key_file, false)
+}
+
+fn start_native_responses_proxy_with_vision(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    vision: bool,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-native-responses-{}-{}",
@@ -693,6 +726,7 @@ fn start_native_responses_proxy(upstream: &MockUpstream, key_file: &Path) -> Pro
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [{
                     "model": "gpt-5.5",
+                    "vision": vision,
                     "tool": true,
                     "tool_state": "verified",
                     "context_window": 400_000
@@ -987,6 +1021,16 @@ fn start_native_anthropic_proxy_with(
     direct: bool,
     tool_state: &str,
 ) -> Proxy {
+    start_native_anthropic_proxy_with_capabilities(upstream, key_file, direct, tool_state, false)
+}
+
+fn start_native_anthropic_proxy_with_capabilities(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    direct: bool,
+    tool_state: &str,
+    vision: bool,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-native-proxy-{}-{}",
@@ -1014,6 +1058,7 @@ fn start_native_anthropic_proxy_with(
                 "models": [
                     {
                         "model": "deepseek-chat",
+                        "vision": vision,
                         "tool": tool_state != "unsupported",
                         "tool_state": tool_state,
                         "context_window": 128_000
@@ -4461,9 +4506,8 @@ fn anthropic_upstreams_receive_document_blocks_verbatim_over_the_translated_path
 }
 
 #[test]
-fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
-    // Native passthrough keeps server tools and forced tool choice verbatim, but
-    // its confirmed text-only target receives localized image and PDF fallback.
+fn anthropic_native_passthrough_rejects_images_for_a_text_only_model() {
+    // Native server tools must not bypass the image capability check.
     let upstream_answer = json!({
         "id": "msg_native_1",
         "type": "message",
@@ -4492,50 +4536,9 @@ fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
         &proxy.virtual_key,
     );
 
-    // The client receives the upstream's response verbatim.
-    assert_eq!(status, 200, "body={body}");
-    assert!(
-        body.contains("msg_native_1"),
-        "upstream body relayed verbatim, body={body}"
-    );
-
-    let seen = mock.seen();
-    assert_eq!(seen.len(), 1, "exactly one upstream hit");
-    let forwarded = &seen[0];
-    // base_url is origin-only, so it resolves to /v1/messages.
-    assert_eq!(forwarded.path, "/v1/messages");
-    // The server tool and forced tool_choice survived verbatim (NOT translated to
-    // a function or refused).
-    assert_eq!(
-        forwarded.body["tools"][0]["type"],
-        json!("web_search_20250305")
-    );
-    assert_eq!(forwarded.body["tool_choice"]["type"], json!("tool"));
-    assert_eq!(
-        forwarded.body["messages"][0]["content"][0],
-        json!({"type": "text", "text": "[图片已省略：当前模型不支持视觉输入。]"})
-    );
-    assert_eq!(
-        forwarded.body["messages"][0]["content"][1],
-        json!({
-            "type": "text",
-            "text": "[Token Station 已把 PDF 附件转换为文字，因为当前路由不能直接传递 document 内容块。]\n文件名：native.pdf\n\nTOKEN_STATION_PDF_TEXT"
-        })
-    );
-    assert_eq!(
-        forwarded.body["messages"][0]["content"][2],
-        json!({"type": "text", "text": "搜索这张图相关的资料"})
-    );
-    // Only the model was remapped to the routed upstream model.
-    assert_eq!(forwarded.body["model"], json!("deepseek-chat"));
-    // Anthropic authenticates with its own header-secret shape. The client uses
-    // Bearer locally, but neither that virtual key nor a fabricated upstream
-    // Bearer header may cross the proxy boundary.
-    assert_eq!(forwarded.x_api_key.as_deref(), Some("sk-upstream-secret"));
-    assert_eq!(
-        forwarded.authorization, None,
-        "native Anthropic upstreams must never receive Bearer authentication"
-    );
+    assert_eq!(status, 400, "body={body}");
+    assert!(body.contains("image"), "body={body}");
+    assert_eq!(mock.hits(), 0, "native requests must not lose images");
     std::fs::remove_file(key).ok();
 }
 
@@ -5080,7 +5083,66 @@ fn opencode_and_hermes_images_reach_a_vision_capable_upstream() {
 }
 
 #[test]
-fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
+fn codex_and_claude_code_preserve_images_for_a_vision_upstream() {
+    let answer = json!({
+        "id": "chatcmpl-vision", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "VISION_OK" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 12, "completion_tokens": 2 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("codex-claude-vision", "sk-test-key");
+    let proxy = start_proxy_with_agents(
+        &mock,
+        &key,
+        true,
+        &["agent-anthropic", "agent-openai-responses"],
+    );
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+    let image_url = format!("data:image/png;base64,{image_data}");
+    let requests = [
+        (
+            "/agents/claude-code/v1/messages",
+            json!({
+                "model": "auto", "max_tokens": 64,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_data}}
+                ]}]
+            }),
+        ),
+        (
+            "/agents/codex/v1/responses",
+            json!({
+                "model": "auto",
+                "input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": "Describe this image."},
+                    {"type": "input_image", "image_url": image_url}
+                ]}]
+            }),
+        ),
+    ];
+    for (path, request) in requests {
+        let (status, body) = post_scoped(&proxy, path, &request, &proxy.virtual_key, false);
+        assert_eq!(status, 200, "{path}: {body}");
+    }
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2);
+    for request in seen {
+        assert_eq!(request.path, "/v1/chat/completions");
+        let parts = request.body["messages"][0]["content"].as_array().unwrap();
+        assert!(
+            parts
+                .iter()
+                .any(|part| part["type"] == "image_url" && part["image_url"]["url"] == image_url),
+            "{parts:?}"
+        );
+        assert!(!request.body.to_string().contains("Image omitted"));
+    }
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn every_openai_chat_agent_rejects_images_before_a_non_vision_upstream() {
     let answer = json!({
         "id": "chatcmpl-media-fallback",
         "model": "home-model",
@@ -5119,26 +5181,17 @@ fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
             &token,
             false,
         );
-        assert_eq!(status, 200, "{agent_id}: {body}");
-        assert!(
-            body.contains("I can continue with the text."),
-            "{agent_id}: {body}"
-        );
+        assert_eq!(status, 400, "{agent_id}: {body}");
+        assert!(body.contains("image"), "{agent_id}: {body}");
     }
 
-    assert_eq!(home.hits(), 3);
+    assert_eq!(home.hits(), 0);
     assert_eq!(custom.hits(), 0);
-    for request in home.seen() {
-        assert_eq!(
-            message_text(&request.body["messages"][0]["content"]),
-            "[Image omitted: the current model does not support visual input.]"
-        );
-    }
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn media_fallback_localizes_from_the_latest_user_text_and_records_a_real_attempt() {
+fn image_route_refusal_records_zero_attempts_even_with_later_text() {
     let answer = json!({
         "id": "chatcmpl-localized-fallback",
         "model": "home-model",
@@ -5177,41 +5230,23 @@ fn media_fallback_localizes_from_the_latest_user_text_and_records_a_real_attempt
         &token,
         false,
     );
-    assert_eq!(status, 200, "{body}");
-    let response: Value = serde_json::from_str(&body).expect("model response is JSON");
-    assert_eq!(response["object"], json!("chat.completion"));
-    assert_eq!(
-        response["choices"][0]["message"]["role"],
-        json!("assistant")
-    );
-    assert_eq!(
-        response["choices"][0]["message"]["content"],
-        json!("我会根据剩余文字继续。")
-    );
-    assert_eq!(home.hits(), 1);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("image"), "{body}");
+    assert_eq!(home.hits(), 0);
     assert_eq!(custom.hits(), 0);
-    let seen = home.seen();
-    assert_eq!(
-        message_text(&seen[0].body["messages"][0]["content"]),
-        "[图片已省略：当前模型不支持视觉输入。]"
-    );
-    assert_eq!(
-        message_text(&seen[0].body["messages"][1]["content"]),
-        "请继续查看这份报告。"
-    );
     settle();
     let log = std::fs::read_to_string(proxy.data_dir.join("requests.log")).expect("log exists");
     let receipt: Value = serde_json::from_str(log.lines().last().expect("a receipt exists"))
         .expect("receipt is JSON");
-    assert_eq!(receipt["status"], json!(200));
-    assert_eq!(receipt["error_code"], Value::Null);
-    assert_eq!(receipt["attempts"], json!(1));
+    assert_eq!(receipt["status"], json!(400));
+    assert_eq!(receipt["error_code"], json!("capability"));
+    assert_eq!(receipt["attempts"], json!(0));
     assert_eq!(receipt["agent_id"], json!("workbuddy"));
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn codex_responses_input_images_use_the_same_text_only_fallback() {
+fn codex_responses_rejects_images_without_a_supported_route() {
     let answer = json!({
         "id": "chatcmpl-responses-media-fallback",
         "model": "agent-model",
@@ -5247,21 +5282,20 @@ fn codex_responses_input_images_use_the_same_text_only_fallback() {
         false,
     );
 
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("Continued without the image."), "{body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("image"), "{body}");
     assert_eq!(home.hits(), 0);
-    assert_eq!(custom.hits(), 1);
-    let seen = custom.seen();
     assert_eq!(
-        message_text(&seen[0].body["messages"][0]["content"]),
-        "Continue from the text.[Image omitted: the current model does not support visual input.]"
+        custom.hits(),
+        0,
+        "images must never be replaced and sent as text"
     );
 
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn an_upstream_media_refusal_retries_once_with_localized_markers() {
+fn an_upstream_image_refusal_never_retries_without_the_image() {
     let refusal = json!({
         "error": { "message": "This model does not support image attachments." }
     });
@@ -5297,22 +5331,18 @@ fn an_upstream_media_refusal_retries_once_with_localized_markers() {
         None,
     );
 
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("Continued after fallback."), "{body}");
-    assert_eq!(mock.hits(), 2);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("rejected image input"), "{body}");
+    assert_eq!(mock.hits(), 1);
     let seen = mock.seen();
     assert_eq!(
         seen[0].body["messages"][0]["content"][1]["type"],
         "image_url"
     );
-    assert_eq!(
-        message_text(&seen[1].body["messages"][0]["content"]),
-        "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
-    );
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(200)");
-    assert_eq!(row["attempts"], "Integer(2)");
+    assert_eq!(row["status"], "Integer(400)");
+    assert_eq!(row["attempts"], "Integer(1)");
 
     std::fs::remove_file(key).ok();
 }
@@ -7368,50 +7398,34 @@ fn south_stream_deadline_hides_host_private_policy_from_the_agent_renderer() {
 
 #[test]
 #[cfg(feature = "builtin-plugins")]
-fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
+fn south_image_refusal_never_retries_or_falls_back() {
+    assert_south_image_terminal_contract(false);
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn south_image_deadline_hides_private_policy_and_stops_fallback() {
+    assert_south_image_terminal_contract(true);
+}
+
+#[cfg(feature = "builtin-plugins")]
+fn assert_south_image_terminal_contract(deadline: bool) {
     let refusal = json!({
         "error": { "message": "This model does not support image attachments." }
     });
-    let mock = MockUpstream::start_response_then_hanging(
-        http_json(501, &refusal.to_string()),
-        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
-    );
+    let mock = if deadline {
+        MockUpstream::start_hanging()
+    } else {
+        MockUpstream::start_response_then_hanging(
+            http_json(501, &refusal.to_string()),
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        )
+    };
     let fallback = ConnectionTrap::start(Some(http_json(
         500,
         &json!({ "error": { "message": "fallback must not run" } }).to_string(),
     )));
-    let (config_path, data_dir) =
-        write_south_probe_config(&mock, "sk-south-media-retry-marker", true);
-    token_station_cli::secrets::store_set(
-        &data_dir,
-        "mock_fallback",
-        "provider_api_key",
-        "sk-south-media-retry-fallback",
-    )
-    .expect("fallback test secret is stored");
-    let mut config: Value =
-        serde_json::from_slice(&std::fs::read(&config_path).expect("South marker config reads"))
-            .expect("South marker config is JSON");
-    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered_streaming");
-    config["upstreams"]["mock_primary"]["models"][0]["vision"] = json!(true);
-    config["upstreams"]["mock_fallback"] = json!({
-        "provider": "openai-compatible",
-        "base_url": fallback.http_url(),
-        "auth": { "slot": "provider_api_key", "store": true },
-        "models": [ {
-            "model": "gpt-5.5",
-            "tool": true,
-            "vision": true,
-            "context_window": 400_000
-        } ]
-    });
-    config["router"]["pools"]["main"] = json!([
-        { "upstream": "mock_primary", "model": "gpt-5.5" },
-        { "upstream": "mock_fallback", "model": "gpt-5.5" }
-    ]);
-    config["plugins"]["agents"] = json!(["marker-agent"]);
-    config["plugins"]["allow_unsigned"] = json!(true);
-    let config: ClientConfig = serde_json::from_value(config).expect("South marker config parses");
+    let (config, data_dir) = south_image_terminal_config(&mock, &fallback);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -7446,7 +7460,7 @@ fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
                     "messages": [{
                         "role": "user",
                         "content": [
-                            { "type": "text", "text": "Continue without the attachment." },
+                            { "type": "text", "text": "Inspect the attachment." },
                             { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
                         ]
                     }]
@@ -7464,35 +7478,78 @@ fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
         .expect("blocking worker joins")
     });
 
-    let reply = match replies.first() {
-        Some(Reply::BeginJson(reply)) => reply,
-        Some(Reply::BeginStream) => panic!("expected JSON, stream began"),
-        Some(Reply::Chunk(chunk)) => panic!("expected JSON, got chunk: {chunk}"),
-        None => panic!("expected a rendered 504, got no reply"),
+    let Some(Reply::BeginJson(reply)) = replies.first() else {
+        panic!("expected a rendered terminal JSON error");
     };
-    assert_eq!(reply.status, 504, "unexpected error: {}", reply.body);
+    assert_eq!(
+        reply.status,
+        if deadline { 504 } else { 400 },
+        "unexpected error: {}",
+        reply.body
+    );
     let rendered: Value = serde_json::from_str(&reply.body).expect("marker renderer returns JSON");
     assert_eq!(rendered["saw_private_marker"], json!(false));
-    assert_eq!(mock.hits(), 2, "the media retry reaches its deadline");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "a terminal image error cannot replay through legacy or retry without media"
+    );
     assert_eq!(
         fallback.hits(),
         0,
-        "the retry deadline forbids a fallback upstream attempt"
+        "the terminal error forbids a fallback upstream attempt"
     );
     let seen = mock.seen();
     assert_eq!(
         seen[0].body["messages"][0]["content"][1]["type"],
         "image_url"
     );
-    assert_eq!(
-        message_text(&seen[1].body["messages"][0]["content"]),
-        "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
-    );
+    assert!(!seen[0].body.to_string().contains("Image omitted"));
     drop(gateway);
     drop(runtime);
     mock.finish_hanging();
     fallback.finish();
     std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[cfg(feature = "builtin-plugins")]
+fn south_image_terminal_config(
+    mock: &MockUpstream,
+    fallback: &ConnectionTrap,
+) -> (ClientConfig, PathBuf) {
+    let (config_path, data_dir) =
+        write_south_probe_config(mock, "sk-south-media-retry-marker", true);
+    token_station_cli::secrets::store_set(
+        &data_dir,
+        "mock_fallback",
+        "provider_api_key",
+        "sk-south-media-retry-fallback",
+    )
+    .expect("fallback test secret is stored");
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South marker config reads"))
+            .expect("South marker config is JSON");
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered_streaming");
+    config["upstreams"]["mock_primary"]["models"][0]["vision"] = json!(true);
+    config["upstreams"]["mock_fallback"] = json!({
+        "provider": "openai-compatible",
+        "base_url": fallback.http_url(),
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [ {
+            "model": "gpt-5.5",
+            "tool": true,
+            "vision": true,
+            "context_window": 400_000
+        } ]
+    });
+    config["router"]["pools"]["main"] = json!([
+        { "upstream": "mock_primary", "model": "gpt-5.5" },
+        { "upstream": "mock_fallback", "model": "gpt-5.5" }
+    ]);
+    config["plugins"]["agents"] = json!(["marker-agent"]);
+    config["plugins"]["allow_unsigned"] = json!(true);
+    let config: ClientConfig = serde_json::from_value(config).expect("South marker config parses");
+    (config, data_dir)
 }
 
 fn write_south_probe_config(
@@ -9892,37 +9949,47 @@ fn quota_fallback_lease_tracks_actual_provider_and_releases_on_drain() {
     let backup = MockUpstream::start_hanging_buffered();
     let key = key_file("quota-actual-lease", "sk-quota-actual-lease");
     let proxy = start_quota_first_native_pair(&primary, &backup, &key);
-    std::thread::scope(|scope| {
+    let (started, snapshot, reply, settled) = std::thread::scope(|scope| {
         let request =
-            scope.spawn(|| post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key));
+            scope.spawn(|| post_bounded_json(&proxy, "/v1/messages", &native_server_tool_turn()));
         let deadline = Instant::now() + Duration::from_secs(5);
         while !backup.response_started() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(backup.response_started());
+        let started = backup.response_started();
         let snapshot = proxy.gateway.quota_snapshot(quota_audit_now_ms());
-        let accounts = snapshot["accounts"].as_array().unwrap();
-        let account = |name| {
-            accounts
-                .iter()
-                .find(|account| account["upstream"] == name)
-                .unwrap()
-        };
-        assert_eq!(account("account_a")["inflight"], 0);
-        assert_eq!(account("account_b")["inflight"], 1);
+        // Always drain before an assertion can unwind into the scoped join.
+        // The HTTP deadline also bounds failure when startup is overloaded.
         proxy.control.cancel_in_flight();
-        let (status, _) = request.join().unwrap();
-        assert_eq!(status, 503);
-        assert!(
-            proxy.gateway.quota_snapshot(quota_audit_now_ms())["accounts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|account| account["inflight"] == 0)
-        );
+        let reply = request.join();
+        let settled = proxy.gateway.quota_snapshot(quota_audit_now_ms());
+        (started, snapshot, reply, settled)
     });
+    let hits = (primary.hits(), backup.hits());
     backup.finish_hanging();
     std::fs::remove_file(key).unwrap();
+    assert!(
+        started,
+        "backup never started; hits={hits:?}, quota={snapshot}"
+    );
+    let accounts = snapshot["accounts"].as_array().unwrap();
+    let account = |name| {
+        accounts
+            .iter()
+            .find(|account| account["upstream"] == name)
+            .unwrap()
+    };
+    assert_eq!(account("account_a")["inflight"], 0);
+    assert_eq!(account("account_b")["inflight"], 1);
+    let (status, body) = reply.expect("bounded request worker joins");
+    assert_eq!(status, 503, "drain must return retryable failure: {body}");
+    assert!(
+        settled["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| account["inflight"] == 0)
+    );
 }
 
 #[test]
@@ -10156,4 +10223,431 @@ fn current_route_search_conversion_failures_eject_the_backend() {
         "Search must not switch to an unrelated provider"
     );
     std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_image_requests_keep_bytes_and_report_explicit_channel_rejection() {
+    for anthropic in [true, false] {
+        for (vision, upstream_status, expected_status) in
+            [(false, 200, 400), (true, 200, 200), (true, 400, 400)]
+        {
+            let answer = if upstream_status == 200 {
+                json!({"id":"native-image-ok","output":[],"content":[]})
+            } else {
+                json!({"error":{"message":"kiro: image input is not yet supported (text + tools only)"}})
+            };
+            let mock =
+                MockUpstream::start(vec![vec![http_json(upstream_status, &answer.to_string())]]);
+            let key = key_file("native-image-contract", "sk-fixture-secret");
+            let proxy = if anthropic {
+                start_native_anthropic_proxy_with_capabilities(
+                    &mock, &key, true, "verified", vision,
+                )
+            } else {
+                start_native_responses_proxy_with_vision(&mock, &key, vision)
+            };
+            let request = if anthropic {
+                json!({"model":"auto","max_tokens":64,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"cGl4ZWxz"}}]}],"tools":[{"type":"web_search_20250305","name":"web_search"}]})
+            } else {
+                json!({"model":"auto","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,cGl4ZWxz"}]}],"tools":[{"type":"web_search"}]})
+            };
+            let (status, body) = if anthropic {
+                post_messages(&proxy, &request, &proxy.virtual_key)
+            } else {
+                let (status, _, body) = send_responses(&proxy, &request, &proxy.virtual_key);
+                (status, body)
+            };
+            assert_eq!(
+                status, expected_status,
+                "anthropic={anthropic} vision={vision} body={body}"
+            );
+            assert_eq!(mock.hits(), usize::from(vision));
+            if vision {
+                let seen = mock.seen();
+                if anthropic {
+                    assert_eq!(seen[0].body["messages"], request["messages"]);
+                } else {
+                    assert_eq!(seen[0].body["input"], request["input"]);
+                }
+                if upstream_status == 400 {
+                    assert!(body.contains("rejected image input"), "{body}");
+                }
+            } else {
+                assert!(body.contains("image"), "{body}");
+            }
+            std::fs::remove_file(key).ok();
+        }
+    }
+}
+
+const VISION_REVIEW_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+
+fn vision_review_image_request() -> Value {
+    json!({
+        "model": "auto",
+        "stream": false,
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "inspect this image"},
+            {"type": "input_image", "image_url": format!("data:image/png;base64,{VISION_REVIEW_PNG}")}
+        ]}]
+    })
+}
+
+fn post_bounded_json(proxy: &Proxy, path: &str, body: &Value) -> (u16, String) {
+    let client = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build(),
+    );
+    let response = client
+        .post(format!("{}{path}", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .send(&body.to_string())
+        .expect("vision review gateway must answer within ten seconds");
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().expect("body reads");
+    (status, body)
+}
+
+fn vision_review_chat_answer() -> Value {
+    json!({
+        "id": "chatcmpl-vision-review",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "VISION_OK"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 2, "total_tokens": 14}
+    })
+}
+
+fn vision_review_upstream(mock: &MockUpstream, key: &Path) -> Value {
+    json!({
+        "provider": "openai-compatible",
+        "base_url": mock.base_url(),
+        "auth": {"slot": "provider_api_key", "file": key},
+        "models": [{"model": "gpt-5.5", "vision": true, "tool": true,
+            "tool_state": "verified", "context_window": 400_000}]
+    })
+}
+
+fn vision_review_proxy(upstreams: &Value, router: &Value) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-vision-review-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": {"listen": "127.0.0.1:0"},
+        "data": {"dir": data_dir, "metrics": true},
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai-responses", "agent-anthropic"],
+            "providers": {"openai-compatible": "provider-openai-compatible-v2"}
+        },
+        "upstreams": upstreams,
+        "router": router
+    }))
+    .expect("vision review config parses");
+    config.validate().expect("vision review config is valid");
+    spawn_proxy(&config)
+}
+
+#[test]
+fn vision_review_mixed_native_and_chat_preserves_plain_image_on_selected_chat_route() {
+    let chat = MockUpstream::start(vec![vec![http_json(
+        200,
+        &vision_review_chat_answer().to_string(),
+    )]]);
+    let native = MockUpstream::start(Vec::new());
+    let key = key_file("vision-review-mixed", "sk-vision-review-fixture");
+    let mut native_config = vision_review_upstream(&native, &key);
+    native_config["api_dialect"] = json!("responses-native");
+    // The native offering is configured but outside the selected pool. Its
+    // presence must not change normalization or admission for the Chat route.
+    let proxy = vision_review_proxy(
+        &json!({"chat": vision_review_upstream(&chat, &key), "native": native_config}),
+        &json!({"version": 1, "pools": {
+            "main": [{"upstream": "chat", "model": "gpt-5.5"}],
+            "other": [{"upstream": "native", "model": "gpt-5.5"}]
+        }, "default_pool": "main"}),
+    );
+    let request = vision_review_image_request();
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status,
+        200,
+        "selected Chat image route must succeed; chat_hits={}, native_hits={}, body={body}",
+        chat.hits(),
+        native.hits()
+    );
+    assert_eq!(native.hits(), 0, "the unselected pool must remain unused");
+    let seen = chat.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["image_url"]["url"],
+        request["input"][0]["content"][1]["image_url"]
+    );
+}
+
+#[test]
+fn vision_review_anthropic_keyword_tier_reaches_vision_route_without_server_tools() {
+    let text_only = MockUpstream::start(Vec::new());
+    let vision = MockUpstream::start(vec![vec![http_json(
+        200,
+        &vision_review_chat_answer().to_string(),
+    )]]);
+    let key = key_file("vision-review-keyword", "sk-vision-review-fixture");
+    let mut text_config = vision_review_upstream(&text_only, &key);
+    text_config["models"][0]["vision"] = json!(false);
+    let proxy = vision_review_proxy(
+        &json!({"text_only": text_config, "vision": vision_review_upstream(&vision, &key)}),
+        &json!({"version": 1, "pools": {
+            "text": [{"upstream": "text_only", "model": "gpt-5.5"}],
+            "vision": [{"upstream": "vision", "model": "gpt-5.5"}]
+        }, "default_pool": "text", "rules": [
+            {"id": "inspect-vision", "when": {"keywords_any": ["inspect"]}, "route_to": "vision"}
+        ]}),
+    );
+    let request = json!({
+        "model": "auto", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "inspect this image"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": VISION_REVIEW_PNG}}
+        ]}]
+    });
+    let (status, body) = post_bounded_json(&proxy, "/v1/messages", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status,
+        200,
+        "keyword-selected vision route must succeed; text_hits={}, vision_hits={}, body={body}",
+        text_only.hits(),
+        vision.hits()
+    );
+    assert_eq!(text_only.hits(), 0);
+    let seen = vision.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["image_url"]["url"],
+        format!("data:image/png;base64,{VISION_REVIEW_PNG}")
+    );
+}
+
+#[test]
+fn vision_review_free_native_image_failure_never_uses_paid_fallback() {
+    let refusal = json!({"error": {"message": "free native service unavailable"}});
+    let free = MockUpstream::start(vec![vec![http_json(503, &refusal.to_string())]]);
+    let paid = MockUpstream::start(vec![vec![http_json(
+        200,
+        &json!({"id": "resp_paid", "object": "response", "status": "completed", "output": []})
+            .to_string(),
+    )]]);
+    let key = key_file("vision-review-free", "sk-vision-review-fixture");
+    let mut free_config = vision_review_upstream(&free, &key);
+    free_config["api_dialect"] = json!("responses-native");
+    free_config["access_tier"] = json!("free");
+    let mut paid_config = vision_review_upstream(&paid, &key);
+    paid_config["api_dialect"] = json!("responses-native");
+    paid_config["access_tier"] = json!("paid");
+    let proxy = vision_review_proxy(
+        &json!({"free": free_config, "paid": paid_config}),
+        &json!({"version": 1, "pools": {"main": [
+            {"upstream": "free", "model": "gpt-5.5"},
+            {"upstream": "paid", "model": "gpt-5.5"}
+        ]}, "default_pool": "main"}),
+    );
+    let request = vision_review_image_request();
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(free.hits(), 1, "the selected free upstream was attempted");
+    assert_eq!(
+        paid.hits(),
+        0,
+        "Tiered free routing must not incur a paid fallback; status={status}, body={body}"
+    );
+    assert_eq!(
+        status, 503,
+        "the free upstream failure must reach the caller: {body}"
+    );
+    assert_eq!(free.seen()[0].path, "/v1/responses");
+    assert_eq!(free.seen()[0].body["input"], request["input"]);
+}
+
+#[test]
+fn vision_review_native_image_response_allows_following_text_continuation() {
+    let answer = |id: &str| {
+        json!({
+            "id": id, "object": "response", "status": "completed", "model": "gpt-5.5",
+            "output": [{"type": "message", "id": "msg_vision", "role": "assistant", "status": "completed",
+                "content": [{"type": "output_text", "text": "VISION_OK", "annotations": []}]}],
+            "usage": {"input_tokens": 12, "output_tokens": 2, "total_tokens": 14}
+        })
+    };
+    let native = MockUpstream::start(vec![
+        vec![http_json(200, &answer("resp_native_image").to_string())],
+        vec![http_json(200, &answer("resp_native_followup").to_string())],
+    ]);
+    let key = key_file("vision-review-continuation", "sk-vision-review-fixture");
+    let proxy = start_native_responses_proxy_with_vision(&native, &key, true);
+    let (first_status, first_body) =
+        post_bounded_json(&proxy, "/v1/responses", &vision_review_image_request());
+    assert_eq!(first_status, 200, "initial image request: {first_body}");
+    let first: Value = serde_json::from_str(&first_body).expect("first response is JSON");
+    assert_eq!(native.seen()[0].path, "/v1/responses");
+    let followup = json!({
+        "model": "auto", "stream": false,
+        "previous_response_id": first["id"], "input": "Explain your previous answer."
+    });
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &followup);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status,
+        200,
+        "a returned native response ID must remain usable without another image; native_hits={}, body={body}",
+        native.hits()
+    );
+    let seen = native.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].path, "/v1/responses");
+    assert_vision_review_replayed_input(&seen[1].body, followup["input"].as_str().unwrap());
+}
+
+fn assert_vision_review_replayed_input(body: &Value, followup: &str) {
+    // Local continuation replay must remain self-contained if routing later
+    // selects another account. Do not send a foreign upstream response ID.
+    assert!(body.get("previous_response_id").is_none());
+    let replay = body["input"]
+        .as_array()
+        .expect("continuation replays complete input messages");
+    assert_eq!(replay.len(), 3);
+    assert_eq!(replay[0]["role"], "user");
+    assert_eq!(
+        replay[0]["content"][1]["image_url"],
+        format!("data:image/png;base64,{VISION_REVIEW_PNG}")
+    );
+    assert_eq!(replay[1]["role"], "assistant");
+    assert_eq!(message_text(&replay[1]["content"]), "VISION_OK");
+    assert_eq!(replay[2]["role"], "user");
+    assert_eq!(message_text(&replay[2]["content"]), followup);
+}
+
+#[test]
+fn vision_review_native_image_sse_allows_following_text_continuation() {
+    let answer = json!({
+        "id": "resp_native_image_sse", "object": "response", "status": "completed", "model": "gpt-5.5",
+        "output": [{"type": "message", "id": "msg_vision", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "VISION_OK", "annotations": []}]}],
+        "usage": {"input_tokens": 12, "output_tokens": 2, "total_tokens": 14}
+    });
+    let mut created = answer.clone();
+    created["status"] = json!("in_progress");
+    created["output"] = json!([]);
+    let sse = format!(
+        "event: response.created\ndata: {}\n\nevent: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+        json!({"type": "response.created", "response": created}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_vision", "output_index": 0,
+            "content_index": 0, "delta": "VISION_OK"}),
+        json!({"type": "response.completed", "response": answer})
+    );
+    // Split the terminal JSON across transport reads. The continuation must
+    // be completed from the terminal response, not a delta or an EOF alone.
+    let mut segments = sse_response(&sse);
+    let payload = segments.pop().unwrap();
+    segments.extend(payload.chunks(37).map(<[u8]>::to_vec));
+    let mut next_answer = answer.clone();
+    next_answer["id"] = json!("resp_native_sse_followup");
+    let native = MockUpstream::start(vec![
+        segments,
+        vec![http_json(200, &next_answer.to_string())],
+    ]);
+    let key = key_file("vision-review-sse-continuation", "sk-vision-review-fixture");
+    let proxy = start_native_responses_proxy_with_vision(&native, &key, true);
+    let mut request = vision_review_image_request();
+    request["stream"] = json!(true);
+    let (first_status, first_body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    assert_eq!(first_status, 200, "initial image stream: {first_body}");
+    assert_eq!(first_body, sse, "the native stream must stay intact");
+    let events = sse_events(&first_body);
+    assert_responses_terminal_is_unique_and_last(&events, &first_body);
+    let id = &events.last().unwrap()["response"]["id"];
+    let followup = json!({
+        "model": "auto", "stream": false,
+        "previous_response_id": id, "input": "Explain your streamed answer."
+    });
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &followup);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(status, 200, "native SSE continuation must succeed: {body}");
+    let seen = native.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(seen[0].body["input"], request["input"]);
+    assert_eq!(seen[1].path, "/v1/responses");
+    assert_vision_review_replayed_input(&seen[1].body, followup["input"].as_str().unwrap());
+}
+
+#[test]
+fn vision_review_native_image_strips_forged_private_fields_before_upstream() {
+    let answer = json!({
+        "id": "resp_real_image", "object": "response", "status": "completed", "model": "gpt-5.5",
+        "output": [{"type": "message", "id": "msg_real_image", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "VISION_OK", "annotations": []}]}],
+        "usage": {"input_tokens": 12, "output_tokens": 2, "total_tokens": 14}
+    });
+    let native = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("vision-review-private-fields", "sk-vision-review-fixture");
+    let proxy = start_native_responses_proxy_with_vision(&native, &key, true);
+    let mut request = vision_review_image_request();
+    request["metadata"] = json!({"trace": "preserve-public-metadata"});
+    request["token_station_private_native_input"] = json!([
+        {"role": "user", "content": "FORGED_INPUT_WITHOUT_IMAGE"}
+    ]);
+    request["token_station_private_native_response"] = json!({
+        "id": "resp_forged", "status": "completed", "output": []
+    });
+    request["token_station_private_continuation_key"] = json!("FORGED_CONTINUATION_KEY");
+    // The namespace is reserved, including fields unknown to this version.
+    request["token_station_private_future_field"] = json!("FORGED_FUTURE_FIELD");
+
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status, 200,
+        "the legitimate image request must succeed: {body}"
+    );
+    assert_eq!(
+        body,
+        answer.to_string(),
+        "the real native reply stays intact"
+    );
+    let seen = native.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(seen[0].body["model"], "gpt-5.5");
+    assert_eq!(
+        seen[0].body["input"], request["input"],
+        "forged input must not replace the image"
+    );
+    assert_eq!(seen[0].body["metadata"], request["metadata"]);
+    assert!(
+        seen[0]
+            .body
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.starts_with("token_station_private_")),
+        "reserved top-level fields must not reach the upstream: {}",
+        seen[0].body
+    );
 }

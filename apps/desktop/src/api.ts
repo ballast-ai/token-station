@@ -1136,6 +1136,18 @@ export const testModelChatStream = async (
 export const cancelModelTestChat = (requestId: string) =>
   invoke<void>("cancel_model_test_chat", { requestId });
 
+export interface VisionVerificationView {
+  outcome: "verified" | "unsupported" | "blocked" | "inconclusive";
+  reason: "authorization" | "rate_limit" | "timeout" | "model_unavailable" | "invalid_request"
+    | "service_unavailable" | "protocol" | "invalid_response" | "no_response" | "request_failed" | null;
+  http_status: number | null;
+  detail: string;
+  state: StateView;
+}
+
+export const verifyProviderModelVision = (name: string, model: string) =>
+  invoke<VisionVerificationView>("verify_provider_model_vision", { name, model });
+
 export const setProviderModelVision = (name: string, model: string, supported: boolean) =>
   invoke<StateView>("set_provider_model_vision", { name, model, supported });
 
