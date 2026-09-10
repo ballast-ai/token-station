@@ -133,7 +133,7 @@ export default function ProviderModelManager({
   onSaved,
 }: ProviderModelManagerProps) {
   const { copy, language } = useLocalizedCopy();
-  const { showError, showSuccess } = useErrorToast();
+  const { showError, showSuccess, showInfo } = useErrorToast();
   const endpointErrorId = useId();
   const [models, setModels] = useState(provider.models);
   const [selected, setSelected] = useState(provider.models);
@@ -457,7 +457,21 @@ export default function ProviderModelManager({
     if (operationDisabled || state === "verified") return;
     setCapabilitySaving(model);
     try {
-      onSaved(await setProviderModelVision(provider.name, model, state !== "declared"));
+      const next = await setProviderModelVision(provider.name, model, state !== "declared");
+      onSaved(next);
+      showInfo(next.serve.phase === "starting"
+        ? copy(
+          "Applying vision support. After application, restart Codex and attach the image again.",
+          "正在应用视觉能力。应用完成后，请重启 Codex 并重新添加图片。",
+          "正在套用視覺能力。完成後，請重新啟動 Codex 並重新附加圖片。",
+          "画像対応を適用中です。適用後に Codex を再起動し、画像を添付し直してください。",
+        )
+        : copy(
+          "Vision support saved. Start the proxy before attaching images.",
+          "视觉能力已保存。发送图片前请启动代理。",
+          "視覺能力已儲存。傳送圖片前請啟動代理。",
+          "画像対応を保存しました。画像の送信前にプロキシを起動してください。",
+        ), `provider-capability:${provider.name}:${model}`);
     } catch (caught) {
       showError(humanizeAppError(caught), `provider-capability:${provider.name}:${model}`);
     } finally {
