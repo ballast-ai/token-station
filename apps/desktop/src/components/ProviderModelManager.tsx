@@ -154,7 +154,9 @@ export default function ProviderModelManager({
   const [testing, setTesting] = useState(false);
   const [visionChecking, setVisionChecking] = useState<string | null>(null);
   const [visionResults, setVisionResults] = useState<Record<string, VisionVerificationView>>({});
-  useEffect(() => setVisionResults({}), [provider.name, provider.base_url, provider.provider_call,
+  const [visionErrors, setVisionErrors] = useState<Record<string, string>>({});
+  const visionInFlight = useRef(false);
+  useEffect(() => { setVisionResults({}); setVisionErrors({}); }, [provider.name, provider.base_url, provider.provider_call,
     provider.credential_source, provider.credential_reference]);
   const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
   const [limitSaving, setLimitSaving] = useState<string | null>(null);
@@ -463,21 +465,37 @@ export default function ProviderModelManager({
   const visionResultLabel = (outcome: VisionVerificationView["outcome"]) => ({
     verified: copy("Verified: all nine image cells matched.", "验证通过：九个随机色块全部识别正确。", "驗證通過：九個隨機色塊全部辨識正確。", "検証成功：9 個の色がすべて一致しました。"),
     unsupported: copy("This channel explicitly rejected images.", "该通道明确拒绝了图片输入。", "此通道明確拒絕了圖片輸入。", "この経路は画像入力を拒否しました。"),
-    blocked: copy("Verification was blocked. Capability is unchanged.", "请求受阻，未修改视觉能力。", "請求受阻，未修改視覺能力。", "検証できませんでした。対応状況は変更していません。"),
+    blocked: copy("Verification was blocked. Capability is unchanged.", "验证未完成，视觉设置保持不变。", "請求受阻，未修改視覺能力。", "検証できませんでした。対応状況は変更していません。"),
     inconclusive: copy("The answer did not match. Capability is unchanged.", "识别结果不匹配，未修改视觉能力。", "辨識結果不符，未修改視覺能力。", "回答が一致しません。対応状況は変更していません。"),
   })[outcome];
 
+  const visionFailureLabel = (reason: VisionVerificationView["reason"]) => ({
+    authorization: copy("Access was denied. Check this model's account permissions and credential.", "认证或权限不足，请检查凭据及该模型的开通权限。", "驗證或權限不足，請檢查憑據及模型權限。", "認証または権限が不足しています。認証情報とモデルの権限を確認してください。"),
+    rate_limit: copy("The channel rate limit was reached. Wait before retrying.", "供应商限流，请稍后重试。", "供應商限流，請稍後重試。", "利用制限に達しました。しばらく待って再試行してください。"),
+    timeout: copy("The request timed out. Check the connection, then retry.", "请求超时，请检查连接后重试。", "請求逾時，請檢查連線後重試。", "リクエストがタイムアウトしました。接続を確認して再試行してください。"),
+    model_unavailable: copy("The model or endpoint was not found. Check the model ID, address, and account access.", "模型或接口不可用，请核对模型 ID、接口地址和开通权限。", "模型或介面不可用，請核對模型 ID、位址和權限。", "モデルまたはエンドポイントが見つかりません。ID、URL、権限を確認してください。"),
+    invalid_request: copy("The channel rejected the test request. Check the error details for unsupported parameters or image format.", "接口拒绝了测试请求，请查看错误详情，核对参数或图片格式要求。", "介面拒絕測試請求，請查看錯誤詳情，核對參數或圖片格式。", "テストリクエストが拒否されました。詳細でパラメーターや画像形式を確認してください。"),
+    service_unavailable: copy("The channel service failed. Check its status or retry later.", "通道服务异常，请检查服务状态或稍后重试。", "通道服務異常，請檢查狀態或稍後重試。", "サービスでエラーが発生しました。状態を確認するか、後で再試行してください。"),
+    protocol: copy("The channel cannot run this verification protocol. Check the Provider call engine and API dialect.", "当前通道无法执行此验证协议，请检查供应商调用引擎和接口协议。", "目前通道無法執行此驗證協議，請檢查呼叫引擎和介面協議。", "この検証プロトコルを実行できません。呼び出しエンジンと API 形式を確認してください。"),
+    invalid_response: copy("The interface returned no readable model answer. Check the response format and protocol.", "接口返回格式异常，未取得可读的模型回答，请检查接口协议。", "介面回應格式異常，未取得可讀回答，請檢查介面協議。", "読み取り可能な回答がありません。応答形式とプロトコルを確認してください。"),
+    no_response: copy("No complete reply arrived within the verification limits. Check the connection and protocol.", "验证未收到完整响应，请检查连接和接口协议。", "驗證未收到完整回應，請檢查連線及介面協議。", "完全な応答を受信できませんでした。接続とプロトコルを確認してください。"),
+    request_failed: copy("The test request failed. Use the error details to check this channel.", "测试请求失败，请根据错误详情检查当前通道。", "測試請求失敗，請依錯誤詳情檢查通道。", "テストリクエストに失敗しました。詳細を確認してください。"),
+  })[reason ?? "request_failed"];
+
   const verifyVision = async (model: string) => {
-    if (operationDisabled) return;
+    if (operationDisabled || visionInFlight.current) return;
+    visionInFlight.current = true;
     setVisionChecking(model);
+    setVisionErrors((previous) => { const next = { ...previous }; delete next[model]; return next; });
+    setVisionResults((previous) => { const next = { ...previous }; delete next[model]; return next; });
     try {
       const result = await verifyProviderModelVision(provider.name, model);
       onSaved(result.state);
       setVisionResults((previous) => ({ ...previous, [model]: result }));
-      showInfo(visionResultLabel(result.outcome), `provider-vision-check:${provider.name}:${model}`);
     } catch (caught) {
-      showError(humanizeAppError(caught), `provider-vision-check:${provider.name}:${model}`);
+      setVisionErrors((previous) => ({ ...previous, [model]: humanizeAppError(caught) }));
     } finally {
+      visionInFlight.current = false;
       setVisionChecking(null);
     }
   };
@@ -827,10 +845,24 @@ export default function ProviderModelManager({
                   ? copy("Verifying…", "验证中…", "驗證中…", "検証中…")
                   : copy("Verify vision", "验证视觉", "驗證視覺", "画像を検証")}</button>}
               </div>
-              {visionResults[row.model] && <p className="model-limit-source" role="status">
-                {visionResultLabel(visionResults[row.model].outcome)}
-                {visionResults[row.model].outcome === "blocked" && ` ${visionResults[row.model].detail}`}
+              {visionChecking === row.model && <p className="model-limit-source" role="status">
+                {copy(`Verifying only ${row.model}. Other actions for this Provider are temporarily locked.`, `仅验证 ${row.model}，同一供应商的其他操作暂时锁定。`, `僅驗證 ${row.model}，同一供應商的其他操作暫時鎖定。`, `${row.model} のみ検証中です。同じプロバイダーの他の操作は一時的にロックされています。`)}
               </p>}
+              {visionErrors[row.model] && <p className="model-limit-source" role="status" style={{ overflowWrap: "anywhere" }}>
+                {copy("Verification could not finish: ", "验证未能完成：", "驗證未能完成：", "検証を完了できませんでした：")}{visionErrors[row.model]}
+              </p>}
+              {visionResults[row.model] && <div className="model-limit-source" role="status" style={{ overflowWrap: "anywhere" }}>
+                <p>{visionResultLabel(visionResults[row.model].outcome)}</p>
+                {visionResults[row.model].outcome === "blocked" && <>
+                  <p>{visionFailureLabel(visionResults[row.model].reason)}
+                    {visionResults[row.model].http_status != null && ` (HTTP ${visionResults[row.model].http_status})`}
+                  </p>
+                  {visionResults[row.model].detail && <details>
+                    <summary>{copy("Error details", "错误详情", "錯誤詳情", "エラー詳細")}</summary>
+                    <p>{visionResults[row.model].detail}</p>
+                  </details>}
+                </>}
+              </div>}
               {row.configured && row.cap.context_window_source
                 && row.cap.context_window_source === row.cap.max_output_tokens_source && (
                 <p className="model-limit-source">

@@ -1138,6 +1138,9 @@ export const cancelModelTestChat = (requestId: string) =>
 
 export interface VisionVerificationView {
   outcome: "verified" | "unsupported" | "blocked" | "inconclusive";
+  reason: "authorization" | "rate_limit" | "timeout" | "model_unavailable" | "invalid_request"
+    | "service_unavailable" | "protocol" | "invalid_response" | "no_response" | "request_failed" | null;
+  http_status: number | null;
   detail: string;
   state: StateView;
 }

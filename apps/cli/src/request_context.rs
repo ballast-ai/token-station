@@ -28,6 +28,7 @@ pub struct RequestContext {
     upstream_response_limit: Option<u64>,
     http_trace: Mutex<Option<HttpTraceCapture>>,
     accounting: Mutex<crate::accounting::AccountingTap>,
+    error_diagnostic: Mutex<Option<ErrorDiagnosticCapture>>,
 }
 
 const MAX_HTTP_TRACE_BODY_BYTES: usize = 1024 * 1024;
@@ -35,6 +36,11 @@ const MAX_HTTP_TRACE_BODY_BYTES: usize = 1024 * 1024;
 struct HttpTraceCapture {
     snapshot: HttpTraceSnapshot,
     remaining_body_bytes: usize,
+}
+
+#[derive(Default)]
+struct ErrorDiagnosticCapture {
+    response: Option<(u16, Vec<u8>)>,
 }
 
 struct CappedJsonWriter {
@@ -125,6 +131,7 @@ impl RequestContext {
             per_attempt_timeout: per_attempt,
             upstream_response_limit: None,
             http_trace: Mutex::new(None),
+            error_diagnostic: Mutex::new(None),
             accounting: Mutex::new(crate::accounting::AccountingTap::default()),
         }
     }
@@ -334,11 +341,39 @@ impl RequestContext {
             });
     }
 
+    /// Enable bounded, memory-only upstream error details for an explicit diagnostic request.
+    /// This does not enable body logging or capture successful replies, headers, or requests.
+    pub fn enable_error_diagnostics(&self) {
+        *self
+            .error_diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(ErrorDiagnosticCapture::default());
+    }
+
+    /// Consume the latest failed reply. Callers must redact credentials before displaying it.
+    /// An incomplete or non-JSON body must not be displayed as raw text.
+    pub fn take_error_diagnostic(&self) -> Option<(u16, Vec<u8>)> {
+        self.error_diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .and_then(|capture| capture.response)
+    }
+
     pub(crate) fn capture_upstream_response_head(
         &self,
         status: u16,
         headers: &BTreeMap<String, String>,
     ) {
+        if let Some(capture) = self
+            .error_diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            capture.response = (status >= 300).then(|| (status, Vec::new()));
+        }
         let content_type = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
@@ -365,6 +400,16 @@ impl RequestContext {
     }
 
     pub(crate) fn append_upstream_response_body(&self, value: &[u8]) {
+        if let Some((_, body)) = self
+            .error_diagnostic
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|capture| capture.response.as_mut())
+        {
+            let remaining = 8192usize.saturating_sub(body.len());
+            body.extend_from_slice(&value[..value.len().min(remaining)]);
+        }
         self.accounting.lock().expect("accounting lock").push(value);
         let mut trace = self.http_trace.lock().unwrap();
         let Some(trace) = trace.as_mut() else {
@@ -460,6 +505,26 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
     use token_station_protocol::{Auth, HttpMethod, HttpRequestDescriptor, SafeHeaders, SecretRef};
+
+    #[test]
+    fn error_diagnostics_are_opt_in_bounded_and_exclude_success() {
+        let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(10));
+        ctx.capture_upstream_response_head(400, &BTreeMap::new());
+        ctx.append_upstream_response_body(b"hidden");
+        assert!(ctx.take_error_diagnostic().is_none());
+        ctx.enable_error_diagnostics();
+        ctx.capture_upstream_response_head(200, &BTreeMap::new());
+        ctx.append_upstream_response_body(b"successful private answer");
+        assert!(ctx.take_error_diagnostic().is_none());
+        ctx.enable_error_diagnostics();
+        ctx.capture_upstream_response_head(400, &BTreeMap::new());
+        ctx.append_upstream_response_body(&vec![b'x'; 9000]);
+        let (status, body) = ctx.take_error_diagnostic().unwrap();
+        assert_eq!(status, 400);
+        assert_eq!(body.len(), 8192);
+        assert!(ctx.take_error_diagnostic().is_none());
+        assert_eq!(ctx.http_trace_snapshot(), HttpTraceSnapshot::default());
+    }
 
     #[test]
     fn a_cancelled_client_cancels_the_context() {

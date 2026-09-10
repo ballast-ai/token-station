@@ -23,8 +23,8 @@ pub(crate) enum VisionOutcome {
 
 #[derive(Serialize)]
 pub(crate) struct VisionVerificationView {
-    outcome: VisionOutcome,
-    detail: String,
+    #[serde(flatten)]
+    report: VisionReport,
     state: StateView,
 }
 
@@ -62,7 +62,91 @@ fn challenge(random: [u8; 9]) -> Result<Challenge, String> {
     })
 }
 
-fn evaluate(status: u16, body: &str, expected: &[&str]) -> (VisionOutcome, &'static str) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum VisionFailureReason {
+    Authorization,
+    RateLimit,
+    Timeout,
+    ModelUnavailable,
+    InvalidRequest,
+    ServiceUnavailable,
+    Protocol,
+    InvalidResponse,
+    NoResponse,
+    RequestFailed,
+}
+
+#[derive(Debug, Serialize)]
+struct VisionReport {
+    outcome: VisionOutcome,
+    reason: Option<VisionFailureReason>,
+    http_status: Option<u16>,
+    detail: String,
+}
+
+impl VisionReport {
+    fn new(
+        outcome: VisionOutcome,
+        reason: Option<VisionFailureReason>,
+        http_status: Option<u16>,
+        detail: &str,
+    ) -> Self {
+        Self {
+            outcome,
+            reason,
+            http_status,
+            detail: detail.into(),
+        }
+    }
+}
+
+// Display only bounded error fields, never arbitrary reply bodies or request content.
+fn safe_error_detail(value: &Value, secrets: &[&str]) -> String {
+    let error = value.get("error").unwrap_or(value);
+    let fields: Vec<_> = ["code", "type", "message"]
+        .iter()
+        .filter_map(|key| error.get(key).and_then(Value::as_str))
+        .collect();
+    let mut distinct = Vec::new();
+    for field in fields {
+        if !distinct.contains(&field) {
+            distinct.push(field);
+        }
+    }
+    let mut detail = distinct.join(" · ");
+    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+        detail = detail.replace(secret, "[REDACTED]");
+    }
+    static PRIVATE_CONTENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)(?:https?://|data:)[^\s"<>]+|[a-z0-9+/=_-]{80,}"#).unwrap()
+    });
+    detail = PRIVATE_CONTENT
+        .replace_all(&detail, "[REDACTED]")
+        .into_owned();
+    crate::recovery::redact_and_bound(&detail, 600)
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn evaluate(status: u16, body: &str, expected: &[&str]) -> VisionReport {
+    evaluate_with_secrets(status, body, expected, &[])
+}
+
+fn evaluate_with_secrets(
+    status: u16,
+    body: &str,
+    expected: &[&str],
+    secrets: &[&str],
+) -> VisionReport {
     let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     if status == 400
         && matches!(
@@ -73,18 +157,53 @@ fn evaluate(status: u16, body: &str, expected: &[&str]) -> (VisionOutcome, &'sta
             .as_str()
             .is_some_and(|text| text.contains("channel rejected image input"))
     {
-        return (
-            VisionOutcome::Unsupported,
-            "The Provider channel explicitly rejected image input.",
-        );
+        return VisionReport::new(VisionOutcome::Unsupported, None, Some(status), "");
     }
-    if status != 200 {
-        return (VisionOutcome::Blocked, match status {
-            401 | 403 => "Authorization failed. Vision support was not changed.",
-            429 => "The Provider rate limit blocked verification. Vision support was not changed.",
-            408 | 504 => "Verification timed out. Vision support was not changed.",
-            _ => "The request failed before vision could be verified. Check the channel and protocol. Vision support was not changed.",
-        });
+    if status != 200 || !value["error"].is_null() {
+        let detail = safe_error_detail(&value, secrets);
+        let lower = detail.to_ascii_lowercase();
+        let reason = match status {
+            401 | 403 => VisionFailureReason::Authorization,
+            429 => VisionFailureReason::RateLimit,
+            408 | 504 => VisionFailureReason::Timeout,
+            404 => VisionFailureReason::ModelUnavailable,
+            _ if lower.contains("model_not_found")
+                || lower.contains("invalidmodel")
+                || lower.contains("model does not exist") =>
+            {
+                VisionFailureReason::ModelUnavailable
+            }
+            _ if lower.contains("bounded chat attempt")
+                || lower.contains("protocol")
+                || lower.contains("api dialect") =>
+            {
+                VisionFailureReason::Protocol
+            }
+            400 | 413 | 415 | 422 => VisionFailureReason::InvalidRequest,
+            500..=599 => VisionFailureReason::ServiceUnavailable,
+            _ => VisionFailureReason::RequestFailed,
+        };
+        return VisionReport::new(VisionOutcome::Blocked, Some(reason), Some(status), &detail);
+    }
+    if value["choices"][0]["message"]["content"].as_str().is_none()
+        && !value["output"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["type"] == "message"
+                    && item["role"] == "assistant"
+                    && item["content"].as_array().is_some_and(|parts| {
+                        parts
+                            .iter()
+                            .any(|part| part["type"] == "output_text" && part["text"].is_string())
+                    })
+            })
+        })
+    {
+        return VisionReport::new(
+            VisionOutcome::Blocked,
+            Some(VisionFailureReason::InvalidResponse),
+            Some(status),
+            "",
+        );
     }
     let answer = value["choices"][0]["message"]["content"]
         .as_str()
@@ -106,16 +225,10 @@ fn evaluate(status: u16, body: &str, expected: &[&str]) -> (VisionOutcome, &'sta
         .split(|c: char| !c.is_ascii_alphabetic())
         .filter(|word| !word.is_empty())
         .collect();
-    if actual == expected {
-        (
-            VisionOutcome::Verified,
-            "The channel correctly identified all nine random image cells.",
-        )
+    if !expected.is_empty() && actual == expected {
+        VisionReport::new(VisionOutcome::Verified, None, Some(status), "")
     } else {
-        (
-            VisionOutcome::Inconclusive,
-            "The image answer did not match the test. Vision support was not changed.",
-        )
+        VisionReport::new(VisionOutcome::Inconclusive, None, Some(status), "")
     }
 }
 
@@ -190,7 +303,7 @@ fn run_probe(
     config: &ClientConfig,
     name: &str,
     runtime: tokio::runtime::Handle,
-) -> Result<(VisionOutcome, &'static str), String> {
+) -> Result<VisionReport, String> {
     let before = credential_fingerprint(config, name)?;
     let mut random = [0; 9];
     getrandom::fill(&mut random).map_err(|_| "Cannot generate an image challenge")?;
@@ -223,6 +336,7 @@ fn run_probe(
     };
     let body = serde_json::to_vec(&request).map_err(|_| "Cannot encode the image check")?;
     let context = RequestContext::detached(Duration::from_secs(60), Duration::from_secs(45));
+    context.enable_error_diagnostics();
     let mut response = None;
     gateway.chat_scoped_without_body_log(
         &context,
@@ -234,9 +348,14 @@ fn run_probe(
         &body,
         &mut |reply| {
             if let Reply::BeginJson(reply) = reply {
-                if reply.body.len() <= 65536 {
-                    response = Some((reply.status, reply.body));
-                }
+                response = Some((
+                    reply.status,
+                    if reply.body.len() <= 65536 {
+                        reply.body
+                    } else {
+                        String::new()
+                    },
+                ));
             }
             true
         },
@@ -244,13 +363,48 @@ fn run_probe(
     if before != credential_fingerprint(config, name)? {
         return Err("The credential changed during verification. Run verification again.".into());
     }
-    Ok(response.map_or(
-        (
-            VisionOutcome::Blocked,
-            "No bounded response was received. Vision support was not changed.",
-        ),
-        |(status, body)| evaluate(status, &body, &challenge.expected),
-    ))
+    let store = secrets::SecretStore::from_config(config, &config.data.dir);
+    let mut credentials: Vec<Zeroizing<String>> = Vec::new();
+    if let Some(auth) = config.upstreams[name].auth.as_ref() {
+        credentials.push(Zeroizing::new(
+            store
+                .resolve(name, &auth.slot)
+                .map_err(|_| "Cannot read the Provider credential")?,
+        ));
+    }
+    if let Some(auth) = &config.egress.auth {
+        credentials.push(Zeroizing::new(
+            store
+                .resolve_egress(&auth.credential.slot)
+                .map_err(|_| "Cannot read the egress credential")?,
+        ));
+    }
+    let secrets: Vec<&str> = credentials.iter().map(|key| key.as_str()).collect();
+    let mut report = response.map_or_else(
+        || {
+            VisionReport::new(
+                VisionOutcome::Blocked,
+                Some(VisionFailureReason::NoResponse),
+                None,
+                "",
+            )
+        },
+        |(status, body)| evaluate_with_secrets(status, &body, &challenge.expected, &secrets),
+    );
+    if report.outcome == VisionOutcome::Blocked {
+        if let Some((status, body)) = context.take_error_diagnostic() {
+            let diagnostic =
+                evaluate_with_secrets(status, &String::from_utf8_lossy(&body), &[], &secrets);
+            if diagnostic.outcome == VisionOutcome::Blocked {
+                report.http_status = diagnostic.http_status;
+                if !diagnostic.detail.is_empty() {
+                    report.reason = diagnostic.reason;
+                    report.detail = diagnostic.detail;
+                }
+            }
+        }
+    }
+    Ok(report)
 }
 
 pub(crate) fn invalidate_probe_evidence(upstream: &mut Value) {
@@ -351,7 +505,7 @@ pub(crate) async fn verify_provider_model_vision<R: Runtime>(
     };
     let task_name = name.clone();
     let runtime = tokio::runtime::Handle::current();
-    let (outcome, detail) =
+    let report =
         tauri::async_runtime::spawn_blocking(move || run_probe(&config, &task_name, runtime))
             .await
             .map_err(|_| "The image check stopped unexpectedly")??;
@@ -368,10 +522,10 @@ pub(crate) async fn verify_provider_model_vision<R: Runtime>(
                     .into(),
             );
         }
-        save_evidence(&mut inner, &name, &model, &expected, outcome)?;
+        save_evidence(&mut inner, &name, &model, &expected, report.outcome)?;
     }
     let snapshot = if matches!(
-        outcome,
+        report.outcome,
         VisionOutcome::Verified | VisionOutcome::Unsupported
     ) {
         apply_saved_capabilities(app, state.inner())?
@@ -379,8 +533,7 @@ pub(crate) async fn verify_provider_model_vision<R: Runtime>(
         state.0.lock().unwrap().snapshot()
     };
     Ok(VisionVerificationView {
-        outcome,
-        detail: detail.into(),
+        report,
         state: snapshot,
     })
 }
@@ -388,6 +541,87 @@ pub(crate) async fn verify_provider_model_vision<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_verification_retains_status_and_reason() {
+        let report = evaluate(
+            404,
+            r#"{"error":{"code":"model_not_found","message":"The model does not exist."}}"#,
+            &[],
+        );
+        assert_eq!(report.outcome, VisionOutcome::Blocked);
+        assert_eq!(report.http_status, Some(404));
+        let detail = report.detail;
+        assert!(
+            detail.contains("model_not_found"),
+            "Provider code was lost: {detail}"
+        );
+        assert!(detail.contains("The model does not exist"));
+    }
+
+    #[test]
+    fn request_failures_do_not_prove_missing_vision() {
+        for (status, body, reason) in [
+            (401, "{}", VisionFailureReason::Authorization),
+            (403, "{}", VisionFailureReason::Authorization),
+            (429, "{}", VisionFailureReason::RateLimit),
+            (504, "{}", VisionFailureReason::Timeout),
+            (503, "{}", VisionFailureReason::ServiceUnavailable),
+            (
+                400,
+                r#"{"error":{"message":"Invalid model: model does not exist"}}"#,
+                VisionFailureReason::ModelUnavailable,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"Cannot construct a bounded Chat attempt"}}"#,
+                VisionFailureReason::Protocol,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"Image format is invalid"}}"#,
+                VisionFailureReason::InvalidRequest,
+            ),
+            (
+                200,
+                "<html>error</html>",
+                VisionFailureReason::InvalidResponse,
+            ),
+            (
+                200,
+                r#"{"error":{"message":"Internal failure"}}"#,
+                VisionFailureReason::RequestFailed,
+            ),
+        ] {
+            let report = evaluate(status, body, &["red"]);
+            assert_eq!(report.outcome, VisionOutcome::Blocked);
+            assert_eq!(report.reason, Some(reason));
+            assert_eq!(report.http_status, Some(status));
+        }
+    }
+
+    #[test]
+    fn error_details_remove_credentials_content_and_control_characters() {
+        let secret = "unusual credential value";
+        let value = json!({"error": {"code": "invalid_parameter", "message": format!("bad argument {secret} Bearer abcdef sk-example-secret https://user:pass@host/path?key=123 data:image/png;base64,abcdef \u{202e}\ncontent: private image"), "body": "private response"}});
+        let detail = safe_error_detail(&value, &[secret]);
+        assert!(detail.contains("invalid_parameter"));
+        for hidden in [
+            secret,
+            "abcdef",
+            "example-secret",
+            "user:pass",
+            "private image",
+            "private response",
+            "\u{202e}",
+            "\n",
+        ] {
+            assert!(!detail.contains(hidden), "Unsafe diagnostic: {detail}");
+        }
+        let huge = json!({"message": "错误 ".repeat(1000)});
+        assert!(safe_error_detail(&huge, &[]).len() <= 600);
+        assert!(safe_error_detail(&json!({"body":"never show bodies"}), &[]).is_empty());
+    }
 
     #[test]
     fn verification_requires_every_random_image_cell() {
@@ -399,7 +633,7 @@ mod tests {
                 &answer("red,green,blue,yellow,red,blue,green,yellow,blue"),
                 &check.expected
             )
-            .0,
+            .outcome,
             VisionOutcome::Verified
         );
         for text in [
@@ -408,7 +642,7 @@ mod tests {
             "red,green,blue,yellow,red,blue,green,yellow,red",
         ] {
             assert_eq!(
-                evaluate(200, &answer(text), &check.expected).0,
+                evaluate(200, &answer(text), &check.expected).outcome,
                 VisionOutcome::Inconclusive
             );
         }
@@ -428,12 +662,18 @@ mod tests {
     #[test]
     fn only_explicit_channel_image_rejection_proves_unsupported() {
         let rejection = json!({"error":{"code":"capability","message":"The selected Provider channel rejected image input."}}).to_string();
-        assert_eq!(evaluate(400, &rejection, &[]).0, VisionOutcome::Unsupported);
+        assert_eq!(
+            evaluate(400, &rejection, &[]).outcome,
+            VisionOutcome::Unsupported
+        );
         for status in [401, 403, 429, 500, 504] {
-            assert_eq!(evaluate(status, &rejection, &[]).0, VisionOutcome::Blocked);
+            assert_eq!(
+                evaluate(status, &rejection, &[]).outcome,
+                VisionOutcome::Blocked
+            );
         }
         assert_eq!(
-            evaluate(400, r#"{"error":{"message":"Invalid model"}}"#, &[]).0,
+            evaluate(400, r#"{"error":{"message":"Invalid model"}}"#, &[]).outcome,
             VisionOutcome::Blocked
         );
     }
