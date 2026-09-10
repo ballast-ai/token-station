@@ -128,8 +128,8 @@ if [[ "$unsigned_windows" == "true" ]]; then
   esac
   unsigned_windows_version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
     "$root/apps/desktop/src-tauri/tauri.conf.json" | head -n 1)
-  [[ "$unsigned_windows_version" == "2.0.0" || "$unsigned_windows_version" == "2.1.0" ]] || {
-    echo "--unsigned-windows is restricted to Token Station 2.0.0 and 2.1.0" >&2
+  [[ "$unsigned_windows_version" == "2.0.0" || "$unsigned_windows_version" == "2.1.1" ]] || {
+    echo "--unsigned-windows is restricted to Token Station 2.0.0 and 2.1.1" >&2
     exit 2
   }
 fi

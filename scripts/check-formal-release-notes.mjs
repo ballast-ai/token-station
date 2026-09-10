@@ -46,7 +46,7 @@ if (firstContentLine !== expectedHeading) {
 if (notes.trim().length < expectedHeading.length + 40) {
   failures.push("the notes must contain a useful formal release summary");
 }
-if ((version === "2.0.0" || version === "2.1.0") && !notes.includes(requiredWindowsWarning)) {
+if ((version === "2.0.0" || version === "2.1.1") && !notes.includes(requiredWindowsWarning)) {
   failures.push(`the notes must contain exactly: ${requiredWindowsWarning}`);
 }
 

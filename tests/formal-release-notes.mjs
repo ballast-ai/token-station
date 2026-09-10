@@ -59,15 +59,15 @@ try {
 
   const missingV21Warning = check(
     "v21-missing-warning.md",
-    "# Token Station v2.1.0\n\nThis stable release improves Agent routing and configuration recovery.\n",
-    "2.1.0",
+    "# Token Station v2.1.1\n\nThis stable release improves Agent routing and configuration recovery.\n",
+    "2.1.1",
   );
-  assert.equal(missingV21Warning.status, 1, "v2.1.0 must disclose the unsigned MSI");
+  assert.equal(missingV21Warning.status, 1, "v2.1.1 must disclose the unsigned MSI");
   assert.match(missingV21Warning.stderr, /Windows MSI/);
   const v21Warning = check(
     "v21-warning.md",
-    "# Token Station v2.1.0\n\nThis stable release improves Agent routing.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
-    "2.1.0",
+    "# Token Station v2.1.1\n\nThis stable release improves Agent routing.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
+    "2.1.1",
   );
   assert.equal(v21Warning.status, 0, v21Warning.stderr);
 

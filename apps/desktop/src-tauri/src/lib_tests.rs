@@ -9526,6 +9526,13 @@ fn metadata_only_draft_model_test_keeps_receipts_without_body_files() {
     assert!(!data_dir
         .join(token_station_cli::bodylog::BODY_DIR_NAME)
         .exists());
+    assert!(app
+        .state::<ModelTestStreamState>()
+        .1
+        .lock()
+        .unwrap()
+        .take()
+        .is_some());
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -1107,6 +1107,7 @@ mod tests {
             .insert("OPENCLAW_STATE_DIR".into());
         assert!(openclaw_runtime_paths(&environment).is_err());
         environment.present_environment.clear();
+        environment.platform = current_platform();
         let root =
             std::env::temp_dir().join(format!("openclaw-legacy-state-{}", std::process::id()));
         std::fs::create_dir_all(root.join(".clawdbot")).unwrap();

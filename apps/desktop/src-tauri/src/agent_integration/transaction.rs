@@ -2712,7 +2712,14 @@ keep = true
         write_initial(&target, original_config);
         write_initial(&catalog, original_catalog);
         let plan = prepare_codex(&target, "vk-codex-catalog");
-        assert_eq!(plan.view.related_config_paths, [catalog.to_string_lossy()]);
+        assert_eq!(
+            plan.view
+                .related_config_paths
+                .iter()
+                .map(Path::new)
+                .collect::<Vec<_>>(),
+            [catalog.as_path()]
+        );
 
         let keys = Arc::new(TestKeys::available());
         let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
