@@ -1786,6 +1786,7 @@ mod tests {
 
     fn discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),
@@ -1949,6 +1950,11 @@ mod tests {
 
     fn openclaw_discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: Some(super::super::types::ConnectorRuntimePaths {
+                primary_config_path: target.to_path_buf(),
+                state_directory: target.parent().unwrap().to_path_buf(),
+                effective_home: target.parent().unwrap().join("home"),
+            }),
             agent_id: "openclaw".to_string(),
             executable_path: "/opt/openclaw".to_string(),
             canonical_path: "/opt/openclaw".to_string(),
@@ -2006,6 +2012,7 @@ mod tests {
 
     fn hermes_discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: "nous-hermes-agent".to_string(),
             executable_path: "/opt/hermes".to_string(),
             canonical_path: "/opt/hermes".to_string(),
@@ -3905,6 +3912,9 @@ keep = true
         let target = root.join("openclaw.json");
         let initial = include_bytes!("../../tests/fixtures/config/openclaw/openclaw.input.json5");
         write_initial(&target, initial);
+        let catalog = root.join("agents/main/agent/models.json");
+        let catalog_before = br#"{"providers":{"tokenstation":{"apiKey":"old-key","baseUrl":"http://old.invalid/v1","models":[{"id":"auto"}]},"other":{"apiKey":"keep"}}}"#;
+        write_initial(&catalog, catalog_before);
         let connect = prepare_openclaw(&target, "vk-openclaw-secret");
         let keys = Arc::new(TestKeys::available());
         let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
@@ -3923,6 +3933,13 @@ keep = true
         let connected = std::fs::read_to_string(&target).unwrap();
         assert!(connected.contains("keep this comment"), "{connected}");
         assert!(connected.contains("vk-openclaw-secret"));
+        let cached: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+        assert_eq!(
+            cached["providers"]["tokenstation"]["apiKey"],
+            "vk-openclaw-secret"
+        );
+        assert_eq!(cached["providers"]["other"]["apiKey"], "keep");
         let replay = engine
             .apply_connection(&connect, &confirmation(&connect), &admission(), 1_003)
             .expect_err("OpenClaw connect plan is one-shot");
@@ -3944,8 +3961,34 @@ keep = true
             original_permissions: baseline.record.original_permissions,
             original_owner: baseline.record.original_owner.clone(),
         };
+        let generated = root.join("agents/new/agent/models.json");
+        write_initial(&generated, &std::fs::read(&catalog).unwrap());
+        let refresh = crate::agent_integration::plan::build_metadata_refresh_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("vk-openclaw-secret"),
+                adapter_ready: true,
+                model_metadata: None,
+            },
+            &ownership,
+            1,
+            None,
+            1_500,
+            "88".repeat(16),
+        )
+        .unwrap();
+        assert_eq!(
+            refresh.companions.len(),
+            1,
+            "matching newly generated catalogs require no write"
+        );
         let current = read_config_source(&target).unwrap();
-        let restore = build_snapshot_restore_plan(
+        let mut restore = build_snapshot_restore_plan(
             &OpenClawConnector,
             &openclaw_discovery(&target),
             &openclaw_verified(),
@@ -3961,6 +4004,15 @@ keep = true
             "56".repeat(16),
         )
         .unwrap();
+        crate::agent_integration::plan::attach_restore_companions(
+            &mut restore,
+            &OpenClawConnector,
+            &ownership,
+            &baseline.record,
+            &snapshots,
+            &keys.load().unwrap(),
+        )
+        .unwrap();
         engine
             .apply_snapshot_restore(
                 &restore,
@@ -3973,10 +4025,16 @@ keep = true
         assert!(restored.contains("keep this comment"), "{restored}");
         assert!(restored.contains("existing.invalid"), "{restored}");
         assert!(!restored.contains("vk-openclaw-secret"));
+        let cached: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+        assert_eq!(
+            cached,
+            serde_json::from_slice::<serde_json::Value>(catalog_before).unwrap()
+        );
 
         let ownership = ownership_store.load(&key).unwrap().unwrap();
         let current = read_config_source(&target).unwrap();
-        let disconnect = build_disconnect_plan(
+        let mut disconnect = build_disconnect_plan(
             &OpenClawConnector,
             &openclaw_discovery(&target),
             &openclaw_verified(),
@@ -3990,6 +4048,14 @@ keep = true
             None,
             3_000,
             "67".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_disconnect_companions(
+            &mut disconnect,
+            &OpenClawConnector,
+            &ownership,
+            &snapshots,
+            &keys.load().unwrap(),
         )
         .unwrap();
         engine

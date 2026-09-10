@@ -1,0 +1,36 @@
+.agent-capability-route {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.agent-capability-route > div {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.agent-capability-route dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.agent-capability-target dd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--ink);
+  opacity: 0.8;
+}
+
+.agent-capability-target dd > span {
+  flex-shrink: 0;
+  color: var(--muted);
+}

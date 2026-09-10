@@ -347,6 +347,14 @@ fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
                         descriptor.agent_id
                     ));
                 }
+                if resolution_sources.contains(&RuntimeResolutionSource::WorkbuddyBundledNode)
+                    && (descriptor.agent_id != "workbuddy" || interpreter_candidates != &["node"])
+                {
+                    return Err(
+                        "The WorkBuddy runtime source requires the WorkBuddy node interpreter"
+                            .to_string(),
+                    );
+                }
                 let unique_sources = BTreeSet::from_iter(resolution_sources.iter().copied());
                 if unique_sources.len() != resolution_sources.len() {
                     return Err(format!(

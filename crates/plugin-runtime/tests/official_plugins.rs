@@ -233,6 +233,132 @@ fn gemini_model_and_stream_mode_come_from_the_transport_path() {
 }
 
 #[test]
+fn gemini_cli_json_schema_parameters_reach_the_model_unchanged() {
+    let plugin = AgentPlugin::load(&runtime(), gemini_agent_package()).expect("loads clean");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string", "description": "Read the exact path."},
+            "options": {
+                "type": "object",
+                "properties": {"type": {"type": "string", "enum": ["OBJECT", "STRING"]}},
+                "additionalProperties": false
+            },
+            "lines": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+        },
+        "required": ["file_path"],
+        "additionalProperties": false,
+        "$defs": {"label": {"type": "string"}}
+    });
+    for field in ["parametersJsonSchema", "parameters"] {
+        let mut declaration = json!({"name": "read_file", "description": "Read a file."});
+        declaration[field] = schema.clone();
+        let mut request = envelope(
+            "google-gemini-generate-content",
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "Read marker 中文.txt"}]}],
+                "tools": [{"functionDeclarations": [declaration]}]
+            }),
+        );
+        request.extensions.insert(
+            "transport_path".to_owned(),
+            json!("/agents/gemini-cli/v1beta/models/gemini-2.5-pro:streamGenerateContent"),
+        );
+        let normalized = plugin
+            .normalize_inbound(&request)
+            .expect("schema normalizes");
+        assert_eq!(
+            normalized.tools[0].parameters, schema,
+            "{field} must preserve tool constraints"
+        );
+        assert_eq!(normalized.tools[0].name, "read_file");
+    }
+}
+
+#[test]
+fn gemini_rejects_conflicting_or_invalid_parameter_schemas() {
+    let plugin = AgentPlugin::load(&runtime(), gemini_agent_package()).expect("loads clean");
+    for declaration in [
+        json!({"name": "read", "parameters": {}, "parametersJsonSchema": {}}),
+        json!({"name": "read", "parametersJsonSchema": "not a schema"}),
+        json!({"name": "read", "parametersJsonSchema": null}),
+        json!({"name": "read", "parameters": []}),
+    ] {
+        let mut request = envelope(
+            "google-gemini-generate-content",
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "read"}]}],
+                "tools": [{"functionDeclarations": [declaration]}]
+            }),
+        );
+        request.extensions.insert(
+            "transport_path".to_owned(),
+            json!("/v1beta/models/gemini-2.5-pro:generateContent"),
+        );
+        let error = plugin
+            .normalize_inbound(&request)
+            .expect_err("invalid schemas must not become empty tools");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+}
+
+#[test]
+fn gemini_parallel_tool_fragments_finish_with_complete_objects() {
+    let plugin = AgentPlugin::load(&runtime(), gemini_agent_package()).expect("loads clean");
+    let context = json!({"stream_id": "gemini-parallel", "model": "routed"});
+    for (index, name, arguments) in [
+        (0, Some("read_file"), "{\"file_path\":\"marker "),
+        (1, Some("run_shell_command"), "{\"command\":\"python3 "),
+        (0, None, "中文.txt\"}"),
+        (1, None, "test_calc.py\"}"),
+    ] {
+        let rendered = plugin
+            .render_stream_event(
+                &StreamEvent::ToolCallDelta {
+                    index,
+                    id: None,
+                    name: name.map(str::to_owned),
+                    arguments_delta: arguments.to_owned(),
+                },
+                &context,
+            )
+            .expect("fragment buffers");
+        assert!(
+            response_sse_events(&rendered).is_empty(),
+            "partial arguments must not execute"
+        );
+    }
+    plugin
+        .render_stream_event(
+            &StreamEvent::Finish {
+                finish_reason: Some(FinishReason::ToolCalls),
+                stop_sequence: None,
+            },
+            &context,
+        )
+        .unwrap();
+    let rendered = plugin
+        .render_stream_event(
+            &StreamEvent::Done {
+                finish_reason: None,
+                stop_sequence: None,
+            },
+            &context,
+        )
+        .expect("complete tool calls render");
+    let events = response_sse_events(&rendered);
+    let candidate = &events[0]["candidates"][0];
+    assert_eq!(candidate["finishReason"], "STOP");
+    assert_eq!(
+        candidate["content"]["parts"],
+        json!([
+            {"functionCall": {"name": "read_file", "args": {"file_path": "marker 中文.txt"}}},
+            {"functionCall": {"name": "run_shell_command", "args": {"command": "python3 test_calc.py"}}}
+        ])
+    );
+}
+
+#[test]
 fn responses_structured_output_is_typed_by_the_real_wasm() {
     let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
     let request = |format: serde_json::Value| {

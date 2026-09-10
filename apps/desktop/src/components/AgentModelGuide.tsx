@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, Copy, Info } from "lucide-react";
-import type { AgentUiMetadataView } from "../api";
+import type { AgentRouteView, AgentUiMetadataView } from "../api";
+import AgentCapabilityGuide from "./AgentCapabilityGuide";
 import { useLocalizedCopy, type LocalizedCopy } from "./LanguageProvider";
 import { useErrorToast } from "./ErrorToast";
 import { Button } from "./ui/button";
@@ -106,9 +107,10 @@ function modelGuide(agentId: string, copy: LocalizedCopy): ModelGuide | undefine
   }
 }
 
-export default function AgentModelGuide({ metadata, connected }: {
+export default function AgentModelGuide({ metadata, connected, route }: {
   metadata: Pick<AgentUiMetadataView, "agent_id" | "display_name">;
   connected: boolean;
+  route?: AgentRouteView;
 }) {
   const { copy } = useLocalizedCopy();
   const { showError } = useErrorToast();
@@ -161,6 +163,7 @@ export default function AgentModelGuide({ metadata, connected }: {
   return (
     <section className="agent-model-guide agent-flat-surface" aria-label={heading}>
       <h3 className="sr-only">{heading}</h3>
+      <div className="agent-model-guide-primary">
       <span className="agent-model-guide-label" aria-hidden="true">{connected
         ? copy("Model entry", "模型入口", "模型入口", "モデル入口")
         : copy("Select after connection", "接入后选择", "接入後選擇", "接続後に選択")}</span>
@@ -178,6 +181,7 @@ export default function AgentModelGuide({ metadata, connected }: {
           </dd>
         </div>
       </dl>
+      </div>
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -189,6 +193,7 @@ export default function AgentModelGuide({ metadata, connected }: {
           <TooltipContent side="bottom" className="agent-model-guide-tooltip">{guide.instruction}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
+      {route && <AgentCapabilityGuide route={route} />}
       <span className="sr-only" role="status">{copied ? copy("Copied", "已复制", "已複製", "コピーしました") : ""}</span>
     </section>
   );

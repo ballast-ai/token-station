@@ -102,6 +102,11 @@ describe("humanizeAppError", () => {
     );
   });
 
+  it("explains rejected launchers without claiming the Agent version is unsupported", () => {
+    expect(humanizeAppError({ code: "EXECUTABLE_NOT_RUNNABLE", message: "unsupported launcher" }, "zh-CN"))
+      .toBe("无法验证 Agent 启动入口。请选择其他安装，或修复该入口的 Node 运行时与程序路径后重新扫描。");
+  });
+
   it("describes a local Agent version probe timeout without blaming the network", () => {
     const error = {
       code: "VERSION_PROBE_TIMEOUT",

@@ -71,6 +71,7 @@ pub enum ProbeRuntime {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeResolutionSource {
+    WorkbuddyBundledNode,
     ObservedEntrySibling,
     KnownInstallLocations,
     Path,
@@ -136,6 +137,9 @@ pub enum BaseUrlShape {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryRecord {
+    /// Server-side paths captured from the same environment as configuration discovery.
+    #[serde(skip)]
+    pub(crate) runtime_paths: Option<ConnectorRuntimePaths>,
     pub agent_id: String,
     pub executable_path: String,
     pub canonical_path: String,
@@ -154,6 +158,13 @@ pub struct DiscoveryRecord {
     pub conflict_group: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
     pub scanned_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectorRuntimePaths {
+    pub primary_config_path: std::path::PathBuf,
+    pub state_directory: std::path::PathBuf,
+    pub effective_home: std::path::PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

@@ -1,13 +1,21 @@
 .agent-model-guide {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   flex: 0 0 auto;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 6px 16px;
+  gap: 3px 12px;
   min-width: 0;
-  padding: 10px 16px;
+  padding: 12px 16px;
   border-radius: 9px;
   background: var(--surface-2);
+}
+
+.agent-model-guide-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  min-width: 0;
 }
 
 .agent-model-guide-label {
@@ -57,7 +65,9 @@
 }
 
 .agent-model-guide-help {
-  margin-left: auto;
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
   color: var(--muted);
 }
 

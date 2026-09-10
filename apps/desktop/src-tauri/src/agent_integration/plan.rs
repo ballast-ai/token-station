@@ -373,7 +373,11 @@ fn build_connection_or_refresh_plan(
         &operations,
         &connector.sensitive_paths(),
     );
-    let companion_raw = connector.companion_projections(target_path, input)?;
+    let companion_raw = connector.companion_projections_with_context(
+        target_path,
+        input,
+        discovery.runtime_paths.as_ref(),
+    )?;
     let mut companions = Vec::with_capacity(companion_raw.len());
     let mut related_config_paths = Vec::with_capacity(companion_raw.len());
     let mut companion_diff = Vec::new();
@@ -408,6 +412,24 @@ fn build_connection_or_refresh_plan(
             companion.format,
             companion.label,
         )?;
+        // OpenClaw generates catalogs after connection. A matching unowned cache needs no write.
+        if connector.agent_id() == "openclaw"
+            && ownership.is_some_and(|record| {
+                !record
+                    .companion_files
+                    .iter()
+                    .any(|owned| Path::new(&owned.target_config_path) == companion.target_path)
+            })
+        {
+            let projected = parse_source_bytes(
+                Some(companion.projected_bytes.as_slice()),
+                companion.format,
+                companion.label,
+            )?;
+            if semantic_json(&companion_document)? == semantic_json(&projected)? {
+                continue;
+            }
+        }
         let companion_baseline_semantic = semantic_json(&companion_document)?;
         let ancestor_reverse = prepare_owned_paths_for_write_with_reverse(
             &mut companion_document,
@@ -1521,6 +1543,7 @@ mod tests {
 
     fn discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),

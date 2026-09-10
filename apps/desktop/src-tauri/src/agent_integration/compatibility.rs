@@ -97,15 +97,6 @@ pub fn evaluate_discovery(
             }
         };
 
-    if discovery.conflict_group.is_some() {
-        return decision(
-            CompatibilityStatus::MultipleInstallations,
-            ReasonCode::MultipleCanonicalPaths,
-            "检测到多个安装实例，请先选择精确路径".to_string(),
-            None,
-            &[AllowedAction::SelectInstallation],
-        );
-    }
     if !discovery.runnable {
         return decision(
             CompatibilityStatus::InstalledBroken,
@@ -113,7 +104,13 @@ pub fn evaluate_discovery(
                 .diagnostics
                 .first()
                 .map_or(ReasonCode::ExecutableNotRunnable, |value| value.reason_code),
-            "安装入口存在，但版本探测进程未成功运行".to_string(),
+            discovery.diagnostics.first().map_or_else(
+                || {
+                    "The Agent version probe failed. Check the installation, then rescan."
+                        .to_string()
+                },
+                |diagnostic| diagnostic.message.clone(),
+            ),
             None,
             &[],
         );
@@ -171,6 +168,15 @@ pub fn evaluate_discovery(
         );
     }
 
+    if discovery.conflict_group.is_some() {
+        return decision(
+            CompatibilityStatus::MultipleInstallations,
+            ReasonCode::MultipleCanonicalPaths,
+            "检测到多个安装实例，请先选择精确路径".to_string(),
+            None,
+            &[AllowedAction::SelectInstallation],
+        );
+    }
     decision(
         CompatibilityStatus::DetectedVerified,
         ReasonCode::DefaultAdmission,
@@ -289,6 +295,7 @@ mod tests {
 
     fn discovery(agent_id: &str, version: Option<&str>) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: agent_id.to_string(),
             executable_path: format!("/tmp/{agent_id}"),
             canonical_path: format!("/tmp/{agent_id}"),
@@ -429,6 +436,48 @@ mod tests {
         });
         let decision = evaluate_discovery(&catalog, codex, &broken);
         assert_eq!(decision.status, CompatibilityStatus::InstalledBroken);
+    }
+
+    #[test]
+    fn multiple_installations_do_not_hide_admission_failures() {
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut catalog = CompatibilityCatalog::builtin(&registry).unwrap();
+        let agent = descriptor(&registry, "openclaw");
+        let mut record = discovery("openclaw", Some("2026.9.3"));
+        record.conflict_group = Some("openclaw".into());
+        record.runnable = false;
+        let decision = evaluate_discovery(&catalog, agent, &record);
+        assert_eq!(decision.status, CompatibilityStatus::InstalledBroken);
+        assert!(decision.connector_id.is_none());
+        record.runnable = true;
+        for reason_code in [
+            ReasonCode::ConfigParseFailed,
+            ReasonCode::ConfigReadFailed,
+            ReasonCode::ReadOnlyPreflightFailed,
+            ReasonCode::InvalidEnvironmentOverride,
+        ] {
+            record.diagnostics = vec![Diagnostic {
+                reason_code,
+                message: "preflight failed".into(),
+            }];
+            let decision = evaluate_discovery(&catalog, agent, &record);
+            assert_eq!(decision.reason_code, reason_code);
+            assert!(decision.connector_id.is_none());
+        }
+        record.diagnostics.clear();
+        catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.agent_id == "openclaw")
+            .unwrap()
+            .blocked
+            .push(BlockedRule {
+                version_requirement: "=2026.9.3".into(),
+                reason: "blocked fixture".into(),
+            });
+        let decision = evaluate_discovery(&catalog, agent, &record);
+        assert_eq!(decision.status, CompatibilityStatus::DetectedBlocked);
+        assert!(decision.connector_id.is_none());
     }
 
     #[test]

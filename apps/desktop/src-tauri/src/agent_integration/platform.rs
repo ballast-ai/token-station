@@ -3,7 +3,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::types::{
-    AgentDescriptor, ConfigFormat, DiscoverySource, EnvValueKind, Platform, ProbeRuntime,
+    AgentDescriptor, ConfigFormat, ConnectorRuntimePaths, DiscoverySource, EnvValueKind, Platform,
+    ProbeRuntime,
 };
 
 const ROOT_VARIABLES: &[&str] = &[
@@ -117,6 +118,86 @@ pub(crate) struct ConfigResolution {
     pub candidates: Vec<ResolvedConfigCandidate>,
     pub invalid_environment_names: Vec<String>,
     pub inline_config_present: bool,
+}
+
+/// Resolve OpenClaw paths only from the environment captured for this scan.
+pub(crate) fn openclaw_runtime_paths(
+    environment: &ScanEnvironment,
+) -> Result<ConnectorRuntimePaths, String> {
+    let variable = |name: &str| -> Result<Option<&str>, String> {
+        match environment.variables.get(name) {
+            Some(value) if !value.trim().is_empty() => Ok(Some(value.trim())),
+            Some(_) => Err(format!("OpenClaw path variable {name} is invalid.")),
+            None if environment.present_environment.contains(name) => {
+                Err(format!("OpenClaw path variable {name} is invalid."))
+            }
+            None => Ok(None),
+        }
+    };
+    let absolute = |value: &str| -> Result<PathBuf, String> {
+        let normalized = normalize_separators(value);
+        if !is_absolute_for(environment.platform, &normalized)
+            || normalized.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err("OpenClaw runtime paths must be absolute without traversal.".into());
+        }
+        Ok(PathBuf::from(normalized))
+    };
+    let os_home =
+        || -> Result<PathBuf, String> {
+            let value = match variable("HOME")? {
+                Some(value) => Some(value),
+                None => variable("USERPROFILE")?,
+            };
+            absolute(value.ok_or(
+                "OpenClaw runtime home is unavailable. Rescan with a valid home directory.",
+            )?)
+        };
+    let expand = |value: &str, home: &Path| -> Result<PathBuf, String> {
+        let normalized = normalize_separators(value);
+        let path = if normalized == "~" {
+            home.to_path_buf()
+        } else if let Some(relative) = normalized.strip_prefix("~/") {
+            home.join(relative)
+        } else {
+            return absolute(&normalized);
+        };
+        absolute(
+            path.to_str()
+                .ok_or("OpenClaw runtime path must be Unicode.")?,
+        )
+    };
+    let effective_home = match variable("OPENCLAW_HOME")? {
+        Some(value) if value.starts_with('~') => expand(value, &os_home()?)?,
+        Some(value) => absolute(value)?,
+        None => os_home()?,
+    };
+    let state_directory = match variable("OPENCLAW_STATE_DIR")? {
+        Some(value) => expand(value, &effective_home)?,
+        None => {
+            let current = effective_home.join(".openclaw");
+            let legacy = effective_home.join(".clawdbot");
+            if !current
+                .try_exists()
+                .map_err(|_| "Cannot inspect the OpenClaw state directory.")?
+                && legacy
+                    .try_exists()
+                    .map_err(|_| "Cannot inspect the legacy OpenClaw state directory.")?
+            {
+                return Err("OpenClaw uses a legacy state directory. Set OPENCLAW_STATE_DIR explicitly and rescan.".into());
+            }
+            current
+        }
+    };
+    let primary_config_path = match variable("OPENCLAW_CONFIG_PATH")? {
+        Some(value) => expand(value, &effective_home)?,
+        None => state_directory.join("openclaw.json"),
+    };
+    Ok(ConnectorRuntimePaths {
+        primary_config_path,
+        state_directory,
+        effective_home,
+    })
 }
 
 pub(crate) fn executable_candidates(
@@ -285,7 +366,9 @@ fn workbuddy_signing_identity_is_allowed(bytes: &[u8]) -> bool {
         .find_map(|line| line.strip_prefix("TeamIdentifier="));
     matches!(
         identifier,
-        Some("com.workbuddy.workbuddy" | "com.workbuddy.workbuddy-ai")
+        Some(
+            "com.workbuddy.workbuddy" | "com.workbuddy.workbuddy-ai" | "com.tencent.workbuddy.mac"
+        )
     ) && team == Some("FN2V63AD2J")
 }
 
@@ -601,6 +684,23 @@ pub(crate) fn config_candidates(
     environment: &ScanEnvironment,
     installation_path: &std::path::Path,
 ) -> ConfigResolution {
+    if descriptor.agent_id == "openclaw" && !descriptor.config_locations.is_empty() {
+        return match openclaw_runtime_paths(environment) {
+            Ok(paths) => ConfigResolution {
+                candidates: vec![ResolvedConfigCandidate {
+                    path: paths.primary_config_path,
+                    format: ConfigFormat::Json5,
+                }],
+                invalid_environment_names: Vec::new(),
+                inline_config_present: false,
+            },
+            Err(_) => ConfigResolution {
+                candidates: Vec::new(),
+                invalid_environment_names: vec!["OpenClaw runtime paths".into()],
+                inline_config_present: false,
+            },
+        };
+    }
     let mut candidates = Vec::new();
     let mut invalid_environment_names = Vec::new();
     let scoped_match = descriptor.config_locations.iter().any(|location| {
@@ -909,6 +1009,116 @@ mod tests {
     }
 
     #[test]
+    fn openclaw_paths_keep_config_state_and_home_overrides_independent() {
+        let mut environment = environment(Platform::Linux);
+        environment.variables = BTreeMap::from([
+            ("HOME".into(), "/os-home".into()),
+            ("OPENCLAW_HOME".into(), "/effective-home".into()),
+            ("OPENCLAW_STATE_DIR".into(), "/runtime-state".into()),
+            (
+                "OPENCLAW_CONFIG_PATH".into(),
+                "/config/selected.json".into(),
+            ),
+        ]);
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|entry| entry.agent_id == "openclaw")
+            .unwrap();
+        let paths = openclaw_runtime_paths(&environment).unwrap();
+        assert_eq!(
+            paths.primary_config_path,
+            Path::new("/config/selected.json")
+        );
+        assert_eq!(paths.state_directory, Path::new("/runtime-state"));
+        assert_eq!(paths.effective_home, Path::new("/effective-home"));
+        assert_eq!(
+            config_candidates(descriptor, &environment, Path::new("/bin/openclaw")).candidates[0]
+                .path,
+            paths.primary_config_path
+        );
+        environment.variables.remove("OPENCLAW_CONFIG_PATH");
+        assert_eq!(
+            openclaw_runtime_paths(&environment)
+                .unwrap()
+                .primary_config_path,
+            Path::new("/runtime-state/openclaw.json")
+        );
+        assert_eq!(
+            config_candidates(descriptor, &environment, Path::new("/bin/openclaw"))
+                .candidates
+                .len(),
+            1
+        );
+        environment
+            .variables
+            .insert("OPENCLAW_STATE_DIR".into(), "~/state".into());
+        assert_eq!(
+            openclaw_runtime_paths(&environment)
+                .unwrap()
+                .state_directory,
+            Path::new("/effective-home/state")
+        );
+    }
+
+    #[test]
+    fn openclaw_paths_use_userprofile_without_home_on_windows() {
+        let mut environment = environment(Platform::Windows);
+        environment.variables =
+            BTreeMap::from([("USERPROFILE".into(), "C:\\Users\\tester".into())]);
+        let paths = openclaw_runtime_paths(&environment).unwrap();
+        assert_eq!(paths.effective_home, Path::new("C:/Users/tester"));
+        assert_eq!(
+            paths.state_directory,
+            Path::new("C:/Users/tester/.openclaw")
+        );
+        environment
+            .variables
+            .insert("OPENCLAW_HOME".into(), "D:\\profile".into());
+        environment
+            .variables
+            .insert("OPENCLAW_STATE_DIR".into(), "~\\state".into());
+        assert_eq!(
+            openclaw_runtime_paths(&environment)
+                .unwrap()
+                .state_directory,
+            Path::new("D:/profile/state")
+        );
+    }
+
+    #[test]
+    fn openclaw_paths_reject_missing_invalid_and_legacy_context() {
+        let mut environment = environment(Platform::Linux);
+        environment.variables.clear();
+        assert!(openclaw_runtime_paths(&environment).is_err());
+        environment
+            .variables
+            .insert("HOME".into(), "/fixture-home".into());
+        for value in ["", "relative", "/state/../elsewhere"] {
+            environment
+                .variables
+                .insert("OPENCLAW_STATE_DIR".into(), value.into());
+            assert!(openclaw_runtime_paths(&environment).is_err());
+        }
+        environment.variables.remove("OPENCLAW_STATE_DIR");
+        environment
+            .present_environment
+            .insert("OPENCLAW_STATE_DIR".into());
+        assert!(openclaw_runtime_paths(&environment).is_err());
+        environment.present_environment.clear();
+        let root =
+            std::env::temp_dir().join(format!("openclaw-legacy-state-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".clawdbot")).unwrap();
+        environment
+            .variables
+            .insert("HOME".into(), root.to_str().unwrap().into());
+        let result = openclaw_runtime_paths(&environment);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.unwrap_err().contains("legacy state directory"));
+    }
+
+    #[test]
     fn discovery_platform_templates_expand_without_touching_the_filesystem() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/discovery/platform-paths.json"
@@ -1104,8 +1314,12 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_dynamic_scan_accepts_only_the_two_signed_product_identities() {
-        for identifier in ["com.workbuddy.workbuddy", "com.workbuddy.workbuddy-ai"] {
+    fn workbuddy_dynamic_scan_accepts_only_the_known_signed_product_identities() {
+        for identifier in [
+            "com.workbuddy.workbuddy",
+            "com.workbuddy.workbuddy-ai",
+            "com.tencent.workbuddy.mac",
+        ] {
             assert!(workbuddy_signing_identity_is_allowed(
                 format!("Identifier={identifier}\nTeamIdentifier=FN2V63AD2J\n").as_bytes(),
             ));

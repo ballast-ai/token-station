@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use super::config_codec::{ConfigDocument, DocumentFormat};
-use super::types::{BaseUrlShape, ConfigPath, PatchKind, PatchOperation, Platform};
+use super::types::{
+    BaseUrlShape, ConfigPath, ConnectorRuntimePaths, PatchKind, PatchOperation, Platform,
+};
 
 include!(concat!(env!("OUT_DIR"), "/builtin_connectors.rs"));
 
@@ -246,6 +248,14 @@ pub trait Connector: Sync {
     ) -> Result<Vec<CompanionProjection>, String> {
         Ok(Vec::new())
     }
+    fn companion_projections_with_context(
+        &self,
+        primary_target: &Path,
+        input: &ConnectInput<'_>,
+        _runtime_paths: Option<&ConnectorRuntimePaths>,
+    ) -> Result<Vec<CompanionProjection>, String> {
+        self.companion_projections(primary_target, input)
+    }
     fn legacy_companion_format(
         &self,
         _primary_target: &Path,
@@ -290,6 +300,15 @@ pub trait Connector: Sync {
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
     ) -> Result<(), String>;
+    fn validate_connected_configuration(
+        &self,
+        _primary_target: &Path,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+        _runtime_paths: Option<&ConnectorRuntimePaths>,
+    ) -> Result<(), String> {
+        self.validate_projected(document, input)
+    }
     fn validate_refresh_projected(
         &self,
         document: &ConfigDocument,
