@@ -1957,15 +1957,37 @@ pub(crate) fn replace_provider_model_vision(
 }
 
 #[tauri::command]
-pub(crate) fn set_provider_model_vision(
+pub(crate) fn set_provider_model_vision<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppStateManaged>,
     name: String,
     model: String,
     supported: bool,
 ) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    replace_provider_model_vision(&mut inner, &name, &model, supported)?;
-    Ok(inner.snapshot())
+    let (running, snapshot) = {
+        let mut inner = state.0.lock().unwrap();
+        if matches!(
+            inner.server,
+            ServerLifecycle::Starting { .. }
+                | ServerLifecycle::Applying { .. }
+                | ServerLifecycle::Stopping { .. }
+        ) {
+            return Err(
+                "Wait for the current Gateway operation before changing vision support.".into(),
+            );
+        }
+        let running = matches!(inner.server, ServerLifecycle::Running { .. });
+        replace_provider_model_vision(&mut inner, &name, &model, supported)?;
+        (running, inner.snapshot())
+    };
+    if running {
+        // Rebuild the capability catalog and refresh connected Agent metadata
+        // through the same guarded replacement used by Apply Configuration.
+        begin_serve_start(app, state.inner(), prepare_server)
+            .map_err(|error| format!("Vision support was saved but not applied: {error}"))
+    } else {
+        Ok(snapshot)
+    }
 }
 
 pub(crate) fn replace_provider_model_limits(

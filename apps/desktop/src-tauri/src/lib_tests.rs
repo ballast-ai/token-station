@@ -2303,6 +2303,102 @@ fn a_desktop_legacy_zero_concurrency_config_loads_writable_without_rewriting_sou
 }
 
 #[test]
+fn provider_model_vision_declaration_updates_the_running_gateway() {
+    let root = scratch_home("model-vision-runtime");
+    let (draft, server) = published_agent_route_fixture(&root);
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    inner.server = ServerLifecycle::Running {
+        generation: 1,
+        server,
+        apply_error: None,
+    };
+    let app = tauri::test::mock_app();
+    manage_test_agent_state(&app, &root);
+    assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+    let mut catalogs = Vec::new();
+    for supported in [true, false] {
+        let applying = set_provider_model_vision(
+            app.handle().clone(),
+            app.state(),
+            "local".into(),
+            "small".into(),
+            supported,
+        )
+        .unwrap();
+        assert_eq!(applying.serve.phase, ServePhase::Starting);
+        let running = wait_for_serve_phase(&app, ServePhase::Running);
+        assert_eq!(running.serve.error, None);
+        assert_eq!(running.serve.running_revision, Some(running.saved_revision));
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        let ServerLifecycle::Running { server, .. } = &inner.server else {
+            panic!("Gateway must be running");
+        };
+        catalogs.push(
+            serde_json::from_str::<Value>(&server.gateway().models_for(None).unwrap()).unwrap(),
+        );
+    }
+    begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+    wait_for_serve_phase(&app, ServePhase::Stopped);
+    std::fs::remove_dir_all(root).ok();
+    assert_eq!(
+        catalogs[0]["data"][0]["modalities"]["input"],
+        json!(["text", "image"]),
+        "a saved vision declaration must reach the published Gateway"
+    );
+    assert_eq!(
+        catalogs[1]["data"][0]["modalities"]["input"],
+        json!(["text"]),
+        "disabling vision must also reach the published Gateway"
+    );
+}
+
+#[test]
+fn provider_model_vision_apply_failure_keeps_the_published_gateway() {
+    let root = scratch_home("model-vision-apply-failure");
+    let (draft, server) = published_agent_route_fixture(&root);
+    let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+    inner.server = ServerLifecycle::Running {
+        generation: 1,
+        server,
+        apply_error: None,
+    };
+    // The saved configuration is valid, but the replacement cannot bind here.
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    inner.draft["server"]["listen"] = json!(occupied.local_addr().unwrap().to_string());
+    let app = tauri::test::mock_app();
+    manage_test_agent_state(&app, &root);
+    assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+    set_provider_model_vision(
+        app.handle().clone(),
+        app.state(),
+        "local".into(),
+        "small".into(),
+        true,
+    )
+    .unwrap();
+    let running = wait_for_serve_phase(&app, ServePhase::Running);
+    assert!(running.serve.error.is_some());
+    assert_eq!(
+        running.providers[0].model_capabilities[0].vision,
+        CapabilityState::Declared
+    );
+    let catalog = {
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        let ServerLifecycle::Running { server, .. } = &inner.server else {
+            panic!("failed replacement must preserve the old Gateway");
+        };
+        serde_json::from_str::<Value>(&server.gateway().models_for(None).unwrap()).unwrap()
+    };
+    begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+    wait_for_serve_phase(&app, ServePhase::Stopped);
+    std::fs::remove_dir_all(root).ok();
+    assert_eq!(catalog["data"][0]["modalities"]["input"], json!(["text"]));
+}
+
+#[test]
 fn provider_model_vision_declaration_updates_the_public_state() {
     let root = scratch_home("model-vision");
     let mut draft = template_for_test(&root);
@@ -2324,16 +2420,19 @@ fn provider_model_vision_declaration_updates_the_public_state() {
     )))));
 
     let declared = set_provider_model_vision(
+        app.handle().clone(),
         app.state(),
         "provider".to_owned(),
         "vision-model".to_owned(),
         true,
     )
     .expect("a configured model can be declared vision-capable");
+    assert_eq!(declared.serve.app_runtime, AppRuntime::Stopped);
     let model = &declared.providers[0].model_capabilities[0];
     assert_eq!(model.vision, CapabilityState::Declared);
 
     let unsupported = set_provider_model_vision(
+        app.handle().clone(),
         app.state(),
         "provider".to_owned(),
         "vision-model".to_owned(),

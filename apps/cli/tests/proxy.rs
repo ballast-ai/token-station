@@ -5080,6 +5080,65 @@ fn opencode_and_hermes_images_reach_a_vision_capable_upstream() {
 }
 
 #[test]
+fn codex_and_claude_code_preserve_images_for_a_vision_upstream() {
+    let answer = json!({
+        "id": "chatcmpl-vision", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "VISION_OK" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 12, "completion_tokens": 2 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("codex-claude-vision", "sk-test-key");
+    let proxy = start_proxy_with_agents(
+        &mock,
+        &key,
+        true,
+        &["agent-anthropic", "agent-openai-responses"],
+    );
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+    let image_url = format!("data:image/png;base64,{image_data}");
+    let requests = [
+        (
+            "/agents/claude-code/v1/messages",
+            json!({
+                "model": "auto", "max_tokens": 64,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_data}}
+                ]}]
+            }),
+        ),
+        (
+            "/agents/codex/v1/responses",
+            json!({
+                "model": "auto",
+                "input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": "Describe this image."},
+                    {"type": "input_image", "image_url": image_url}
+                ]}]
+            }),
+        ),
+    ];
+    for (path, request) in requests {
+        let (status, body) = post_scoped(&proxy, path, &request, &proxy.virtual_key, false);
+        assert_eq!(status, 200, "{path}: {body}");
+    }
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2);
+    for request in seen {
+        assert_eq!(request.path, "/v1/chat/completions");
+        let parts = request.body["messages"][0]["content"].as_array().unwrap();
+        assert!(
+            parts
+                .iter()
+                .any(|part| part["type"] == "image_url" && part["image_url"]["url"] == image_url),
+            "{parts:?}"
+        );
+        assert!(!request.body.to_string().contains("Image omitted"));
+    }
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
     let answer = json!({
         "id": "chatcmpl-media-fallback",
