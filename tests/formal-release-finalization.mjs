@@ -124,7 +124,7 @@ assert.match(entry, /TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED/);
 assert.match(entry, /TOKEN_STATION_RELEASE_PUBKEY_HEX/);
 assert.match(entry, /TOKEN_STATION_UPDATER_PUBKEY/);
 assert.match(entry, /APPLE_CERTIFICATE_PASSWORD/);
-assert.match(entry, /if \[\[ "\$version" != "2\.0\.0" \]\]/);
+assert.match(entry, /if \[\[ "\$version" != "2\.0\.0" && "\$version" != "2\.1\.0" \]\]/);
 assert.match(entry, /WINDOWS_CERTIFICATE_PASSWORD/);
 assert.match(entry, /gh secret list/);
 assert.match(entry, /gh run watch/);
@@ -136,7 +136,7 @@ assert.match(entry, /workflowName,event,status,conclusion,url/);
 assert.match(entry, /run \$run_id is not completed/);
 
 assert.match(releaseWorkflow, /--production --unsigned-windows --target x86_64-pc-windows-msvc/);
-assert.match(releaseWorkflow, /needs\.release-target\.outputs\.tag != 'v2\.0\.0'/);
+assert.match(releaseWorkflow, /needs\.release-target\.outputs\.tag != 'v2\.0\.0' && needs\.release-target\.outputs\.tag != 'v2\.1\.0'/);
 assert.match(releaseWorkflow, /scripts\/build-desktop\.sh --production --target x86_64-pc-windows-msvc/);
 
 const desktopBuild = read("scripts/build-desktop.sh");

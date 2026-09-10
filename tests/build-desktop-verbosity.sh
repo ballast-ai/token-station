@@ -318,8 +318,9 @@ test_windows_production_build_requires_authenticode_by_default() {
 }
 
 test_explicit_unsigned_windows_production_build_skips_authenticode_only() {
-  make_fixture unsigned-windows-production
-  printf '{\n  "version": "2.0.0"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
+  local approved_version=$1
+  make_fixture "unsigned-windows-production-$approved_version"
+  printf '{\n  "version": "%s"\n}\n' "$approved_version" >"$repo/apps/desktop/src-tauri/tauri.conf.json"
   run_unsigned_windows_production_build >"$state/output" 2>&1
   grep -Fxq -- '--unsigned-windows' "$state/audit-args" \
     || fail "unsigned Windows production build did not preserve the audit boundary"
@@ -331,8 +332,9 @@ test_explicit_unsigned_windows_production_build_skips_authenticode_only() {
 }
 
 test_unsigned_windows_exception_rejects_later_versions() {
-  make_fixture unsigned-windows-future-version
-  printf '{\n  "version": "2.0.1"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
+  local rejected_version=$1
+  make_fixture "unsigned-windows-future-version-$rejected_version"
+  printf '{\n  "version": "%s"\n}\n' "$rejected_version" >"$repo/apps/desktop/src-tauri/tauri.conf.json"
   if run_unsigned_windows_production_build >"$state/output" 2>&1; then
     fail "unsigned Windows exception accepted a later version"
   fi
@@ -376,8 +378,11 @@ test_preview_build_supports_an_intel_updater_payload_and_unsigned_test_dmg
 test_preview_build_loads_the_private_key_path_for_the_tauri_bundler
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release
 test_windows_production_build_requires_authenticode_by_default
-test_explicit_unsigned_windows_production_build_skips_authenticode_only
-test_unsigned_windows_exception_rejects_later_versions
+test_explicit_unsigned_windows_production_build_skips_authenticode_only 2.0.0
+test_explicit_unsigned_windows_production_build_skips_authenticode_only 2.1.0
+test_unsigned_windows_exception_rejects_later_versions 2.0.1
+test_unsigned_windows_exception_rejects_later_versions 2.1.1
+test_unsigned_windows_exception_rejects_later_versions 2.2.0
 test_production_build_rejects_private_material_in_the_public_key_variable
 
 echo "build-desktop verbosity tests: PASS"

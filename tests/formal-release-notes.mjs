@@ -15,10 +15,10 @@ const currentVersion = JSON.parse(
   fs.readFileSync(path.join(root, "apps/desktop/package.json"), "utf8"),
 ).version;
 
-function check(name, contents) {
+function check(name, contents, version = "2.0.0") {
   const file = path.join(testDir, name);
   fs.writeFileSync(file, contents);
-  return spawnSync(process.execPath, [checker, "--version", "2.0.0", "--file", file], {
+  return spawnSync(process.execPath, [checker, "--version", version, "--file", file], {
     cwd: root,
     encoding: "utf8",
   });
@@ -56,6 +56,20 @@ try {
   );
   assert.equal(missingWindowsWarning.status, 1);
   assert.match(missingWindowsWarning.stderr, /Windows MSI/);
+
+  const missingV21Warning = check(
+    "v21-missing-warning.md",
+    "# Token Station v2.1.0\n\nThis stable release improves Agent routing and configuration recovery.\n",
+    "2.1.0",
+  );
+  assert.equal(missingV21Warning.status, 1, "v2.1.0 must disclose the unsigned MSI");
+  assert.match(missingV21Warning.stderr, /Windows MSI/);
+  const v21Warning = check(
+    "v21-warning.md",
+    "# Token Station v2.1.0\n\nThis stable release improves Agent routing.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
+    "2.1.0",
+  );
+  assert.equal(v21Warning.status, 0, v21Warning.stderr);
 
   const laterVersionNotes = path.join(testDir, "later-version.md");
   fs.writeFileSync(

@@ -172,8 +172,8 @@ jobs:
           TS_HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
           TS_HAS_APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT != '' }}
         run: node scripts/resolve-release-mode.mjs
-      - name: Require Windows Authenticode configuration after v2.0.0
-        if: steps.mode.outputs.formal == 'true' && needs.release-target.outputs.tag != 'v2.0.0'
+      - name: Require Windows Authenticode outside approved exception versions
+        if: steps.mode.outputs.formal == 'true' && needs.release-target.outputs.tag != 'v2.0.0' && needs.release-target.outputs.tag != 'v2.1.0'
         env:
           TS_EVENT: workflow_dispatch
           TS_REQUESTED_MODE: formal
@@ -402,8 +402,8 @@ jobs:
           fi
           node scripts/check-release-readiness.mjs --version "$version" --formal
           node scripts/check-windows-release-config.mjs
-      - name: Import the Windows signing certificate after v2.0.0
-        if: needs.release-target.outputs.tag != 'v2.0.0'
+      - name: Import the Windows signing certificate outside approved exception versions
+        if: needs.release-target.outputs.tag != 'v2.0.0' && needs.release-target.outputs.tag != 'v2.1.0'
         shell: pwsh
         run: |
           if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
@@ -420,7 +420,7 @@ jobs:
           RELEASE_TAG: ${{ needs.release-target.outputs.tag }}
         shell: bash
         run: |
-          if [[ "$RELEASE_TAG" == "v2.0.0" ]]; then
+          if [[ "$RELEASE_TAG" == "v2.0.0" || "$RELEASE_TAG" == "v2.1.0" ]]; then
             scripts/build-desktop.sh --production --unsigned-windows --target x86_64-pc-windows-msvc
             echo "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning." >> "$GITHUB_STEP_SUMMARY"
           else
