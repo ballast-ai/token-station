@@ -298,8 +298,6 @@ fn input_contains_unsupported_media(value: &Value) -> bool {
     }
 }
 
-const MEDIA_FALLBACK_EN: &str = "[Image omitted: the current model does not support visual input.]";
-const MEDIA_FALLBACK_ZH: &str = "[图片已省略：当前模型不支持视觉输入。]";
 const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EXTRACTED_DOCUMENT_CHARS: usize = 120_000;
 
@@ -344,14 +342,6 @@ fn request_prefers_chinese(request: &ChatRequest) -> bool {
     latest_user_content.is_some_and(|content| content_text(content).any(contains_han))
 }
 
-fn localized_media_marker(request: &ChatRequest) -> &'static str {
-    if request_prefers_chinese(request) {
-        MEDIA_FALLBACK_ZH
-    } else {
-        MEDIA_FALLBACK_EN
-    }
-}
-
 /// Replaces every `document` block the IR carries verbatim with locally
 /// extracted text (or an honest marker) for an upstream whose renderer cannot
 /// express it. Anthropic upstreams never see this: they take the block as is.
@@ -385,41 +375,60 @@ fn replace_canonical_documents(request: &mut ChatRequest) -> DocumentFallbackSta
     stats
 }
 
-fn replace_canonical_images(request: &mut ChatRequest) -> usize {
-    let marker = localized_media_marker(request).to_owned();
-    request
-        .messages
-        .iter_mut()
-        .filter_map(|message| message.content.as_mut())
-        .map(|content| match content {
-            Content::Text(_) => 0,
-            Content::Parts(parts) => {
-                let mut replaced = 0;
-                for part in parts {
-                    if matches!(part, ContentPart::ImageUrl { .. }) {
-                        *part = ContentPart::Text {
-                            text: marker.clone(),
-                        };
-                        replaced += 1;
-                    }
-                }
-                replaced
-            }
-        })
-        .sum()
+fn image_route_error() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorCode::Capability,
+        400,
+        "No configured route supports image input, or vision support is unknown. Select a verified image-capable channel. No text-only substitute was sent.",
+    )
 }
 
-fn is_vision_no_route(error: &NoRoute) -> bool {
-    matches!(
-        error,
+fn upstream_image_error() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorCode::Capability,
+        400,
+        "The selected Provider channel rejected image input. Select another image-capable channel. The image was not removed or retried as text.",
+    )
+}
+
+fn raw_contains_images(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(raw_contains_images),
+        Value::Object(item) => {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("image" | "input_image" | "image_url")
+            ) || ["messages", "input", "content"]
+                .iter()
+                .any(|key| item.get(*key).is_some_and(raw_contains_images))
+        }
+        _ => false,
+    }
+}
+
+fn add_native_image_requirement(request: &mut ChatRequest, body: &Value) {
+    if raw_contains_images(body) {
+        let mut message = Message::text(token_station_protocol::Role::User, "");
+        message.content = Some(Content::Parts(vec![ContentPart::ImageUrl {
+            image_url: token_station_protocol::ImageUrl {
+                url: "https://image-routing.invalid/probe".into(),
+                detail: None,
+            },
+        }]));
+        request.messages.push(message);
+    }
+}
+
+fn route_error(no_route: &NoRoute) -> ErrorEnvelope {
+    if matches!(
+        no_route,
         NoRoute::Unsatisfiable {
             reason: UnmetRequirement::Vision,
             ..
         }
-    )
-}
-
-fn route_error(no_route: &NoRoute) -> ErrorEnvelope {
+    ) {
+        return image_route_error();
+    }
     let code = no_route.error_code();
     let status = if code == ErrorCode::Capability {
         400
@@ -438,6 +447,23 @@ fn is_unsupported_media_error(error: &ErrorEnvelope) -> bool {
         .as_deref()
         .unwrap_or(&error.message)
         .to_ascii_lowercase();
+    if [
+        "image size",
+        "image format",
+        "mime",
+        "media_type",
+        "media type",
+        "base64",
+        "decode",
+        "image url",
+        "image_url",
+        "image resolution",
+    ]
+    .iter()
+    .any(|hint| message.contains(hint))
+    {
+        return false;
+    }
     if message.contains("only support text") || message.contains("only supports text") {
         return true;
     }
@@ -456,26 +482,35 @@ fn is_unsupported_media_error(error: &ErrorEnvelope) -> bool {
     let rejects_media = [
         "unsupported",
         "not supported",
+        "not yet supported",
         "does not support",
         "doesn't support",
         "do not support",
         "don't support",
         "text only",
         "text-only",
-        "invalid content type",
-        "invalid message content",
-        "unknown variant",
-        "unknown content type",
-        "unrecognized content type",
-        "cannot process",
-        "cannot handle",
-        "can't process",
-        "can't handle",
-        "unable to process",
     ]
     .iter()
     .any(|hint| message.contains(hint));
     mentions_media && rejects_media
+}
+
+fn native_rejects_image(status: u16, body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(message) = value["error"]["message"]
+        .as_str()
+        .or_else(|| value["message"].as_str())
+    else {
+        return false;
+    };
+    // Inspect only in memory. Never put the upstream body into an error envelope.
+    is_unsupported_media_error(&ErrorEnvelope::new(
+        ErrorCode::InvalidRequest,
+        status,
+        message,
+    ))
 }
 
 fn safe_document_label(block: &Value) -> String {
@@ -3760,27 +3795,9 @@ impl Gateway {
         let (quota_now_ms, session) = Self::quota_preamble(router, || quota_session_key(&request));
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let mut decision = match self.route_with_mode(
-            router,
-            &request,
-            &hints,
-            &candidates,
-            &session,
-        ) {
-            Ok(decision) => decision,
-            Err(no_route) if is_vision_no_route(&no_route) => {
-                let replaced = replace_canonical_images(&mut request);
-                if replaced == 0 {
-                    return Err(route_error(&no_route));
-                }
-                eprintln!(
-                    "media fallback -> replaced {replaced} image block(s) before text-only routing"
-                );
-                self.route_with_mode(router, &request, &hints, &candidates, &session)
-                    .map_err(|error| route_error(&error))?
-            }
-            Err(no_route) => return Err(route_error(&no_route)),
-        };
+        let mut decision = self
+            .route_with_mode(router, &request, &hints, &candidates, &session)
+            .map_err(|error| route_error(&error))?;
         // Free-provider fallback filtering is a tiered-mode feature. Direct has
         // no fallbacks; quota fallbacks are ranked accounts and must not be
         // pruned by it.
@@ -4601,6 +4618,35 @@ mod capability_evidence_tests {
 mod unsupported_media_tests {
     use super::{contains_unsupported_media, is_embeddings_path};
     use serde_json::json;
+
+    #[test]
+    fn malformed_images_and_protocol_errors_do_not_prove_lack_of_vision() {
+        use super::{ErrorCode, ErrorEnvelope, is_unsupported_media_error};
+        for message in [
+            "invalid image content type",
+            "unknown variant image_url",
+            "cannot process image: size too large",
+            "image decoder unavailable",
+            "unsupported image format",
+            "unsupported image MIME type",
+        ] {
+            assert!(!is_unsupported_media_error(&ErrorEnvelope::new(
+                ErrorCode::InvalidRequest,
+                400,
+                message
+            )));
+        }
+        assert!(is_unsupported_media_error(&ErrorEnvelope::new(
+            ErrorCode::InvalidRequest,
+            400,
+            "kiro: image input is not yet supported (text + tools only)"
+        )));
+        assert!(!is_unsupported_media_error(&ErrorEnvelope::new(
+            ErrorCode::RateLimit,
+            429,
+            "image input unsupported"
+        )));
+    }
 
     #[test]
     fn only_the_canonical_embeddings_path_is_rejected() {

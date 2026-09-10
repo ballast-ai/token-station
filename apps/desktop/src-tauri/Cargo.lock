@@ -5712,6 +5712,7 @@ version = "2.1.1"
 dependencies = [
  "aes",
  "axum",
+ "base64 0.22.1",
  "cbc",
  "command-group",
  "flate2",
@@ -5722,6 +5723,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "pbkdf2",
+ "png 0.18.1",
  "regex",
  "reqwest 0.13.4",
  "ring",

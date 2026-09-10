@@ -1493,6 +1493,7 @@ fn newly_added_provider_refresh_persists_reported_model_limits() {
     )
     .expect("the Provider is created before optional discovery");
     let result = tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.handle().clone(),
         app.state(),
         "reported".to_owned(),
         base_url,
@@ -1548,6 +1549,7 @@ fn newly_added_provider_preserves_output_only_fact_over_heuristic_context() {
     )
     .expect("the Provider is created before optional discovery");
     tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.handle().clone(),
         app.state(),
         "output_only".to_owned(),
         base_url,
@@ -1612,6 +1614,7 @@ fn partial_limit_refresh_prefers_fresh_fact_over_conflicting_cached_fact() {
     .unwrap();
 
     tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.handle().clone(),
         app.state(),
         "partial".to_owned(),
         base_url.clone(),
@@ -1623,6 +1626,7 @@ fn partial_limit_refresh_prefers_fresh_fact_over_conflicting_cached_fact() {
     assert_eq!(first_model.max_output_tokens, 200_000);
 
     tauri::async_runtime::block_on(discover_provider_model_limits(
+        app.handle().clone(),
         app.state(),
         "partial".to_owned(),
         base_url,
@@ -1669,6 +1673,7 @@ fn complete_limit_refresh_replaces_older_provider_sourced_values() {
     .unwrap();
     for _ in 0..2 {
         tauri::async_runtime::block_on(discover_provider_model_limits(
+            app.handle().clone(),
             app.state(),
             "changing".to_owned(),
             base_url.clone(),
@@ -1715,6 +1720,7 @@ fn add_provider_consumes_only_the_exact_live_catalog_revision() {
     )))));
 
     let discovery = tauri::async_runtime::block_on(discover_provider_models(
+        app.handle().clone(),
         app.state(),
         "reported".to_owned(),
         base_url.clone(),
@@ -1838,6 +1844,7 @@ fn repeated_model_discovery_only_updates_the_catalog_cache() {
 
     for _ in 0..3 {
         let result = tauri::async_runtime::block_on(discover_provider_models(
+            app.handle().clone(),
             app.state(),
             "fixture".to_owned(),
             base_url.clone(),
@@ -1866,6 +1873,7 @@ fn repeated_model_discovery_only_updates_the_catalog_cache() {
     }
 
     let cached = tauri::async_runtime::block_on(discover_provider_models(
+        app.handle().clone(),
         app.state(),
         "fixture".to_owned(),
         base_url,
@@ -1935,6 +1943,7 @@ fn repeated_model_discovery_only_updates_the_catalog_cache() {
     let warning_initial_state = get_state(warning_app.state());
 
     let warning = tauri::async_runtime::block_on(discover_provider_models(
+        warning_app.handle().clone(),
         warning_app.state(),
         "fixture".to_owned(),
         warning_base,
@@ -1988,6 +1997,7 @@ fn remote_http_discovery_fails_before_network_access_even_without_credentials() 
     )))));
 
     let error = tauri::async_runtime::block_on(discover_provider_models(
+        app.handle().clone(),
         app.state(),
         "remote_http".to_owned(),
         "http://192.0.2.1/v1".to_owned(),
@@ -2512,7 +2522,7 @@ fn provider_model_limits_allow_missing_output_and_persist_atomically() {
 }
 
 #[test]
-fn trusted_catalog_vision_facts_update_configured_models() {
+fn catalog_vision_claims_update_configured_models_without_claiming_local_verification() {
     let root = scratch_home("catalog-vision");
     let mut draft = template_for_test(&root);
     draft["upstreams"]["openrouter"] = json!({
@@ -2565,7 +2575,7 @@ fn trusted_catalog_vision_facts_update_configured_models() {
         .as_array()
         .unwrap();
     assert_eq!(models[0]["vision"], json!(true));
-    assert_eq!(models[0]["vision_state"], json!("verified"));
+    assert_eq!(models[0]["vision_state"], json!("declared"));
     assert_eq!(
         models[0]["context_window"],
         json!(128000),
@@ -2920,11 +2930,15 @@ fn provider_model_updates_protect_inactive_agent_route_drafts() {
     save_agent_routes(app.state()).unwrap();
     set_agent_route_mode(app.state(), "codex".to_owned(), "inherit".to_owned()).unwrap();
 
-    let error =
-        match update_provider_models(app.state(), "provider".to_owned(), vec!["home".to_owned()]) {
-            Ok(_) => panic!("inactive custom drafts still protect their model references"),
-            Err(error) => error,
-        };
+    let error = match update_provider_models(
+        app.handle().clone(),
+        app.state(),
+        "provider".to_owned(),
+        vec!["home".to_owned()],
+    ) {
+        Ok(_) => panic!("inactive custom drafts still protect their model references"),
+        Err(error) => error,
+    };
     assert!(error.contains("codex/high"), "{error}");
     let state = app.state::<AppStateManaged>();
     let inner = state.0.lock().unwrap();
@@ -3001,11 +3015,15 @@ fn provider_model_updates_protect_unsaved_agent_route_editors() {
     )
     .unwrap();
 
-    let error =
-        match update_provider_models(app.state(), "provider".to_owned(), vec!["home".to_owned()]) {
-            Ok(_) => panic!("an unsaved Agent editor must protect its selected model"),
-            Err(error) => error,
-        };
+    let error = match update_provider_models(
+        app.handle().clone(),
+        app.state(),
+        "provider".to_owned(),
+        vec!["home".to_owned()],
+    ) {
+        Ok(_) => panic!("an unsaved Agent editor must protect its selected model"),
+        Err(error) => error,
+    };
 
     assert!(error.contains("codex/high"), "{error}");
     let state = app.state::<AppStateManaged>();
@@ -5060,16 +5078,11 @@ fn save_and_apply_hands_new_requests_to_the_new_revision() {
     assert_eq!(price_v2.version, 2);
 
     edit_provider(app.state(), "fixture".to_owned(), upstream_b, None).unwrap();
-    update_provider_models(
+    let applying = update_provider_models(
+        app.handle().clone(),
         app.state(),
         "fixture".to_owned(),
         vec!["small".to_owned(), "extra".to_owned()],
-    )
-    .unwrap();
-    let applying = begin_serve_start(
-        app.handle().clone(),
-        app.state::<AppStateManaged>().inner(),
-        prepare_server,
     )
     .unwrap();
     assert_eq!(applying.serve.app_runtime, AppRuntime::Running);
@@ -6512,6 +6525,7 @@ fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views()
     assert_eq!(router.bands[0].upstream.as_deref(), Some("local"));
 
     update_provider_models(
+        app.handle().clone(),
         app.state(),
         "local".to_string(),
         vec![
@@ -9834,4 +9848,164 @@ fn model_test_cancel_before_registration_still_stops_the_request() {
     assert_eq!(error, "Model test cancelled");
     assert!(!registry.active.contains_key("model-test-race"));
     assert!(!registry.pending_cancellations.contains("model-test-race"));
+}
+
+#[test]
+fn vision_verification_uses_real_image_transport_and_persists_only_conclusive_evidence() {
+    verify_image_transport_fixture(false);
+}
+
+#[test]
+fn vision_verification_uses_native_responses_without_hosted_tools() {
+    verify_image_transport_fixture(true);
+}
+
+fn verify_image_transport_fixture(responses: bool) {
+    use base64::Engine;
+    let root = scratch_home("vision-verification");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        for attempt in 0..4 {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    result => panic!("image check did not reach fixture: {result:?}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            let body = loop {
+                let mut chunk = [0; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    assert!(headers.starts_with(if responses {
+                        "POST /v1/responses "
+                    } else {
+                        "POST /v1/chat/completions "
+                    }));
+                    let len = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + len {
+                        break serde_json::from_slice::<Value>(&request[end + 4..end + 4 + len])
+                            .unwrap();
+                    }
+                }
+            };
+            assert_eq!(body["model"], "image-model");
+            let url = if responses {
+                body["input"][0]["content"][1]["image_url"]
+                    .as_str()
+                    .unwrap()
+            } else {
+                body["messages"][0]["content"][1]["image_url"]["url"]
+                    .as_str()
+                    .unwrap()
+            };
+            assert!(
+                body.get("tools").is_none(),
+                "vision checks must not invoke hosted tools"
+            );
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(url.strip_prefix("data:image/png;base64,").unwrap())
+                .unwrap();
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+                .read_info()
+                .unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+            reader.next_frame(&mut pixels).unwrap();
+            let mut colors = Vec::new();
+            for row in 0..3 {
+                for col in 0..3 {
+                    let offset = ((row * 64 + 32) * 192 + col * 64 + 32) * 3;
+                    colors.push(match &pixels[offset..offset + 3] {
+                        [240, 20, 20] => "red",
+                        [20, 180, 20] => "green",
+                        [20, 20, 240] => "blue",
+                        [240, 240, 20] => "yellow",
+                        _ => panic!("invalid test cell"),
+                    });
+                }
+            }
+            let (status, reply) = match attempt {
+                1 => (429, json!({"error":{"message":"rate limit"}})),
+                3 => (
+                    400,
+                    json!({"error":{"message":"kiro: image input is not yet supported (text + tools only)"}}),
+                ),
+                _ if responses => (
+                    200,
+                    json!({"id":"probe-fixture","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":if attempt == 0 {colors.join(",")} else {"Unknown".into()}}]}],"usage":{"input_tokens":10,"output_tokens":10}}),
+                ),
+                _ => (
+                    200,
+                    json!({"id":"probe-fixture","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":if attempt == 0 { colors.join(",") } else { "I cannot determine the image".to_owned() }},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10}}),
+                ),
+            };
+            let body = reply.to_string();
+            write!(stream,"HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+    });
+    let mut draft = gateway_template_for_test(&root);
+    draft["upstreams"]["fixture"] = json!({"provider":"openai-compatible","base_url":format!("http://{address}/v1"),"models":[{"model":"image-model","vision_state":"unknown","context_window":32000}]});
+    if responses {
+        draft["upstreams"]["fixture"]["api_dialect"] = json!("responses-native");
+    }
+    draft["router"]["pools"] = json!({"main":[{"upstream":"fixture","model":"image-model"}]});
+    draft["router"]["default_pool"] = json!("main");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("config.json"),
+        draft,
+        None
+    )))));
+    for (outcome, capability) in [
+        ("verified", "verified"),
+        ("blocked", "verified"),
+        ("inconclusive", "verified"),
+        ("unsupported", "unsupported"),
+    ] {
+        let reply = tauri::async_runtime::block_on(vision_probe::verify_provider_model_vision(
+            app.handle().clone(),
+            app.state(),
+            "fixture".into(),
+            "image-model".into(),
+        ))
+        .unwrap();
+        let reply = serde_json::to_value(reply).unwrap();
+        assert_eq!(reply["outcome"], outcome, "{reply}");
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        assert_eq!(
+            inner.draft["upstreams"]["fixture"]["models"][0]["vision_state"],
+            capability
+        );
+        assert!(inner.pending_provider_discoveries.is_empty());
+        assert!(
+            !inner.data_dir().join("requests.log").exists(),
+            "probe bodies and answers must not be logged"
+        );
+    }
+    fixture.join().unwrap();
+    std::fs::remove_dir_all(root).ok();
 }

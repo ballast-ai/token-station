@@ -1557,6 +1557,12 @@ pub(crate) fn edit_provider_impl(
     let identity_changed = previous["base_url"].as_str() != Some(base_url.as_str())
         || api_key.is_some()
         || auth_changed;
+    let transport_changed = provider_call.is_some_and(|next| {
+        previous["provider_call"]
+            .as_str()
+            .unwrap_or(DEFAULT_PROVIDER_CALL)
+            != next
+    });
     let previous_pricing = inner.draft["pricing"].clone();
     let previous_state = inner.config_state.clone();
     if identity_changed {
@@ -1565,6 +1571,9 @@ pub(crate) fn edit_provider_impl(
         // presenting the old account's catalog as trusted is not.
         model_catalog::remove_provider(&inner.data_dir(), &name)?;
         clear_provider_scoped_prices(&mut inner, &name)?;
+    }
+    if identity_changed || transport_changed {
+        crate::vision_probe::invalidate_probe_evidence(&mut inner.draft["upstreams"][&name]);
     }
     if let Some(provider_call) = provider_call {
         inner.draft["upstreams"][&name]["provider_call"] = json!(provider_call);
@@ -1853,8 +1862,7 @@ pub(crate) fn replace_provider_models(
                         let supported = discovered.vision.is_supported();
                         capability["vision"] = json!(supported);
                         capability["vision_state"] = json!(match discovered.vision {
-                            CapabilityState::Verified => "verified",
-                            CapabilityState::Declared => "declared",
+                            CapabilityState::Verified | CapabilityState::Declared => "declared",
                             CapabilityState::Unsupported => "unsupported",
                             CapabilityState::Unknown => "unknown",
                         });
@@ -1906,14 +1914,17 @@ pub(crate) fn replace_provider_models(
 }
 
 #[tauri::command]
-pub(crate) fn update_provider_models(
+pub(crate) fn update_provider_models<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppStateManaged>,
     name: String,
     models: Vec<String>,
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
+    ensure_capability_change_ready(&inner)?;
     replace_provider_models(&mut inner, name.trim(), models)?;
-    Ok(inner.snapshot())
+    drop(inner);
+    apply_saved_capabilities(app, state.inner())
 }
 
 pub(crate) fn replace_provider_model_vision(
@@ -1944,6 +1955,11 @@ pub(crate) fn replace_provider_model_vision(
         .iter_mut()
         .find(|candidate| candidate["model"].as_str() == Some(model))
         .ok_or_else(|| format!("供应商 `{name}` 未配置模型 `{model}`"))?;
+    capability["x-token-station-vision-source"] = json!("operator");
+    capability
+        .as_object_mut()
+        .unwrap()
+        .remove("x-token-station-vision-tested-at-ms");
     capability["vision"] = json!(supported);
     capability["vision_state"] = json!(if supported { "declared" } else { "unsupported" });
 
@@ -1956,6 +1972,39 @@ pub(crate) fn replace_provider_model_vision(
     Ok(())
 }
 
+pub(crate) fn ensure_capability_change_ready(inner: &AppInner) -> Result<(), String> {
+    inner.ensure_editable()?;
+    if matches!(
+        inner.server,
+        ServerLifecycle::Starting { .. }
+            | ServerLifecycle::Applying { .. }
+            | ServerLifecycle::Stopping { .. }
+    ) {
+        return Err(
+            "Wait for the current Gateway operation before changing model capabilities.".into(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_saved_capabilities<R: Runtime>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+) -> Result<StateView, String> {
+    let inner = state.0.lock().unwrap();
+    ensure_capability_change_ready(&inner)
+        .map_err(|error| format!("Model capabilities were saved but not applied: {error}"))?;
+    let running = matches!(inner.server, ServerLifecycle::Running { .. });
+    let snapshot = inner.snapshot();
+    drop(inner);
+    if running {
+        begin_serve_start(app, state, prepare_server)
+            .map_err(|error| format!("Model capabilities were saved but not applied: {error}"))
+    } else {
+        Ok(snapshot)
+    }
+}
+
 #[tauri::command]
 pub(crate) fn set_provider_model_vision<R: Runtime>(
     app: AppHandle<R>,
@@ -1964,30 +2013,12 @@ pub(crate) fn set_provider_model_vision<R: Runtime>(
     model: String,
     supported: bool,
 ) -> Result<StateView, String> {
-    let (running, snapshot) = {
+    {
         let mut inner = state.0.lock().unwrap();
-        if matches!(
-            inner.server,
-            ServerLifecycle::Starting { .. }
-                | ServerLifecycle::Applying { .. }
-                | ServerLifecycle::Stopping { .. }
-        ) {
-            return Err(
-                "Wait for the current Gateway operation before changing vision support.".into(),
-            );
-        }
-        let running = matches!(inner.server, ServerLifecycle::Running { .. });
+        ensure_capability_change_ready(&inner)?;
         replace_provider_model_vision(&mut inner, &name, &model, supported)?;
-        (running, inner.snapshot())
-    };
-    if running {
-        // Rebuild the capability catalog and refresh connected Agent metadata
-        // through the same guarded replacement used by Apply Configuration.
-        begin_serve_start(app, state.inner(), prepare_server)
-            .map_err(|error| format!("Vision support was saved but not applied: {error}"))
-    } else {
-        Ok(snapshot)
     }
+    apply_saved_capabilities(app, state.inner())
 }
 
 pub(crate) fn replace_provider_model_limits(
@@ -2050,7 +2081,8 @@ pub(crate) fn replace_provider_model_limits(
 }
 
 #[tauri::command]
-pub(crate) fn set_provider_model_limits(
+pub(crate) fn set_provider_model_limits<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppStateManaged>,
     name: String,
     model: String,
@@ -2058,8 +2090,10 @@ pub(crate) fn set_provider_model_limits(
     max_output_tokens: u32,
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
+    ensure_capability_change_ready(&inner)?;
     replace_provider_model_limits(&mut inner, &name, &model, context_window, max_output_tokens)?;
-    Ok(inner.snapshot())
+    drop(inner);
+    apply_saved_capabilities(app, state.inner())
 }
 
 pub(crate) fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {

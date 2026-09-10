@@ -38,6 +38,7 @@ mod self_test;
 mod serve_supervisor;
 mod stats_commands;
 mod views;
+mod vision_probe;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -503,6 +504,7 @@ pub fn run() {
             test_model_chat_stream,
             cancel_model_test_chat,
             set_provider_model_vision,
+            vision_probe::verify_provider_model_vision,
             set_provider_model_limits,
             update_provider_models,
             preview_provider_removal,

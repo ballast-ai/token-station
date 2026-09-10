@@ -15,6 +15,7 @@ import {
   previewProviderRemoval,
   setSettings,
   setProviderModelVision,
+  verifyProviderModelVision,
   setProviderModelLimits,
   testProvider,
   updateProviderModels,
@@ -103,6 +104,7 @@ vi.mock("./api", async (loadOriginal) => {
     previewProviderRemoval: vi.fn(),
     setSettings: vi.fn(),
     setProviderModelVision: vi.fn(),
+    verifyProviderModelVision: vi.fn(),
     setProviderModelLimits: vi.fn(),
     testProvider: vi.fn(),
     updateProviderModels: vi.fn(),
@@ -174,6 +176,7 @@ beforeEach(() => {
   vi.mocked(previewProviderRemoval).mockReset();
   vi.mocked(setSettings).mockReset();
   vi.mocked(setProviderModelVision).mockReset();
+  vi.mocked(verifyProviderModelVision).mockReset();
   vi.mocked(testProvider).mockReset();
   vi.mocked(updateProviderModels).mockReset();
   vi.mocked(previewProviderEndpoints).mockResolvedValue({
@@ -960,6 +963,23 @@ describe("model selection and provider model management", () => {
     expect(onSaved).toHaveBeenCalledWith(state);
   });
 
+  it("verifies the exact offering and reports a blocked check without declaring vision", async () => {
+    const provider: ProviderView = {
+      name: "matrix", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["model-a"], model_capabilities: [
+        { model: "model-a", tool: "unknown", vision: "unknown", json_schema: "unknown" },
+      ], has_auth: true,
+    };
+    vi.mocked(verifyProviderModelVision).mockResolvedValue({ outcome: "blocked", detail: "Rate limit", state });
+    const onSaved = vi.fn();
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={onSaved} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: "验证 model-a 的视觉能力" }));
+    await waitFor(() => expect(verifyProviderModelVision).toHaveBeenCalledWith("matrix", "model-a"));
+    expect(await screen.findByText(/请求受阻，未修改视觉能力/)).toBeInTheDocument();
+    expect(setProviderModelVision).not.toHaveBeenCalled();
+    expect(onSaved).toHaveBeenCalledWith(state);
+  });
+
   it("allows a user to complete missing model limits and rejects output above context", async () => {
     const provider: ProviderView = {
       name: "kimi",
@@ -1008,7 +1028,7 @@ describe("model selection and provider model management", () => {
     ));
     expect(onSaved).toHaveBeenCalledWith(state);
     expect(within(screen.getByTestId("error-toast-viewport")).getByText(
-      "已保存模型限制；重启代理后生效",
+      "已保存模型限制，正在向运行中的代理应用。",
     )).toBeInTheDocument();
   });
 

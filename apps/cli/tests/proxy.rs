@@ -670,6 +670,14 @@ fn start_proxy_with_agent(
 }
 
 fn start_native_responses_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    start_native_responses_proxy_with_vision(upstream, key_file, false)
+}
+
+fn start_native_responses_proxy_with_vision(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    vision: bool,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-native-responses-{}-{}",
@@ -693,6 +701,7 @@ fn start_native_responses_proxy(upstream: &MockUpstream, key_file: &Path) -> Pro
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [{
                     "model": "gpt-5.5",
+                    "vision": vision,
                     "tool": true,
                     "tool_state": "verified",
                     "context_window": 400_000
@@ -987,6 +996,16 @@ fn start_native_anthropic_proxy_with(
     direct: bool,
     tool_state: &str,
 ) -> Proxy {
+    start_native_anthropic_proxy_with_capabilities(upstream, key_file, direct, tool_state, false)
+}
+
+fn start_native_anthropic_proxy_with_capabilities(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    direct: bool,
+    tool_state: &str,
+    vision: bool,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-native-proxy-{}-{}",
@@ -1014,6 +1033,7 @@ fn start_native_anthropic_proxy_with(
                 "models": [
                     {
                         "model": "deepseek-chat",
+                        "vision": vision,
                         "tool": tool_state != "unsupported",
                         "tool_state": tool_state,
                         "context_window": 128_000
@@ -4461,9 +4481,8 @@ fn anthropic_upstreams_receive_document_blocks_verbatim_over_the_translated_path
 }
 
 #[test]
-fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
-    // Native passthrough keeps server tools and forced tool choice verbatim, but
-    // its confirmed text-only target receives localized image and PDF fallback.
+fn anthropic_native_passthrough_rejects_images_for_a_text_only_model() {
+    // Native server tools must not bypass the image capability check.
     let upstream_answer = json!({
         "id": "msg_native_1",
         "type": "message",
@@ -4492,50 +4511,9 @@ fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
         &proxy.virtual_key,
     );
 
-    // The client receives the upstream's response verbatim.
-    assert_eq!(status, 200, "body={body}");
-    assert!(
-        body.contains("msg_native_1"),
-        "upstream body relayed verbatim, body={body}"
-    );
-
-    let seen = mock.seen();
-    assert_eq!(seen.len(), 1, "exactly one upstream hit");
-    let forwarded = &seen[0];
-    // base_url is origin-only, so it resolves to /v1/messages.
-    assert_eq!(forwarded.path, "/v1/messages");
-    // The server tool and forced tool_choice survived verbatim (NOT translated to
-    // a function or refused).
-    assert_eq!(
-        forwarded.body["tools"][0]["type"],
-        json!("web_search_20250305")
-    );
-    assert_eq!(forwarded.body["tool_choice"]["type"], json!("tool"));
-    assert_eq!(
-        forwarded.body["messages"][0]["content"][0],
-        json!({"type": "text", "text": "[图片已省略：当前模型不支持视觉输入。]"})
-    );
-    assert_eq!(
-        forwarded.body["messages"][0]["content"][1],
-        json!({
-            "type": "text",
-            "text": "[Token Station 已把 PDF 附件转换为文字，因为当前路由不能直接传递 document 内容块。]\n文件名：native.pdf\n\nTOKEN_STATION_PDF_TEXT"
-        })
-    );
-    assert_eq!(
-        forwarded.body["messages"][0]["content"][2],
-        json!({"type": "text", "text": "搜索这张图相关的资料"})
-    );
-    // Only the model was remapped to the routed upstream model.
-    assert_eq!(forwarded.body["model"], json!("deepseek-chat"));
-    // Anthropic authenticates with its own header-secret shape. The client uses
-    // Bearer locally, but neither that virtual key nor a fabricated upstream
-    // Bearer header may cross the proxy boundary.
-    assert_eq!(forwarded.x_api_key.as_deref(), Some("sk-upstream-secret"));
-    assert_eq!(
-        forwarded.authorization, None,
-        "native Anthropic upstreams must never receive Bearer authentication"
-    );
+    assert_eq!(status, 400, "body={body}");
+    assert!(body.contains("image"), "body={body}");
+    assert_eq!(mock.hits(), 0, "native requests must not lose images");
     std::fs::remove_file(key).ok();
 }
 
@@ -5139,7 +5117,7 @@ fn codex_and_claude_code_preserve_images_for_a_vision_upstream() {
 }
 
 #[test]
-fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
+fn every_openai_chat_agent_rejects_images_before_a_non_vision_upstream() {
     let answer = json!({
         "id": "chatcmpl-media-fallback",
         "model": "home-model",
@@ -5178,26 +5156,17 @@ fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
             &token,
             false,
         );
-        assert_eq!(status, 200, "{agent_id}: {body}");
-        assert!(
-            body.contains("I can continue with the text."),
-            "{agent_id}: {body}"
-        );
+        assert_eq!(status, 400, "{agent_id}: {body}");
+        assert!(body.contains("image"), "{agent_id}: {body}");
     }
 
-    assert_eq!(home.hits(), 3);
+    assert_eq!(home.hits(), 0);
     assert_eq!(custom.hits(), 0);
-    for request in home.seen() {
-        assert_eq!(
-            message_text(&request.body["messages"][0]["content"]),
-            "[Image omitted: the current model does not support visual input.]"
-        );
-    }
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn media_fallback_localizes_from_the_latest_user_text_and_records_a_real_attempt() {
+fn image_route_refusal_records_zero_attempts_even_with_later_text() {
     let answer = json!({
         "id": "chatcmpl-localized-fallback",
         "model": "home-model",
@@ -5236,41 +5205,23 @@ fn media_fallback_localizes_from_the_latest_user_text_and_records_a_real_attempt
         &token,
         false,
     );
-    assert_eq!(status, 200, "{body}");
-    let response: Value = serde_json::from_str(&body).expect("model response is JSON");
-    assert_eq!(response["object"], json!("chat.completion"));
-    assert_eq!(
-        response["choices"][0]["message"]["role"],
-        json!("assistant")
-    );
-    assert_eq!(
-        response["choices"][0]["message"]["content"],
-        json!("我会根据剩余文字继续。")
-    );
-    assert_eq!(home.hits(), 1);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("image"), "{body}");
+    assert_eq!(home.hits(), 0);
     assert_eq!(custom.hits(), 0);
-    let seen = home.seen();
-    assert_eq!(
-        message_text(&seen[0].body["messages"][0]["content"]),
-        "[图片已省略：当前模型不支持视觉输入。]"
-    );
-    assert_eq!(
-        message_text(&seen[0].body["messages"][1]["content"]),
-        "请继续查看这份报告。"
-    );
     settle();
     let log = std::fs::read_to_string(proxy.data_dir.join("requests.log")).expect("log exists");
     let receipt: Value = serde_json::from_str(log.lines().last().expect("a receipt exists"))
         .expect("receipt is JSON");
-    assert_eq!(receipt["status"], json!(200));
-    assert_eq!(receipt["error_code"], Value::Null);
-    assert_eq!(receipt["attempts"], json!(1));
+    assert_eq!(receipt["status"], json!(400));
+    assert_eq!(receipt["error_code"], json!("capability"));
+    assert_eq!(receipt["attempts"], json!(0));
     assert_eq!(receipt["agent_id"], json!("workbuddy"));
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn codex_responses_input_images_use_the_same_text_only_fallback() {
+fn codex_responses_rejects_images_without_a_supported_route() {
     let answer = json!({
         "id": "chatcmpl-responses-media-fallback",
         "model": "agent-model",
@@ -5306,21 +5257,20 @@ fn codex_responses_input_images_use_the_same_text_only_fallback() {
         false,
     );
 
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("Continued without the image."), "{body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("image"), "{body}");
     assert_eq!(home.hits(), 0);
-    assert_eq!(custom.hits(), 1);
-    let seen = custom.seen();
     assert_eq!(
-        message_text(&seen[0].body["messages"][0]["content"]),
-        "Continue from the text.[Image omitted: the current model does not support visual input.]"
+        custom.hits(),
+        0,
+        "images must never be replaced and sent as text"
     );
 
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn an_upstream_media_refusal_retries_once_with_localized_markers() {
+fn an_upstream_image_refusal_never_retries_without_the_image() {
     let refusal = json!({
         "error": { "message": "This model does not support image attachments." }
     });
@@ -5356,22 +5306,18 @@ fn an_upstream_media_refusal_retries_once_with_localized_markers() {
         None,
     );
 
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("Continued after fallback."), "{body}");
-    assert_eq!(mock.hits(), 2);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("rejected image input"), "{body}");
+    assert_eq!(mock.hits(), 1);
     let seen = mock.seen();
     assert_eq!(
         seen[0].body["messages"][0]["content"][1]["type"],
         "image_url"
     );
-    assert_eq!(
-        message_text(&seen[1].body["messages"][0]["content"]),
-        "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
-    );
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(200)");
-    assert_eq!(row["attempts"], "Integer(2)");
+    assert_eq!(row["status"], "Integer(400)");
+    assert_eq!(row["attempts"], "Integer(1)");
 
     std::fs::remove_file(key).ok();
 }
@@ -10215,4 +10161,59 @@ fn current_route_search_conversion_failures_eject_the_backend() {
         "Search must not switch to an unrelated provider"
     );
     std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn native_image_requests_keep_bytes_and_report_explicit_channel_rejection() {
+    for anthropic in [true, false] {
+        for (vision, upstream_status, expected_status) in
+            [(false, 200, 400), (true, 200, 200), (true, 400, 400)]
+        {
+            let answer = if upstream_status == 200 {
+                json!({"id":"native-image-ok","output":[],"content":[]})
+            } else {
+                json!({"error":{"message":"kiro: image input is not yet supported (text + tools only)"}})
+            };
+            let mock =
+                MockUpstream::start(vec![vec![http_json(upstream_status, &answer.to_string())]]);
+            let key = key_file("native-image-contract", "sk-fixture-secret");
+            let proxy = if anthropic {
+                start_native_anthropic_proxy_with_capabilities(
+                    &mock, &key, true, "verified", vision,
+                )
+            } else {
+                start_native_responses_proxy_with_vision(&mock, &key, vision)
+            };
+            let request = if anthropic {
+                json!({"model":"auto","max_tokens":64,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"cGl4ZWxz"}}]}],"tools":[{"type":"web_search_20250305","name":"web_search"}]})
+            } else {
+                json!({"model":"auto","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,cGl4ZWxz"}]}],"tools":[{"type":"web_search"}]})
+            };
+            let (status, body) = if anthropic {
+                post_messages(&proxy, &request, &proxy.virtual_key)
+            } else {
+                let (status, _, body) = send_responses(&proxy, &request, &proxy.virtual_key);
+                (status, body)
+            };
+            assert_eq!(
+                status, expected_status,
+                "anthropic={anthropic} vision={vision} body={body}"
+            );
+            assert_eq!(mock.hits(), usize::from(vision));
+            if vision {
+                let seen = mock.seen();
+                if anthropic {
+                    assert_eq!(seen[0].body["messages"], request["messages"]);
+                } else {
+                    assert_eq!(seen[0].body["input"], request["input"]);
+                }
+                if upstream_status == 400 {
+                    assert!(body.contains("rejected image input"), "{body}");
+                }
+            } else {
+                assert!(body.contains("image"), "{body}");
+            }
+            std::fs::remove_file(key).ok();
+        }
+    }
 }
