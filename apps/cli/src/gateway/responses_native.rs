@@ -102,7 +102,7 @@ impl ResponsesSseUsageTap {
 }
 
 impl Gateway {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // native admission, routing, and relay form one pipeline
     pub(super) fn try_responses_passthrough(
         &self,
         ctx: &RequestContext,
@@ -119,7 +119,14 @@ impl Gateway {
         let Ok(body_value) = serde_json::from_slice::<Value>(body) else {
             return Ok(None);
         };
-        if !declares_active_web_search(&body_value) {
+        let hosted_search = declares_active_web_search(&body_value);
+        if !hosted_search
+            && (!raw_contains_images(&body_value)
+                || !self
+                    .upstreams
+                    .values()
+                    .any(|upstream| upstream.dialect == ApiDialect::ResponsesNative))
+        {
             return Ok(None);
         }
         let Some(model) = body_value
@@ -134,27 +141,40 @@ impl Gateway {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let mut mini = ChatRequest::new(&model, Vec::new());
-        mini.stream = stream;
-        mini.tools.push(ToolDef {
-            name: "responses_native_routing_probe".to_owned(),
-            description: None,
-            parameters: json!({}),
-        });
+        let (mini, hints) = if hosted_search {
+            let mut mini = ChatRequest::new(&model, Vec::new());
+            mini.stream = stream;
+            add_native_image_requirement(&mut mini, &body_value);
+            mini.tools.push(ToolDef {
+                name: "responses_native_routing_probe".to_owned(),
+                description: None,
+                parameters: json!({}),
+            });
+            (mini, Vec::new())
+        } else {
+            // Plain image requests use the full routing features and configured policy.
+            let (request, hints, _) =
+                Self::normalize_request(agent, "POST", "/v1/responses", raw_headers, body, record)?;
+            (request, hints)
+        };
         let (quota_now_ms, session) =
             Self::quota_preamble(router, || format!("responses-native:{model}"));
         let candidates: Vec<Candidate> = self
             .candidates(std::time::Instant::now(), quota_now_ms)
             .into_iter()
             .filter(|candidate| {
-                self.upstreams
-                    .get(candidate.target.upstream.as_str())
-                    .is_some_and(|upstream| upstream.dialect == ApiDialect::ResponsesNative)
+                !hosted_search
+                    || self
+                        .upstreams
+                        .get(candidate.target.upstream.as_str())
+                        .is_some_and(|upstream| upstream.dialect == ApiDialect::ResponsesNative)
             })
             .collect();
-        let Ok(mut decision) = self.route_with_mode(router, &mini, &[], &candidates, &session)
-        else {
-            return Ok(None);
+        let mut decision = match self.route_with_mode(router, &mini, &hints, &candidates, &session)
+        {
+            Ok(decision) => decision,
+            Err(error) if raw_contains_images(&body_value) => return Err(route_error(&error)),
+            Err(_) => return Ok(None),
         };
         let Some(upstream) = self.upstreams.get(decision.chosen.upstream.as_str()) else {
             return Ok(None);
@@ -191,11 +211,11 @@ impl Gateway {
             emit,
             record,
         );
-        if let Some(raw) = last_upstream_error
-            .borrow_mut()
-            .take()
-            .filter(|_| result.is_err())
-        {
+        if let Some(raw) = last_upstream_error.borrow_mut().take().filter(|_| {
+            result
+                .as_ref()
+                .is_err_and(|error| error.code != ErrorCode::Capability)
+        }) {
             record.status = raw.status;
             record.error_code = Some(responses_error_code(raw.status));
             emit(Reply::BeginJson(JsonReply {
@@ -331,6 +351,10 @@ impl Gateway {
             let code = responses_error_code(response.status);
             let parts = response.into_parts()?;
             ctx.append_upstream_response_body(parts.body.as_bytes());
+            if raw_contains_images(body) && native_rejects_image(parts.status, &parts.body) {
+                return Err(upstream_image_error());
+            }
+
             record_conversion(
                 record,
                 ConversionStage::ProviderResponse,

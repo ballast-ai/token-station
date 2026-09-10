@@ -16,6 +16,8 @@ import {
   ProviderTestResult,
   setProviderModelLimits,
   setProviderModelVision,
+  verifyProviderModelVision,
+  VisionVerificationView,
   testProvider,
   updateProviderModels,
 } from "../api";
@@ -150,6 +152,10 @@ export default function ProviderModelManager({
   const [testResults, setTestResults] = useState<ProviderTestResult[]>([]);
   const [testedAtMs, setTestedAtMs] = useState<number | null>(null);
   const [testing, setTesting] = useState(false);
+  const [visionChecking, setVisionChecking] = useState<string | null>(null);
+  const [visionResults, setVisionResults] = useState<Record<string, VisionVerificationView>>({});
+  useEffect(() => setVisionResults({}), [provider.name, provider.base_url, provider.provider_call,
+    provider.credential_source, provider.credential_reference]);
   const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
   const [limitSaving, setLimitSaving] = useState<string | null>(null);
   const [limitDrafts, setLimitDrafts] = useState<Record<string, ModelLimitDraft>>({});
@@ -186,7 +192,7 @@ export default function ProviderModelManager({
     }));
   }, [catalog, capabilities, provider.models, selected]);
   const operationDisabled = disabled || refreshing || saving || testing || editing
-    || capabilitySaving !== null || limitSaving !== null;
+    || capabilitySaving !== null || limitSaving !== null || visionChecking !== null;
   const limitsDirty = capabilities.some((cap) => {
     const draft = limitDrafts[cap.model];
     return draft && (draft.context !== (cap.context_window ? String(cap.context_window) : "")
@@ -400,7 +406,7 @@ export default function ProviderModelManager({
       onSaved(next);
       showSuccess(
         serveRunning
-          ? copy("Model limits saved; restart the proxy to apply.", "已保存模型限制；重启代理后生效", "模型限制已儲存；重啟代理後生效。", "モデルの制限が保存されました。プロキシを再起動してから有効になります。")
+          ? copy("Model limits saved. Applying to the running proxy.", "已保存模型限制，正在向运行中的代理应用。", "模型限制已儲存，正在套用至執行中的代理。", "モデルの制限を保存しました。プロキシに適用中です。")
           : copy("Model limits saved.", "已保存模型限制", "模型限制已儲存。", "モデルの制限が保存されました。"),
         `provider-model-limits:${provider.name}:${model}`,
       );
@@ -428,6 +434,7 @@ export default function ProviderModelManager({
           : null,
       ));
       setEditKey("");
+      setVisionResults({});
       showSuccess(
         copy(`Provider ${provider.name} details saved`, `${provider.name} 的基本信息已保存`, `${provider.name} 的基本資訊已儲存`, `${provider.name} の基本情報が保存されました`),
         `provider-edit:${provider.name}`,
@@ -453,6 +460,28 @@ export default function ProviderModelManager({
     }
   };
 
+  const visionResultLabel = (outcome: VisionVerificationView["outcome"]) => ({
+    verified: copy("Verified: all nine image cells matched.", "验证通过：九个随机色块全部识别正确。", "驗證通過：九個隨機色塊全部辨識正確。", "検証成功：9 個の色がすべて一致しました。"),
+    unsupported: copy("This channel explicitly rejected images.", "该通道明确拒绝了图片输入。", "此通道明確拒絕了圖片輸入。", "この経路は画像入力を拒否しました。"),
+    blocked: copy("Verification was blocked. Capability is unchanged.", "请求受阻，未修改视觉能力。", "請求受阻，未修改視覺能力。", "検証できませんでした。対応状況は変更していません。"),
+    inconclusive: copy("The answer did not match. Capability is unchanged.", "识别结果不匹配，未修改视觉能力。", "辨識結果不符，未修改視覺能力。", "回答が一致しません。対応状況は変更していません。"),
+  })[outcome];
+
+  const verifyVision = async (model: string) => {
+    if (operationDisabled) return;
+    setVisionChecking(model);
+    try {
+      const result = await verifyProviderModelVision(provider.name, model);
+      onSaved(result.state);
+      setVisionResults((previous) => ({ ...previous, [model]: result }));
+      showInfo(visionResultLabel(result.outcome), `provider-vision-check:${provider.name}:${model}`);
+    } catch (caught) {
+      showError(humanizeAppError(caught), `provider-vision-check:${provider.name}:${model}`);
+    } finally {
+      setVisionChecking(null);
+    }
+  };
+
   const toggleVision = async (model: string, state: CapabilityState) => {
     if (operationDisabled || state === "verified") return;
     setCapabilitySaving(model);
@@ -461,10 +490,10 @@ export default function ProviderModelManager({
       onSaved(next);
       showInfo(next.serve.phase === "starting"
         ? copy(
-          "Applying vision support. After application, restart Codex and attach the image again.",
-          "正在应用视觉能力。应用完成后，请重启 Codex 并重新添加图片。",
-          "正在套用視覺能力。完成後，請重新啟動 Codex 並重新附加圖片。",
-          "画像対応を適用中です。適用後に Codex を再起動し、画像を添付し直してください。",
+          "Applying the declaration to the Gateway. Use Verify vision to check this channel.",
+          "正在向网关应用视觉声明。请用“验证视觉”检查该通道是否实际支持图片。",
+          "正在向閘道套用視覺宣告。請用「驗證視覺」檢查通道。",
+          "画像対応の宣言を適用中です。画像検証で経路を確認してください。",
         )
         : copy(
           "Vision support saved. Start the proxy before attaching images.",
@@ -633,6 +662,7 @@ export default function ProviderModelManager({
             const nextSource = value as typeof credentialSource;
             setCredentialSource(nextSource);
             setEditKey("");
+      setVisionResults({});
             setCredentialReference("");
           }}
         >
@@ -786,7 +816,21 @@ export default function ProviderModelManager({
                     </span>
                   )
                 ))}
+                {row.configured && <button
+                  className="btn tiny"
+                  type="button"
+                  disabled={operationDisabled}
+                  aria-label={copy(`Verify vision for ${row.model}`, `验证 ${row.model} 的视觉能力`, `驗證 ${row.model} 的視覺能力`, `${row.model} の画像対応を検証`)}
+                  title={copy("Send one synthetic image to this channel. Provider usage charges may apply.", "向该通道发送一张随机测试图，会产生一次模型调用。", "向此通道傳送一張隨機測試圖，會產生一次模型呼叫。", "テスト画像を送信します。モデル利用料金が発生する場合があります。")}
+                  onClick={() => void verifyVision(row.model)}
+                >{visionChecking === row.model
+                  ? copy("Verifying…", "验证中…", "驗證中…", "検証中…")
+                  : copy("Verify vision", "验证视觉", "驗證視覺", "画像を検証")}</button>}
               </div>
+              {visionResults[row.model] && <p className="model-limit-source" role="status">
+                {visionResultLabel(visionResults[row.model].outcome)}
+                {visionResults[row.model].outcome === "blocked" && ` ${visionResults[row.model].detail}`}
+              </p>}
               {row.configured && row.cap.context_window_source
                 && row.cap.context_window_source === row.cap.max_output_tokens_source && (
                 <p className="model-limit-source">
@@ -879,7 +923,7 @@ export default function ProviderModelManager({
       <div className="manager-actions">
         <span className="manager-hint">
           {serveRunning
-            ? copy("Proxy running · Restart after saving to apply", "代理运行中 · 保存后重启代理生效", "代理正在執行 · 儲存後重啟代理生效", "プロキシが実行中 · 保存後プロキシを再起動して有効にする")
+            ? copy("Proxy running · Saved model changes are applied automatically", "代理运行中 · 保存模型修改后自动应用", "代理正在執行 · 儲存模型變更後自動套用", "プロキシが実行中 · 保存したモデル変更は自動適用されます")
             : copy("Save to write the current provider configuration", "保存后写入当前供应商配置", "儲存後寫入當前供應商配置", "保存後、現在のプロバイダー設定を書き込む")}
         </span>
         <button

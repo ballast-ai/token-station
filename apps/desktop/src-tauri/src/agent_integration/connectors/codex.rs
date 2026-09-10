@@ -471,16 +471,9 @@ fn provider_fields(token: &str) -> Vec<(&'static str, serde_json::Value)> {
 }
 
 fn token_station_model(codex_home: &Path, input: &ConnectInput<'_>) -> serde_json::Value {
-    let (context_window, vision) = input
-        .model_metadata
+    let context_window = input.model_metadata
         .and_then(AgentModelMetadata::safe_limits)
-        .map(|(context, _)| {
-            (
-                context,
-                input.model_metadata.is_some_and(|metadata| metadata.vision),
-            )
-        })
-        .unwrap_or((FALLBACK_CONTEXT_WINDOW, false));
+        .map_or(FALLBACK_CONTEXT_WINDOW, |(context, _)| context);
     let mut model = installed_model_template(codex_home).unwrap_or_else(fallback_model_template);
     let object = model
         .as_object_mut()
@@ -501,14 +494,8 @@ fn token_station_model(codex_home: &Path, input: &ConnectInput<'_>) -> serde_jso
         ("upgrade", serde_json::Value::Null),
         ("context_window", json!(context_window)),
         ("max_context_window", json!(context_window)),
-        (
-            "input_modalities",
-            if vision {
-                json!(["text", "image"])
-            } else {
-                json!(["text"])
-            },
-        ),
+        // Auto describes Gateway input. The router validates each image destination.
+        ("input_modalities", json!(["text", "image"])),
         ("use_responses_lite", json!(false)),
     ] {
         object.insert(field.to_string(), value);
@@ -593,7 +580,7 @@ fn fallback_model_template() -> serde_json::Value {
         "context_window": FALLBACK_CONTEXT_WINDOW,
         "max_context_window": FALLBACK_CONTEXT_WINDOW,
         "experimental_supported_tools": [],
-        "input_modalities": ["text"],
+        "input_modalities": ["text", "image"],
         "use_responses_lite": false
     })
 }
@@ -892,6 +879,17 @@ mod tests {
         assert_eq!(catalog["models"][0]["display_name"], "Token Station Auto");
         assert_eq!(catalog["models"][0]["visibility"], "list");
         assert_eq!(catalog["models"][0]["context_window"], 128_000);
+        assert_eq!(catalog["models"][0]["input_modalities"], json!(["text", "image"]));
+    }
+
+    #[test]
+    fn codex_auto_accepts_images_even_without_upstream_metadata() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("fixture-key"), adapter_ready: true, model_metadata: None,
+        };
+        let model = token_station_model(Path::new("/nonexistent-ts-codex-fixture"), &input);
+        assert_eq!(model["input_modalities"], json!(["text", "image"]));
     }
 
     #[test]

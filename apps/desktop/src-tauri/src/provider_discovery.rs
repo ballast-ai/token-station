@@ -219,10 +219,15 @@ pub(crate) fn apply_discovered_model_capabilities(
             continue;
         };
         if let Some(fact) = facts.get(model).copied() {
+            let locally_owned = matches!(
+                capability["x-token-station-vision-source"].as_str(),
+                Some("probe" | "operator")
+            );
             if let Some((supported, serialized)) = match fact.vision {
-                CapabilityState::Verified => Some((true, "verified")),
+                _ if locally_owned => None,
+                CapabilityState::Verified | CapabilityState::Declared => Some((true, "declared")),
                 CapabilityState::Unsupported => Some((false, "unsupported")),
-                CapabilityState::Declared | CapabilityState::Unknown => None,
+                CapabilityState::Unknown => None,
             } {
                 if capability["vision"].as_bool() != Some(supported)
                     || capability["vision_state"].as_str() != Some(serialized)
@@ -318,29 +323,46 @@ enum DiscoveryMutation {
 }
 
 #[tauri::command]
-pub(crate) async fn discover_provider_models(
+pub(crate) async fn discover_provider_models<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppStateManaged>,
     name: String,
     base_url: String,
     api_key: Option<String>,
 ) -> Result<ModelDiscoveryView, String> {
-    discover_provider_models_impl(
-        state,
+    let result = discover_provider_models_impl(
+        state.clone(),
         name,
         base_url,
         api_key,
         DiscoveryMutation::AllCapabilities,
     )
-    .await
+    .await?;
+    if result.capabilities_updated {
+        apply_saved_capabilities(app, state.inner())?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
-pub(crate) async fn discover_provider_model_limits(
+pub(crate) async fn discover_provider_model_limits<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppStateManaged>,
     name: String,
     base_url: String,
 ) -> Result<ModelDiscoveryView, String> {
-    discover_provider_models_impl(state, name, base_url, None, DiscoveryMutation::LimitsOnly).await
+    let result = discover_provider_models_impl(
+        state.clone(),
+        name,
+        base_url,
+        None,
+        DiscoveryMutation::LimitsOnly,
+    )
+    .await?;
+    if result.capabilities_updated {
+        apply_saved_capabilities(app, state.inner())?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -457,6 +479,7 @@ async fn discover_provider_models_impl(
     let mut inner = state.0.lock().unwrap();
     ensure_provider_discovery_target_unchanged(&inner, &name, &expected_target)?;
     if mutate_derived_state {
+        ensure_capability_change_ready(&inner)?;
         if let Err(error) =
             model_catalog::commit_live_discovery_cache(&data_dir, &name, &base_url, &result)
         {
