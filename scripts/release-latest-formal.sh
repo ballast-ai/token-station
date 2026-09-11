@@ -103,7 +103,7 @@ require_formal_github_config() {
     APPLE_API_KEY \
     APPLE_API_KEY_CONTENT
   )
-  if [[ "$version" != "2.0.0" && "$version" != "2.1.1" ]]; then
+  if [[ "$version" != "2.0.0" && "$version" != "2.1.1" && "$version" != "2.1.2" ]]; then
     required_secrets+=(
       WINDOWS_CERTIFICATE
       WINDOWS_CERTIFICATE_PASSWORD

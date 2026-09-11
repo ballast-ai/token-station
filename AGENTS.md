@@ -116,7 +116,7 @@ the user explicitly requests it.
 
 ## Publish a stable release with an unsigned Windows MSI
 
-Use this exception only for Token Station v2.0.0 and v2.1.1. All other stable versions require Windows Authenticode.
+Use this exception only for Token Station v2.0.0, v2.1.1, and v2.1.2. All other stable versions require Windows Authenticode.
 
 1. Sign and notarize both macOS Apps with the required Apple credentials.
 2. Keep the CLI and macOS updater private keys offline.
@@ -128,7 +128,7 @@ Use this exception only for Token Station v2.0.0 and v2.1.1. All other stable ve
 The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.
 ```
 
-Windows updates remain manual. Do not describe the MSI or its checksum as a publisher signature. The v2.0.0 and v2.1.1
+Windows updates remain manual. Do not describe the MSI or its checksum as a publisher signature. The v2.0.0, v2.1.1, and v2.1.2
 tag workflows do not require Windows certificate secrets.
 
 ## Publish an unsigned cross-platform preview release

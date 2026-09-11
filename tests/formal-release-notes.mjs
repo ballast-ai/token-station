@@ -71,6 +71,20 @@ try {
   );
   assert.equal(v21Warning.status, 0, v21Warning.stderr);
 
+  const missingV212Warning = check(
+    "v212-missing-warning.md",
+    "# Token Station v2.1.2\n\nThis stable release fixes image routing and Provider vision verification.\n",
+    "2.1.2",
+  );
+  assert.equal(missingV212Warning.status, 1, "v2.1.2 must disclose the unsigned MSI");
+  assert.match(missingV212Warning.stderr, /Windows MSI/);
+  const v212Warning = check(
+    "v212-warning.md",
+    "# Token Station v2.1.2\n\nThis stable release fixes image routing.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
+    "2.1.2",
+  );
+  assert.equal(v212Warning.status, 0, v212Warning.stderr);
+
   const laterVersionNotes = path.join(testDir, "later-version.md");
   fs.writeFileSync(
     laterVersionNotes,
