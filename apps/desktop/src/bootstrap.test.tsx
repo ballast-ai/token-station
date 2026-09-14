@@ -29,7 +29,7 @@ const normal = {
   found_schema: null, supported_schema: 4, metrics_path: "/data/db", backup_dir: "/data", local_only: true,
 };
 
-beforeEach(() => vi.mocked(getRecoveryState).mockReset());
+beforeEach(() => { vi.mocked(getRecoveryState).mockReset(); });
 afterEach(() => vi.useRealTimers());
 
 describe("recovery bootstrap", () => {
@@ -46,12 +46,67 @@ describe("recovery bootstrap", () => {
     expect(await screen.findByText("normal application")).toBeInTheDocument();
   });
 
-  it("unblocks the application as soon as startup is ready", async () => {
+  it("plays the complete 2700 ms sequence even when startup is ready immediately", async () => {
     vi.useFakeTimers();
     vi.mocked(getRecoveryState).mockResolvedValue(normal);
     render(<AppBootstrap />);
     await act(async () => Promise.resolve());
     fireEvent.click(screen.getByText("settle application"));
+    act(() => vi.advanceTimersByTime(2399));
+    expect(screen.getByTestId("launch-screen")).toHaveAttribute("data-phase", "presenting");
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("launch-screen")).toHaveAttribute("data-phase", "exiting");
+    act(() => vi.advanceTimersByTime(299));
+    expect(screen.getByTestId("launch-screen")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByTestId("launch-screen")).toBeNull();
+  });
+
+  it("finishes on schedule while application startup is still pending", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getRecoveryState).mockResolvedValue(normal);
+    const { container } = render(<AppBootstrap />);
+    await act(async () => Promise.resolve());
+    act(() => vi.advanceTimersByTime(2700));
+    expect(screen.queryByTestId("launch-screen")).toBeNull();
+    expect(container.querySelector(".launch-app-stage")).not.toHaveAttribute("inert");
+    fireEvent.click(screen.getByText("settle application"));
+    expect(screen.queryByTestId("launch-screen")).toBeNull();
+  });
+
+  it("does not restart the exit timer when application readiness changes", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getRecoveryState).mockResolvedValue(normal);
+    render(<AppBootstrap />);
+    await act(async () => Promise.resolve());
+    act(() => vi.advanceTimersByTime(2500));
+    expect(screen.getByTestId("launch-screen")).toHaveAttribute("data-phase", "exiting");
+    fireEvent.click(screen.getByText("settle application"));
+    expect(screen.getByTestId("launch-screen")).toHaveAttribute("data-phase", "exiting");
+    act(() => vi.advanceTimersByTime(200));
+    expect(screen.queryByTestId("launch-screen")).toBeNull();
+  });
+
+  it("shows a loading status after 2700 ms without bypassing compatibility checks", async () => {
+    vi.useFakeTimers();
+    let resolveRecovery!: (value: typeof normal) => void;
+    vi.mocked(getRecoveryState).mockReturnValue(new Promise((resolve) => { resolveRecovery = resolve; }));
+    render(<AppBootstrap />);
+    act(() => vi.advanceTimersByTime(2700));
+    expect(screen.queryByTestId("launch-screen")).toBeNull();
+    expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByText("normal application")).toBeNull();
+    await act(async () => resolveRecovery(normal));
+    expect(screen.getByText("normal application")).toBeInTheDocument();
+    expect(screen.queryByTestId("launch-screen")).toBeNull();
+  });
+
+  it("shows compatibility errors immediately without waiting for presentation", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getRecoveryState).mockRejectedValue(new Error("compatibility unavailable"));
+    render(<AppBootstrap />);
+    await act(async () => Promise.resolve());
+    expect(screen.getByText(/recovery shell · error · compatibility unavailable/)).toBeInTheDocument();
     expect(screen.queryByTestId("launch-screen")).toBeNull();
   });
 
