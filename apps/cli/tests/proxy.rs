@@ -7398,7 +7398,7 @@ fn south_stream_deadline_hides_host_private_policy_from_the_agent_renderer() {
 
 #[test]
 #[cfg(feature = "builtin-plugins")]
-fn south_image_refusal_never_retries_or_falls_back() {
+fn south_image_authentication_never_retries_or_falls_back() {
     assert_south_image_terminal_contract(false);
 }
 
@@ -7411,13 +7411,13 @@ fn south_image_deadline_hides_private_policy_and_stops_fallback() {
 #[cfg(feature = "builtin-plugins")]
 fn assert_south_image_terminal_contract(deadline: bool) {
     let refusal = json!({
-        "error": { "message": "This model does not support image attachments." }
+        "error": { "message": "Authentication required: this model does not support image attachments." }
     });
     let mock = if deadline {
         MockUpstream::start_hanging()
     } else {
         MockUpstream::start_response_then_hanging(
-            http_json(501, &refusal.to_string()),
+            http_json(401, &refusal.to_string()),
             b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
         )
     };
@@ -7483,7 +7483,7 @@ fn assert_south_image_terminal_contract(deadline: bool) {
     };
     assert_eq!(
         reply.status,
-        if deadline { 504 } else { 400 },
+        if deadline { 504 } else { 401 },
         "unexpected error: {}",
         reply.body
     );
@@ -7509,6 +7509,134 @@ fn assert_south_image_terminal_contract(deadline: bool) {
     drop(runtime);
     mock.finish_hanging();
     fallback.finish();
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+#[allow(clippy::too_many_lines)] // The fixture owns both provider lifetimes and the deadline assertion.
+fn south_image_fallback_keeps_the_image_and_hides_deadline_policy() {
+    let refusal = json!({
+        "error": { "message": "This model does not support image attachments." }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(501, &refusal.to_string())]]);
+    let fallback = MockUpstream::start_hanging();
+    let (config_path, data_dir) =
+        write_south_probe_config(&mock, "sk-south-media-retry-marker", true);
+    token_station_cli::secrets::store_set(
+        &data_dir,
+        "mock_fallback",
+        "provider_api_key",
+        "sk-south-media-retry-fallback",
+    )
+    .expect("fallback test secret is stored");
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South marker config reads"))
+            .expect("South marker config is JSON");
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered_streaming");
+    config["upstreams"]["mock_primary"]["models"][0]["vision"] = json!(true);
+    config["upstreams"]["mock_fallback"] = json!({
+        "provider": "openai-compatible",
+        "base_url": fallback.base_url(),
+        "provider_call": "south_v1_buffered_streaming",
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [ {
+            "model": "gpt-5.5",
+            "tool": true,
+            "vision": true,
+            "context_window": 400_000
+        } ]
+    });
+    config["router"]["pools"]["main"] = json!([
+        { "upstream": "mock_primary", "model": "gpt-5.5" },
+        { "upstream": "mock_fallback", "model": "gpt-5.5" }
+    ]);
+    config["plugins"]["agents"] = json!(["marker-agent"]);
+    config["plugins"]["allow_unsigned"] = json!(true);
+    let config: ClientConfig = serde_json::from_value(config).expect("South marker config parses");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    let gateway = Arc::new(
+        Gateway::new_with_provider_runtime(
+            &config,
+            Arc::new(token_station_metrics::NoopRecorder),
+            runtime.handle().clone(),
+        )
+        .expect("South marker gateway assembles"),
+    );
+    let replies = runtime.block_on(async {
+        let worker_gateway = Arc::clone(&gateway);
+        tokio::task::spawn_blocking(move || {
+            let ctx = token_station_cli::request_context::RequestContext::detached(
+                Duration::from_millis(1_400),
+                Duration::from_secs(1),
+            );
+            let mut replies = Vec::new();
+            worker_gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                json!({
+                    "model": "auto",
+                    "stream": true,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "Inspect the attachment." },
+                            { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
+                        ]
+                    }]
+                })
+                .to_string()
+                .as_bytes(),
+                &mut |reply| {
+                    replies.push(reply);
+                    true
+                },
+            );
+            replies
+        })
+        .await
+        .expect("blocking worker joins")
+    });
+
+    let reply = match replies.first() {
+        Some(Reply::BeginJson(reply)) => reply,
+        Some(Reply::BeginStream) => panic!("expected JSON, stream began"),
+        Some(Reply::Chunk(chunk)) => panic!("expected JSON, got chunk: {chunk}"),
+        None => panic!("expected a rendered 504, got no reply"),
+    };
+    assert_eq!(reply.status, 504, "unexpected error: {}", reply.body);
+    let rendered: Value = serde_json::from_str(&reply.body).expect("marker renderer returns JSON");
+    assert_eq!(rendered["saw_private_marker"], json!(false));
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the refusing channel is never retried as text"
+    );
+    assert_eq!(
+        fallback.hits(),
+        1,
+        "the authorized image fallback reaches its deadline"
+    );
+    let seen = mock.seen();
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["type"],
+        "image_url"
+    );
+    assert_eq!(
+        fallback.seen()[0].body["messages"],
+        seen[0].body["messages"]
+    );
+    drop(gateway);
+    drop(runtime);
+    fallback.finish_hanging();
     std::fs::remove_dir_all(data_dir).ok();
 }
 
@@ -10650,4 +10778,125 @@ fn vision_review_native_image_strips_forged_private_fields_before_upstream() {
         "reserved top-level fields must not reach the upstream: {}",
         seen[0].body
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One matrix checks the same channel lifecycle across all wire dialects.
+fn automatic_image_routing_learns_acceptance_and_rejection_without_removing_images() {
+    for dialect in ["translated", "anthropic-native", "responses-native"] {
+        // A rate limit leaves the first channel Unknown. The successful backup
+        // becomes preferred on the next request. An explicit refusal also skips
+        // the first channel next time, without changing any saved declaration.
+        for (first_status, free_primary) in [
+            (400, false),
+            (429, false),
+            (422, false),
+            (401, false),
+            (400, true),
+        ] {
+            let rejection = json!({"error":{"message": match first_status {
+                400 => "This model does not support image attachments.",
+                429 => "Rate limit exceeded",
+                422 => "Unsupported image format: invalid base64",
+                _ => "Authentication required",
+            }}});
+            let should_fallback = matches!(first_status, 400 | 429) && !free_primary;
+            let primary =
+                MockUpstream::start(vec![vec![http_json(first_status, &rejection.to_string())]]);
+            let success = if dialect == "translated" {
+                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1}})
+            } else {
+                json!({"id":"image-ok","output":[],"content":[]})
+            };
+            let backup = MockUpstream::start(vec![vec![http_json(200, &success.to_string())]]);
+            let key = key_file("automatic-image-routing", "sk-fixture-secret");
+            let data_dir = key.with_extension("data");
+            let upstream = |mock: &MockUpstream| {
+                json!({
+                    "provider": if dialect == "anthropic-native" { "anthropic" } else { "openai-compatible" },
+                    "api_dialect": dialect,
+                    "base_url": mock.base_url(),
+                    "auth":{"slot":"provider_api_key","file":key},
+                    "models":[{"model":"image-model","tool":true,"vision_state":"unknown","context_window":128_000}]
+                })
+            };
+            let mut config = json!({
+                "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":data_dir,"metrics":true},
+                "plugins":{"dir":plugins_dir(),"agents":["agent-openai","agent-anthropic","agent-openai-responses"],
+                    "providers":{"openai-compatible":"provider-openai-compatible-v2","anthropic":"provider-anthropic-v2"}},
+                "upstreams":{"image_primary":upstream(&primary),"image_backup":upstream(&backup)},
+                "router":{"version":1,"pools":{"main":[{"upstream":"image_primary","model":"image-model"},{"upstream":"image_backup","model":"image-model"}]},"default_pool":"main"}
+            });
+            if free_primary {
+                config["upstreams"]["image_primary"]["access_tier"] = json!("free");
+            }
+            if first_status == 400 {
+                config["router"]["pools"] = json!({
+                    "main":[{"upstream":"image_primary","model":"image-model"}],
+                    "backup":[{"upstream":"image_backup","model":"image-model"}]
+                });
+                config["router"]["recovery"] = json!({"policy":"ordered","pools":["backup"]});
+            }
+            let config: ClientConfig = serde_json::from_value(config).unwrap();
+            let proxy = spawn_proxy(&config);
+            let catalog: Value =
+                serde_json::from_str(&proxy.gateway.models_for(None).unwrap()).unwrap();
+            assert_eq!(
+                catalog["data"][0]["capabilities"]["image_input"], true,
+                "Unknown must permit attachments"
+            );
+            let image = "data:image/png;base64,cGl4ZWxz";
+            let (path, request, field) = match dialect {
+                "anthropic-native" => (
+                    "/v1/messages",
+                    json!({"model":"auto","max_tokens":64,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"cGl4ZWxz"}}]}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}),
+                    "messages",
+                ),
+                "responses-native" => (
+                    "/v1/responses",
+                    json!({"model":"auto","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":image}]}],"tools":[{"type":"web_search"}]}),
+                    "input",
+                ),
+                _ => (
+                    "/v1/chat/completions",
+                    json!({"model":"auto","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":image}}]}]}),
+                    "messages",
+                ),
+            };
+            for _ in 0..2 {
+                let (status, body) = post_scoped(&proxy, path, &request, &proxy.virtual_key, false);
+                if should_fallback {
+                    assert_eq!(status, 200, "{dialect} first_status={first_status}: {body}");
+                } else {
+                    assert!((400..500).contains(&status), "{dialect}: {body}");
+                }
+                assert!(!body.contains("token_station_private_image_unsupported"));
+            }
+            assert_eq!(
+                primary.hits(),
+                if should_fallback || free_primary {
+                    1
+                } else {
+                    2
+                },
+                "channel evidence must affect the next request"
+            );
+            assert_eq!(backup.hits(), if should_fallback { 2 } else { 0 });
+            for seen in primary.seen().into_iter().chain(backup.seen()) {
+                assert_eq!(
+                    seen.body[field], request[field],
+                    "every attempt must retain the original image"
+                );
+            }
+            assert_eq!(
+                config.upstreams["image_primary"].models[0].vision_state(),
+                token_station_protocol::CapabilityState::Unknown
+            );
+            proxy.control.stop_accepting();
+            settle();
+            drop(proxy);
+            std::fs::remove_file(key).ok();
+            std::fs::remove_dir_all(data_dir).ok();
+        }
+    }
 }

@@ -170,7 +170,7 @@ fn forbid_attempt_fallback(mut error: ErrorEnvelope) -> ErrorEnvelope {
 }
 
 fn attempt_fallback_allowed(error: &ErrorEnvelope) -> bool {
-    error.code.is_retriable_elsewhere()
+    (error.code.is_retriable_elsewhere() || is_image_channel_refusal(error))
         && !matches!(
             error.extensions.get(NO_ATTEMPT_FALLBACK_EXTENSION),
             Some(serde_json::Value::Bool(true))
@@ -179,6 +179,21 @@ fn attempt_fallback_allowed(error: &ErrorEnvelope) -> bool {
 
 pub(super) fn sanitize_attempt_error_for_render(error: &mut ErrorEnvelope) {
     error.extensions.remove(NO_ATTEMPT_FALLBACK_EXTENSION);
+    error.extensions.remove(IMAGE_UNSUPPORTED_EXTENSION);
+}
+
+fn is_image_channel_refusal(error: &ErrorEnvelope) -> bool {
+    error.extensions.get(IMAGE_UNSUPPORTED_EXTENSION) == Some(&Value::Bool(true))
+}
+
+fn completed_image_json_response(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|body| {
+        body.is_object()
+            && body.get("error").is_none_or(Value::is_null)
+            && body
+                .get("status")
+                .is_none_or(|status| status == "completed")
+    })
 }
 
 /// Returns the routing decision and erases its host-private carrier.
@@ -319,6 +334,71 @@ pub(super) struct RawUpstreamError {
     pub(super) body: String,
 }
 
+fn rank_image_targets(
+    router: &Router,
+    mut decision: Decision,
+    candidates: &[Candidate],
+    free_upstreams: &BTreeSet<String>,
+) -> Result<Decision, NoRoute> {
+    let mut targets = std::iter::once(&decision.chosen)
+        .chain(&decision.fallbacks)
+        .filter_map(|target| {
+            candidates
+                .iter()
+                .find(|candidate| &candidate.target == target)
+        })
+        .filter(|candidate| candidate.capability.allows_image_attempt())
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|candidate| {
+        let pool_rank = if router.routing_mode() == RoutingMode::Tiered
+            && !matches!(
+                decision.decided_by,
+                token_station_router_core::DecidedBy::ExactModel { .. }
+            )
+            && router
+                .config()
+                .pools
+                .get(&decision.pool)
+                .is_some_and(|members| !members.contains(&candidate.target))
+        {
+            match &router.config().recovery {
+                token_station_router_core::RecoveryPolicy::Ordered { pools } => pools
+                    .iter()
+                    .position(|pool| router.config().pools[pool].contains(&candidate.target))
+                    .map_or(usize::MAX, |index| index + 1),
+                token_station_router_core::RecoveryPolicy::Strict => 0,
+            }
+        } else {
+            0
+        };
+        let health = if router.routing_mode() == RoutingMode::Tiered {
+            candidate.health
+        } else {
+            token_station_router_core::Health::Healthy
+        };
+        (
+            pool_rank,
+            health,
+            !candidate.capability.vision_state().is_supported(),
+        )
+    });
+    let Some((chosen, fallbacks)) = targets.split_first() else {
+        return Err(NoRoute::Unsatisfiable {
+            pool: decision.pool,
+            reason: UnmetRequirement::Vision,
+        });
+    };
+    decision.chosen = chosen.target.clone();
+    decision.fallbacks = fallbacks
+        .iter()
+        .map(|candidate| candidate.target.clone())
+        .collect();
+    if router.routing_mode() == RoutingMode::Tiered {
+        retain_free_fallbacks(&mut decision, free_upstreams);
+    }
+    Ok(decision)
+}
+
 impl Gateway {
     /// Quota-first preamble: whether quota mode is on (as `Some(now_ms)` with a
     /// single wall-clock read) and the conversation's affinity key. The key
@@ -345,7 +425,7 @@ impl Gateway {
         candidates: &[Candidate],
         session: &str,
     ) -> Result<Decision, NoRoute> {
-        let mut decision = match router.routing_mode() {
+        let route = |candidates: &[Candidate]| match router.routing_mode() {
             RoutingMode::Tiered => router.route(request, hints, candidates),
             RoutingMode::QuotaFirst => {
                 let last = self
@@ -356,21 +436,56 @@ impl Gateway {
                     .cloned();
                 router.route_quota_first(request, candidates, last.as_ref())
             }
-        }?;
-        if request.tools.is_empty()
-            && !matches!(
-                request.response_format,
-                Some(token_station_protocol::ResponseFormat::JsonSchema { .. })
-            )
-        {
+        };
+        let has_images =
+            token_station_router_core::RequestFeatures::extract(request, hints).has_images;
+        if !has_images {
+            let mut decision = route(candidates)?;
+            if router.routing_mode() == RoutingMode::Tiered {
+                retain_free_fallbacks(&mut decision, &self.free_upstreams);
+            }
+            decision.features.estimated_input_tokens = estimated_input_with_schemas(request, hints);
             return Ok(decision);
         }
-        let estimated_input_tokens = estimated_input_with_schemas(request, hints);
-        // The frozen router accepts requests, not independent context estimates.
-        // Keep its tier, quota, exact-model, and soft-overflow decisions unchanged.
-        // Schema-aware route selection remains deferred until that API can evolve.
-        decision.features.estimated_input_tokens = estimated_input_tokens;
-        Ok(decision)
+
+        // Admission projection for the frozen router. This copy never becomes
+        // capability evidence. Only a completed provider attempt can learn support.
+        let mut admitted = candidates.to_vec();
+        for candidate in &mut admitted {
+            if candidate.capability.vision_state() == CapabilityState::Unknown {
+                candidate.capability.vision_state = Some(CapabilityState::Declared);
+            }
+        }
+        let mut decision = match route(&admitted) {
+            Ok(decision) => decision,
+            Err(NoRoute::Unsatisfiable {
+                pool,
+                reason: UnmetRequirement::Vision,
+            }) if router.routing_mode() == RoutingMode::Tiered
+                && matches!(
+                    router.config().recovery,
+                    token_station_router_core::RecoveryPolicy::Ordered { .. }
+                )
+                && !(router.config().honor_exact_model && request.model != "auto") =>
+            {
+                // Let the existing router enumerate its authorized backups while
+                // retaining the original pool's identity for the free-provider guard.
+                if let Some(members) = router.config().pools.get(&pool) {
+                    for candidate in &mut admitted {
+                        if members.contains(&candidate.target) {
+                            candidate.capability.vision_state = Some(CapabilityState::Declared);
+                        }
+                    }
+                }
+                route(&admitted)?
+            }
+            Err(error) => return Err(error),
+        };
+        if router.routing_mode() == RoutingMode::Tiered {
+            retain_free_fallbacks(&mut decision, &self.free_upstreams);
+        }
+        decision.features.estimated_input_tokens = estimated_input_with_schemas(request, hints);
+        rank_image_targets(router, decision, candidates, &self.free_upstreams)
     }
 
     /// The shared back half of one routed exchange, identical for every
@@ -507,6 +622,26 @@ impl Gateway {
             let attempt_clock = Instant::now();
             let mut upstream_http_status = None;
             let mut provider_call_engine = ProviderCallOutcome::default();
+            let mut output_started = false;
+            let mut valid_image_response = true;
+            let mut responses_tap = (decision.features.has_images
+                && matches!(
+                    payload,
+                    AttemptPayload::ResponsesNative { stream: true, .. }
+                ))
+            .then(super::responses_native::ResponsesSseUsageTap::default);
+            let mut attempt_emit = |reply| {
+                output_started = true;
+                if let (Some(tap), Reply::Chunk(chunk)) = (&mut responses_tap, &reply) {
+                    tap.observe(chunk);
+                }
+                if decision.features.has_images
+                    && let Reply::BeginJson(ref reply) = reply
+                {
+                    valid_image_response = completed_image_json_response(&reply.body);
+                }
+                emit(reply)
+            };
             let result = self.try_upstream(
                 ctx,
                 budget.per_attempt_timeout,
@@ -514,23 +649,66 @@ impl Gateway {
                 payload,
                 inbound_tools,
                 target,
-                emit,
+                &mut attempt_emit,
                 record,
                 &mut upstream_http_status,
                 &mut provider_call_engine,
             );
-            let result = result.map_err(|error| {
-                let has_images = match payload {
-                    AttemptPayload::Canonical(request) => request_contains_images(request),
-                    AttemptPayload::AnthropicNative { body, .. }
-                    | AttemptPayload::ResponsesNative { body, .. } => raw_contains_images(body),
+            if let Some(tap) = &mut responses_tap {
+                tap.finish();
+                valid_image_response &= tap.completed_successfully();
+            }
+            let result = result
+                .map_err(|error| {
+                    if decision.features.has_images && is_unsupported_media_error(&error) {
+                        let mut refusal = upstream_image_error();
+                        if !attempt_fallback_allowed(&error)
+                            && error.extensions.contains_key(NO_ATTEMPT_FALLBACK_EXTENSION)
+                        {
+                            refusal = forbid_attempt_fallback(refusal);
+                        }
+                        refusal
+                    } else {
+                        error
+                    }
+                })
+                .map_err(|error| {
+                    if output_started {
+                        forbid_attempt_fallback(error)
+                    } else {
+                        error
+                    }
+                });
+            if decision.features.has_images && !ctx.is_cancelled() {
+                let observation = match &result {
+                    Err(error) if is_image_channel_refusal(error) => {
+                        Some(CapabilityState::Unsupported)
+                    }
+                    Ok(StreamOutcome::Complete)
+                        if valid_image_response
+                            && upstream_http_status
+                                .is_some_and(|status| (200..300).contains(&status)) =>
+                    {
+                        Some(CapabilityState::Declared)
+                    }
+                    _ => None,
                 };
-                if has_images && is_unsupported_media_error(&error) {
-                    upstream_image_error()
-                } else {
-                    error
+                if let Some(state) = observation {
+                    let originally_unknown = self.catalog.iter().any(|(known, capability)| {
+                        known == target && capability.vision_state() == CapabilityState::Unknown
+                    });
+                    let mut observations = self
+                        .image_observations
+                        .lock()
+                        .expect("image observations lock");
+                    if state == CapabilityState::Unsupported || originally_unknown {
+                        let entry = observations.entry(target.clone()).or_insert(state);
+                        if *entry != CapabilityState::Unsupported {
+                            *entry = state;
+                        }
+                    }
                 }
-            });
+            }
             let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
             let attempt = attempt_receipt_for_result(
                 target,
@@ -554,7 +732,7 @@ impl Gateway {
                     }
                     let fallback_allowed = take_attempt_fallback_policy(&mut error);
                     self.observe(&target.upstream, &target.model, Err(&error));
-                    let retriable = fallback_allowed && error.code.is_retriable_elsewhere();
+                    let retriable = fallback_allowed;
                     eprintln!("upstream {target} failed ({:?})", error.code);
                     if !retriable {
                         last_error = Some(error);
@@ -934,6 +1112,7 @@ mod cancelled_settlement_tests {
             local_upstreams: BTreeSet::new(),
             free_upstreams: BTreeSet::new(),
             catalog: Vec::new(),
+            image_observations: std::sync::Mutex::new(BTreeMap::new()),
             health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
                 eject_after: 3,
                 cooldown: Duration::from_secs(1),
@@ -1011,6 +1190,76 @@ mod cancelled_settlement_tests {
         assert_eq!(snapshots[0].windows[0].used, 300);
         assert_eq!(snapshots[1].windows[0].used, 300);
         assert_eq!(quota.last_account("conversation"), Some(&b));
+    }
+
+    #[test]
+    fn image_admission_preserves_modes_exact_models_and_original_evidence() {
+        let gateway = gateway();
+        let mut message = Message::text(token_station_protocol::Role::User, "describe");
+        message.content = Some(Content::Parts(vec![ContentPart::ImageUrl {
+            image_url: token_station_protocol::ImageUrl {
+                url: "data:image/png;base64,cGl4ZWxz".into(),
+                detail: None,
+            },
+        }]));
+        for mode in ["tiered", "quota_first"] {
+            for exact in [false, true] {
+                let request =
+                    ChatRequest::new(if exact { "shared" } else { "auto" }, vec![message.clone()]);
+                let targets =
+                    json!([{"upstream":"a","model":"shared"},{"upstream":"b","model":"shared"}]);
+                let pool_targets = if exact {
+                    json!([targets[0]])
+                } else {
+                    targets.clone()
+                };
+                let router = Router::new(
+                    serde_json::from_value(json!({
+                        "version":1,"pools":{"shared":pool_targets,"backup":[targets[1]]},"default_pool":"shared",
+                        "recovery":{"policy":"ordered","pools":["backup"]},
+                        "routing_mode":mode,"quota_accounts":targets,"honor_exact_model":exact,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                let mut candidates = ["a", "b"]
+                    .iter()
+                    .map(|name| {
+                        Candidate::new(
+                            UpstreamModel::new(UpstreamRef::new(*name).unwrap(), "shared"),
+                            ModelCapability {
+                                vision_state: Some(CapabilityState::Unknown),
+                                context_window: 128_000,
+                                ..ModelCapability::default()
+                            },
+                            token_station_router_core::Health::Healthy,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let first = gateway
+                    .route_with_mode(&router, &request, &[], &candidates, "")
+                    .unwrap();
+                assert_eq!(first.chosen, candidates[0].target);
+                assert_eq!(
+                    candidates[0].capability.vision_state(),
+                    CapabilityState::Unknown
+                );
+                candidates[1].capability.vision_state = Some(CapabilityState::Declared);
+                let preferred = gateway
+                    .route_with_mode(&router, &request, &[], &candidates, "")
+                    .unwrap();
+                assert_eq!(preferred.chosen, candidates[1].target);
+                assert_eq!(preferred.fallbacks, vec![candidates[0].target.clone()]);
+                candidates[0].capability.vision_state = Some(CapabilityState::Unsupported);
+                assert!(
+                    gateway
+                        .route_with_mode(&router, &request, &[], &candidates, "")
+                        .unwrap()
+                        .fallbacks
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[test]
@@ -1414,6 +1663,38 @@ mod request_receipt_tests {
 
 #[cfg(test)]
 mod south_stream_fallback_policy_tests {
+    #[test]
+    fn only_completed_json_responses_establish_image_acceptance() {
+        for status in [
+            "queued",
+            "in_progress",
+            "failed",
+            "incomplete",
+            "cancelled",
+            "completed",
+        ] {
+            let body = serde_json::json!({"status":status,"error":null}).to_string();
+            assert_eq!(
+                super::completed_image_json_response(&body),
+                status == "completed"
+            );
+        }
+        assert!(!super::completed_image_json_response(
+            r#"{"error":{"message":"failed"}}"#
+        ));
+        assert!(!super::completed_image_json_response("invalid JSON"));
+    }
+
+    #[test]
+    fn image_refusal_retry_marker_is_private_and_respects_terminal_guards() {
+        let mut error = super::upstream_image_error();
+        assert!(super::take_attempt_fallback_policy(&mut error));
+        assert!(error.extensions.is_empty());
+        let mut terminal = super::forbid_attempt_fallback(super::upstream_image_error());
+        assert!(!super::take_attempt_fallback_policy(&mut terminal));
+        assert!(terminal.extensions.is_empty());
+    }
+
     use super::{
         CancellationDispositionV1, buffered_transport_timeout, forbid_attempt_fallback,
         map_south_stream_failure_for_attempt, sanitize_attempt_error_for_render,

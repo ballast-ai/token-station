@@ -375,20 +375,26 @@ fn replace_canonical_documents(request: &mut ChatRequest) -> DocumentFallbackSta
     stats
 }
 
+const IMAGE_UNSUPPORTED_EXTENSION: &str = "token_station_private_image_unsupported";
+
 fn image_route_error() -> ErrorEnvelope {
     ErrorEnvelope::new(
         ErrorCode::Capability,
         400,
-        "No configured route supports image input, or vision support is unknown. Select a verified image-capable channel. No text-only substitute was sent.",
+        "The current route cannot process images. Open Token Station to select another channel. The image was not removed.",
     )
 }
 
 fn upstream_image_error() -> ErrorEnvelope {
-    ErrorEnvelope::new(
+    let mut error = ErrorEnvelope::new(
         ErrorCode::Capability,
         400,
-        "The selected Provider channel rejected image input. Select another image-capable channel. The image was not removed or retried as text.",
-    )
+        "The current channel rejected image input. No available fallback completed the request. Open Token Station to select another channel.",
+    );
+    error
+        .extensions
+        .insert(IMAGE_UNSUPPORTED_EXTENSION.to_owned(), Value::Bool(true));
+    error
 }
 
 fn request_contains_images(request: &ChatRequest) -> bool {
@@ -445,6 +451,12 @@ fn route_error(no_route: &NoRoute) -> ErrorEnvelope {
 }
 
 fn is_unsupported_media_error(error: &ErrorEnvelope) -> bool {
+    if matches!(
+        error.code,
+        ErrorCode::ContentPolicy | ErrorCode::Auth | ErrorCode::PaymentRequired
+    ) {
+        return false;
+    }
     if !matches!(error.http_status, 400 | 415 | 422 | 501) {
         return false;
     }
@@ -464,6 +476,10 @@ fn is_unsupported_media_error(error: &ErrorEnvelope) -> bool {
         "image url",
         "image_url",
         "image resolution",
+        "content policy",
+        "content_policy",
+        "safety",
+        "moderation",
     ]
     .iter()
     .any(|hint| message.contains(hint))
@@ -1392,7 +1408,7 @@ fn catalog_model_document(
         "object": "model",
         "owned_by": owner,
     });
-    let image_input = capability.vision_state().is_supported();
+    let image_input = capability.allows_image_attempt();
     document["capabilities"] = json!({
         "image_input": image_input,
         "input_modalities": if image_input { json!(["text", "image"]) } else { json!(["text"]) },
@@ -1537,7 +1553,7 @@ fn scoped_models_document(
         });
         merged.vision = capabilities
             .iter()
-            .all(|capability| capability.vision_state().is_supported());
+            .any(|capability| capability.allows_image_attempt());
         merged.vision_state = Some(if merged.vision {
             CapabilityState::Declared
         } else {
@@ -1675,6 +1691,9 @@ pub struct Gateway {
     /// What each upstream serves; health is applied per request from the
     /// tracker, because it changes and this does not.
     catalog: Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
+    /// Per-channel transport evidence for this configuration and credential generation.
+    /// Gateway replacement discards it. No request content is retained.
+    image_observations: std::sync::Mutex<BTreeMap<UpstreamModel, CapabilityState>>,
     health: std::sync::Mutex<HealthTracker>,
     /// Quota-first accounting: per-account consumption, in-flight leases, and
     /// conversation affinity. Consulted only in quota-first mode; kept warm in
@@ -2206,6 +2225,7 @@ impl Gateway {
             local_upstreams,
             free_upstreams,
             catalog,
+            image_observations: std::sync::Mutex::new(BTreeMap::new()),
             health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
                 eject_after: config.health.eject_after,
                 cooldown: Duration::from_millis(config.health.cooldown_ms),
@@ -2266,7 +2286,19 @@ impl Gateway {
                     .and_then(|routers| routers.fallback.as_deref())
             })
             .or(self.home_router.as_deref())?;
-        Some(scoped_models_document(&self.catalog, router, &self.pricing))
+        let observations = self.image_observations.lock().ok()?;
+        let catalog = self
+            .catalog
+            .iter()
+            .map(|(target, capability)| {
+                let mut capability = capability.clone();
+                if let Some(state) = observations.get(target) {
+                    capability.vision_state = Some(*state);
+                }
+                (target.clone(), capability)
+            })
+            .collect::<Vec<_>>();
+        Some(scoped_models_document(&catalog, router, &self.pricing))
     }
 
     /// Upper bound for blocking request workers. The async server acquires a
@@ -3106,6 +3138,17 @@ impl Gateway {
                 })
                 .collect()
         };
+        {
+            let observations = self
+                .image_observations
+                .lock()
+                .expect("image observations lock");
+            for candidate in &mut candidates {
+                if let Some(state) = observations.get(&candidate.target) {
+                    candidate.capability.vision_state = Some(*state);
+                }
+            }
+        }
         // Quota state is host-measured and attached only in quota-first mode, so
         // the tiered path is unchanged and pays nothing for it.
         if let Some(now_ms) = quota_now_ms {
@@ -3809,15 +3852,9 @@ impl Gateway {
         let (quota_now_ms, session) = Self::quota_preamble(router, || quota_session_key(&request));
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let mut decision = self
+        let decision = self
             .route_with_mode(router, &request, &hints, &candidates, &session)
             .map_err(|error| route_error(&error))?;
-        // Free-provider fallback filtering is a tiered-mode feature. Direct has
-        // no fallbacks; quota fallbacks are ranked accounts and must not be
-        // pruned by it.
-        if router.routing_mode() == RoutingMode::Tiered {
-            retain_free_fallbacks(&mut decision, &self.free_upstreams);
-        }
         eprintln!(
             "route -> {} ({:?}), {} fallback(s)",
             decision.chosen,
@@ -4682,6 +4719,15 @@ mod unsupported_media_tests {
             429,
             "image input unsupported"
         )));
+        assert!(!is_unsupported_media_error(&ErrorEnvelope::new(
+            ErrorCode::ContentPolicy,
+            400,
+            "Image input unsupported by content policy"
+        )));
+        assert!(!super::native_rejects_image(
+            400,
+            r#"{"error":{"message":"Image input unsupported by content policy"}}"#
+        ));
     }
 
     #[test]

@@ -622,7 +622,7 @@ fn agent_model_metadata_for_router(
     let mut output = None;
     let mut max_input = None;
     let mut uses_compatibility_limits = false;
-    let mut vision = true;
+    let mut vision = false;
     let mut tools = true;
     let mut reasoning = true;
     let mut costs = Vec::new();
@@ -677,7 +677,7 @@ fn agent_model_metadata_for_router(
         max_input = Some(max_input.map_or(candidate_max_input, |current: u32| {
             current.min(candidate_max_input)
         }));
-        vision &= capability.vision_state().is_supported();
+        vision |= capability.allows_image_attempt();
         tools &= capability.tool_state().is_supported();
         reasoning &= capability.supported_parameters.contains("reasoning_effort");
 
@@ -3230,12 +3230,33 @@ mod tests {
         draft["upstreams"]["provider_b"]["models"][0]["vision"] = json!(false);
         draft["upstreams"]["provider_b"]["models"][0]["tool"] = json!(false);
         draft["upstreams"]["provider_b"]["models"][0]["supported_parameters"] = json!([]);
-        let mixed: token_station_cli::config::ClientConfig = serde_json::from_value(draft).unwrap();
+        let mixed: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
         let mixed = agent_model_metadata(&mixed, "opencode").unwrap().unwrap();
         assert_eq!(mixed.cost, None);
-        assert!(!mixed.vision);
+        assert!(
+            mixed.vision,
+            "one reachable channel permits image attachments"
+        );
         assert!(!mixed.tools);
         assert!(!mixed.reasoning);
+
+        draft["upstreams"]["provider_a"]["models"][0]["vision_state"] = json!("unknown");
+        let unknown = serde_json::from_value(draft.clone()).unwrap();
+        assert!(
+            agent_model_metadata(&unknown, "opencode")
+                .unwrap()
+                .unwrap()
+                .vision
+        );
+        draft["upstreams"]["provider_a"]["models"][0]["vision_state"] = json!("unsupported");
+        let unsupported = serde_json::from_value(draft).unwrap();
+        assert!(
+            !agent_model_metadata(&unsupported, "opencode")
+                .unwrap()
+                .unwrap()
+                .vision
+        );
     }
 
     #[test]
