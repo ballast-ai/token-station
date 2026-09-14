@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 use ring::hmac;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
@@ -1090,6 +1090,27 @@ fn validate_force_forget_reconnect(
 }
 
 impl AgentCommandState {
+    pub(crate) fn start_snapshot_maintenance(app: AppHandle) {
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let handle = app.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let Some(state) = handle.try_state::<AgentCommandState>() else {
+                        return Ok(());
+                    };
+                    state.snapshots.prune_expired(state.clock.now_ms())
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!("Snapshot maintenance failed: {error}"),
+                    Err(error) => eprintln!("Snapshot maintenance task failed: {error}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
+
     pub fn new(paths: AgentIntegrationPaths) -> Result<Self, String> {
         // Store the snapshot master key in a private local 0600 file instead of
         // the OS keychain. Development re-signing invalidated keychain entries and
