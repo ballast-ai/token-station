@@ -1084,6 +1084,12 @@ export default function AgentRoutePage({
             <ol>
               <li>{copy("Show the target file and field-level changes.", "展示目标文件与字段级改动。", "展示目標檔案與欄位級變更。", "対象ファイルとフィールド単位の変更を表示します。")}</li>
               <li>{copy("Create an encrypted local snapshot immediately before writing.", "写入前立即创建本机加密快照。", "寫入前立即建立本機加密快照。", "書き込み直前にローカル暗号化スナップショットを作成します。")}</li>
+              <li>{copy(
+                "Keep history for up to 7 days, with at most 5 backups per configuration. Keep the initial snapshot while its Agent is managed. Clean up on startup and every minute while running.",
+                "历史备份最多保留 7 天，每个配置最多 5 份。接管期间保留恢复原配置所需的初始快照。应用启动时及运行期间每分钟清理。",
+                "歷史備份最多保留 7 天，每個設定最多 5 份。接管期間保留恢復原設定所需的初始快照。應用程式啟動時及執行期間每分鐘清理。",
+                "履歴は最大 7 日間、設定ごとに最大 5 件保持します。管理中の Agent の初期スナップショットは保持します。起動時と実行中は毎分クリーンアップします。",
+              )}</li>
               <li>{copy("Check for later manual edits before restoring.", "恢复前检查接入后的手动修改。", "恢復前檢查連線後的手動修改。", "復元前に接続後の手動変更を確認します。")}</li>
             </ol>
           </details>

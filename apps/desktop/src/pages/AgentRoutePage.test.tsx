@@ -254,6 +254,7 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(await screen.findByText("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots")).toBeInTheDocument();
+    expect(screen.getByText(/历史备份最多保留 7 天/)).toBeInTheDocument();
     expect(screen.queryByText(/受管字段：/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "复制备份目录" })).toHaveAttribute("data-size", "icon-sm");
     const openButton = screen.getByRole("button", { name: "打开备份文件夹" });
