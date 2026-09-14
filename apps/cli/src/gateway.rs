@@ -486,35 +486,26 @@ fn is_unsupported_media_error(error: &ErrorEnvelope) -> bool {
     {
         return false;
     }
-    if message.contains("only support text") || message.contains("only supports text") {
-        return true;
-    }
-    let mentions_media = [
-        "image",
-        "vision",
-        "multimodal",
-        "multi-modal",
-        "modality",
-        "modalities",
-        "media",
-        "attachment",
-    ]
-    .iter()
-    .any(|hint| message.contains(hint));
-    let rejects_media = [
-        "unsupported",
-        "not supported",
-        "not yet supported",
-        "does not support",
-        "doesn't support",
-        "do not support",
-        "don't support",
-        "text only",
-        "text-only",
-    ]
-    .iter()
-    .any(|hint| message.contains(hint));
-    mentions_media && rejects_media
+    // A negative observation affects later requests, including valid images.
+    // Accept complete capability statements, not conditional or format errors.
+    let statement = message.trim();
+    let statement = statement
+        .strip_prefix("kiro:")
+        .unwrap_or(statement)
+        .trim()
+        .trim_end_matches(['.', '!']);
+    matches!(
+        statement,
+        "this model does not support image attachments"
+            | "this model does not support images"
+            | "this model does not support image input"
+            | "image input is not supported"
+            | "image input is not yet supported"
+            | "image input is not yet supported (text + tools only)"
+            | "image input unsupported"
+            | "this model only supports text"
+            | "this model is text-only"
+    )
 }
 
 fn native_rejects_image(status: u16, body: &str) -> bool {
@@ -4702,6 +4693,12 @@ mod unsupported_media_tests {
             "image decoder unavailable",
             "unsupported image format",
             "unsupported image MIME type",
+            "Unsupported image type: image/tiff",
+            "unsupported image source type",
+            "unsupported image content type",
+            "image input is not supported for tool calls",
+            "This model does not support image attachments of type image/tiff.",
+            "Image input unsupported by policy",
         ] {
             assert!(!is_unsupported_media_error(&ErrorEnvelope::new(
                 ErrorCode::InvalidRequest,
@@ -4728,6 +4725,26 @@ mod unsupported_media_tests {
             400,
             r#"{"error":{"message":"Image input unsupported by content policy"}}"#
         ));
+    }
+
+    #[test]
+    fn complete_channel_image_rejections_remain_recognized() {
+        use super::{ErrorCode, ErrorEnvelope, is_unsupported_media_error};
+        for message in [
+            "This model does not support image attachments.",
+            "kiro: image input is not yet supported (text + tools only)",
+            "This model does not support images.",
+            "Image input is not supported.",
+        ] {
+            assert!(
+                is_unsupported_media_error(&ErrorEnvelope::new(
+                    ErrorCode::InvalidRequest,
+                    400,
+                    message
+                )),
+                "{message}"
+            );
+        }
     }
 
     #[test]

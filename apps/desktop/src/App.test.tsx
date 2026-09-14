@@ -1448,15 +1448,15 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
 
-    // Repeating the latest instance must not look like a replacement. A truly
-    // newer instance does refresh the cached Agent overlay exactly once.
+    // A final publication event revalidates metadata even for an observed
+    // instance. Polling the same instance must still avoid duplicate refreshes.
     act(() => emitServe?.(latestRuntime));
-    expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
-      .toHaveLength(0);
+    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
+      .toHaveLength(1));
     act(() => emitServe?.({ ...latestRuntime, instance_id: "runtime-replacement" }));
     await waitFor(() => expect(
       invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
-    ).toHaveLength(1));
+    ).toHaveLength(2));
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
@@ -3658,4 +3658,164 @@ it("command reply must not replace a newer serve event", async () => {
   expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
   await act(async () => { resolveStart(stateFixture({ serve: serveFixture({ phase: "starting" }) })); await startReply; });
   expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
+});
+
+
+describe("Direct route publication", () => {
+  const provider = {
+    name: "fixture", brand_id: "openai", provider: "openai",
+    base_url: "https://example.com/v1", has_auth: true,
+    models: ["text-model", "image-model"],
+    model_capabilities: [
+      { model: "text-model", vision: "unknown" as const, tool: "declared" as const, json_schema: "declared" as const },
+      { model: "image-model", vision: "verified" as const, tool: "declared" as const, json_schema: "declared" as const },
+    ],
+  };
+  const target = { upstream: "fixture", model: "text-model" };
+  const nextTarget = { upstream: "fixture", model: "image-model" };
+  const running = serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1 });
+
+  it("shows a metadata warning without claiming that the running revision was not applied", async () => {
+    const user = userEvent.setup();
+    const current = stateFixture({
+      providers: [provider], routing_mode: "direct", direct_target: target,
+      saved_revision: 1, draft_revision: 1,
+      serve: { ...running, error: "代理已启动，但模型元数据刷新失败：fixture metadata failure" },
+    });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return current;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+    await openRouting(user);
+    expect(document.querySelector(".direct-applied-target")).toHaveTextContent("应用异常");
+    expect(document.querySelector(".direct-applied-target")).not.toHaveTextContent("已保存尚未应用");
+    expect(within(screen.getByRole("region", { name: "简单路由配置" })).getByRole("alert")).toHaveTextContent("fixture metadata failure");
+  });
+
+  it.each([false, true])("waits for runtime publication after an image switch (failure: %s)", async (fails) => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_name, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const initial = stateFixture({ providers: [provider], routing_mode: "direct", direct_target: target, saved_revision: 1, draft_revision: 1, serve: running });
+    const pending = { ...initial, direct_target: nextTarget, saved_revision: 2, draft_revision: 2, serve: { ...running, phase: "starting" as const } };
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "set_direct_route") return pending;
+      if (command === "serve_start") return pending;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+    await openRouting(user);
+    await user.click(screen.getByRole("button", { name: "切换到看图模型 image-model" }));
+    expect(document.querySelector(".direct-applied-target")).toHaveTextContent("应用中");
+    expect(screen.queryByText(/已应用 image-model/)).toBeNull();
+    act(() => emitServe?.({ ...running, running_revision: fails ? 1 : 2, error: fails ? "已保存尚未应用：gateway_init: fixture failure" : null }));
+    await waitFor(() => expect(document.querySelector(".direct-applied-target")).toHaveTextContent(fails ? "已保存尚未应用" : "已应用"));
+    if (fails) {
+      expect(await screen.findByRole("alert")).toHaveTextContent("本地代理无法安全重启");
+      expect(screen.queryByText(/配置已应用/)).toBeNull();
+    } else {
+      expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用 · revision 2")).toBeInTheDocument();
+    }
+  });
+
+  it("reloads the global draft when saving the new route fails synchronously", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture({
+      providers: [provider], routing_mode: "direct", direct_target: target,
+      saved_revision: 1, draft_revision: 1, serve: running,
+    });
+    const draft = { ...initial, direct_target: nextTarget, draft_revision: 2, config_dirty: true };
+    let edited = false;
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return edited ? draft : initial;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "set_direct_route") { edited = true; return draft; }
+      if (command === "serve_start") throw new Error("fixture save failed");
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+    await openRouting(user);
+    await user.click(screen.getByRole("button", { name: "切换到看图模型 image-model" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "fixture 模型" })).toHaveTextContent("image-model"));
+    expect(document.querySelector(".direct-applied-target")).toHaveTextContent("有未保存更改");
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText(/fixture save failed/)).toBeInTheDocument();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_state")).toHaveLength(2);
+  });
+
+  it("reloads the Agent target after a post-publication metadata failure", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture({ providers: [provider], serve: running });
+    initial.agent_routes.codex = { ...emptyRoute, routing_mode: "direct", direct_target: target };
+    const changed = { ...initial, agent_routes: { ...initial.agent_routes, codex: { ...initial.agent_routes.codex, direct_target: nextTarget } } };
+    let published = false;
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return published ? changed : initial;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      if (command === "set_direct_route") return changed;
+      if (command === "restart_agent_route") {
+        published = true;
+        throw new Error("Agent 路由已应用，但模型元数据刷新失败：fixture failure");
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+    await openAgentRoute(user, "Codex");
+    await user.click(screen.getByRole("button", { name: "切换到看图模型 image-model" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "fixture 模型" })).toHaveTextContent("image-model"));
+    expect(document.querySelector(".direct-applied-target")).toHaveTextContent("已配置");
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText(/Agent 路由已应用，但模型元数据刷新失败/)).toBeInTheDocument();
+  });
+});
+
+
+it("revalidates Agent status when a final event follows an early same-instance poll", async () => {
+  const user = userEvent.setup();
+  let emitServe: ((serve: ServeView) => void) | undefined;
+  listenMock.mockImplementation(async (_name, handler) => {
+    emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+    return () => undefined;
+  });
+  const connected = structuredClone(scannedClaude);
+  connected.status = "CONNECTED";
+  connected.installations[0].managed = true;
+  connected.installations[0].connected = true;
+  connected.installations[0].compatibility.status = "CONNECTED";
+  const oldRuntime = serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, instance_id: "old" });
+  const nextRuntime = { ...oldRuntime, instance_id: "new" };
+  let runtime = oldRuntime;
+  let metadataReady = false;
+  let polls = 0;
+  mockInvokeImplementation(async (command) => {
+    if (command === "get_state") return stateFixture({ serve: oldRuntime });
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [connected];
+    if (command === "get_runtime_state") { polls += 1; return runtime; }
+    if (command === "get_cached_agent_views") return [metadataReady ? connected : scannedClaude];
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+  render(<App />);
+  await openAgents(user);
+  const agentButton = screen.getByRole("button", { name: "Claude Code" });
+  expect(agentButton).toHaveAttribute("title", "Claude Code · 已接入");
+  runtime = nextRuntime;
+  await waitFor(() => expect(agentButton).toHaveAttribute("title", "Claude Code · 可接入"), { timeout: 1600 });
+  const beforeRepeat = polls;
+  await waitFor(() => expect(polls).toBeGreaterThan(beforeRepeat), { timeout: 1600 });
+  expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views")).toHaveLength(1);
+  metadataReady = true;
+  act(() => emitServe?.(nextRuntime));
+  await waitFor(() => expect(agentButton).toHaveAttribute("title", "Claude Code · 已接入"));
+  expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views")).toHaveLength(2);
+  expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
 });

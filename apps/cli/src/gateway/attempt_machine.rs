@@ -186,6 +186,13 @@ fn is_image_channel_refusal(error: &ErrorEnvelope) -> bool {
     error.extensions.get(IMAGE_UNSUPPORTED_EXTENSION) == Some(&Value::Bool(true))
 }
 
+fn image_request_guidance(mut error: ErrorEnvelope) -> ErrorEnvelope {
+    if error.code == ErrorCode::InvalidRequest && error.http_status == 400 {
+        "The model rejected this image request. Check the image format or switch to an image model in Token Station > Routing.".clone_into(&mut error.message);
+    }
+    error
+}
+
 fn completed_image_json_response(body: &str) -> bool {
     serde_json::from_str::<Value>(body).is_ok_and(|body| {
         body.is_object()
@@ -668,6 +675,8 @@ impl Gateway {
                             refusal = forbid_attempt_fallback(refusal);
                         }
                         refusal
+                    } else if decision.features.has_images {
+                        image_request_guidance(error)
                     } else {
                         error
                     }
@@ -1663,6 +1672,21 @@ mod request_receipt_tests {
 
 #[cfg(test)]
 mod south_stream_fallback_policy_tests {
+    #[test]
+    fn image_request_rejection_has_guidance_without_capability_learning_or_retry() {
+        let error = super::image_request_guidance(super::ErrorEnvelope::new(
+            super::ErrorCode::InvalidRequest,
+            400,
+            "the upstream refused the request as malformed",
+        ));
+        assert!(error.message.contains("Token Station > Routing"));
+        assert_eq!(error.code, super::ErrorCode::InvalidRequest);
+        assert!(!super::is_image_channel_refusal(&error));
+        assert!(!super::attempt_fallback_allowed(&error));
+        let auth = super::ErrorEnvelope::new(super::ErrorCode::Auth, 403, "credential rejected");
+        assert_eq!(super::image_request_guidance(auth.clone()), auth);
+    }
+
     #[test]
     fn only_completed_json_responses_establish_image_acceptance() {
         for status in [

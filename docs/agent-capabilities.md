@@ -25,7 +25,10 @@ A completed image request records transport acceptance for the running Gateway. 
 Restarting or replacing the Gateway clears these observations. Saved capability declarations remain unchanged.
 Image format errors, authentication failures, and rate limits do not establish that a channel lacks image support.
 
-A Direct route has only its selected channel. If that channel cannot process images, select another channel in Token Station.
+A Direct route uses one fixed model for both text and images. It does not switch models automatically.
+If images fail, open **Routing**. When the same channel has a model with verified image support, use **Switch to image model**.
+The button names the destination. Clicking it applies that model to text and images, at that model's pricing.
+A request format error does not prove that the selected model lacks image support. Check the image format if switching is unnecessary.
 
 Open a model's management panel and select **Verify vision** to test that exact offering.
 The check sends one synthetic image challenge through the configured transport. It does not send your images or conversations.
