@@ -512,6 +512,23 @@ fn native_rejects_image(status: u16, body: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return false;
     };
+    // A generic capability sentence must not override a structured policy,
+    // credential, quota, or malformed-input classification. Unknown classifiers
+    // also remain request failures rather than permanent channel evidence.
+    for object in [&value, &value["error"]] {
+        for field in ["code", "type"] {
+            if let Some(classification) = object.get(field).filter(|value| !value.is_null())
+                && !classification.as_str().is_some_and(|value| {
+                    matches!(
+                        value,
+                        "" | "invalid_request" | "invalid_request_error" | "error"
+                    )
+                })
+            {
+                return false;
+            }
+        }
+    }
     let Some(message) = value["error"]["message"]
         .as_str()
         .or_else(|| value["message"].as_str())
@@ -4725,6 +4742,49 @@ mod unsupported_media_tests {
             400,
             r#"{"error":{"message":"Image input unsupported by content policy"}}"#
         ));
+    }
+
+    #[test]
+    fn native_image_rejection_respects_structured_error_classification() {
+        for classification in [
+            "content_policy_violation",
+            "content_filter",
+            "authentication_error",
+            "invalid_api_key",
+            "permission_error",
+            "insufficient_quota",
+            "billing_error",
+            "rate_limit_error",
+            "invalid_image_format",
+            "invalid_image",
+            "unsupported_image_format",
+            "invalid_image_url",
+        ] {
+            for field in ["code", "type"] {
+                for nested in [false, true] {
+                    let mut error = json!({"message":"Image input unsupported"});
+                    error[field] = json!(classification);
+                    let body = if nested {
+                        json!({"error":error})
+                    } else {
+                        error
+                    };
+                    assert!(
+                        !super::native_rejects_image(400, &body.to_string()),
+                        "{classification} in {field}, nested={nested} must not establish channel evidence"
+                    );
+                }
+            }
+        }
+        for error in [
+            json!({"message":"Image input unsupported"}),
+            json!({"type":"invalid_request_error","code":null,"message":"Image input unsupported"}),
+        ] {
+            assert!(super::native_rejects_image(
+                400,
+                &json!({"error":error}).to_string()
+            ));
+        }
     }
 
     #[test]

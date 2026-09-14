@@ -1798,6 +1798,7 @@ mod schema_estimate_tests {
             local_upstreams: BTreeSet::new(),
             free_upstreams: BTreeSet::new(),
             catalog: Vec::new(),
+            image_observations: std::sync::Mutex::new(BTreeMap::new()),
             health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
                 eject_after: 3,
                 cooldown: Duration::from_secs(1),
