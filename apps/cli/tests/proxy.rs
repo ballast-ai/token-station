@@ -10781,6 +10781,140 @@ fn vision_review_native_image_strips_forged_private_fields_before_upstream() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Exercise delivery and cancellation through each real wire pipeline.
+fn completed_image_delivery_survives_late_cancellation_without_learning_cancelled_attempts() {
+    use token_station_cli::request_context::RequestContext;
+
+    for dialect in ["translated", "anthropic-native", "responses-native"] {
+        for delivery in [
+            "accepted",
+            "rejected",
+            "cancelled-before-request",
+            "incomplete",
+        ] {
+            if delivery == "incomplete" && dialect != "responses-native" {
+                continue;
+            }
+            let primary = MockUpstream::start(vec![vec![http_json(
+                429,
+                &json!({"error":{"message":"Rate limit exceeded"}}).to_string(),
+            )]]);
+            let success = if dialect == "translated" {
+                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1}})
+            } else {
+                json!({"id":"image-ok","status":if delivery == "incomplete" {"incomplete"} else {"completed"},"output":[],"content":[]})
+            };
+            let backup = MockUpstream::start(vec![vec![http_json(200, &success.to_string())]]);
+            let key = key_file("image-delivery-cancellation", "sk-fixture-secret");
+            let data_dir = key.with_extension("data");
+            let upstream = |mock: &MockUpstream| {
+                json!({
+                    "provider": if dialect == "anthropic-native" {"anthropic"} else {"openai-compatible"},
+                    "api_dialect":dialect,"base_url":mock.base_url(),
+                    "auth":{"slot":"provider_api_key","file":key},
+                    "models":[{"model":"image-model","tool":true,"vision_state":"unknown","context_window":128_000}]
+                })
+            };
+            let config: ClientConfig = serde_json::from_value(json!({
+                "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":data_dir,"metrics":false},
+                "plugins":{"dir":plugins_dir(),"agents":["agent-openai","agent-anthropic","agent-openai-responses"],
+                    "providers":{"openai-compatible":"provider-openai-compatible-v2","anthropic":"provider-anthropic-v2"}},
+                "upstreams":{"image_primary":upstream(&primary),"image_backup":upstream(&backup)},
+                "router":{"version":1,"pools":{"main":[{"upstream":"image_primary","model":"image-model"},{"upstream":"image_backup","model":"image-model"}]},"default_pool":"main"}
+            })).unwrap();
+            let proxy = spawn_proxy(&config);
+            let image = "data:image/png;base64,cGl4ZWxz";
+            let (path, request, field) = match dialect {
+                "anthropic-native" => (
+                    "/v1/messages",
+                    json!({"model":"auto","max_tokens":64,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"cGl4ZWxz"}}]}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}),
+                    "messages",
+                ),
+                "responses-native" => (
+                    "/v1/responses",
+                    json!({"model":"auto","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":image}]}],"tools":[{"type":"web_search"}]}),
+                    "input",
+                ),
+                _ => (
+                    "/v1/chat/completions",
+                    json!({"model":"auto","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":image}}]}]}),
+                    "messages",
+                ),
+            };
+            let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(5));
+            if delivery == "cancelled-before-request" {
+                ctx.cancel();
+            }
+            let mut first_status = None;
+            proxy.gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
+                "POST",
+                path,
+                &[],
+                &request.to_string().into_bytes(),
+                &mut |reply| {
+                    if let Reply::BeginJson(reply) = reply {
+                        first_status = Some(reply.status);
+                        // Mirrors worker_response dropping CancelOnDrop after accepting
+                        // a complete JSON reply, before the worker records evidence.
+                        ctx.cancel();
+                        return delivery != "rejected";
+                    }
+                    true
+                },
+            );
+            if delivery != "cancelled-before-request" {
+                assert_eq!(first_status, Some(200), "{dialect}/{delivery}");
+            }
+            let mut next_status = None;
+            proxy.gateway.chat(
+                "POST",
+                path,
+                &[],
+                &request.to_string().into_bytes(),
+                &mut |reply| {
+                    if let Reply::BeginJson(reply) = reply {
+                        next_status = Some(reply.status);
+                    }
+                    true
+                },
+            );
+            assert_eq!(next_status, Some(200), "{dialect}/{delivery}");
+            let expected_primary = if matches!(delivery, "accepted" | "cancelled-before-request") {
+                1
+            } else {
+                2
+            };
+            assert_eq!(
+                primary.hits(),
+                expected_primary,
+                "{dialect}/{delivery}: only accepted complete delivery establishes support"
+            );
+            assert_eq!(
+                backup.hits(),
+                if delivery == "cancelled-before-request" {
+                    1
+                } else {
+                    2
+                }
+            );
+            for seen in primary.seen().into_iter().chain(backup.seen()) {
+                assert_eq!(
+                    seen.body[field], request[field],
+                    "images must remain intact"
+                );
+            }
+            proxy.control.stop_accepting();
+            drop(proxy);
+            std::fs::remove_file(key).ok();
+            std::fs::remove_dir_all(data_dir).ok();
+        }
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One matrix checks the same channel lifecycle across all wire dialects.
 fn automatic_image_routing_learns_acceptance_and_rejection_without_removing_images() {
     for dialect in ["translated", "anthropic-native", "responses-native"] {

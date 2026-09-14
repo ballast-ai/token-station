@@ -645,9 +645,16 @@ impl Gateway {
                 if decision.features.has_images
                     && let Reply::BeginJson(ref reply) = reply
                 {
-                    valid_image_response = completed_image_json_response(&reply.body);
+                    valid_image_response &= completed_image_json_response(&reply.body);
                 }
-                emit(reply)
+                // Once a complete reply is accepted, the server may drop its
+                // cancellation guard before this worker records the observation.
+                // Snapshot cancellation before delivery, and retain a rejected
+                // send even on native paths that return Complete regardless.
+                valid_image_response &= !ctx.is_cancelled();
+                let accepted = emit(reply);
+                valid_image_response &= accepted;
+                accepted
             };
             let result = self.try_upstream(
                 ctx,
@@ -688,9 +695,9 @@ impl Gateway {
                         error
                     }
                 });
-            if decision.features.has_images && !ctx.is_cancelled() {
+            if decision.features.has_images {
                 let observation = match &result {
-                    Err(error) if is_image_channel_refusal(error) => {
+                    Err(error) if !ctx.is_cancelled() && is_image_channel_refusal(error) => {
                         Some(CapabilityState::Unsupported)
                     }
                     Ok(StreamOutcome::Complete)
