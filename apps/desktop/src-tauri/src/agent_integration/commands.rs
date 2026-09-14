@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 use ring::hmac;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
@@ -622,7 +622,7 @@ fn agent_model_metadata_for_router(
     let mut output = None;
     let mut max_input = None;
     let mut uses_compatibility_limits = false;
-    let mut vision = true;
+    let mut vision = false;
     let mut tools = true;
     let mut reasoning = true;
     let mut costs = Vec::new();
@@ -677,7 +677,7 @@ fn agent_model_metadata_for_router(
         max_input = Some(max_input.map_or(candidate_max_input, |current: u32| {
             current.min(candidate_max_input)
         }));
-        vision &= capability.vision_state().is_supported();
+        vision |= capability.allows_image_attempt();
         tools &= capability.tool_state().is_supported();
         reasoning &= capability.supported_parameters.contains("reasoning_effort");
 
@@ -1090,6 +1090,27 @@ fn validate_force_forget_reconnect(
 }
 
 impl AgentCommandState {
+    pub(crate) fn start_snapshot_maintenance(app: AppHandle) {
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let handle = app.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let Some(state) = handle.try_state::<AgentCommandState>() else {
+                        return Ok(());
+                    };
+                    state.snapshots.prune_expired(state.clock.now_ms())
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!("Snapshot maintenance failed: {error}"),
+                    Err(error) => eprintln!("Snapshot maintenance task failed: {error}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
+
     pub fn new(paths: AgentIntegrationPaths) -> Result<Self, String> {
         // Store the snapshot master key in a private local 0600 file instead of
         // the OS keychain. Development re-signing invalidated keychain entries and
@@ -3230,12 +3251,33 @@ mod tests {
         draft["upstreams"]["provider_b"]["models"][0]["vision"] = json!(false);
         draft["upstreams"]["provider_b"]["models"][0]["tool"] = json!(false);
         draft["upstreams"]["provider_b"]["models"][0]["supported_parameters"] = json!([]);
-        let mixed: token_station_cli::config::ClientConfig = serde_json::from_value(draft).unwrap();
+        let mixed: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
         let mixed = agent_model_metadata(&mixed, "opencode").unwrap().unwrap();
         assert_eq!(mixed.cost, None);
-        assert!(!mixed.vision);
+        assert!(
+            mixed.vision,
+            "one reachable channel permits image attachments"
+        );
         assert!(!mixed.tools);
         assert!(!mixed.reasoning);
+
+        draft["upstreams"]["provider_a"]["models"][0]["vision_state"] = json!("unknown");
+        let unknown = serde_json::from_value(draft.clone()).unwrap();
+        assert!(
+            agent_model_metadata(&unknown, "opencode")
+                .unwrap()
+                .unwrap()
+                .vision
+        );
+        draft["upstreams"]["provider_a"]["models"][0]["vision_state"] = json!("unsupported");
+        let unsupported = serde_json::from_value(draft).unwrap();
+        assert!(
+            !agent_model_metadata(&unsupported, "opencode")
+                .unwrap()
+                .unwrap()
+                .vision
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ describe("desktop in-app update", () => {
         desktopVersion="1.1.2"
         coreVersion="0.2.0"
         commitHash="8632371"
+        buildInfo={{ channel: "local", sourceState: "modified", builtAt: "2026-09-14T06:00:00.000Z" }}
         onOpenFirstRunGuide={onOpenFirstRunGuide}
       />,
     );
@@ -43,6 +44,9 @@ describe("desktop in-app update", () => {
     expect(screen.getByLabelText("Desktop 1.1.2")).toBeInTheDocument();
     expect(screen.getByLabelText("Core 0.2.0")).toBeInTheDocument();
     expect(screen.getByLabelText("Commit 8632371")).toBeInTheDocument();
+    expect(screen.getByText("本地构建")).toBeInTheDocument();
+    expect(screen.getByLabelText("构建信息")).toHaveTextContent("包含未提交修改");
+    expect(screen.getByText("2026-09-14T06:00:00.000Z")).toBeInTheDocument();
     expect(container.querySelector('[data-slot="card"]')).toBeInTheDocument();
     expect(container.querySelectorAll('[data-slot="badge"]')).toHaveLength(3);
     expect(container.querySelector('[data-slot="separator"]')).toBeInTheDocument();

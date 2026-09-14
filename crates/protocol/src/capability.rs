@@ -16,7 +16,7 @@ pub enum CapabilityState {
 }
 
 impl CapabilityState {
-    /// Only positive evidence routes traffic. Unknown fails closed.
+    /// Positive evidence of support. This does not decide attempt eligibility.
     #[must_use]
     pub const fn is_supported(self) -> bool {
         matches!(self, Self::Verified | Self::Declared)
@@ -27,7 +27,8 @@ impl CapabilityState {
 ///
 /// The router uses this to drop candidates that cannot serve a request: a
 /// request carrying tools must not be routed without positive evidence. Absent
-/// capabilities fail closed. The legacy bools remain in the v1 ABI; optional
+/// tool capabilities fail closed. Unknown vision permits an image attempt.
+/// The legacy bools remain in the v1 ABI; optional
 /// evidence fields add the four-state truth without breaking older plugins.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelCapability {
@@ -69,6 +70,13 @@ const fn is_zero(value: &u32) -> bool {
 }
 
 impl ModelCapability {
+    /// Image requests can establish support when the channel has no evidence.
+    /// An explicit negative declaration still prevents an attempt.
+    #[must_use]
+    pub fn allows_image_attempt(&self) -> bool {
+        self.vision_state() != CapabilityState::Unsupported
+    }
+
     #[must_use]
     pub fn tool_state(&self) -> CapabilityState {
         self.tool_state.unwrap_or(if self.tool {

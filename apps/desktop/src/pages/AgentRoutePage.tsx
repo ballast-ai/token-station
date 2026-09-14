@@ -258,6 +258,7 @@ function statusCopy(
   route: AgentRouteView,
   copy: LocalizedCopy,
   language: Language,
+  serveRunning: boolean,
 ) {
   const usesCursorDatabaseIntegration = metadata.agent_id === "cursor"
     && installation?.compatibility.reason_code === "CONNECTOR_BINDING_NOT_UNIQUE";
@@ -327,13 +328,26 @@ function statusCopy(
       }, language),
     };
   }
-  if (installation?.connection_issue) {
+  if (installation?.connection_issue
+    && (serveRunning || installation.connection_issue.code !== "agent_runtime_transition")) {
     return {
       tone: "danger",
       label: installation.connection_issue.code === "agent_runtime_transition"
         ? copy("Proxy transitioning", "代理切换中", "代理切換中", "プロキシの切り替え中")
         : copy("Route incomplete", "路由待完善", "路由待完善", "ルーティングが未完成"),
       detail: humanizeAppError(installation.connection_issue, language),
+    };
+  }
+  if (installation?.managed && !serveRunning) {
+    return {
+      tone: "idle",
+      label: copy("Managed · proxy not running", "已接管 · 代理未运行", "已接管 · 代理未執行", "管理中 · プロキシ停止中"),
+      detail: copy(
+        "The management record is retained. Start the proxy to check the connection again.",
+        "接管记录仍保留。启动代理后将重新检查连接。",
+        "接管記錄仍保留。啟動代理後將重新檢查連線。",
+        "管理記録は保持されています。プロキシを起動すると接続を再確認します。",
+      ),
     };
   }
   if (installation?.connected) {
@@ -494,7 +508,7 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const discoveredStatus = statusCopy(metadata, agent, installation, route, copy, language);
+  const discoveredStatus = statusCopy(metadata, agent, installation, route, copy, language, serveRunning);
   const status = metadata.agent_id === "cursor" && cursorStatus?.state === "connected"
     ? {
       tone: "success" as const,
@@ -527,6 +541,7 @@ export default function AgentRoutePage({
         || isExactMultiInstallSelection(agent, installation)),
   );
   const canOperate = managed ? Boolean(installation) : canConnect;
+  const needsProxyStart = Boolean(installation) && !managed && !serveRunning && metadata.agent_id !== "cursor";
   const connectionTarget = installation?.discovery.config_candidates[0]
     ?? metadata.connector_capabilities?.[0]?.config_path_template
     ?? copy("Resolved during connection", "接入时确定", "接入時確定", "接続時に解決");
@@ -604,13 +619,14 @@ export default function AgentRoutePage({
   };
 
   const previewConnection = async () => {
-    if (!installation || !canOperate || busy) return;
+    if (!installation || !canOperate || busy || applying) return;
+    if (metadata.agent_id !== "cursor" && !serveRunning) return;
     let planReady = false;
     onConnectInFlightChange?.(true);
     setBusy(true);
     try {
-      onStateChange(await ensureServeRunning());
       if (metadata.agent_id === "cursor") {
+        onStateChange(await ensureServeRunning());
         const next = await configureCursorProvider();
         setCursorStatus(next);
         showSuccess(
@@ -928,8 +944,10 @@ export default function AgentRoutePage({
             size="lg"
             type="button"
             data-onboarding-target={!managed ? "agent-connect" : undefined}
-            disabled={busy || !canOperate}
-            onClick={() => void (managed ? restoreOfficial() : previewConnection())}
+            disabled={busy || applying || !canOperate}
+            onClick={() => void (managed ? restoreOfficial() : needsProxyStart
+              ? runState(ensureServeRunning)
+              : previewConnection())}
             title={managed
               ? copy(
                 "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
@@ -941,6 +959,8 @@ export default function AgentRoutePage({
               ? copy("Working…", "处理中…", "處理中…", "処理中…")
               : managed
                 ? copy("Restore official configuration & disconnect", "恢复官方配置并断开", "恢復官方配置並斷開", "公式設定を復元し、接続を解除")
+                : needsProxyStart
+                  ? copy("Start proxy", "启动代理", "啟動代理", "プロキシを起動")
                 : cursorRepairRequired
                   ? copy("Reconnect & launch", "重新接入并启动", "重新連線並啟動", "再接続して起動")
                   : metadata.agent_id === "cursor"
@@ -1084,6 +1104,12 @@ export default function AgentRoutePage({
             <ol>
               <li>{copy("Show the target file and field-level changes.", "展示目标文件与字段级改动。", "展示目標檔案與欄位級變更。", "対象ファイルとフィールド単位の変更を表示します。")}</li>
               <li>{copy("Create an encrypted local snapshot immediately before writing.", "写入前立即创建本机加密快照。", "寫入前立即建立本機加密快照。", "書き込み直前にローカル暗号化スナップショットを作成します。")}</li>
+              <li>{copy(
+                "Keep history for up to 7 days, with at most 5 backups per configuration. Keep the initial snapshot while its Agent is managed. Clean up on startup and every minute while running.",
+                "历史备份最多保留 7 天，每个配置最多 5 份。接管期间保留恢复原配置所需的初始快照。应用启动时及运行期间每分钟清理。",
+                "歷史備份最多保留 7 天，每個設定最多 5 份。接管期間保留恢復原設定所需的初始快照。應用程式啟動時及執行期間每分鐘清理。",
+                "履歴は最大 7 日間、設定ごとに最大 5 件保持します。管理中の Agent の初期スナップショットは保持します。起動時と実行中は毎分クリーンアップします。",
+              )}</li>
               <li>{copy("Check for later manual edits before restoring.", "恢复前检查接入后的手动修改。", "恢復前檢查連線後的手動修改。", "復元前に接続後の手動変更を確認します。")}</li>
             </ol>
           </details>
@@ -1137,7 +1163,9 @@ export default function AgentRoutePage({
           <div className="agent-backup-assurance">
             <ShieldCheck aria-hidden="true" />
             <div>
-              <strong>{copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
+              <strong>{pendingPlan?.intent === "connect"
+                ? copy("Encrypted backup before writing", "写入前自动加密备份", "寫入前自動加密備份", "書き込み前に暗号化バックアップを作成")
+                : copy("Encrypted backup", "已加密备份", "已加密備份", "暗号化バックアップ")}</strong>
               <span>{pendingPlan?.intent === "restore"
                 ? copy("Only Token Station-owned fields change. Other fields stay as they are.", "只恢复 Token Station 受管字段，其他字段保持不变。", "只恢復 Token Station 受管欄位，其他欄位保持不變。", "Token Station 管理フィールドのみ復元し、他のフィールドは保持します。")
                 : pendingPlan?.intent === "review"
@@ -1368,9 +1396,7 @@ export default function AgentRoutePage({
           busy={busy}
           applying={applying}
           agent
-          onApply={(upstream, model) => {
-            void onApplyDirect(upstream, model);
-          }}
+          onApply={onApplyDirect}
         />
       ) : route.routing_mode === "quota_first" ? (
         <QuotaPriorityPanel

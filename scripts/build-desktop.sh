@@ -14,6 +14,8 @@ case "$mode" in
   *) usage ;;
 esac
 
+export TOKEN_STATION_BUILD_CHANNEL="$mode"
+
 target=""
 test_version=""
 unsigned_windows=false

@@ -56,10 +56,11 @@ fn responses_wire_usage(usage: &Value) -> Option<Usage> {
 }
 
 #[derive(Default)]
-struct ResponsesSseUsageTap {
+pub(super) struct ResponsesSseUsageTap {
     partial: String,
     usage: Option<Usage>,
     saw_terminal: bool,
+    successful: bool,
     abandoned: bool,
     terminal_response: Option<Value>,
 }
@@ -67,7 +68,7 @@ struct ResponsesSseUsageTap {
 impl ResponsesSseUsageTap {
     const MAX_LINE: usize = 256 * 1024;
 
-    fn observe(&mut self, chunk: &str) {
+    pub(super) fn observe(&mut self, chunk: &str) {
         if self.abandoned {
             return;
         }
@@ -95,6 +96,11 @@ impl ResponsesSseUsageTap {
             Some("response.completed" | "response.failed" | "response.incomplete")
         ) {
             self.saw_terminal = true;
+            self.successful = event["type"] == "response.completed"
+                && event["response"].get("error").is_none_or(Value::is_null)
+                && event["response"]
+                    .get("status")
+                    .is_none_or(|status| status == "completed");
         }
         if line.len() <= Self::MAX_LINE
             && event.get("type").and_then(Value::as_str) == Some("response.completed")
@@ -111,7 +117,11 @@ impl ResponsesSseUsageTap {
         }
     }
 
-    fn finish(&mut self) {
+    pub(super) fn completed_successfully(&self) -> bool {
+        self.saw_terminal && self.successful && !self.abandoned
+    }
+
+    pub(super) fn finish(&mut self) {
         if self.abandoned || self.partial.is_empty() {
             return;
         }
@@ -711,6 +721,27 @@ impl Gateway {
 #[cfg(test)]
 mod tests {
     use super::{ResponsesSseUsageTap, responses_wire_usage};
+
+    #[test]
+    fn failed_and_incomplete_streams_do_not_establish_image_acceptance() {
+        for terminal in [
+            "response.failed",
+            "response.incomplete",
+            "response.completed",
+        ] {
+            let mut tap = ResponsesSseUsageTap::default();
+            let event = format!("data: {{\"type\":\"{terminal}\"}}\n\n");
+            for chunk in event.as_bytes().chunks(3) {
+                tap.observe(std::str::from_utf8(chunk).unwrap());
+            }
+            tap.finish();
+            assert!(tap.saw_terminal);
+            assert_eq!(
+                tap.completed_successfully(),
+                terminal == "response.completed"
+            );
+        }
+    }
 
     #[test]
     fn responses_usage_reads_cache_and_reasoning_details() {

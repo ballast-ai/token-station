@@ -14,11 +14,21 @@ The connection page labels this state as independent routing.
 To remove that override, open the Agent's routing page and select **Restore global routing**.
 This operation does not change other Agents' routes.
 
-## Image input
+## Image requests
 
-Codex Auto accepts text and image input. Reopen an existing Codex session once to reload its model catalog.
-The selected model offering must support images. Token Station returns an explicit error when the configured route cannot accept an image.
-It never retries an image request with the image removed. Free Tiered routes do not fall back to paid channels.
+Send the image from your Agent. Manual vision verification is optional.
+Token Station prefers supported channels among eligible candidates. It can also try channels with unknown image support.
+If a channel explicitly rejects images, Token Station tries an authorized fallback with the original image.
+It never removes the image to retry as text. It does not add providers to your route.
+
+A completed image request records transport acceptance for the running Gateway. This does not certify visual understanding.
+Restarting or replacing the Gateway clears these observations. Saved capability declarations remain unchanged.
+Image format errors, authentication failures, and rate limits do not establish that a channel lacks image support.
+
+A Direct route uses one fixed model for both text and images. It does not switch models automatically.
+If images fail, open **Routing**. When the same channel has a model with verified image support, use **Switch to image model**.
+The button names the destination. Clicking it applies that model to text and images, at that model's pricing.
+A request format error does not prove that the selected model lacks image support. Check the image format if switching is unnecessary.
 
 Open a model's management panel and select **Verify vision** to test that exact offering.
 The check sends one synthetic image challenge through the configured transport. It does not send your images or conversations.

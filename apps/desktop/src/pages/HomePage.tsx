@@ -22,6 +22,8 @@ interface HomePageProps {
   profiles: string[];
   routingMode: RoutingMode;
   directTarget?: DirectRouteTarget | null;
+  directApplicationStatus?: string;
+  directApplicationError?: string | null;
   onSetRoutingMode: (mode: RoutingMode) => void;
   onApplyDirect: (upstream: string, model: string) => boolean | void | Promise<boolean | void>;
   onDirectDraftChange?: (hasUnappliedTarget: boolean) => void;
@@ -55,6 +57,8 @@ export default function HomePage({
   profiles,
   routingMode,
   directTarget,
+  directApplicationStatus,
+  directApplicationError,
   onSetRoutingMode,
   onApplyDirect,
   onDirectDraftChange,
@@ -123,6 +127,8 @@ export default function HomePage({
         <DirectRoutePanel
           providers={providers}
           target={directTarget}
+          applicationStatus={directApplicationStatus}
+          applicationError={directApplicationError}
           busy={busy}
           applying={applying}
           onApply={onApplyDirect}

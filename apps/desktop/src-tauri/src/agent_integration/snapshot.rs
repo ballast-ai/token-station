@@ -20,6 +20,7 @@ const INDEX_FILE: &str = "index.json";
 const MAX_INDEX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES: u64 = 20 * 1024 * 1024;
 const RETAIN_UNPINNED_PER_TARGET: usize = 5;
+const SNAPSHOT_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 pub trait MasterKeyStore: Send + Sync {
     fn load_or_create(&self, allow_create: bool) -> Result<Zeroizing<[u8; 32]>, String>;
@@ -320,7 +321,7 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
             sync_parent(&self.root).ok();
             return Err(error);
         }
-        let maintenance_warning = self.prune(&mut index).err();
+        let maintenance_warning = self.prune(&mut index, Some(request.created_at_ms)).err();
         Ok(SnapshotCreateResult {
             record,
             maintenance_warning,
@@ -454,12 +455,24 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
         if pinned {
             Ok(())
         } else {
-            self.prune(&mut index)
+            self.prune(&mut index, None)
         }
     }
 }
 
 impl<K: MasterKeyStore> FileSnapshotStore<K> {
+    pub fn prune_expired(&self, now_ms: u64) -> Result<(), String> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| "Snapshot storage lock is poisoned".to_string())?;
+        if !self.root.exists() {
+            return Ok(());
+        }
+        let mut index = self.read_index()?;
+        self.prune(&mut index, Some(now_ms))
+    }
+
     pub fn organize_legacy_layout(&self) -> Result<LegacySnapshotMigrationReport, String> {
         let _guard = self
             .lock
@@ -637,8 +650,18 @@ impl<K: MasterKeyStore> FileSnapshotStore<K> {
         }
     }
 
-    fn prune(&self, index: &mut SnapshotIndex) -> Result<(), String> {
-        let mut remove = BTreeSet::new();
+    fn prune(&self, index: &mut SnapshotIndex, now_ms: Option<u64>) -> Result<(), String> {
+        let mut remove: BTreeSet<_> = index
+            .records
+            .iter()
+            .filter(|record| {
+                !record.pinned
+                    && now_ms.is_some_and(|now| {
+                        now.saturating_sub(record.created_at_ms) >= SNAPSHOT_RETENTION_MS
+                    })
+            })
+            .map(|record| record.snapshot_id.clone())
+            .collect();
         let groups: BTreeSet<_> = index
             .records
             .iter()
@@ -676,28 +699,51 @@ impl<K: MasterKeyStore> FileSnapshotStore<K> {
             .filter(|record| remove.contains(&record.snapshot_id))
             .cloned()
             .collect::<Vec<_>>();
-        let original = index.records.clone();
-        index
-            .records
-            .retain(|record| !remove.contains(&record.snapshot_id));
-        if let Err(error) = self.write_index(index) {
-            index.records = original;
-            return Err(format!("快照保留策略索引提交失败：{error}"));
-        }
         let mut failed = false;
+        let mut deleted = BTreeSet::new();
         for record in removed_records {
-            if std::fs::remove_file(self.resolve_envelope_path(&record)).is_err() {
+            // Keep failed deletions indexed so the next maintenance pass can retry.
+            // Delete both supported paths when migration left duplicate envelopes.
+            if self.remove_envelopes(&record).is_err() {
                 failed = true;
+            } else {
+                deleted.insert(record.snapshot_id);
             }
         }
-        if sync_parent(&self.root).is_err() {
-            failed = true;
+        if !deleted.is_empty() {
+            index
+                .records
+                .retain(|record| !deleted.contains(&record.snapshot_id));
+            self.write_index(index)?;
         }
         if failed {
-            Err("快照索引已提交，但旧快照文件清理未完全成功".to_string())
+            Err("Snapshot cleanup failed. Failed entries will be retried.".to_string())
         } else {
             Ok(())
         }
+    }
+
+    fn remove_envelopes(&self, record: &SnapshotRecord) -> Result<(), String> {
+        for path in [
+            self.current_envelope_path(record),
+            self.legacy_envelope_path(&record.snapshot_id),
+        ] {
+            // Validate directories before deleting. A symlink must not redirect cleanup.
+            for directory in [&self.root, path.parent().expect("snapshot parent")] {
+                match std::fs::symlink_metadata(directory) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err("Snapshot directory is not a regular directory".to_string()),
+                }
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => sync_parent(path.parent().expect("snapshot parent"))
+                    .map_err(|_| "Failed to sync the snapshot directory".to_string())?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("Failed to delete the snapshot file".to_string()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1080,6 +1126,100 @@ mod tests {
             .expect("missing key with existing blob is rejected");
         assert!(error.contains("missing"));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn expiration_removes_only_due_backups_and_keeps_active_baselines() {
+        let root = scratch("expiration");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"fixture".to_vec(), Some(0o600), None);
+        let future = store
+            .create(request(&source, SNAPSHOT_RETENTION_MS + 2, false))
+            .unwrap()
+            .record;
+        let pinned = store.create(request(&source, 0, true)).unwrap().record;
+        let expired = store.create(request(&source, 1, false)).unwrap().record;
+        let recent = store.create(request(&source, 2, false)).unwrap().record;
+        // Exercise the supported root-level legacy layout as well.
+        std::fs::rename(
+            store.current_envelope_path(&expired),
+            store.legacy_envelope_path(&expired.snapshot_id),
+        )
+        .unwrap();
+        let unrelated = root.join("notes.txt");
+        std::fs::write(&unrelated, "keep").unwrap();
+
+        store.prune_expired(SNAPSHOT_RETENTION_MS).unwrap();
+        assert!(store.load(&expired.snapshot_id).is_ok());
+        store.prune_expired(SNAPSHOT_RETENTION_MS + 1).unwrap();
+        assert!(store.load(&expired.snapshot_id).is_err());
+        assert!(!store.legacy_envelope_path(&expired.snapshot_id).exists());
+        for record in [&pinned, &recent, &future] {
+            assert!(store.load(&record.snapshot_id).is_ok());
+        }
+        assert!(unrelated.exists());
+        store.prune_expired(SNAPSHOT_RETENTION_MS + 1).unwrap();
+        store.set_pinned(&pinned.snapshot_id, false).unwrap();
+        store.prune_expired(SNAPSHOT_RETENTION_MS + 1).unwrap();
+        assert!(store.load(&pinned.snapshot_id).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn creating_a_backup_expires_old_history_across_agents() {
+        let root = scratch("create-expiration");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"fixture".to_vec(), Some(0o600), None);
+        let old = store.create(request(&source, 1, false)).unwrap().record;
+        let mut new_request = request(&source, SNAPSHOT_RETENTION_MS + 1, false);
+        new_request.agent_id = "codex";
+        let new = store.create(new_request).unwrap();
+        assert!(new.maintenance_warning.is_none());
+        assert!(!store.current_envelope_path(&old).exists());
+        assert!(store.load(&new.record.snapshot_id).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expiration_does_not_follow_agent_directory_symlinks() {
+        let root = scratch("expiration-symlink");
+        let outside = scratch("expiration-outside");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"fixture".to_vec(), Some(0o600), None);
+        let record = store.create(request(&source, 1, false)).unwrap().record;
+        std::fs::rename(root.join("claude-code"), &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("claude-code")).unwrap();
+        assert!(store.prune_expired(SNAPSHOT_RETENTION_MS + 1).is_err());
+        assert!(outside
+            .join(store.current_envelope_path(&record).file_name().unwrap())
+            .exists());
+        assert_eq!(store.list_agent("claude-code").unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn expiration_retries_failed_deletions_and_processes_other_agents() {
+        let root = scratch("expiration-retry");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"fixture".to_vec(), Some(0o600), None);
+        let blocked = store.create(request(&source, 1, false)).unwrap().record;
+        let mut other_request = request(&source, 1, false);
+        other_request.agent_id = "codex";
+        let other = store.create(other_request).unwrap().record;
+        let blocked_path = store.current_envelope_path(&blocked);
+        std::fs::remove_file(&blocked_path).unwrap();
+        std::fs::create_dir(&blocked_path).unwrap();
+
+        assert!(store.prune_expired(SNAPSHOT_RETENTION_MS + 1).is_err());
+        assert_eq!(store.list_agent("claude-code").unwrap().len(), 1);
+        assert!(store.list_agent("codex").unwrap().is_empty());
+        assert!(!store.current_envelope_path(&other).exists());
+        std::fs::remove_dir(&blocked_path).unwrap();
+        store.prune_expired(SNAPSHOT_RETENTION_MS + 1).unwrap();
+        assert!(store.list_agent("claude-code").unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

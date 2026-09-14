@@ -7877,6 +7877,10 @@ pre.block {
   text-align: center;
 }
 
+.direct-image-switch { flex-wrap: wrap; margin-bottom: 16px; }
+.direct-image-switch .sub { flex: 1 1 260px; margin: 0; }
+.direct-image-switch button { white-space: normal; overflow-wrap: anywhere; height: auto; }
+
 .direct-route-actions {
   justify-content: flex-end;
   gap: 14px;

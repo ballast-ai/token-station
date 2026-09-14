@@ -399,6 +399,7 @@ pub fn run() {
             })?;
             app.manage(paths);
             app.manage(agent_commands);
+            AgentCommandState::start_snapshot_maintenance(app.handle().clone());
             app.manage(CursorTunnelState::default());
             desktop_shell::complete_install(desktop_shell::install(
                 app.handle(),
