@@ -14,6 +14,19 @@ The connection page labels this state as independent routing.
 To remove that override, open the Agent's routing page and select **Restore global routing**.
 This operation does not change other Agents' routes.
 
+## Image requests
+
+Send the image from your Agent. Manual vision verification is optional.
+Token Station prefers supported channels among eligible candidates. It can also try channels with unknown image support.
+If a channel explicitly rejects images, Token Station tries an authorized fallback with the original image.
+It never removes the image to retry as text. It does not add providers to your route.
+
+A completed image request records transport acceptance for the running Gateway. This does not certify visual understanding.
+Restarting or replacing the Gateway clears these observations. Saved capability declarations remain unchanged.
+Image format errors, authentication failures, and rate limits do not establish that a channel lacks image support.
+
+A Direct route has only its selected channel. If that channel cannot process images, select another channel in Token Station.
+
 ## Search requirements
 
 | Agent | Requirement or limit |

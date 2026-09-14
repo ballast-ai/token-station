@@ -292,112 +292,6 @@ impl MockUpstream {
         )
     }
 
-    fn start_response_then_hanging(
-        first_response: Vec<u8>,
-        response_prefix: &'static [u8],
-    ) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
-        let port = listener.local_addr().expect("bound").port();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let hits = Arc::new(AtomicUsize::new(0));
-        let response_started = Arc::new(AtomicBool::new(false));
-        let peer_closed = Arc::new(AtomicBool::new(false));
-        let hanging_stop = Arc::new(AtomicBool::new(false));
-        let record = Arc::clone(&seen);
-        let counter = Arc::clone(&hits);
-        let started = Arc::clone(&response_started);
-        let closed = Arc::clone(&peer_closed);
-        let stop = Arc::clone(&hanging_stop);
-        let hanging_worker = std::thread::spawn(move || {
-            listener
-                .set_nonblocking(true)
-                .expect("retry listener becomes cancellable");
-            let accept_before_stop = |label: &str, deadline: Option<Instant>| {
-                loop {
-                    if stop.load(Ordering::SeqCst) {
-                        return None;
-                    }
-                    match listener.accept() {
-                        Ok((stream, _)) => return Some(stream),
-                        Err(error)
-                            if error.kind() == std::io::ErrorKind::WouldBlock
-                                && deadline.is_none_or(|deadline| Instant::now() < deadline) =>
-                        {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            panic!("{label} did not arrive before the mock deadline");
-                        }
-                        Err(error) => panic!("{label} accept failed: {error}"),
-                    }
-                }
-            };
-            let Some(mut first) = accept_before_stop("first upstream request", None) else {
-                return;
-            };
-            record
-                .lock()
-                .expect("recorder")
-                .push(read_http_request(&mut first));
-            counter.fetch_add(1, Ordering::SeqCst);
-            first
-                .write_all(&first_response)
-                .expect("first response writes");
-            first.flush().expect("first response flushes");
-            drop(first);
-
-            let Some(mut second) = accept_before_stop(
-                "retry upstream request",
-                Some(Instant::now() + Duration::from_secs(5)),
-            ) else {
-                return;
-            };
-            record
-                .lock()
-                .expect("recorder")
-                .push(read_http_request(&mut second));
-            counter.fetch_add(1, Ordering::SeqCst);
-            second
-                .write_all(response_prefix)
-                .expect("retry response prefix writes");
-            second.flush().expect("retry response prefix flushes");
-            started.store(true, Ordering::SeqCst);
-            second
-                .set_read_timeout(Some(Duration::from_millis(100)))
-                .expect("read timeout sets");
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut byte = [0_u8; 1];
-            while !stop.load(Ordering::SeqCst) && Instant::now() < deadline {
-                match second.read(&mut byte) {
-                    Ok(0) => {
-                        closed.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) => {}
-                    Err(_) => {
-                        closed.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                }
-            }
-            let _ = second.shutdown(Shutdown::Both);
-        });
-        Self {
-            port,
-            seen,
-            hits,
-            response_started,
-            peer_closed,
-            hanging_stop: Some(hanging_stop),
-            hanging_worker: Some(hanging_worker),
-        }
-    }
-
     fn start_hanging_with_prefix(response_prefix: &'static [u8]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
         let port = listener.local_addr().expect("bound").port();
@@ -7341,18 +7235,13 @@ fn south_stream_deadline_hides_host_private_policy_from_the_agent_renderer() {
 
 #[test]
 #[cfg(feature = "builtin-plugins")]
-fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
+#[allow(clippy::too_many_lines)] // The fixture owns both provider lifetimes and the deadline assertion.
+fn south_image_fallback_keeps_the_image_and_hides_deadline_policy() {
     let refusal = json!({
         "error": { "message": "This model does not support image attachments." }
     });
-    let mock = MockUpstream::start_response_then_hanging(
-        http_json(501, &refusal.to_string()),
-        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
-    );
-    let fallback = ConnectionTrap::start(Some(http_json(
-        500,
-        &json!({ "error": { "message": "fallback must not run" } }).to_string(),
-    )));
+    let mock = MockUpstream::start(vec![vec![http_json(501, &refusal.to_string())]]);
+    let fallback = MockUpstream::start_hanging();
     let (config_path, data_dir) =
         write_south_probe_config(&mock, "sk-south-media-retry-marker", true);
     token_station_cli::secrets::store_set(
@@ -7369,7 +7258,8 @@ fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
     config["upstreams"]["mock_primary"]["models"][0]["vision"] = json!(true);
     config["upstreams"]["mock_fallback"] = json!({
         "provider": "openai-compatible",
-        "base_url": fallback.http_url(),
+        "base_url": fallback.base_url(),
+        "provider_call": "south_v1_buffered_streaming",
         "auth": { "slot": "provider_api_key", "store": true },
         "models": [ {
             "model": "gpt-5.5",
@@ -7446,11 +7336,15 @@ fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
     assert_eq!(reply.status, 504, "unexpected error: {}", reply.body);
     let rendered: Value = serde_json::from_str(&reply.body).expect("marker renderer returns JSON");
     assert_eq!(rendered["saw_private_marker"], json!(false));
-    assert_eq!(mock.hits(), 2, "the media retry reaches its deadline");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the refusing channel is never retried as text"
+    );
     assert_eq!(
         fallback.hits(),
-        0,
-        "the retry deadline forbids a fallback upstream attempt"
+        1,
+        "the authorized image fallback reaches its deadline"
     );
     let seen = mock.seen();
     assert_eq!(
@@ -7458,13 +7352,12 @@ fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
         "image_url"
     );
     assert_eq!(
-        message_text(&seen[1].body["messages"][0]["content"]),
-        "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
+        fallback.seen()[0].body["messages"],
+        seen[0].body["messages"]
     );
     drop(gateway);
     drop(runtime);
-    mock.finish_hanging();
-    fallback.finish();
+    fallback.finish_hanging();
     std::fs::remove_dir_all(data_dir).ok();
 }
 
@@ -10176,6 +10069,127 @@ fn native_image_requests_keep_bytes_and_report_explicit_channel_rejection() {
                 assert!(body.contains("image"), "{body}");
             }
             std::fs::remove_file(key).ok();
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One matrix checks the same channel lifecycle across all wire dialects.
+fn automatic_image_routing_learns_acceptance_and_rejection_without_removing_images() {
+    for dialect in ["translated", "anthropic-native", "responses-native"] {
+        // A rate limit leaves the first channel Unknown. The successful backup
+        // becomes preferred on the next request. An explicit refusal also skips
+        // the first channel next time, without changing any saved declaration.
+        for (first_status, free_primary) in [
+            (400, false),
+            (429, false),
+            (422, false),
+            (401, false),
+            (400, true),
+        ] {
+            let rejection = json!({"error":{"message": match first_status {
+                400 => "This model does not support image attachments.",
+                429 => "Rate limit exceeded",
+                422 => "Unsupported image format: invalid base64",
+                _ => "Authentication required",
+            }}});
+            let should_fallback = matches!(first_status, 400 | 429) && !free_primary;
+            let primary =
+                MockUpstream::start(vec![vec![http_json(first_status, &rejection.to_string())]]);
+            let success = if dialect == "translated" {
+                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1}})
+            } else {
+                json!({"id":"image-ok","output":[],"content":[]})
+            };
+            let backup = MockUpstream::start(vec![vec![http_json(200, &success.to_string())]]);
+            let key = key_file("automatic-image-routing", "sk-fixture-secret");
+            let data_dir = key.with_extension("data");
+            let upstream = |mock: &MockUpstream| {
+                json!({
+                    "provider": if dialect == "anthropic-native" { "anthropic" } else { "openai-compatible" },
+                    "api_dialect": dialect,
+                    "base_url": mock.base_url(),
+                    "auth":{"slot":"provider_api_key","file":key},
+                    "models":[{"model":"image-model","tool":true,"vision_state":"unknown","context_window":128_000}]
+                })
+            };
+            let mut config = json!({
+                "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":data_dir,"metrics":true},
+                "plugins":{"dir":plugins_dir(),"agents":["agent-openai","agent-anthropic","agent-openai-responses"],
+                    "providers":{"openai-compatible":"provider-openai-compatible-v2","anthropic":"provider-anthropic-v2"}},
+                "upstreams":{"image_primary":upstream(&primary),"image_backup":upstream(&backup)},
+                "router":{"version":1,"pools":{"main":[{"upstream":"image_primary","model":"image-model"},{"upstream":"image_backup","model":"image-model"}]},"default_pool":"main"}
+            });
+            if free_primary {
+                config["upstreams"]["image_primary"]["access_tier"] = json!("free");
+            }
+            if first_status == 400 {
+                config["router"]["pools"] = json!({
+                    "main":[{"upstream":"image_primary","model":"image-model"}],
+                    "backup":[{"upstream":"image_backup","model":"image-model"}]
+                });
+                config["router"]["recovery"] = json!({"policy":"ordered","pools":["backup"]});
+            }
+            let config: ClientConfig = serde_json::from_value(config).unwrap();
+            let proxy = spawn_proxy(&config);
+            let catalog: Value =
+                serde_json::from_str(&proxy.gateway.models_for(None).unwrap()).unwrap();
+            assert_eq!(
+                catalog["data"][0]["capabilities"]["image_input"], true,
+                "Unknown must permit attachments"
+            );
+            let image = "data:image/png;base64,cGl4ZWxz";
+            let (path, request, field) = match dialect {
+                "anthropic-native" => (
+                    "/v1/messages",
+                    json!({"model":"auto","max_tokens":64,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"cGl4ZWxz"}}]}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}),
+                    "messages",
+                ),
+                "responses-native" => (
+                    "/v1/responses",
+                    json!({"model":"auto","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":image}]}],"tools":[{"type":"web_search"}]}),
+                    "input",
+                ),
+                _ => (
+                    "/v1/chat/completions",
+                    json!({"model":"auto","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":image}}]}]}),
+                    "messages",
+                ),
+            };
+            for _ in 0..2 {
+                let (status, body) = post_scoped(&proxy, path, &request, &proxy.virtual_key, false);
+                if should_fallback {
+                    assert_eq!(status, 200, "{dialect} first_status={first_status}: {body}");
+                } else {
+                    assert!((400..500).contains(&status), "{dialect}: {body}");
+                }
+                assert!(!body.contains("token_station_private_image_unsupported"));
+            }
+            assert_eq!(
+                primary.hits(),
+                if should_fallback || free_primary {
+                    1
+                } else {
+                    2
+                },
+                "channel evidence must affect the next request"
+            );
+            assert_eq!(backup.hits(), if should_fallback { 2 } else { 0 });
+            for seen in primary.seen().into_iter().chain(backup.seen()) {
+                assert_eq!(
+                    seen.body[field], request[field],
+                    "every attempt must retain the original image"
+                );
+            }
+            assert_eq!(
+                config.upstreams["image_primary"].models[0].vision_state(),
+                token_station_protocol::CapabilityState::Unknown
+            );
+            proxy.control.stop_accepting();
+            settle();
+            drop(proxy);
+            std::fs::remove_file(key).ok();
+            std::fs::remove_dir_all(data_dir).ok();
         }
     }
 }
