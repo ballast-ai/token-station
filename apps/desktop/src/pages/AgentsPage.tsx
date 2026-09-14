@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Bot, ChevronDown, Layers3, RefreshCw } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
+import { hasManagedInstallation } from "../agentManagement";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
 import { Badge } from "../components/ui/badge";
@@ -23,20 +24,23 @@ interface AgentsPageProps {
   children: ReactNode;
 }
 
-function statusCopy(status: AgentView["status"] | undefined, copy: LocalizedCopy) {
+function statusCopy(agent: AgentView | undefined, copy: LocalizedCopy) {
+  const status = agent?.status;
   if (status === "CONNECTED") return copy("Connected", "已接入", "已接入", "接続済み");
-  if (status === "DETECTED_VERIFIED") return copy("Ready", "可接入", "可接入", "接続可能");
   if (status === "DETECTED_BLOCKED" || status === "INSTALLED_BROKEN") return copy("Attention", "需处理", "注意", "注意");
+  if (hasManagedInstallation(agent)) return copy("Managed", "已接管", "已接管", "管理中");
+  if (status === "DETECTED_VERIFIED") return copy("Ready", "可接入", "可接入", "接続可能");
   if (status === "MULTIPLE_INSTALLATIONS") return copy("Choose", "待选择", "選擇", "選択");
   if (status === "DETECTED_UNKNOWN") return copy("Detected", "已检测", "已檢測", "検出済み");
   return copy("Offline", "未检测", "未檢測", "検出されていません");
 }
 
-function navStatusCopy(status: AgentView["status"] | undefined, copy: LocalizedCopy) {
-  if (status === "CONNECTED") return copy("Managed", "接管中", "接管中", "管理中");
-  if (status === "DETECTED_VERIFIED") return copy("Ready", "就绪", "就緒", "準備完了");
+function navStatusCopy(agent: AgentView | undefined, copy: LocalizedCopy) {
+  const status = agent?.status;
   if (status === "MULTIPLE_INSTALLATIONS") return copy("Multiple", "多实例", "多例項", "複数インスタンス");
   if (status === "DETECTED_BLOCKED" || status === "INSTALLED_BROKEN") return copy("Issue", "异常", "異常", "異常");
+  if (hasManagedInstallation(agent)) return copy("Managed", "接管中", "接管中", "管理中");
+  if (status === "DETECTED_VERIFIED") return copy("Ready", "就绪", "就緒", "準備完了");
   if (status === "DETECTED_UNKNOWN") return copy("Found", "已发现", "已發現", "検出済み");
   return copy("Not found", "未检测", "未檢測", "検出されていません");
 }
@@ -175,7 +179,7 @@ export default function AgentsPage({
                                 variant="ghost"
                                 type="button"
                                 aria-label={metadata.display_name}
-                                title={`${metadata.display_name} · ${statusCopy(agent?.status, copy)}`}
+                                title={`${metadata.display_name} · ${statusCopy(agent, copy)}`}
                                 aria-current={selected ? "page" : undefined}
                                 onClick={() => onOpenAgent(metadata.agent_id)}
                               >
@@ -183,7 +187,7 @@ export default function AgentsPage({
                                   <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={28} />
                                 </span>
                                 <span className="agent-master-copy"><strong>{metadata.display_name}</strong></span>
-                                <Badge variant={agent?.status === "CONNECTED" ? "secondary" : "ghost"}>{navStatusCopy(agent?.status, copy)}</Badge>
+                                <Badge variant={agent?.status === "CONNECTED" ? "secondary" : "ghost"}>{navStatusCopy(agent, copy)}</Badge>
                               </Button>
                             );
                           })}
@@ -209,7 +213,7 @@ export default function AgentsPage({
                       variant="ghost"
                       type="button"
                       aria-label={metadata.display_name}
-                      title={`${metadata.display_name} · ${statusCopy(agent?.status, copy)}`}
+                      title={`${metadata.display_name} · ${statusCopy(agent, copy)}`}
                       data-onboarding-target="agent-entry"
                       aria-current={selected ? "page" : undefined}
                       onClick={() => onOpenAgent(metadata.agent_id)}
@@ -218,7 +222,7 @@ export default function AgentsPage({
                         <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={28} />
                       </span>
                       <span className="agent-master-copy"><strong>{metadata.display_name}</strong></span>
-                      <Badge variant={agent?.status === "CONNECTED" ? "secondary" : "ghost"}>{navStatusCopy(agent?.status, copy)}</Badge>
+                      <Badge variant={agent?.status === "CONNECTED" ? "secondary" : "ghost"}>{navStatusCopy(agent, copy)}</Badge>
                     </Button>
                   );
                 })}

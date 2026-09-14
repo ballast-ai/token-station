@@ -1121,6 +1121,67 @@ it("shows an already-complete summary without asking for repeated setup", async 
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
 });
 
+it("refreshes managed Agent overlays when stopping reaches stopped", async () => {
+  const ready = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, instance_id: "ready" }) });
+  const managed = structuredClone(scannedClaude);
+  managed.status = "CONNECTED";
+  managed.installations[0].managed = true;
+  managed.installations[0].connected = true;
+  let cacheReads = 0;
+  mockInvokeImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [managed];
+    if (command === "get_cached_agent_views") { cacheReads += 1; return [managed]; }
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+  render(<App />);
+  await screen.findByRole("heading", { name: "主页" });
+  await waitFor(() => expect(listenMock).toHaveBeenCalled());
+  const call = listenMock.mock.calls.find(([event]) => event === "serve-state-changed");
+  expect(call).toBeDefined();
+  const notify = call![1] as (event: { payload: ServeView }) => void;
+  await act(async () => notify({ payload: serveFixture({ phase: "stopping", app_runtime: "stopped", listener_reachable: false }) }));
+  await waitFor(() => expect(cacheReads).toBe(1));
+  await act(async () => notify({ payload: serveFixture({ phase: "stopped", app_runtime: "stopped", listener_reachable: false }) }));
+  await waitFor(() => expect(cacheReads).toBe(2));
+});
+
+it("flushes a deferred runtime refresh after a successful preview is cancelled", async () => {
+  const user = userEvent.setup();
+  const ready = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, instance_id: "ready" }) });
+  let resolvePlan!: (plan: unknown) => void;
+  const delayedPlan = new Promise((resolve) => { resolvePlan = resolve; });
+  let cacheReads = 0;
+  let runtime = ready.serve;
+  mockInvokeImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "get_runtime_state") return runtime;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [scannedClaude];
+    if (command === "plan_agent_connection") return delayedPlan;
+    if (command === "get_cached_agent_views") { cacheReads += 1; return [scannedClaude]; }
+    if (command === "discard_agent_plan") return null;
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+  render(<App />);
+  await openAgent(user, "Claude Code");
+  await user.click(await screen.findByRole("button", { name: "预览并接入" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", expect.anything()));
+  const notify = listenMock.mock.calls.find(([event]) => event === "serve-state-changed")![1] as (event: { payload: ServeView }) => void;
+  runtime = serveFixture({ phase: "stopping" });
+  await act(async () => notify({ payload: runtime }));
+  runtime = serveFixture({ phase: "stopped" });
+  await act(async () => notify({ payload: runtime }));
+  expect(cacheReads).toBe(0);
+  await act(async () => resolvePlan({ operation_id: "delayed-preview", confirmation_token: "test-confirmation", changes: [], intent: "connect", target_config_path: "/tmp/settings.json", related_config_paths: [], human_diff: "" }));
+  const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+  await user.click(within(preview).getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(cacheReads).toBe(1));
+  expect(invokeMock).not.toHaveBeenCalledWith("ensure_serve_running", expect.anything());
+  expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
+});
+
 it("persists a skipped guide and does not show it on the next App session", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   const user = userEvent.setup();
@@ -3296,7 +3357,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" })).toBeInTheDocument();
   }, 15_000);
 
-  it("ensure 后 plan 失败仍只刷新缓存覆盖且不重新扫描", async () => {
+  it("starts explicitly and refreshes cached overlays after a planning failure", async () => {
     const user = userEvent.setup();
     let emitServe: ((serve: ServeView) => void) | undefined;
     listenMock.mockImplementation(async (_eventName, handler) => {
@@ -3333,21 +3394,25 @@ describe("desktop station navigation", () => {
     render(<App />);
     await waitFor(() => expect(scans).toBe(1));
     await openAgent(user, "Claude Code");
+    await user.click(await screen.findByRole("button", { name: "启动代理" }));
+    expect(invokeMock).not.toHaveBeenCalledWith("plan_agent_connection", expect.anything());
     await user.click(await screen.findByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(
       invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
-    ).toHaveLength(1));
+    ).toHaveLength(2));
 
     expect(invokeMock.mock.calls
       .map(([command]) => command)
       .filter((command) => [
         "ensure_serve_running",
+        "get_cached_agent_views",
         "plan_agent_connection",
         "apply_agent_plan",
         "get_cached_agent_views",
       ].includes(command)))
       .toEqual([
         "ensure_serve_running",
+        "get_cached_agent_views",
         "plan_agent_connection",
         "get_cached_agent_views",
       ]);
@@ -3399,6 +3464,8 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(scans).toBe(1));
     await openAgent(user, "Claude Code");
     expect(screen.queryByRole("button", { name: /选择版本/ })).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "启动代理" }));
+    expect(invokeMock).not.toHaveBeenCalledWith("plan_agent_connection", expect.anything());
     await user.click(await screen.findByRole("button", { name: "预览并接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
@@ -3416,17 +3483,19 @@ describe("desktop station navigation", () => {
       .toBeInTheDocument();
     expect(scans).toBe(1);
     expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
-      .toHaveLength(1);
+      .toHaveLength(2);
     expect(invokeMock.mock.calls
       .map(([command]) => command)
       .filter((command) => [
         "ensure_serve_running",
+        "get_cached_agent_views",
         "plan_agent_connection",
         "apply_agent_plan",
         "get_cached_agent_views",
       ].includes(command)))
       .toEqual([
         "ensure_serve_running",
+        "get_cached_agent_views",
         "plan_agent_connection",
         "apply_agent_plan",
         "get_cached_agent_views",

@@ -52,6 +52,10 @@ const BUILD_COMMIT_HASH = typeof __APP_COMMIT_HASH__ === "string"
   ? __APP_COMMIT_HASH__
   : "unknown";
 
+const BUILD_INFO = typeof __APP_BUILD_INFO__ !== "undefined"
+  ? __APP_BUILD_INFO__
+  : { channel: "unknown", sourceState: "unknown", builtAt: "unknown" };
+
 function requiresFreshUpdateCheck(message: string): boolean {
   return message.includes("update_version_changed:")
     || message.includes("update_expected_version_missing:");
@@ -76,17 +80,34 @@ function AboutContent({
   desktopVersion,
   coreVersion,
   commitHash = BUILD_COMMIT_HASH,
+  buildInfo = BUILD_INFO,
   runtimeSettings,
   onOpenFirstRunGuide,
 }: {
   desktopVersion: string;
   coreVersion: string;
   commitHash?: string;
+  buildInfo?: { channel: string; sourceState: string; builtAt: string };
   runtimeSettings?: Pick<SettingsView, "listen" | "data_dir" | "plugins_dir" | "agent">;
   onOpenFirstRunGuide?: () => void;
 }) {
   const { copy, language, t } = useLanguage();
   const { showError } = useErrorToast();
+  const buildChannel = buildInfo.channel === "local"
+    ? copy("Local build", "本地构建", "本機組建", "ローカルビルド")
+    : buildInfo.channel === "development"
+      ? copy("Development build", "开发构建", "開發組建", "開発ビルド")
+      : buildInfo.channel === "preview"
+        ? copy("Preview build", "预览构建", "預覽組建", "プレビュービルド")
+        : buildInfo.channel === "production"
+          ? copy("Production build", "生产构建", "生產組建", "本番ビルド")
+          : copy("Unknown build", "构建来源未知", "組建來源未知", "ビルド元不明");
+  const sourceState = buildInfo.sourceState === "modified"
+    ? copy("Includes uncommitted changes", "包含未提交修改", "包含未提交修改", "未コミットの変更を含む")
+    : buildInfo.sourceState === "clean"
+      ? copy("Clean working tree", "工作区无未提交修改", "工作區無未提交修改", "未コミットの変更なし")
+      : copy("Source state unknown", "源码状态未知", "原始碼狀態未知", "ソースの状態不明");
+
   const [update, setUpdate] = useState<DesktopUpdateView | null>(null);
   const [busy, setBusy] = useState<"" | "checking" | "installing" | "restarting">("");
   const [err, setErr] = useState("");
@@ -228,6 +249,10 @@ function AboutContent({
                   <span>Commit</span>
                   <strong className="mono">{commitHash}</strong>
                 </Badge>
+              </div>
+              <div className="about-build-info" aria-label={copy("Build information", "构建信息", "組建資訊", "ビルド情報")}>
+                <p><strong>{buildChannel}</strong> · {sourceState}</p>
+                <p>{copy("Built at (UTC)", "构建时间（UTC）", "組建時間（UTC）", "ビルド日時（UTC）")}: <time dateTime={buildInfo.builtAt === "unknown" ? undefined : buildInfo.builtAt}>{buildInfo.builtAt}</time></p>
               </div>
             </div>
           </div>

@@ -323,8 +323,9 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const scanBusyRef = useRef(false);
   const detectedAgentIdsRef = useRef<Set<string>>(new Set());
   const cachedAgentRefreshGenerationRef = useRef(0);
-  const observedServeRef = useRef<{ ready: boolean; instanceId: string | null } | null>(null);
+  const observedServeRef = useRef<{ ready: boolean; instanceId: string | null; phase: ServeView["phase"] } | null>(null);
   const agentConnectInFlightRef = useRef(false);
+  const deferredAgentRefreshRef = useRef(false);
   const pendingServeRef = useRef<ServeView | null>(null);
   const runtimeEventGeneration = useRef(0);
   const viewRef = useRef(view);
@@ -499,6 +500,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   }, [revealAgents, showError]);
 
   const refreshCachedAgents = useCallback(async () => {
+    deferredAgentRefreshRef.current = false;
     const refreshGeneration = ++cachedAgentRefreshGenerationRef.current;
     try {
       const cached = await getCachedAgentViews();
@@ -515,24 +517,24 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     const next = {
       ready: serve.app_runtime === "running" && serve.listener_reachable,
       instanceId: serve.instance_id,
+      phase: serve.phase,
     };
     const previous = observedServeRef.current;
     observedServeRef.current = next;
 
     if (detectedAgentIdsRef.current.size === 0 || !previous) return;
-    if (!next.ready) {
-      if (previous.ready && !agentConnectInFlightRef.current) {
-        void refreshCachedAgents();
-      }
-      return;
-    }
-
     const becameReady = !previous.ready;
     const instanceChanged = previous.ready && previous.instanceId !== next.instanceId;
     // A poll can see the published Gateway before final Agent metadata writes.
     // The final running event must revalidate the same instance after those writes.
     const metadataPublished = publicationEvent && serve.phase === "running";
-    if ((becameReady || instanceChanged || metadataPublished) && !agentConnectInFlightRef.current) {
+    const needsRefresh = next.ready
+      ? becameReady || instanceChanged || metadataPublished
+      : previous.ready || previous.phase !== next.phase;
+    if (!needsRefresh) return;
+    if (agentConnectInFlightRef.current) {
+      deferredAgentRefreshRef.current = true;
+    } else {
       void refreshCachedAgents();
     }
   }, [refreshCachedAgents]);
@@ -557,6 +559,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
         observedServeRef.current = {
           ready: effectiveServe.app_runtime === "running" && effectiveServe.listener_reachable,
           instanceId: effectiveServe.instance_id,
+          phase: effectiveServe.phase,
         };
         setState(pendingServeRef.current ? { ...nextState, serve: effectiveServe } : nextState);
 
@@ -1155,6 +1158,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
               onRefreshAgents={refreshCachedAgents}
               onConnectInFlightChange={(inFlight) => {
                 agentConnectInFlightRef.current = inFlight;
+                if (!inFlight && deferredAgentRefreshRef.current) void refreshCachedAgents();
               }}
               onSaveQuota={saveQuota}
               onSaveQuotaPlan={saveQuotaPlan}
