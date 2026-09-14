@@ -12286,7 +12286,7 @@ samp {
 }
 
 .launch-screen[data-phase="exiting"] {
-  animation: launch-screen-exit 420ms cubic-bezier(.68, 0, .34, 1) both;
+  animation: launch-screen-exit var(--launch-exit-duration) cubic-bezier(.68, 0, .34, 1) both;
 }
 
 .launch-coordinate {
