@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Activity, ArrowUpRight, Bot, Boxes, Clock3, MessageSquareText, RefreshCw, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
+import { hasManagedInstallation } from "../agentManagement";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { Badge } from "../components/ui/badge";
@@ -51,7 +52,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const connectedAgentIds = new Set(
     agents
-      .filter((agent) => agent.status === "CONNECTED")
+      .filter(hasManagedInstallation)
       .map((agent) => agent.metadata.agent_id),
   );
   const connectedAgents = connectedAgentIds.size;
@@ -64,7 +65,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
     agent: agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id),
   }));
   const connectedRouteAgents = agents
-    .filter((agent) => agent.status === "CONNECTED")
+    .filter(hasManagedInstallation)
     .sort((left, right) => {
       const leftIndex = registry.findIndex((metadata) => metadata.agent_id === left.metadata.agent_id);
       const rightIndex = registry.findIndex((metadata) => metadata.agent_id === right.metadata.agent_id);
@@ -212,10 +213,10 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
           <CardHeader>
             <span><Bot aria-hidden="true" />Agent</span>
             <CardTitle>{copy(
-              `${connectedAgents} ${connectedAgents === 1 ? "Agent" : "Agents"} connected`,
-              `已接入 ${connectedAgents} 个 Agent`,
-              `已連線 ${connectedAgents} 個 Agent`,
-              `${connectedAgents} 個の Agent が接続済み`,
+              `${connectedAgents} ${connectedAgents === 1 ? "Agent" : "Agents"} managed`,
+              `已接管 ${connectedAgents} 个 Agent`,
+              `已接管 ${connectedAgents} 個 Agent`,
+              `${connectedAgents} 個の Agent を管理中`,
             )}</CardTitle>
             <CardAction className="overview-agent-actions">
               <Button
@@ -240,7 +241,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                 <li key={metadata.agent_id}>
                   <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={24} />
                   <strong>{metadata.display_name}</strong>
-                  <small>{agent?.status === "CONNECTED" ? copy("Managed", "已接管", "已接管", "管理中") : copy("Available", "待接入", "待接入", "接続待ち")}</small>
+                  <small>{hasManagedInstallation(agent) ? copy("Managed", "已接管", "已接管", "管理中") : copy("Available", "待接入", "待接入", "接続待ち")}</small>
                 </li>
               ))}
             </ul>

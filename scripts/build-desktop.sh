@@ -14,6 +14,8 @@ case "$mode" in
   *) usage ;;
 esac
 
+export TOKEN_STATION_BUILD_CHANNEL="$mode"
+
 target=""
 test_version=""
 while [[ $# -gt 0 ]]; do

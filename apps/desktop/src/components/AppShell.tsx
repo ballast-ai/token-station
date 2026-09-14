@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Activity, Boxes, Search, Settings, X } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
+import { hasManagedInstallation } from "../agentManagement";
 import { useLanguage } from "./LanguageProvider";
 import TokenStationMark from "./TokenStationMark";
 import { usePageTransition } from "./use-page-transition";
@@ -94,7 +95,7 @@ export default function AppShell({
             : serve.phase === "error"
               ? t("serve.retry")
               : t("serve.startProxy");
-  const connectedAgents = agents.filter((agent) => agent.status === "CONNECTED").length;
+  const connectedAgents = agents.filter(hasManagedInstallation).length;
   const shellTransitionKey = activePrimary === "settings" ? "settings" : view;
   const contentRef = usePageTransition<HTMLElement>(shellTransitionKey);
 

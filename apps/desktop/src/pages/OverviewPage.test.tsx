@@ -136,6 +136,20 @@ beforeEach(() => {
 });
 
 describe("OverviewPage summaries", () => {
+  it("retains managed counts, labels, and route summaries while the proxy is stopped", () => {
+    const managedAgents = agents.map((agent, index) => ({
+      ...agent,
+      status: "DETECTED_VERIFIED" as const,
+      installations: index === 1 ? [{ managed: true, connected: false } as AgentView["installations"][number]] : [],
+    }));
+    render(<LanguageProvider><OverviewPage state={state} registry={registry} agents={managedAgents} onNavigate={vi.fn()} /></LanguageProvider>);
+    const summary = screen.getByRole("region", { name: "Agent 概览" });
+    expect(within(summary).getByText("已接管 1 个 Agent")).toBeInTheDocument();
+    expect(within(summary).getByText("已接管")).toBeInTheDocument();
+    expect(within(summary).getAllByRole("listitem")[0]).toHaveTextContent("Agent 1");
+    expect(screen.getByText("deepseek-v4-flash")).toBeInTheDocument();
+  });
+
   it("renders the Home title and content in Japanese", () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "ja");
 
@@ -168,7 +182,7 @@ describe("OverviewPage summaries", () => {
       .toBeInTheDocument();
     expect(screen.getByText("代理狀態")).toBeInTheDocument();
     expect(screen.getByText("已儲存設定修訂")).toBeInTheDocument();
-    expect(screen.getByText("已連線 2 個 Agent")).toBeInTheDocument();
+    expect(screen.getByText("已接管 2 個 Agent")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Overview" })).toBeNull();
   });
 
@@ -217,7 +231,7 @@ describe("OverviewPage summaries", () => {
 
     const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
     expect(agentSummary).toHaveAttribute("data-surface", "plain-section");
-    expect(within(agentSummary).getByText("已接入 2 个 Agent")).toBeInTheDocument();
+    expect(within(agentSummary).getByText("已接管 2 个 Agent")).toBeInTheDocument();
     expect(within(agentSummary).queryByText("2 个已接管")).toBeNull();
     expect(within(agentSummary).getAllByRole("listitem")).toHaveLength(5);
 

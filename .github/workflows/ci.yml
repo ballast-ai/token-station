@@ -81,5 +81,6 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
       - run: npm --prefix apps/desktop ci
       - run: node tests/agent-sensitive-boundary.mjs
+      - run: node --test tests/desktop-build-info.mjs
       - run: npm --prefix apps/desktop test -- --run
       - run: npm --prefix apps/desktop run build

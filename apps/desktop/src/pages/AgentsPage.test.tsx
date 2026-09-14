@@ -19,14 +19,14 @@ const agents: AgentView[] = registry.map((metadata) => ({
   catalog_warning: null,
 }));
 
-function renderPage(mode: "connections" | "routing") {
+function renderPage(mode: "connections" | "routing", views = agents) {
   const onOpenAgent = vi.fn();
   render(
     <LanguageProvider>
       <AgentsPage
         mode={mode}
         registry={registry}
-        agents={agents}
+        agents={views}
         revealingAgentIds={new Set()}
         selectedAgentId="claude-code"
         homeSelected={mode === "routing"}
@@ -43,6 +43,17 @@ function renderPage(mode: "connections" | "routing") {
 }
 
 describe("AgentsPage split workspaces", () => {
+  it("retains managed navigation labels without hiding real installation errors", () => {
+    const views = agents.map((agent, index) => ({
+      ...agent,
+      status: index === 0 ? "DETECTED_VERIFIED" as const : "INSTALLED_BROKEN" as const,
+      installations: [{ managed: true, connected: false } as AgentView["installations"][number]],
+    }));
+    renderPage("connections", views);
+    expect(screen.getByRole("button", { name: "Claude Code" })).toHaveTextContent("接管中");
+    expect(screen.getByRole("button", { name: "Kimi Code" })).toHaveTextContent("异常");
+  });
+
   it("uses a single-select detected Agent list without global routing", async () => {
     const user = userEvent.setup();
     const onOpenAgent = renderPage("connections");
