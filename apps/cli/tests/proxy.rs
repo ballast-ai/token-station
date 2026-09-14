@@ -2171,7 +2171,9 @@ fn refused_redirect_keeps_its_response_head_in_the_http_trace() {
     );
 
     assert_eq!(status, 502);
-    settle();
+    // The receipt is persisted after the HTTP trace, whereas the client can
+    // receive the 502 before either write completes. Await that real boundary.
+    let _receipt = last_row(&proxy.data_dir);
     let directory = proxy
         .data_dir
         .join(token_station_cli::bodylog::BODY_DIR_NAME);
