@@ -1,16 +1,20 @@
+import type { CSSProperties } from "react";
+
 export type LaunchPhase = "presenting" | "exiting";
 
 interface LaunchScreenProps {
   phase: LaunchPhase;
+  exitDurationMs: number;
 }
 
-/** Independent product launch artwork shown while the first local scan settles. */
-export default function LaunchScreen({ phase }: LaunchScreenProps) {
+/** Independent product launch artwork with a bounded presentation. */
+export default function LaunchScreen({ phase, exitDurationMs }: LaunchScreenProps) {
   const status = "Opening Token Station";
 
   return (
     <section
       className="launch-screen"
+      style={{ "--launch-exit-duration": `${exitDurationMs}ms` } as CSSProperties}
       data-phase={phase}
       data-testid="launch-screen"
       role="status"

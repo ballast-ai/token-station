@@ -3,9 +3,10 @@ import App, { type StartupOutcome } from "./App";
 import { getRecoveryState, type RecoveryState } from "./api";
 import LaunchScreen, { type LaunchPhase } from "./components/LaunchScreen";
 import RecoveryShell from "./components/RecoveryShell";
+import { useLocalizedCopy } from "./components/LanguageProvider";
 
-export const LAUNCH_MINIMUM_MS = 0;
-export const LAUNCH_EXIT_MS = 0;
+export const LAUNCH_MINIMUM_MS = 2_400;
+export const LAUNCH_EXIT_MS = 300;
 
 function reducedMotionRequested(): boolean {
   return typeof window.matchMedia === "function"
@@ -13,12 +14,14 @@ function reducedMotionRequested(): boolean {
 }
 
 export function AppBootstrap() {
+  const { copy } = useLocalizedCopy();
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [startupOutcome, setStartupOutcome] = useState<StartupOutcome | null>(null);
-  const [minimumElapsed, setMinimumElapsed] = useState(reducedMotionRequested);
   const [launchPhase, setLaunchPhase] = useState<LaunchPhase | "hidden">("presenting");
   const onStartupSettled = useCallback((outcome: StartupOutcome) => setStartupOutcome(outcome), []);
+  const skipLaunch = Boolean(error || recovery?.mode === "safe"
+    || startupOutcome === "actionable-error" || reducedMotionRequested());
 
   useEffect(() => {
     let disposed = false;
@@ -31,31 +34,18 @@ export function AppBootstrap() {
   }, []);
 
   useEffect(() => {
-    if (minimumElapsed) return undefined;
-    const timer = window.setTimeout(() => setMinimumElapsed(true), LAUNCH_MINIMUM_MS);
-    return () => window.clearTimeout(timer);
-  }, [minimumElapsed]);
-
-  useEffect(() => {
-    if (launchPhase === "hidden") return undefined;
-    if (error || recovery?.mode === "safe") {
+    if (skipLaunch) {
       setLaunchPhase("hidden");
       return undefined;
     }
-    if (recovery?.mode !== "normal" || startupOutcome === null) return undefined;
-    if (startupOutcome === "actionable-error") {
-      setLaunchPhase("hidden");
-      return undefined;
-    }
-
-    if (startupOutcome === "ready" || reducedMotionRequested()) {
-      setLaunchPhase("hidden");
-      return undefined;
-    }
-    setLaunchPhase("exiting");
-    const timer = window.setTimeout(() => setLaunchPhase("hidden"), LAUNCH_EXIT_MS);
-    return () => window.clearTimeout(timer);
-  }, [error, launchPhase, minimumElapsed, recovery?.mode, startupOutcome]);
+    // Both deadlines belong to the presentation, independent of backend readiness.
+    const exitTimer = window.setTimeout(() => setLaunchPhase("exiting"), LAUNCH_MINIMUM_MS);
+    const hideTimer = window.setTimeout(() => setLaunchPhase("hidden"), LAUNCH_MINIMUM_MS + LAUNCH_EXIT_MS);
+    return () => {
+      window.clearTimeout(exitTimer);
+      window.clearTimeout(hideTimer);
+    };
+  }, [skipLaunch]);
 
   if (error) return <RecoveryShell initialError={error} />;
   if (recovery?.mode === "safe") return <RecoveryShell initialState={recovery} />;
@@ -72,7 +62,13 @@ export function AppBootstrap() {
           <App onStartupSettled={onStartupSettled} launchComplete={!launchVisible} />
         </div>
       )}
-      {launchVisible && <LaunchScreen phase={launchPhase} />}
+      {!recovery && !launchVisible && (
+        <div className="loading-screen" role="status" aria-live="polite" aria-busy="true">
+          <span className="loading-mark" aria-hidden="true"><i /><i /><i /></span>
+          <strong>{copy("Opening Token Station", "正在进入 Token Station", "開啟 Token Station", "Token Station を開きます")}</strong>
+        </div>
+      )}
+      {launchVisible && <LaunchScreen phase={launchPhase} exitDurationMs={LAUNCH_EXIT_MS} />}
     </>
   );
 }
