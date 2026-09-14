@@ -85,6 +85,20 @@ try {
   );
   assert.equal(v212Warning.status, 0, v212Warning.stderr);
 
+  const missingV213Warning = check(
+    "v213-missing-warning.md",
+    "# Token Station v2.1.3\n\nThis stable release restores the desktop launch animation.\n",
+    "2.1.3",
+  );
+  assert.equal(missingV213Warning.status, 1, "v2.1.3 must disclose the unsigned MSI");
+  assert.match(missingV213Warning.stderr, /Windows MSI/);
+  const v213Warning = check(
+    "v213-warning.md",
+    "# Token Station v2.1.3\n\nThis stable release restores the launch animation.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
+    "2.1.3",
+  );
+  assert.equal(v213Warning.status, 0, v213Warning.stderr);
+
   const laterVersionNotes = path.join(testDir, "later-version.md");
   fs.writeFileSync(
     laterVersionNotes,
