@@ -511,7 +511,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     }
   }, [showError]);
 
-  const observeServeRuntime = useCallback((serve: ServeView) => {
+  const observeServeRuntime = useCallback((serve: ServeView, publicationEvent = false) => {
     const next = {
       ready: serve.app_runtime === "running" && serve.listener_reachable,
       instanceId: serve.instance_id,
@@ -529,7 +529,10 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
 
     const becameReady = !previous.ready;
     const instanceChanged = previous.ready && previous.instanceId !== next.instanceId;
-    if ((becameReady || instanceChanged) && !agentConnectInFlightRef.current) {
+    // A poll can see the published Gateway before final Agent metadata writes.
+    // The final running event must revalidate the same instance after those writes.
+    const metadataPublished = publicationEvent && serve.phase === "running";
+    if ((becameReady || instanceChanged || metadataPublished) && !agentConnectInFlightRef.current) {
       void refreshCachedAgents();
     }
   }, [refreshCachedAgents]);
@@ -582,7 +585,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       if (disposed) return;
       runtimeEventGeneration.current += 1;
       pendingServeRef.current = serve;
-      observeServeRuntime(serve);
+      observeServeRuntime(serve, true);
       if (!disposed) setState((current) => current ? { ...current, serve } : current);
     }).then((stop) => {
       if (disposed) stop();
@@ -959,6 +962,15 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const route = selectedAgentId ? (state.agent_routes?.[selectedAgentId] ?? emptyAgentRoute(state)) : undefined;
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const saveStatus = configSaveStatus(state, language);
+  const directApplicationStatus = firstRunRouteApplyComplete(state, state.saved_revision)
+    ? copy("Applied", "已应用", "已應用", "適用済み")
+    : runtimeHealthy && state.serve.running_revision !== state.saved_revision
+      ? copy("Saved, not applied", "已保存尚未应用", "已儲存但尚未套用", "保存済み、未適用")
+      : state.serve.error
+        ? copy("Application needs attention", "应用异常", "套用異常", "適用状態を確認してください")
+        : state.config_dirty
+          ? saveStatus
+          : copy("Configured", "已配置", "已設定", "設定済み");
   const recommendedFirstRunStep = firstIncompleteSetupStep(state, agents);
   const activeFirstRunStep = firstRunSetupStep ?? recommendedFirstRunStep;
   const agentDetected = agents.some((item) => item.installations.length > 0);
@@ -1081,11 +1093,13 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
               profiles={state.profiles ?? []}
               routingMode={state.routing_mode}
               directTarget={state.direct_target ?? null}
+              directApplicationStatus={directApplicationStatus}
+              directApplicationError={state.serve.error ? humanizeAppError(state.serve.error, language) : null}
               onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode))}
               onApplyDirect={(upstream, model) => run(async () => {
                 await setDirectRoute(upstream, model);
                 return serveStart();
-              }, undefined, true)}
+              }, undefined, true, true)}
               onDirectDraftChange={setDirectRouteDraftDirty}
               quotaAccounts={state.quota_accounts ?? []}
               onSaveQuota={saveQuota}
@@ -1149,7 +1163,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
               onApplyDirect={(upstream, model) => run(async () => {
                 await setDirectRoute(upstream, model, metadata.agent_id);
                 return restartAgentRoute(metadata.agent_id);
-              })}
+              }, undefined, false, true)}
               onDeleteProfile={(name) => run(
                 () => deleteProfile(name),
                 copy(`Profile "${name}" deleted`, `已删除策略组“${name}”`, `已刪除策略組「${name}」`, `プロファイル「${name}」が削除されました`),

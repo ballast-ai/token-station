@@ -1368,9 +1368,7 @@ export default function AgentRoutePage({
           busy={busy}
           applying={applying}
           agent
-          onApply={(upstream, model) => {
-            void onApplyDirect(upstream, model);
-          }}
+          onApply={onApplyDirect}
         />
       ) : route.routing_mode === "quota_first" ? (
         <QuotaPriorityPanel

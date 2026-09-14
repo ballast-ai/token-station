@@ -52,7 +52,7 @@ describe("DirectRoutePanel", () => {
       .toBeInTheDocument();
   });
 
-  it("keeps the applied badge to one unambiguous state label", () => {
+  it("does not claim runtime publication from a configured target", () => {
     render(
       <DirectRoutePanel
         providers={providers}
@@ -64,7 +64,7 @@ describe("DirectRoutePanel", () => {
     );
 
     const applied = document.querySelector(".direct-applied-target");
-    expect(applied).toHaveTextContent(/^已应用$/);
+    expect(applied).toHaveTextContent(/^已配置$/);
     expect(applied).not.toHaveTextContent("deepseek-account");
     const selectedRow = screen.getByRole("radio", { name: /deepseek-account/ }).closest(".direct-provider-row");
     expect(selectedRow).toHaveTextContent("deepseek-account");
@@ -87,7 +87,7 @@ describe("DirectRoutePanel", () => {
 
     expect(document.querySelector(".direct-applied-target")).toHaveTextContent("更改未应用");
     expect(document.querySelector(".direct-applied-target")).toHaveClass("is-draft");
-    expect(screen.getByText("当前已应用：deepseek-account / deepseek-chat"))
+    expect(screen.getByText("当前配置：deepseek-account / deepseek-chat"))
       .toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /openai-account/ })).toBeChecked();
   });
@@ -514,5 +514,53 @@ describe("DirectRoutePanel", () => {
     expect(row.querySelector('[data-provider-brand="openai"]')).toBeNull();
     expect(within(row as HTMLElement).getByText("O", { selector: ".brand-fallback" }))
       .toBeInTheDocument();
+  });
+});
+
+
+describe("explicit image model switching", () => {
+  const channel: ProviderView = {
+    ...providers[0],
+    models: ["text-model", "declared-image", "verified-image"],
+    model_capabilities: [
+      { model: "text-model", vision: "unknown", tool: "declared", json_schema: "declared" },
+      { model: "declared-image", vision: "declared", tool: "declared", json_schema: "declared" },
+      { model: "verified-image", vision: "verified", tool: "declared", json_schema: "declared" },
+    ],
+  };
+  const target = { upstream: channel.name, model: "text-model" };
+
+  it("applies the named same-channel image model only after an explicit click", async () => {
+    const onApply = vi.fn().mockResolvedValue(true);
+    render(<DirectRoutePanel providers={[channel]} target={target} busy={false} applying={false} onApply={onApply} />);
+    expect(onApply).not.toHaveBeenCalled();
+    expect(screen.getByText(/文字和图片请求都会使用/)).toHaveTextContent("verified-image");
+    await userEvent.click(screen.getByRole("button", { name: "切换到看图模型 verified-image" }));
+    expect(onApply).toHaveBeenCalledExactlyOnceWith(channel.name, "verified-image");
+    expect(screen.getByRole("combobox")).toHaveTextContent("verified-image");
+  });
+
+  it.each(["unverified", "other-channel", "managed", "already-verified"])("does not offer an unsafe or unnecessary switch: %s", (scenario) => {
+    const current = { ...channel };
+    if (scenario === "unverified" || scenario === "other-channel") current.model_capabilities = [];
+    if (scenario === "managed") current.managed_route = true;
+    render(<DirectRoutePanel providers={[current, { ...channel, name: "other" }]} target={{ ...target, model: scenario === "already-verified" ? "verified-image" : "text-model" }} busy={false} applying={false} onApply={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /切换到看图模型/ })).toBeNull();
+  });
+
+  it("preserves the selected model when application fails", async () => {
+    render(<DirectRoutePanel providers={[channel]} target={target} busy={false} applying={false} onApply={vi.fn().mockResolvedValue(false)} />);
+    await userEvent.click(screen.getByRole("button", { name: /切换到看图模型/ }));
+    expect(screen.getByRole("combobox")).toHaveTextContent("text-model");
+    expect(screen.getByRole("button", { name: /切换到看图模型/ })).toBeEnabled();
+  });
+
+  it("disables the shortcut during application and hides it for unapplied drafts", async () => {
+    const view = render(<DirectRoutePanel providers={[channel]} target={target} busy={false} applying onApply={vi.fn()} />);
+    expect(screen.getByRole("button", { name: /切换到看图模型/ })).toBeDisabled();
+    view.rerender(<DirectRoutePanel providers={[channel]} target={target} busy={false} applying={false} onApply={vi.fn()} />);
+    await userEvent.click(screen.getByRole("combobox"));
+    await userEvent.click(screen.getByRole("option", { name: "declared-image" }));
+    expect(screen.queryByRole("button", { name: /切换到看图模型/ })).toBeNull();
   });
 });

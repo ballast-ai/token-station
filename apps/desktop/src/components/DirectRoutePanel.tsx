@@ -15,6 +15,8 @@ interface DirectRoutePanelProps {
   busy: boolean;
   applying: boolean;
   agent?: boolean;
+  applicationStatus?: string;
+  applicationError?: string | null;
   onApply: (upstream: string, model: string) => boolean | void | Promise<boolean | void>;
   onDraftChange?: (hasUnappliedTarget: boolean) => void;
 }
@@ -118,6 +120,8 @@ export default function DirectRoutePanel({
   busy,
   applying,
   agent = false,
+  applicationStatus,
+  applicationError,
   onApply,
   onDraftChange,
 }: DirectRoutePanelProps) {
@@ -141,7 +145,7 @@ export default function DirectRoutePanel({
   onDraftChangeRef.current = onDraftChange;
   const rowNodesRef = useRef(new Map<string, HTMLDivElement>());
   const pendingPositionsRef = useRef<Map<string, DOMRect> | null>(null);
-  const [routeAnnouncement, setRouteAnnouncement] = useState("");
+  const [switchingImageModel, setSwitchingImageModel] = useState(false);
 
   useEffect(() => {
     setProviderOrder((current) => {
@@ -248,6 +252,29 @@ export default function DirectRoutePanel({
     !target || selectedProvider !== target.upstream || selectedModel !== (target.model ?? "")
   ));
 
+  const appliedProvider = providers.find((provider) => provider.name === target?.upstream);
+  const appliedVision = appliedProvider?.model_capabilities?.find((capability) => capability.model === target?.model)?.vision;
+  const imageAlternative = target?.model && !hasUnappliedTarget && !appliedProvider?.managed_route && appliedVision !== "verified"
+    ? appliedProvider?.models.find((model) => model !== target.model
+      && appliedProvider.model_capabilities?.some((capability) => capability.model === model && capability.vision === "verified"))
+    : undefined;
+
+  const switchImageModel = async () => {
+    if (!target || !imageAlternative || busy || applying || switchingImageModel) return;
+    setSwitchingImageModel(true);
+    try {
+      const applied = await onApply(target.upstream, imageAlternative);
+      if (applied === false) return;
+      setSelectedProvider(target.upstream);
+      setModelByProvider((current) => ({ ...current, [target.upstream]: imageAlternative }));
+
+    } catch (error) {
+      showError(error instanceof Error ? error.message : String(error), "direct-image-switch");
+    } finally {
+      setSwitchingImageModel(false);
+    }
+  };
+
   useEffect(() => {
     onDraftChange?.(hasUnappliedTarget);
   }, [hasUnappliedTarget, onDraftChange]);
@@ -271,17 +298,7 @@ export default function DirectRoutePanel({
         ...current.filter((name) => name !== appliedProvider),
       ]);
     }
-    setRouteAnnouncement(promoted ? copy(
-      `Applied ${appliedProvider} and moved it to the top of the list.`,
-      `已应用 ${appliedProvider}，并将其移到列表顶部。`,
-      `已應用 ${appliedProvider}，並將其移到清單頂端。`,
-      `${appliedProvider} を適用し、リストの先頭に移動しました。`,
-    ) : copy(
-      `Applied ${appliedProvider}.`,
-      `已应用 ${appliedProvider}。`,
-      `已應用 ${appliedProvider}。`,
-      `${appliedProvider} を適用しました。`,
-    ));
+
   };
 
   return (
@@ -315,12 +332,14 @@ export default function DirectRoutePanel({
                 {hasUnappliedTarget
                   ? copy("Changes not applied", "更改未应用", "變更未套用", "変更は未適用")
                   : target.model
-                    ? copy("Applied", "已应用", "已應用", "適用済み")
+                    ? applying
+                      ? copy("Applying…", "应用中…", "應用中…", "適用中…")
+                      : applicationStatus ?? copy("Configured", "已配置", "已設定", "設定済み")
                     : copy("Incomplete", "配置未完成", "未完成", "未完成")}
               </span>
               {hasUnappliedTarget && target.model && (
                 <span className="direct-applied-detail">
-                  {copy("Currently applied: ", "当前已应用：", "目前已套用：", "現在適用中：")}{target.upstream} / {target.model}
+                  {copy("Configured target: ", "当前配置：", "目前設定：", "設定した対象：")}{target.upstream} / {target.model}
                 </span>
               )}
             </>
@@ -328,13 +347,27 @@ export default function DirectRoutePanel({
           <Button
             type="button"
             data-onboarding-target="route-apply"
-            disabled={busy || applying || !selectedTargetValid}
+            disabled={busy || applying || switchingImageModel || !selectedTargetValid}
             onClick={() => void applySelectedTarget()}
           >
             {applying ? copy("Applying…", "应用中…", "應用中…", "適用中…") : copy("Apply", "应用", "應用", "適用")}
           </Button>
         </div>
       </div>
+
+      {imageAlternative && target && (
+        <div className="panel-foot direct-image-switch">
+          <p className="sub">{copy(
+            `Need images? ${imageAlternative} has passed an image check on ${target.upstream}. Switching applies it to text and images, at its own pricing.`,
+            `需要看图？同一通道的 ${imageAlternative} 已通过看图验证。切换后，文字和图片请求都会使用该模型，并按该模型计费。`,
+            `需要看圖？同一通道的 ${imageAlternative} 已通過看圖驗證。切換後，文字和圖片請求都會使用該模型，並按該模型計費。`,
+            `画像を使いますか？同じチャネルの ${imageAlternative} は画像検証済みです。切替後はテキストと画像の両方に適用され、そのモデルの料金になります。`,
+          )}</p>
+          <Button type="button" variant="outline" disabled={busy || applying || switchingImageModel} onClick={() => void switchImageModel()}>
+            {copy(`Switch to image model ${imageAlternative}`, `切换到看图模型 ${imageAlternative}`, `切換到看圖模型 ${imageAlternative}`, `画像対応モデル ${imageAlternative} に切替`)}
+          </Button>
+        </div>
+      )}
 
       {providers.length === 0 ? (
         <p className="direct-route-empty">{copy(
@@ -349,7 +382,7 @@ export default function DirectRoutePanel({
               provider={provider}
               model={modelByProvider[provider.name] ?? ""}
               selected={selectedProvider === provider.name}
-              busy={busy}
+              busy={busy || applying || switchingImageModel}
               onSelect={() => setSelectedProvider(provider.name)}
               onModelChange={(nextModel) => setModelByProvider((current) => ({
                 ...current,
@@ -364,9 +397,9 @@ export default function DirectRoutePanel({
         </div>
       )}
 
-      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {routeAnnouncement}
-      </span>
+      {applicationError && (
+        <p className="panel-foot" role="alert">{applicationError}</p>
+      )}
 
       {!selectedTargetValid && (
         <footer className="panel-foot direct-route-actions">
