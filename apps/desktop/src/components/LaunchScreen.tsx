@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import TokenStationMark from "./TokenStationMark";
 
 export type LaunchPhase = "presenting" | "exiting";
 
@@ -29,11 +30,7 @@ export default function LaunchScreen({ phase, exitDurationMs }: LaunchScreenProp
 
       <div className="launch-composition">
         <div className="launch-switch" aria-hidden="true">
-          <svg viewBox="0 0 256 256" focusable="false">
-            <path fill="currentColor" d="M42 185 91 140h21l-50 45H42ZM88 197l57-57h21l-58 57H88ZM100 113l42-44h21l-43 44h-20ZM157 113l31-31h20l-30 31h-21Z" />
-            <path fill="#f04b2f" d="M58 197 180 60h20L78 197H58Z" />
-            <rect className="launch-symbol-bar" x="88" y="121" width="80" height="14" />
-          </svg>
+          <TokenStationMark size="100%" />
         </div>
 
         <div className="launch-identity">
