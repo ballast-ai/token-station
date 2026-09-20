@@ -12,7 +12,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 
 use token_station_cli::config::EgressConfig;
-use token_station_cli::tls_trust::{classify_tls_failure, TlsTrustFailure};
+use token_station_cli::tls_trust::{TlsTrustFailure, classify_tls_failure};
 
 const CA_PEM: &[u8] = include_bytes!("fixtures/tls/ca_cert.pem");
 const SERVER_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server_cert.pem");
@@ -33,8 +33,8 @@ fn pem_certificates(pem: &[u8]) -> Vec<rustls::pki_types::CertificateDer<'static
 /// with the process, answers every completed handshake with a fixed 200.
 fn spawn_tls_server() -> SocketAddr {
     let key = ureq::tls::PrivateKey::from_pem(SERVER_KEY_PEM).expect("fixture key parses");
-    let key = rustls::pki_types::PrivateKeyDer::try_from(key.der().to_vec())
-        .expect("fixture key is DER");
+    let key =
+        rustls::pki_types::PrivateKeyDer::try_from(key.der().to_vec()).expect("fixture key is DER");
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -58,9 +58,8 @@ fn spawn_tls_server() -> SocketAddr {
             if tls.read(&mut request).is_err() {
                 continue;
             }
-            let _ = tls.write_all(
-                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
-            );
+            let _ = tls
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
         }
     });
     addr
@@ -94,10 +93,8 @@ fn private_ca_server_rejected_without_extra_ca_and_classified_as_untrusted() {
 #[test]
 fn private_ca_server_accepted_with_extra_ca_file() {
     let addr = spawn_tls_server();
-    let ca_path = std::env::temp_dir().join(format!(
-        "token-station-extra-ca-{}.pem",
-        std::process::id()
-    ));
+    let ca_path =
+        std::env::temp_dir().join(format!("token-station-extra-ca-{}.pem", std::process::id()));
     std::fs::write(&ca_path, CA_PEM).expect("write CA fixture");
     let egress = EgressConfig {
         extra_ca_file: Some(ca_path.display().to_string()),

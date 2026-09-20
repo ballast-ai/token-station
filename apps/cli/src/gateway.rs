@@ -5065,7 +5065,7 @@ mod egress_policy_tests {
                 no_proxy: vec!["localhost".to_string(), "*.corp.internal".to_string()],
                 auth: None,
                 extra_ca_file: None,
-        });
+            });
             let agent = policy
                 .agent(Duration::from_secs(1), &SecretStore::default())
                 .unwrap();

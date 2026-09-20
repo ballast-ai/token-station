@@ -175,15 +175,21 @@ jobs:
       - name: Root advisories from the lockfile alone
         if: ${{ !cancelled() }}
         run: cargo audit
+      - name: glib backport gate regression tests
+        if: ${{ !cancelled() }}
+        run: node --test tests/glib-backport.mjs
+      - name: glib optimized FFI regression
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev pkg-config
+          scripts/run-glib-regression.sh
       - name: Desktop RustSec exception ledger
         if: ${{ !cancelled() }}
         run: node scripts/check-rustsec-exceptions.mjs
       - name: Desktop advisories
         if: ${{ !cancelled() }}
-        run: >-
-          cargo audit -D unsound
-          --file apps/desktop/src-tauri/Cargo.lock
-          --ignore RUSTSEC-2024-0429
+        run: node scripts/audit-desktop.mjs
       - name: Desktop licenses and sources
         if: ${{ !cancelled() }}
         run: >-

@@ -61,7 +61,7 @@ token-station-private-fs = { path = "../../../crates/private-fs" }
 [dev-dependencies]
 tauri = { version = "2", default-features = false, features = ["test"] }
 # Constructing rustls verification errors in the TLS error-mapping tests.
-rustls = { version = "0.23", default-features = false, features = ["std"] }
+rustls = { version = "0.23.45", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.61.3", features = ["ApplicationModel", "Management_Deployment", "Storage_Search", "Win32_System_WinRT"] }
@@ -78,3 +78,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
+
+# 保持 GTK 0.18 ABI，精确回补 RUSTSEC-2024-0429；来源与校验见 docs/security。
+[patch.crates-io]
+glib = { path = "../../../vendor/glib-0.18.5" }

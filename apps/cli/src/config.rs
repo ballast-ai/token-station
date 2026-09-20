@@ -1297,17 +1297,24 @@ mod tests {
         };
         // Unset field: no certificates, no error, no TLS override.
         assert!(EgressConfig::default().load_extra_cas().unwrap().is_empty());
-        assert!(EgressConfig::default().extra_tls_config().unwrap().is_none());
+        assert!(
+            EgressConfig::default()
+                .extra_tls_config()
+                .unwrap()
+                .is_none()
+        );
         // A bundle loads every certificate, not just the first PEM block.
         assert_eq!(with_path(&single).load_extra_cas().unwrap().len(), 1);
         assert_eq!(with_path(&bundle).load_extra_cas().unwrap().len(), 2);
         assert!(with_path(&single).extra_tls_config().unwrap().is_some());
         // Zero-certificate and missing files are loud errors, never a silent
         // fallback to the stock roots.
-        assert!(with_path(&empty)
-            .load_extra_cas()
-            .unwrap_err()
-            .contains("no certificate"));
+        assert!(
+            with_path(&empty)
+                .load_extra_cas()
+                .unwrap_err()
+                .contains("no certificate")
+        );
         let missing = dir.join("ts-extra-ca-never-written.pem");
         assert!(with_path(&missing).load_extra_cas().is_err());
 

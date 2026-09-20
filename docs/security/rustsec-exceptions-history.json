@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "description": "历史原样保留；不代表当前活跃豁免或重新审批。0429由glib精确回补与证据门替代。",
+  "exceptions": [
+    {
+      "id": "RUSTSEC-2024-0429",
+      "package": "glib",
+      "locked_version": "0.18.5",
+      "category": "unsound",
+      "dependency_path": "token-station-desktop -> tauri 2.11.5 -> gtk 0.18.2 -> glib 0.18.5",
+      "affected_api": "glib::VariantStrIter Iterator and DoubleEndedIterator implementations",
+      "exposure_assessment": "The desktop crate does not directly import glib, gtk, or VariantStrIter. Exposure is transitive and limited to Tauri's Linux/BSD GTK3 stack.",
+      "platform_scope": "Linux and BSD desktop builds",
+      "justification": "Tauri 2.11.5 is the latest supported v2 release and still requires gtk/glib 0.18. The upstream fix exists only in glib 0.20; no supported Tauri v2 upgrade removes the affected dependency.",
+      "owner": "x",
+      "approved_by": "x",
+      "approved_at": "2026-07-20",
+      "expires_at": "2026-09-18",
+      "upstream_tracking": [
+        "https://github.com/tauri-apps/tauri/issues/12561",
+        "https://github.com/tauri-apps/tauri/issues/12562",
+        "https://github.com/tauri-apps/tauri/issues/12563"
+      ],
+      "remediation_trigger": "Remove this exception when a supported Tauri release no longer depends on gtk/glib 0.18, or when an official 0.18 backport becomes available.",
+      "review_evidence": [
+        "https://github.com/RustSec/advisory-db/blob/main/crates/glib/RUSTSEC-2024-0429.md",
+        "https://github.com/gtk-rs/gtk-rs-core/pull/1343",
+        "https://github.com/tauri-apps/tauri/blob/tauri-v2.11.5/crates/tauri/Cargo.toml"
+      ]
+    }
+  ]
+}

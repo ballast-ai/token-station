@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { verifyGlibPatch } from "./check-glib-backport.mjs";
 
 const registryPath = "docs/security/rustsec-exceptions.json";
 const lockPath = "apps/desktop/src-tauri/Cargo.lock";
@@ -68,8 +70,9 @@ for (const exception of registry.exceptions) {
   }
 }
 
-if (!ids.has("RUSTSEC-2024-0429")) {
-  throw new Error("required desktop exception RUSTSEC-2024-0429 is not registered");
+if (ids.has("RUSTSEC-2024-0429")) {
+  throw new Error("0429 must be fixed by the verified backport, not an active exception");
 }
+verifyGlibPatch(resolve(import.meta.dirname, ".."));
 
 console.log(`RustSec exceptions: PASS (${registry.exceptions.length} active, checked ${today})`);

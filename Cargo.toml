@@ -23,6 +23,7 @@ exclude = [
     # large GUI dependency tree does not enter clippy-pedantic or cargo-deny gates.
     # Its path dependency on token-station-cli reuses the core without a fork.
     "apps/desktop/src-tauri",
+    "vendor/glib-0.18.5",
 ]
 
 [workspace.package]

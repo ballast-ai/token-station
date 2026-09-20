@@ -5343,7 +5343,9 @@ fn classify_settings_error(message: String) -> SettingsCommandError {
         return settings_error(
             "egress_extra_ca_file",
             "invalid_extra_ca",
-            format!("CA 证书文件无效；需要一个存在、可读、至少包含一张 PEM 证书的文件（{message}）"),
+            format!(
+                "CA 证书文件无效；需要一个存在、可读、至少包含一张 PEM 证书的文件（{message}）"
+            ),
         );
     }
     if normalized.contains("proxy")

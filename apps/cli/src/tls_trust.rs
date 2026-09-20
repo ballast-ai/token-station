@@ -61,16 +61,18 @@ pub fn classify_tls_failure(error: &ureq::Error) -> Option<TlsTrustFailure> {
     };
     Some(match certificate_error {
         CertificateError::UnknownIssuer => TlsTrustFailure::UntrustedIssuer,
-        CertificateError::NotValidForName
-        | CertificateError::NotValidForNameContext { .. } => TlsTrustFailure::NameMismatch,
+        CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. } => {
+            TlsTrustFailure::NameMismatch
+        }
         CertificateError::Expired | CertificateError::ExpiredContext { .. } => {
             TlsTrustFailure::Expired
         }
         CertificateError::NotValidYet | CertificateError::NotValidYetContext { .. } => {
             TlsTrustFailure::NotYetValid
         }
-        CertificateError::InvalidPurpose
-        | CertificateError::InvalidPurposeContext { .. } => TlsTrustFailure::WrongPurpose,
+        CertificateError::InvalidPurpose | CertificateError::InvalidPurposeContext { .. } => {
+            TlsTrustFailure::WrongPurpose
+        }
         _ => return None,
     })
 }
@@ -89,7 +91,7 @@ fn find_rustls_error(io: &std::io::Error) -> Option<&rustls::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_tls_failure, TlsTrustFailure};
+    use super::{TlsTrustFailure, classify_tls_failure};
     use rustls::CertificateError;
 
     fn io_wrapped(certificate_error: CertificateError) -> ureq::Error {
