@@ -35,3 +35,7 @@ yanked = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = [
+    "https://github.com/ballast-ai/token-station-south.git",
+    "https://github.com/ballast-ai/token-station-kernel.git",
+]

@@ -50,6 +50,11 @@ unmaintained = "workspace"
 yanked = "deny"
 
 [sources]
-# Trust crates.io only. Git dependencies create a non-reproducible trust chain that conflicts with C1#7.
+# The task executor uses release-pinned South and its exact kernel protocol source.
+# Keep all other registries and Git repositories denied.
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = [
+    "https://github.com/ballast-ai/token-station-south.git",
+    "https://github.com/ballast-ai/token-station-kernel.git",
+]

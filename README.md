@@ -144,7 +144,7 @@ The command blocks below use a POSIX-compatible shell. On Windows, run the repos
 
 ### Desktop app
 
-Desktop development requires Rust stable with MSRV 1.95, Node.js 22.23.1, npm, the `wasm32-wasip2` Rust target, and the platform-specific Tauri dependencies listed in the [development guide](docs/contributing/开发环境.md).
+Desktop development requires Rust stable with MSRV 1.96, Node.js 22.23.1, npm, the `wasm32-wasip2` Rust target, and the platform-specific Tauri dependencies listed in the [development guide](docs/contributing/开发环境.md).
 
 ```bash
 git clone https://github.com/GlimpseEngine/token-station.git
@@ -170,7 +170,7 @@ scripts/install-local-desktop.sh
 
 ### CLI
 
-The CLI needs Rust stable with MSRV 1.95. Platform toolchain requirements are documented in the [development guide](docs/contributing/开发环境.md).
+The CLI needs Rust stable with MSRV 1.96. Platform toolchain requirements are documented in the [development guide](docs/contributing/开发环境.md).
 
 ```bash
 cargo build -p token-station-cli
@@ -178,6 +178,14 @@ cargo build -p token-station-cli
 ```
 
 A normal debug or release-profile Cargo build does not embed the five official adapters. Supply an external plugin directory when serving locally. Official packaging uses `scripts/build-release.sh <target-triple>`, which builds the adapters and enables the built-in plugin feature under the release credential requirements.
+
+### 本地视频任务 CLI
+
+任务使用独立 `--task-config`、原有私有凭证 store 和专用 SQLite，不需要企业余额或预扣。
+目前可使用正式百炼任务包执行 `submit / inspect / observe / wait / cancel / fetch`；
+原任务固定组件摘要、endpoint、model 与凭证材料，缺包或换材料不会回退到当前配置。
+配置边界、命令、取消语义和正式包验收命令见
+[共享任务 CLI 设计与验证](docs/design/2026-09-20-shared-task-cli.md)。
 
 <details>
 <summary><strong>Core local gates</strong></summary>

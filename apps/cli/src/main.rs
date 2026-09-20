@@ -39,6 +39,8 @@ struct Cli {
 enum Command {
     /// Run the loopback proxy.
     Serve,
+    /// Submit and recover local generation tasks.
+    Task(token_station_cli::tasks::TaskArgs),
     /// Store or delete upstream credentials in the OS keychain.
     #[command(subcommand)]
     Key(KeyCommand),
@@ -261,6 +263,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Serve => serve(&cli.config),
+        Command::Task(args) => token_station_cli::tasks::run(&cli.config, args),
         Command::Key(command) => key(&command, &cli.config),
         Command::Upstream(UpstreamCommand::List) => {
             let config = load(&cli.config)?;

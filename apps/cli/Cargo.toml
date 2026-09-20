@@ -8,6 +8,16 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+
+# 共享核心固定源码提交；组件运行时保持独立的正式版本。
+south-task-core = { git = "https://github.com/ballast-ai/token-station-south.git", rev = "b29d6810cc66e64b9a399f9d76e228093749b260" }
+south-component-conformance = { git = "https://github.com/ballast-ai/token-station-south.git", tag = "v0.31.0", features = ["sandbox"] }
+south-contracts = { git = "https://github.com/ballast-ai/token-station-south.git", tag = "v0.31.0" }
+south-provider-api = { git = "https://github.com/ballast-ai/token-station-south.git", tag = "v0.31.0" }
+south-provider-runtime = { git = "https://github.com/ballast-ai/token-station-south.git", tag = "v0.31.0" }
+task-protocol = { package = "token-station-protocol", git = "https://github.com/ballast-ai/token-station-kernel.git", rev = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35" }
+hmac = "0.12"
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
 token-station-private-fs = { path = "../../crates/private-fs" }
 axum = "0.8.9"
 base64 = "0.22"
@@ -50,3 +60,6 @@ builtin-plugins = []
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+south-task-conformance = { git = "https://github.com/ballast-ai/token-station-south.git", rev = "b29d6810cc66e64b9a399f9d76e228093749b260" }
