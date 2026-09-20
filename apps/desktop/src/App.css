@@ -6574,9 +6574,16 @@ pre.block {
   object-fit: contain;
 }
 
-.dark .token-station-mark img {
-  /* Invert black and cream, then restore the orange accent's original hue. */
-  filter: invert(1) hue-rotate(180deg);
+.token-station-mark .token-station-mark-dark {
+  display: none;
+}
+
+.dark .token-station-mark .token-station-mark-light {
+  display: none;
+}
+
+.dark .token-station-mark .token-station-mark-dark {
+  display: block;
 }
 
 .station-primary-nav {
@@ -12334,17 +12341,6 @@ samp {
   transform: translateY(10px);
   clip-path: inset(72% 0 0);
   animation: launch-icon-enter 720ms cubic-bezier(.2, .72, .18, 1) 90ms both;
-}
-
-.launch-switch svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-  color: var(--launch-ink);
-}
-
-.launch-symbol-bar {
-  fill: var(--launch-ink);
 }
 
 .launch-identity {

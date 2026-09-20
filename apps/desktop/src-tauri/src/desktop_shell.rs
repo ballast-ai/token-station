@@ -743,7 +743,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_menu_template_uses_the_station_bar_mark() {
+    fn status_menu_template_preserves_the_d2_crossbar_and_hollow_terminals() {
         let image = Image::from_bytes(TRAY_ICON_PNG).expect("status menu icon must decode");
         assert_eq!((image.width(), image.height()), (36, 36));
 
@@ -760,13 +760,20 @@ mod tests {
             );
         }
 
-        let center_run = (0..image.width())
-            .filter(|&x| pixel_at(x, 18)[3] > 200)
+        let crossbar_run = (0..image.width())
+            .filter(|&x| pixel_at(x, 9)[3] > 200)
             .count();
         assert!(
-            center_run >= 24,
-            "status menu icon must contain the wide station bar"
+            crossbar_run >= 16,
+            "status menu icon must preserve the T crossbar"
         );
+        for (x, y) in [(8, 24), (28, 11)] {
+            assert_eq!(
+                pixel_at(x, y)[3],
+                0,
+                "scan-ring centers must remain transparent"
+            );
+        }
 
         for pixel in rgba.as_chunks::<4>().0.iter().filter(|pixel| pixel[3] > 0) {
             assert_eq!(
