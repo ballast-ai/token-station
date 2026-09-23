@@ -735,8 +735,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
         ), "config-apply");
       } else {
         showSuccess(copy(
-          `Configuration applied · revision ${targetRevision}`,
-          `配置已应用 · revision ${targetRevision}`, `配置已應用 · revision ${targetRevision}`, `設定が適用されました · revision ${targetRevision}`
+          "Configuration applied",
+          "配置已应用", "配置已應用", "設定が適用されました"
         ), "config-apply");
       }
       return undefined;

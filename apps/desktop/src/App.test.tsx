@@ -2256,7 +2256,7 @@ describe("desktop station navigation", () => {
       running_revision: 2,
     })));
 
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用 · revision 2"))
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用"))
       .toBeInTheDocument();
   });
 
@@ -2304,7 +2304,7 @@ describe("desktop station navigation", () => {
       listener_reachable: true,
       running_revision: 2,
     })));
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用 · revision 2"))
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用"))
       .toBeInTheDocument();
   });
 
@@ -3780,7 +3780,7 @@ describe("Direct route publication", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent("本地代理无法安全重启");
       expect(screen.queryByText(/配置已应用/)).toBeNull();
     } else {
-      expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用 · revision 2")).toBeInTheDocument();
+      expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用")).toBeInTheDocument();
     }
   });
 
