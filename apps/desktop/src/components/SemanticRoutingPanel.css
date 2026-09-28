@@ -33,14 +33,3 @@
 .semantic-routing-state { font-size: 12px; margin: 6px 0; }
 .semantic-routing-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; margin: 6px 0; }
 .semantic-routing-note { margin: 8px 0 0; }
-.semantic-routing-counts { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 12px; color: var(--muted); margin: 14px 0 8px; }
-.semantic-routing-counts strong { color: var(--ink); font-family: var(--font-mono); font-weight: 500; margin-left: 4px; }
-.semantic-routing-comparisons { overflow-x: auto; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
-.semantic-routing-comparisons:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
-.semantic-routing-comparisons table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.semantic-routing-comparisons th,
-.semantic-routing-comparisons td { text-align: left; padding: 8px 10px; white-space: nowrap; border-bottom: 1px solid var(--line); }
-.semantic-routing-comparisons th { color: var(--muted); font-weight: 500; }
-.semantic-routing-comparisons tr:last-child td { border-bottom: 0; }
-.semantic-routing-comparisons tr[data-different="true"] td:nth-child(3) { color: var(--signal); }
-.semantic-routing-number { font-family: var(--font-mono); font-size: 11px; }

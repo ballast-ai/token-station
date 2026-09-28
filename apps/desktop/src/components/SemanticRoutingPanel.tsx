@@ -4,35 +4,9 @@ import {
   type SemanticMode, type SemanticStatus,
 } from "../api";
 import { humanizeAppError } from "../errors";
-import { useLocalizedCopy, type LocalizedCopy } from "./LanguageProvider";
+import { useLocalizedCopy } from "./LanguageProvider";
 import { Button } from "./ui/button";
 import "./SemanticRoutingPanel.css";
-
-function tierLabel(tier: string | null, copy: LocalizedCopy): string {
-  switch (tier) {
-    case "low": case "tier_low": return copy("Low", "低档", "低檔", "低");
-    case "medium": case "mid": case "tier_mid": return copy("Medium", "中档", "中檔", "中");
-    case "high": case "tier_high": return copy("High", "高档", "高檔", "高");
-    default: return copy("No suggestion", "无建议", "無建議", "提案なし");
-  }
-}
-
-function outcomeLabel(outcome: string, copy: LocalizedCopy): string {
-  switch (outcome) {
-    case "observed": return copy("Observed only", "仅观察", "僅觀察", "観察のみ");
-    case "applied": return copy("SCX applied", "已采用 SCX", "已採用 SCX", "SCX を適用");
-    case "overridden": return copy("Existing rule takes priority", "已有规则优先", "既有規則優先", "既存ルールを優先");
-    case "timeout": return copy("Timed out · existing rules", "超时，使用原有规则", "逾時，使用原有規則", "タイムアウト・既存ルールを使用");
-    case "busy": return copy("Classifier busy · existing rules", "分类器忙，使用原有规则", "分類器忙碌，使用原有規則", "分類器が使用中・既存ルールを使用");
-    case "loading": return copy("Loading · existing rules", "加载中，使用原有规则", "載入中，使用原有規則", "読み込み中・既存ルールを使用");
-    case "unavailable": return copy("Not ready · existing rules", "未就绪，使用原有规则", "尚未就緒，使用原有規則", "準備未完了・既存ルールを使用");
-    case "unsupported": return copy("Unsupported input · existing rules", "不支持此输入，使用原有规则", "不支援此輸入，使用原有規則", "未対応の入力・既存ルールを使用");
-    case "invalid": return copy("Invalid result · existing rules", "结果无效，使用原有规则", "結果無效，使用原有規則", "無効な結果・既存ルールを使用");
-    case "cancelled": return copy("Cancelled · existing rules", "已取消，使用原有规则", "已取消，使用原有規則", "キャンセル済み・既存ルールを使用");
-    case "no_route": return copy("No eligible route", "没有可用路由", "沒有可用路由", "利用可能なルートなし");
-    default: return copy("Classification failed · existing rules", "分类失败，使用原有规则", "分類失敗，使用原有規則", "分類失敗・既存ルールを使用");
-  }
-}
 
 export default function SemanticRoutingPanel() {
   const { copy, language } = useLocalizedCopy();
@@ -113,7 +87,6 @@ export default function SemanticRoutingPanel() {
     route: copy("Use SCX suggestions after model pins, user rules, and Agent hints. Failures fall back to existing rules.", "固定模型、用户规则和 Agent 提示优先，其余请求采用 SCX 建议；分类失败时使用原有规则。", "固定模型、使用者規則和 Agent 提示優先，其餘請求採用 SCX 建議；分類失敗時使用原有規則。", "モデル指定、ユーザールール、Agent ヒントを優先し、その後 SCX を使用します。失敗時は既存ルールに戻ります。"),
   };
   const visibleError = error ?? status.error ?? pollError;
-  const rows = [...status.observations].sort((a, b) => b.id - a.id).slice(0, 10);
   const preparing = status.state === "preparing";
 
   return (
@@ -155,34 +128,6 @@ export default function SemanticRoutingPanel() {
       {visibleError != null && <p className="semantic-routing-error" role="alert">{humanizeAppError(visibleError, language)}</p>}
       {!status.model_ready && <p className="semantic-routing-note">{copy("Preparation checks local files and downloads the runtime and model if needed.", "准备时检查本地文件，必要时下载运行环境和模型。", "準備時檢查本機檔案，必要時下載執行環境和模型。", "準備時にローカルファイルを確認し、必要に応じて実行環境とモデルをダウンロードします。")}</p>}
       <p className="semantic-routing-note">{copy("Multimodal, oversized text, and native server-tool requests keep using existing rules. The enabled model uses additional memory.", "多模态、过长文本和服务端原生工具请求继续使用原有规则。模型启用时会额外占用内存。", "多模態、過長文字和伺服器端原生工具請求繼續使用原有規則。模型啟用時會額外占用記憶體。", "マルチモーダル、長すぎるテキスト、サーバー側のネイティブツールのリクエストは既存ルールを使用します。モデルの有効時は追加のメモリを使用します。")}</p>
-      <div className="semantic-routing-counts">
-        <span>{copy("Classified", "已分类", "已分類", "分類済み")} <strong>{status.counts.classified.toLocaleString(language)}</strong></span>
-        <span>{copy("Different tiers", "档位不同", "檔位不同", "段階の相違")} <strong>{status.counts.disagreements.toLocaleString(language)}</strong></span>
-        <span>{copy("Fallbacks", "回退次数", "備援次數", "フォールバック")} <strong>{status.counts.fallbacks.toLocaleString(language)}</strong></span>
-      </div>
-      {rows.length > 0 ? (
-        <div className="semantic-routing-comparisons" tabIndex={0} role="region" aria-label={copy("Recent tier comparisons", "最近分档对照", "最近分檔對照", "最近の分類比較")}>
-          <table aria-label={copy("Recent tier comparisons", "最近分档对照", "最近分檔對照", "最近の分類比較")}>
-            <thead><tr>
-              <th scope="col">{copy("Request", "请求", "請求", "リクエスト")}</th>
-              <th scope="col">{copy("Existing rules", "原有规则", "原有規則", "既存ルール")}</th>
-              <th scope="col">{copy("SCX suggestion", "SCX 建议", "SCX 建議", "SCX の提案")}</th>
-              <th scope="col">{copy("Classification time", "分类耗时", "分類耗時", "分類時間")}</th>
-              <th scope="col">{copy("Outcome", "处理结果", "處理結果", "処理結果")}</th>
-            </tr></thead>
-            <tbody>{rows.map((row) => (
-              <tr key={row.id} data-different={row.baseline_tier != null && row.suggested_tier != null && row.baseline_tier !== row.suggested_tier}>
-                <td className="semantic-routing-number">#{row.id}</td>
-                <td>{tierLabel(row.baseline_tier, copy)}</td>
-                <td><strong>{tierLabel(row.suggested_tier, copy)}</strong></td>
-                <td className="semantic-routing-number">{row.latency_ms == null ? "—" : `${row.latency_ms.toLocaleString(language, { maximumFractionDigits: 0 })} ms`}</td>
-                <td>{outcomeLabel(row.outcome, copy)}</td>
-              </tr>
-            ))}</tbody>
-          </table>
-        </div>
-      ) : <p className="semantic-routing-note">{copy("Tier comparisons appear after eligible requests in Observe or Route mode.", "开启观察或路由后，符合条件的请求会显示在这里。", "開啟觀察或路由後，符合條件的請求會顯示在這裡。", "観察またはルーティングを有効にすると、対象リクエストの比較を表示します。")}</p>}
-      <p className="semantic-routing-note">{copy("Classification runs locally. Comparison records contain no request text.", "分类在本机运行，对照记录不保存请求正文。", "分類在本機執行，對照記錄不儲存請求正文。", "分類はローカルで実行します。比較記録にリクエスト本文は保存しません。")}</p>
     </section>
   );
 }

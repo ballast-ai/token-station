@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSemanticStatus, prepareSemanticModel, setSemanticMode, type SemanticStatus } from "../api";
@@ -86,7 +86,7 @@ describe("SemanticRoutingPanel", () => {
     expect(screen.getByRole("radio", { name: "关闭" })).toBeChecked();
   });
 
-  it("shows ten recent comparisons with applied and fallback outcomes", async () => {
+  it("keeps controls available without displaying comparison records or counts", async () => {
     vi.mocked(getSemanticStatus).mockResolvedValue(status({
       mode: "route", state: "ready",
       observations: Array.from({ length: 12 }, (_, index) => ({
@@ -96,12 +96,13 @@ describe("SemanticRoutingPanel", () => {
       counts: { classified: 11, disagreements: 11, fallbacks: 1 },
     }));
     render(<SemanticRoutingPanel />);
-    const table = await screen.findByRole("table", { name: "最近分档对照" });
-    expect(within(table).getAllByRole("row")).toHaveLength(11);
-    expect(within(table).getByText("超时，使用原有规则")).toBeInTheDocument();
-    expect(within(table).getAllByText("已采用 SCX")).toHaveLength(9);
-    expect(within(table).getByText("#12")).toBeInTheDocument();
-    expect(within(table).queryByText("#1")).not.toBeInTheDocument();
+    expect(await screen.findByRole("radio", { name: "参与路由" })).toBeChecked();
+    expect(screen.getByRole("status")).toHaveTextContent("本地模型已就绪");
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "最近分档对照" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/已分类|档位不同|回退次数/)).not.toBeInTheDocument();
+    expect(screen.queryByText("#12")).not.toBeInTheDocument();
+    expect(screen.queryByText(/对照记录/)).not.toBeInTheDocument();
   });
 
   it("polls for completion and stops polling after unmount", async () => {
