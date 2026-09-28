@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ErrorEnvelope, FinishReason, Usage};
 
+// Old provider components emitted one reasoning block and had no
+// `block_index` field. Zero keeps that single-block wire readable. It cannot
+// recover a missing ordinal from a producer that emitted multiple blocks.
+const fn legacy_reasoning_block_index() -> u32 {
+    0
+}
+
 /// One raw fragment of a provider's streaming body, before parsing.
 ///
 /// The host reads it off the socket and hands it to a `provider-adapter`, which
@@ -47,6 +54,7 @@ pub enum StreamEvent {
     /// text and signature fragments for one thinking block carry the same pair.
     ThinkingDelta {
         index: u32,
+        #[serde(default = "legacy_reasoning_block_index")]
         block_index: u32,
         thinking_delta: String,
     },
@@ -56,6 +64,7 @@ pub enum StreamEvent {
     /// ordinal that pairs the signature with those deltas.
     ThinkingSignatureDelta {
         index: u32,
+        #[serde(default = "legacy_reasoning_block_index")]
         block_index: u32,
         signature_delta: String,
     },
@@ -67,6 +76,7 @@ pub enum StreamEvent {
     /// signature.
     RedactedThinking {
         index: u32,
+        #[serde(default = "legacy_reasoning_block_index")]
         block_index: u32,
         data: String,
     },
@@ -234,6 +244,51 @@ mod tests {
         let decoded: Vec<StreamEvent> =
             serde_json::from_value(encoded).expect("valid reasoning events");
         assert_eq!(decoded, events);
+    }
+
+    #[test]
+    fn legacy_reasoning_events_default_to_the_single_source_block() {
+        let encoded = serde_json::json!([
+            {
+                "type": "thinking_delta",
+                "index": 0,
+                "thinking_delta": "legacy thinking"
+            },
+            {
+                "type": "thinking_signature_delta",
+                "index": 0,
+                "signature_delta": "legacy signature"
+            },
+            {
+                "type": "redacted_thinking",
+                "index": 0,
+                "data": "legacy opaque"
+            }
+        ]);
+
+        let decoded: Vec<StreamEvent> =
+            serde_json::from_value(encoded).expect("legacy reasoning events remain readable");
+
+        assert_eq!(
+            decoded,
+            vec![
+                StreamEvent::ThinkingDelta {
+                    index: 0,
+                    block_index: 0,
+                    thinking_delta: "legacy thinking".to_owned(),
+                },
+                StreamEvent::ThinkingSignatureDelta {
+                    index: 0,
+                    block_index: 0,
+                    signature_delta: "legacy signature".to_owned(),
+                },
+                StreamEvent::RedactedThinking {
+                    index: 0,
+                    block_index: 0,
+                    data: "legacy opaque".to_owned(),
+                },
+            ]
+        );
     }
 
     #[test]
