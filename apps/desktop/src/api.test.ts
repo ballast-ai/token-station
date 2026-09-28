@@ -27,6 +27,11 @@ import {
   getRouterTable,
   getState,
   getSemanticStatus,
+  getJevStatus,
+  saveJevKey,
+  clearJevKey,
+  setJevEnabled,
+  testJevConnection,
   setSemanticEnabled,
   prepareSemanticModel,
   setSemanticMode,
@@ -93,6 +98,23 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
+
+describe("Jev cloud routing commands", () => {
+  it("uses dedicated IPC commands and sends the key only when saving", async () => {
+    await getJevStatus();
+    await saveJevKey("synthetic-jev-key");
+    await setJevEnabled(true);
+    await testJevConnection();
+    await clearJevKey();
+    expect(invokeMock.mock.calls).toEqual([
+      ["get_jev_status"],
+      ["save_jev_key", { apiKey: "synthetic-jev-key" }],
+      ["set_jev_enabled", { enabled: true }],
+      ["test_jev_connection"],
+      ["clear_jev_key"],
+    ]);
+  });
+});
 
 describe("local semantic routing commands", () => {
   it("uses the local control commands without request content or model credentials", async () => {

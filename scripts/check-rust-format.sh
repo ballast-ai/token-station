@@ -2,7 +2,8 @@
 set -euo pipefail
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly frozen_router_tree="ebb62b7c48f63dc175158b4c99c4d73cf5786f44"
+# The approved SCX classifier entry point in 28de0ae2 is part of the frozen core.
+readonly frozen_router_tree="89ca49236fb2b4d5bbe18d0e73a0315af06d4d1d"
 readonly workspace_packages=(
   token-station-cli
   token-station-conformance

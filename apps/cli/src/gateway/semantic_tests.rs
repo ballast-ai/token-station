@@ -138,6 +138,7 @@ fn gateway(data: &Path, controller: &Arc<SemanticController>) -> Gateway {
         recorder: Arc::new(token_station_metrics::NoopRecorder),
         body_log: None,
         semantic: None,
+        jev: crate::jev::JevController::shared(&config.data.dir),
     }
     .with_semantic_routing(Arc::clone(controller))
 }
@@ -404,6 +405,35 @@ fn non_tier_and_quota_routes_do_not_use_classifier_suggestions() {
             .observations
             .iter()
             .all(|row| row.outcome == Outcome::Overridden)
+    );
+}
+
+#[test]
+fn an_enabled_jev_failure_does_not_invoke_the_ready_scx_classifier() {
+    let fixture = Fixture::new(Mode::Route);
+    let endpoint = super::jev_tests::Endpoint::new(503, json!({"error":"synthetic unavailable"}));
+    let jev = crate::jev::JevController::for_test(&fixture.data, &endpoint.url);
+    jev.save_key("synthetic-jev-key").unwrap();
+    jev.set_enabled(true).unwrap();
+    let router = Router::new(config()).unwrap();
+    let request = request("Explain this function");
+    let candidates = candidates();
+    let before = fixture.controller.status();
+    assert_eq!(
+        fixture.route(&router, &request, &candidates),
+        router.route(&request, &[], &candidates).unwrap()
+    );
+    let after = fixture.controller.status();
+    assert_eq!(after.counts.classified, before.counts.classified);
+    assert_eq!(after.observations.len(), before.observations.len());
+    assert_eq!(
+        jev.status().last_outcome,
+        Some(crate::jev::Outcome::Unavailable)
+    );
+    jev.set_enabled(false).unwrap();
+    assert_eq!(
+        fixture.route(&router, &request, &candidates).pool,
+        "tier_high"
     );
 }
 

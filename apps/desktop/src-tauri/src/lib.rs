@@ -26,6 +26,7 @@ mod serve_lifecycle;
 mod config_draft;
 mod desktop_update_commands;
 mod dock_icon;
+mod jev_commands;
 #[cfg(test)]
 mod lib_tests;
 mod model_test;
@@ -402,6 +403,9 @@ pub fn run() {
                 eprintln!("历史未知成本回填失败：{error}");
             }
             let read_only = inner.load_error.is_some();
+            app.manage(token_station_cli::jev::JevController::shared(
+                &inner.data_dir(),
+            ));
             app.manage(AppStateManaged(Mutex::new(inner)));
             app.manage(ModelTestStreamState::default());
             if !read_only {
@@ -498,6 +502,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            jev_commands::get_jev_status,
+            jev_commands::save_jev_key,
+            jev_commands::clear_jev_key,
+            jev_commands::set_jev_enabled,
+            jev_commands::test_jev_connection,
             semantic_commands::get_semantic_status,
             semantic_commands::set_semantic_enabled,
             semantic_commands::set_semantic_mode,

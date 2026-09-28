@@ -26,6 +26,7 @@ pub mod cancel;
 pub mod config;
 pub mod filelog;
 pub mod gateway;
+pub mod jev;
 pub mod manage;
 pub mod plugins;
 pub mod pricing;

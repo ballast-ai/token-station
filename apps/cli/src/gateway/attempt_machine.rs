@@ -410,6 +410,11 @@ impl Gateway {
     ) -> Result<Decision, NoRoute> {
         use crate::semantic::{Outcome, Tier};
         let baseline = self.route_with_mode(router, request, hints, candidates, session);
+        // An enabled cloud classifier owns this request's one classification
+        // attempt. Failures retain baseline routing without stacking SCX work.
+        if self.jev.is_enabled() {
+            return self.route_with_jev(ctx, router, request, hints, candidates, baseline);
+        }
         let Some(classifier) = &self.semantic else {
             return baseline;
         };
@@ -1167,6 +1172,7 @@ mod cancelled_settlement_tests {
             recorder: Arc::new(token_station_metrics::NoopRecorder),
             body_log: None,
             semantic: None,
+            jev: crate::jev::JevController::shared(&config.data.dir),
         }
     }
 

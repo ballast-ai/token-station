@@ -192,6 +192,23 @@ impl Gateway {
         if upstream.dialect != ApiDialect::ResponsesNative {
             return Ok(None);
         }
+        // Jev failure must retain the same probe decision as disabled routing.
+        let jev_request = self
+            .jev
+            .is_enabled()
+            .then(|| {
+                super::jev_routing::native_request(&body_value, ApiDialect::ResponsesNative, &model)
+            })
+            .flatten();
+        decision = self.route_native_with_jev(
+            ctx,
+            router,
+            jev_request.as_ref(),
+            &hints,
+            &candidates,
+            decision,
+            ApiDialect::ResponsesNative,
+        );
         decision.fallbacks.retain(|target| {
             self.upstreams
                 .get(target.upstream.as_str())

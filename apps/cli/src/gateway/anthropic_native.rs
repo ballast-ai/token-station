@@ -515,6 +515,28 @@ impl Gateway {
         if !anthropic_request_declares_server_tool(&body_value) {
             return Ok(None);
         }
+        // Keep the original probe's decision as the fallback. The complete
+        // projection applies only to classifier eligibility and tier admission.
+        let jev_request = self
+            .jev
+            .is_enabled()
+            .then(|| {
+                super::jev_routing::native_request(
+                    &body_value,
+                    ApiDialect::AnthropicNative,
+                    route_model,
+                )
+            })
+            .flatten();
+        let decision = self.route_native_with_jev(
+            ctx,
+            router,
+            jev_request.as_ref(),
+            &[],
+            &candidates,
+            decision,
+            ApiDialect::AnthropicNative,
+        );
         let vision_state = candidates
             .iter()
             .find(|candidate| candidate.target == decision.chosen)

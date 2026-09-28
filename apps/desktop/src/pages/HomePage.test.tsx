@@ -1,15 +1,20 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getSemanticStatus, type SemanticStatus } from "../api";
+import { getJevStatus, getSemanticStatus, type SemanticStatus } from "../api";
 import HomePage from "./HomePage";
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, getSemanticStatus: vi.fn() };
+  return { ...actual, getSemanticStatus: vi.fn(), getJevStatus: vi.fn() };
 });
 
 beforeEach(() => {
+  vi.mocked(getJevStatus).mockClear();
+  vi.mocked(getJevStatus).mockResolvedValue({
+    enabled: false, has_key: false, model: "jev-latest", timeout_ms: 1500,
+    confidence_threshold: 0.7, last_outcome: null, last_tier: null, last_latency_ms: null,
+  });
   vi.mocked(getSemanticStatus).mockClear();
   vi.mocked(getSemanticStatus).mockResolvedValue({
     available: true, enabled: true, mode: "route", state: "ready", error: null,
@@ -49,9 +54,12 @@ describe("HomePage routing controls", () => {
     expect(screen.queryByRole("region", { name: "SCX 本地分档" })).not.toBeInTheDocument();
     if (routingMode === "tiered") {
       expect(await screen.findByRole("switch", { name: "本地智能分档" })).toBeEnabled();
+      expect(await screen.findByRole("switch", { name: "Jev 云端智能分档" })).toBeVisible();
     } else {
       expect(screen.queryByRole("switch", { name: "本地智能分档" })).not.toBeInTheDocument();
       expect(getSemanticStatus).not.toHaveBeenCalled();
+      expect(screen.queryByRole("switch", { name: "Jev 云端智能分档" })).not.toBeInTheDocument();
+      expect(getJevStatus).not.toHaveBeenCalled();
     }
     expect(screen.queryByRole("radio", { name: "仅观察" })).not.toBeInTheDocument();
     expect(screen.getByRole("tablist", { name: "路由模式" })).toBeVisible();
@@ -64,5 +72,24 @@ describe("HomePage routing controls", () => {
     const nextLabel = nextMode === "tiered" ? "智能分档" : "简单路由";
     await user.click(screen.getByRole("tab", { name: nextLabel }));
     expect(initial.onSetRoutingMode).toHaveBeenCalledWith(nextMode);
+  });
+
+  it("shows Jev in the ordinary App when local classification is unavailable", async () => {
+    vi.mocked(getSemanticStatus).mockResolvedValue({ available: false } as SemanticStatus);
+    render(<HomePage {...props()} />);
+    expect(await screen.findByRole("switch", { name: "Jev 云端智能分档" })).toBeVisible();
+    expect(screen.queryByRole("switch", { name: "本地智能分档" })).not.toBeInTheDocument();
+  });
+
+  it("explains that an enabled Jev takes precedence over the saved local classifier preference", async () => {
+    vi.mocked(getJevStatus).mockResolvedValue({
+      enabled: true, has_key: true, model: "jev-latest", timeout_ms: 1500,
+      confidence_threshold: 0.7, last_outcome: "ready", last_tier: null, last_latency_ms: null,
+    });
+    render(<HomePage {...props()} />);
+    const local = await screen.findByRole("switch", { name: "本地智能分档" });
+    expect(local).toBeChecked();
+    expect(local).toHaveAccessibleDescription(/本地开关仅保留设置/);
+    expect(screen.getByRole("switch", { name: "Jev 云端智能分档" })).toBeChecked();
   });
 });

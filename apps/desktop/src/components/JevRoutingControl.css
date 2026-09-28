@@ -1,0 +1,77 @@
+.jev-routing-control {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.jev-routing-heading,
+.jev-routing-toggle,
+.jev-routing-key-actions,
+.jev-routing-retry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.jev-routing-heading {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.jev-routing-toggle label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.jev-routing-note,
+.jev-routing-key-state,
+.jev-routing-status,
+.jev-routing-error {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.jev-routing-key-form {
+  display: grid;
+  gap: 6px;
+}
+
+.jev-routing-key-label {
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.jev-routing-key-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.jev-routing-key-actions input {
+  flex: 1 1 220px;
+  width: auto;
+}
+
+.jev-routing-status p,
+.jev-routing-error p {
+  margin: 0;
+}
+
+.jev-routing-error {
+  color: var(--danger);
+}
+
+.jev-routing-settings {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .jev-routing-key-actions input {
+    flex-basis: 100%;
+  }
+}

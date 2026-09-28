@@ -13,6 +13,7 @@ import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
 import SemanticRoutingSwitch from "../components/SemanticRoutingSwitch";
+import JevRoutingControl from "../components/JevRoutingControl";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 
@@ -84,6 +85,7 @@ export default function HomePage({
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [jevEnabled, setJevEnabled] = useState(false);
 
   const saveProfile = async () => {
     const name = profileName.trim();
@@ -124,7 +126,10 @@ export default function HomePage({
         onValueChange={onSetRoutingMode}
       />
 
-      {routingMode === "tiered" && <SemanticRoutingSwitch />}
+      {routingMode === "tiered" && <>
+        <JevRoutingControl onEnabledChange={setJevEnabled} />
+        <SemanticRoutingSwitch overriddenByJev={jevEnabled} />
+      </>}
 
       {routingMode === "direct" ? (
         <DirectRoutePanel

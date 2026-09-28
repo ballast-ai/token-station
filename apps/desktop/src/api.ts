@@ -404,6 +404,18 @@ export type TierSlot = "high" | "mid" | "low";
 
 export type RoutingMode = "direct" | "tiered" | "quota_first";
 
+/** Content-free cloud classification state. The saved key is never returned to the renderer. */
+export interface JevStatus {
+  enabled: boolean;
+  has_key: boolean;
+  model: string;
+  timeout_ms: number;
+  confidence_threshold: number;
+  last_outcome: string | null;
+  last_tier: "low" | "medium" | "high" | null;
+  last_latency_ms: number | null;
+}
+
 export type SemanticMode = "off" | "observe" | "route";
 
 export interface SemanticObservation {
@@ -967,6 +979,11 @@ export interface DiagnosticPreview {
 }
 
 export const getState = () => invoke<StateView>("get_state");
+export const getJevStatus = () => invoke<JevStatus>("get_jev_status");
+export const saveJevKey = (apiKey: string) => invoke<JevStatus>("save_jev_key", { apiKey });
+export const clearJevKey = () => invoke<JevStatus>("clear_jev_key");
+export const setJevEnabled = (enabled: boolean) => invoke<JevStatus>("set_jev_enabled", { enabled });
+export const testJevConnection = () => invoke<JevStatus>("test_jev_connection");
 export const getSemanticStatus = () => invoke<SemanticStatus>("get_semantic_status");
 export const setSemanticEnabled = (enabled: boolean) =>
   invoke<SemanticStatus>("set_semantic_enabled", { enabled });

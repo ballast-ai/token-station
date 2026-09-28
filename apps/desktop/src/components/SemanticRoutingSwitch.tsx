@@ -4,7 +4,7 @@ import { useLocalizedCopy } from "./LanguageProvider";
 import { Switch } from "./ui/switch";
 import "./SemanticRoutingSwitch.css";
 
-export default function SemanticRoutingSwitch() {
+export default function SemanticRoutingSwitch({ overriddenByJev = false }: { overriddenByJev?: boolean }) {
   const { copy } = useLocalizedCopy();
   const id = useId();
   const [status, setStatus] = useState<SemanticStatus | null>(null);
@@ -72,6 +72,8 @@ export default function SemanticRoutingSwitch() {
     ? copy("Setting was not saved. Try again.", "设置未保存，请重试。", "設定未儲存，請重試。", "設定を保存できませんでした。再試行してください。")
     : readFailed
       ? copy("Cannot read the current status. Try again shortly.", "暂时无法读取状态，请稍后重试。", "暫時無法讀取狀態，請稍後重試。", "現在の状態を取得できません。しばらくしてから再試行してください。")
+      : overriddenByJev
+        ? null
       : status.state === "error"
         ? copy("Local classification is unavailable. Existing rules remain active.", "本地分档暂不可用，继续使用原有规则。", "本機分檔暫時無法使用，繼續使用原有規則。", "ローカル分類を利用できません。既存のルールを使用します。")
         : status.enabled && status.state === "preparing"
@@ -94,7 +96,9 @@ export default function SemanticRoutingSwitch() {
         <label htmlFor={id}>{copy("Local smart tiers", "本地智能分档", "本機智慧分檔", "ローカルスマート分層")}</label>
       </div>
       <p className="semantic-routing-switch-note" id={`${id}-note`}>
-        {copy("Off releases model memory and uses the original routing rules.", "关闭后释放模型内存，使用原有路由规则。", "關閉後釋放模型記憶體，使用原有路由規則。", "オフにするとモデルのメモリを解放し、既存のルールを使用します。")}
+        {overriddenByJev
+          ? copy("Jev takes priority. This switch keeps your local preference. Jev failures use existing rules without local classification.", "Jev 优先，本地开关仅保留设置。Jev 失败时使用原有规则，不调用本地分档。", "Jev 優先，本機開關僅保留設定。Jev 失敗時使用原有規則，不呼叫本機分檔。", "Jev を優先します。このスイッチはローカル設定を保持します。Jev が失敗した場合、ローカル分類を呼ばずに既存のルールを使用します。")
+          : copy("Off releases model memory and uses the original routing rules.", "关闭后释放模型内存，使用原有路由规则。", "關閉後釋放模型記憶體，使用原有規則。", "オフにするとモデルのメモリを解放し、既存のルールを使用します。")}
       </p>
       {message && <p className={`semantic-routing-switch-state${hasError ? " is-error" : ""}`} id={`${id}-state`} role={hasError ? "alert" : "status"}>{message}</p>}
     </div>

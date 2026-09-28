@@ -22,6 +22,9 @@
 
 mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw SSE relay
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
+mod jev_routing;
+#[cfg(test)]
+mod jev_tests;
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
 #[cfg(test)]
@@ -1694,6 +1697,7 @@ pub struct Gateway {
     /// so `RequestRecord`, `SQLite`, and the JSONL request log remain body-free.
     body_log: Option<Arc<BodyLog>>,
     semantic: Option<Arc<crate::semantic::SemanticController>>,
+    jev: Arc<crate::jev::JevController>,
 }
 
 /// An Agent router that has already passed every fallible construction step.
@@ -2197,6 +2201,7 @@ impl Gateway {
             recorder,
             body_log: None,
             semantic: None,
+            jev: crate::jev::JevController::shared(&config.data.dir),
         })
     }
 
