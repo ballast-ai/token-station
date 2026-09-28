@@ -1209,8 +1209,17 @@ impl AgentCommandState {
         runtime: Option<&AgentProxyRuntime>,
         opencode_issue: Option<&AgentConnectionIssueView>,
     ) -> Result<Vec<AgentView>, AgentCommandError> {
+        self.scan_with(runtime, opencode_issue, || self.perform_scan())
+    }
+
+    fn scan_with(
+        &self,
+        runtime: Option<&AgentProxyRuntime>,
+        opencode_issue: Option<&AgentConnectionIssueView>,
+        perform_scan: impl FnOnce() -> Result<ScanSnapshot, AgentCommandError>,
+    ) -> Result<Vec<AgentView>, AgentCommandError> {
         let _scan_guard = self.begin_scan()?;
-        let snapshot = self.perform_scan()?;
+        let snapshot = perform_scan()?;
         let views = self.views(&snapshot, runtime, opencode_issue)?;
         self.session
             .lock()
@@ -5117,7 +5126,57 @@ mod tests {
             .expect("preflight diagnostic blocks planning");
         assert_eq!(error.code, "read_only_preflight_failed");
 
-        let scanned = state.scan().unwrap();
+        // 命令事务测试只扫描隔离环境，不读取开发机已安装的应用或二进制。
+        use crate::agent_integration::discovery::{ProbeOutcome, ProbeRunner};
+        use crate::agent_integration::platform::ScanEnvironment;
+        use crate::agent_integration::types::VersionProbe;
+
+        struct FixedProbe;
+        impl ProbeRunner for FixedProbe {
+            fn run(
+                &self,
+                _executable: &Path,
+                _observed_entry: &Path,
+                _probe: &VersionProbe,
+                _environment: &ScanEnvironment,
+            ) -> ProbeOutcome {
+                ProbeOutcome {
+                    runnable: true,
+                    version_raw: Some("1.2.3".to_string()),
+                    version_normalized: Some("1.2.3".to_string()),
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+        let scanner = DiscoveryScanner::new(
+            ScanEnvironment {
+                platform: Platform::Linux,
+                variables: BTreeMap::new(),
+                path_entries: Vec::new(),
+                present_environment: BTreeSet::new(),
+                child_environment: BTreeMap::new(),
+            },
+            FixedProbe,
+        );
+        let scanned = state
+            .scan_with(None, None, || {
+                Ok(ScanSnapshot {
+                    catalog: CompatibilityCatalog::builtin(&state.registry).unwrap(),
+                    source: CatalogSource::Builtin,
+                    warning: None,
+                    records: state
+                        .registry
+                        .descriptors()
+                        .iter()
+                        .flat_map(|descriptor| {
+                            let mut isolated = descriptor.clone();
+                            isolated.known_install_locations.clear();
+                            scanner.scan_descriptor(&isolated)
+                        })
+                        .collect(),
+                })
+            })
+            .unwrap();
         assert_eq!(scanned.len(), 12);
         assert!(state.session.lock().unwrap().scan.is_some());
     }

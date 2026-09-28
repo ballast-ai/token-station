@@ -1335,6 +1335,9 @@ fn responses_stream_state_is_isolated_and_cleaned_by_stream_id() {
             .unwrap()
             .contains("response.created")
     );
+    plugin
+        .render_stream_event(&delta("bad"), &context("stream-a", "resp-a-3"))
+        .expect_err("an active stream still rejects a changed response identity");
 }
 
 #[test]

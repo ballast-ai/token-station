@@ -292,12 +292,25 @@ test_a_launch_that_never_succeeds_still_rolls_back() {
     || fail "a permanently failing launch must restore the old App"
 }
 
-test_copy_failure_preserves_old_app
-test_immediate_exit_restores_old_app
-test_incompatible_candidate_preserves_old_app
-test_concurrent_install_has_single_owner
-test_stable_launch_succeeds
-test_a_transient_launch_refusal_is_retried_not_rolled_back
-test_a_launch_that_never_succeeds_still_rolls_back
+# 不带参数保留完整验收；Rust 短测逐场景运行，各自应用硬截止。
+case "${1:-all}" in
+  all)
+    test_copy_failure_preserves_old_app
+    test_immediate_exit_restores_old_app
+    test_incompatible_candidate_preserves_old_app
+    test_concurrent_install_has_single_owner
+    test_stable_launch_succeeds
+    test_a_transient_launch_refusal_is_retried_not_rolled_back
+    test_a_launch_that_never_succeeds_still_rolls_back
+    ;;
+  copy_failure_preserves_old_app) test_copy_failure_preserves_old_app ;;
+  immediate_exit_restores_old_app) test_immediate_exit_restores_old_app ;;
+  incompatible_candidate_preserves_old_app) test_incompatible_candidate_preserves_old_app ;;
+  concurrent_install_has_single_owner) test_concurrent_install_has_single_owner ;;
+  stable_launch_succeeds) test_stable_launch_succeeds ;;
+  a_transient_launch_refusal_is_retried_not_rolled_back) test_a_transient_launch_refusal_is_retried_not_rolled_back ;;
+  a_launch_that_never_succeeds_still_rolls_back) test_a_launch_that_never_succeeds_still_rolls_back ;;
+  *) fail "unknown installer test scenario: $1" ;;
+esac
 
 echo "install-local-desktop transaction tests passed"

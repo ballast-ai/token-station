@@ -3,8 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-#[test]
-fn local_desktop_installer_is_transactional_and_checks_launch_health() {
+fn run_installer_scenario(scenario: &str) {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let project_root = manifest_dir
         .ancestors()
@@ -14,6 +13,7 @@ fn local_desktop_installer_is_transactional_and_checks_launch_health() {
 
     let output = Command::new("bash")
         .arg(&test_script)
+        .arg(scenario)
         .output()
         .expect("installer transaction test script must run");
 
@@ -23,6 +23,41 @@ fn local_desktop_installer_is_transactional_and_checks_launch_health() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+#[test]
+fn local_desktop_installer_copy_failure_preserves_old_app() {
+    run_installer_scenario("copy_failure_preserves_old_app");
+}
+
+#[test]
+fn local_desktop_installer_immediate_exit_restores_old_app() {
+    run_installer_scenario("immediate_exit_restores_old_app");
+}
+
+#[test]
+fn local_desktop_installer_incompatible_candidate_preserves_old_app() {
+    run_installer_scenario("incompatible_candidate_preserves_old_app");
+}
+
+#[test]
+fn local_desktop_installer_concurrent_install_has_single_owner() {
+    run_installer_scenario("concurrent_install_has_single_owner");
+}
+
+#[test]
+fn local_desktop_installer_stable_launch_succeeds() {
+    run_installer_scenario("stable_launch_succeeds");
+}
+
+#[test]
+fn local_desktop_installer_a_transient_launch_refusal_is_retried_not_rolled_back() {
+    run_installer_scenario("a_transient_launch_refusal_is_retried_not_rolled_back");
+}
+
+#[test]
+fn local_desktop_installer_a_launch_that_never_succeeds_still_rolls_back() {
+    run_installer_scenario("a_launch_that_never_succeeds_still_rolls_back");
 }
 
 #[test]

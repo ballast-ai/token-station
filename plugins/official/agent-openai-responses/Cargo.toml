@@ -16,3 +16,8 @@ serde = "1"
 serde_json = "1"
 token-station-protocol = { path = "../../../crates/protocol" }
 wit-bindgen = "0.59"
+
+# Responses codec shares the same formal South release as the server host.
+south-north-codec = { git = "https://github.com/ballast-ai/token-station-south.git", tag = "v0.37.0" }
+# Use the same canonical types as the codec for continuation snapshots without JSON conversion.
+token-station-kernel-protocol = { package = "token-station-protocol", git = "https://github.com/ballast-ai/token-station-kernel.git", rev = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35" }

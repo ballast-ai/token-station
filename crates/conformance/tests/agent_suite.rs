@@ -7,7 +7,7 @@
 //! retriability to get wrong. What is left — translate faithfully,
 //! deterministically, and survive a field you do not know — is checked here.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Display;
 use std::path::Path;
 
@@ -356,6 +356,96 @@ impl AgentAdapter for Nondeterministic {
     fn map_inbound_error(&self, error: &ErrorEnvelope, context: &Value) -> AdapterResult<Value> {
         OpenAiClient.map_inbound_error(error, context)
     }
+}
+
+/// 拒绝复用已结束的请求；内部 `stream_id` 不参与 wire 渲染。
+#[derive(Default)]
+struct StatefulStream {
+    seen: RefCell<Vec<String>>,
+    active: RefCell<Option<String>>,
+    nondeterministic: bool,
+}
+
+impl AgentAdapter for StatefulStream {
+    fn metadata(&self) -> AdapterMetadata {
+        OpenAiClient.metadata()
+    }
+    fn normalize_inbound(&self, envelope: &AgentRequestEnvelope) -> AdapterResult<ChatRequest> {
+        OpenAiClient.normalize_inbound(envelope)
+    }
+    fn extract_agent_hint(&self, envelope: &AgentRequestEnvelope) -> AdapterResult<Vec<AgentHint>> {
+        OpenAiClient.extract_agent_hint(envelope)
+    }
+    fn render_response(&self, response: &ChatResponse, context: &Value) -> AdapterResult<Value> {
+        OpenAiClient.render_response(response, context)
+    }
+    fn render_stream_event(&self, event: &StreamEvent, context: &Value) -> AdapterResult<Value> {
+        let id = context["stream_id"]
+            .as_str()
+            .ok_or_else(|| invalid("missing stream identity"))?;
+        let mut active = self.active.borrow_mut();
+        let mut seen = self.seen.borrow_mut();
+        if let Some(previous) = active.as_deref() {
+            assert_eq!(previous, id, "同一回放的所有事件使用同一个内部 ID");
+        } else {
+            if seen.iter().any(|previous| previous == id) {
+                return Err(invalid("completed stream cannot be reopened"));
+            }
+            seen.push(id.to_owned());
+            *active = Some(id.to_owned());
+        }
+        assert_eq!(context["response_id"], "wire-response");
+        assert_eq!(context["model"], "wire-model");
+        assert_eq!(context["protocol"], "openai-chat-completions");
+        if matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. }) {
+            *active = None;
+        }
+        let mut output = OpenAiClient.render_stream_event(event, context)?;
+        if self.nondeterministic && seen.len() == 2 {
+            output["data"] = json!("incorrect second replay");
+        }
+        Ok(output)
+    }
+    fn map_inbound_error(&self, error: &ErrorEnvelope, context: &Value) -> AdapterResult<Value> {
+        OpenAiClient.map_inbound_error(error, context)
+    }
+}
+
+fn stateful_stream_pack() -> FixturePack<AgentFamily> {
+    FixturePack::from_cases(
+        pack()
+            .cases()
+            .iter()
+            .cloned()
+            .map(|mut case| {
+                if case.family == AgentFamily::Stream {
+                    case.input["context"]["stream_id"] = json!("fixture-stream");
+                    case.input["context"]["response_id"] = json!("wire-response");
+                    case.input["context"]["model"] = json!("wire-model");
+                }
+                case
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn independent_stream_replays_keep_wire_context_and_isolate_lifecycles() {
+    let adapter = StatefulStream::default();
+    let report = run_agent_suite(&adapter, &stateful_stream_pack());
+    assert!(report.is_passing(), "{report}");
+    assert_eq!(adapter.seen.borrow().len(), 2);
+    assert!(adapter.active.borrow().is_none());
+}
+
+#[test]
+fn isolated_stream_replays_still_reject_nondeterministic_wire_output() {
+    let adapter = StatefulStream {
+        nondeterministic: true,
+        ..Default::default()
+    };
+    let report = run_agent_suite(&adapter, &stateful_stream_pack());
+    assert_eq!(failed_checks(&report), vec![Check::Determinism]);
 }
 
 /// Refuses an envelope carrying a field this ABI version does not model.

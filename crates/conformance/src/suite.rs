@@ -4,6 +4,8 @@
 //! looking at what came back: turn a case into a closure `input -> output`, then
 //! ask the same questions of it.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::Deserialize;
 use serde_json::Value;
 use token_station_protocol::{AgentRequestEnvelope, ChatResponse, ErrorEnvelope, StreamEvent};
@@ -14,6 +16,7 @@ use crate::report::{Check, Outcome, Report};
 
 /// The key injected to prove a `v1` adapter tolerates a `v2` peer's field.
 const UNKNOWN_FIELD: &str = "__conformance_unknown_field";
+static NEXT_STREAM: AtomicU64 = AtomicU64::new(0);
 
 /// What one adapter invocation produced, with a bad fixture told apart from a
 /// bad adapter.
@@ -109,7 +112,20 @@ fn invoke_agent(adapter: &dyn AgentAdapter, family: AgentFamily, input: &Value) 
             )
         }
         AgentFamily::Stream => {
-            let RenderStreamInput { context, events } = parse(input)?;
+            let RenderStreamInput {
+                mut context,
+                events,
+            } = parse(input)?;
+            // 每遍完整回放是独立请求。已终止的请求不得为了确定性检查而重开；
+            // 只隔离内部状态键，response_id/model/events 等 wire 输入保持不变。
+            let identity = NEXT_STREAM.fetch_add(1, Ordering::Relaxed);
+            context
+                .as_object_mut()
+                .ok_or_else(|| Failure::Fixture("stream context must be an object".into()))?
+                .insert(
+                    "stream_id".into(),
+                    Value::String(format!("conformance-stream-{identity}")),
+                );
             let mut chunks = Vec::with_capacity(events.len());
             for event in &events {
                 chunks.push(
