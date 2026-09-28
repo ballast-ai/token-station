@@ -1,6 +1,6 @@
 # Local SCX desktop experiment
 
-Token Station SCX is a separate macOS Apple Silicon App for testing local three-tier classification.
+Token Station is a macOS Apple Silicon App with local three-tier classification in this build.
 It preserves the installed `token-station.app` and uses separate configuration, credentials, data, and gateway port.
 It does not establish production routing quality or measured cost savings.
 
@@ -20,7 +20,9 @@ For later installations, omit the copy option:
 scripts/install-local-desktop.sh --scx-experiment
 ```
 
-The App is `/Applications/Token Station SCX.app`.
+The App is `/Applications/Token Station.app`.
+The installer replaces the former `Token Station SCX.app` name after the new build passes its checks.
+The bundle identifier and private data directory stay unchanged, so existing settings and model assets remain available.
 Its bundle identifier is `com.tokenstation.desktop.scx`.
 Its authenticated gateway uses `127.0.0.1:18787`.
 The ordinary App and its gateway keep their existing settings.
@@ -28,7 +30,7 @@ The experimental App does not receive ordinary automatic updates.
 
 ## Use
 
-1. Open **Token Station SCX**.
+1. Open **Token Station**.
 2. Select smart-tier routing on Home.
 3. Check the low, medium, and high model pools.
 4. Start the proxy if it is stopped.

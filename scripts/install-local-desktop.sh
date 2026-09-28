@@ -21,13 +21,15 @@ fi
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$scx_experiment" == "true" ]]; then
   readonly bundle_id="com.tokenstation.desktop.scx"
-  readonly installed_app="/Applications/Token Station SCX.app"
-  readonly app_name="Token Station SCX.app"
+  readonly installed_app="/Applications/Token Station.app"
+  readonly legacy_installed_app="/Applications/Token Station SCX.app"
+  readonly app_name="Token Station.app"
   readonly lock_name=".token-station-scx.install.lock"
 else
   readonly bundle_id="com.tokenstation.desktop"
   readonly installed_app="/Applications/token-station.app"
   readonly app_name="token-station.app"
+  readonly legacy_installed_app=""
   readonly lock_name=".token-station.install.lock"
 fi
 if [[ "$print_target" == "true" ]]; then
@@ -71,7 +73,9 @@ PY
 
 staging_app=""
 backup_app=""
+previous_app="$installed_app"
 replacement_active=0
+new_app_installed=0
 had_previous_app=0
 
 verify_app() {
@@ -128,11 +132,14 @@ rollback_installation() {
   fi
   osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
   wait_for_app_exit "$installed_app" || true
-  if [[ -e "$installed_app" ]]; then
+  if [[ "$new_app_installed" -eq 1 && ( -e "$installed_app" || -L "$installed_app" ) ]]; then
     rm -rf -- "$installed_app" || rollback_failed=1
   fi
   if [[ "$had_previous_app" -eq 1 && -d "$backup_app" ]]; then
-    if mv -- "$backup_app" "$installed_app"; then
+    if [[ -e "$previous_app" || -L "$previous_app" ]]; then
+      echo "Cannot restore the previous App because its path is occupied. Backup: $backup_app" >&2
+      rollback_failed=1
+    elif mv -- "$backup_app" "$previous_app"; then
       echo "安装失败，旧版本已恢复" >&2
     else
       echo "安装失败，且旧版本恢复失败；备份保留在：$backup_app" >&2
@@ -212,12 +219,19 @@ if [[ -f "$desktop_config" ]] \
   exit 1
 fi
 
-if [[ -e "$installed_app" ]]; then
-  if [[ ! -d "$installed_app" || -L "$installed_app" ]]; then
-    echo "refusing to replace non-directory path: $installed_app" >&2
+if [[ -n "$legacy_installed_app" && ( -e "$legacy_installed_app" || -L "$legacy_installed_app" ) ]]; then
+  if [[ -e "$installed_app" || -L "$installed_app" ]]; then
+    echo "Both current and legacy App paths exist. Resolve the conflict before installing." >&2
     exit 1
   fi
-  verify_app "$installed_app" "installed app"
+  previous_app="$legacy_installed_app"
+fi
+if [[ -e "$previous_app" || -L "$previous_app" ]]; then
+  if [[ ! -d "$previous_app" || -L "$previous_app" ]]; then
+    echo "refusing to replace non-directory path: $previous_app" >&2
+    exit 1
+  fi
+  verify_app "$previous_app" "installed app"
   had_previous_app=1
 fi
 
@@ -230,19 +244,24 @@ verify_app "$staging_app" "staged app"
 
 if [[ "$had_previous_app" -eq 1 ]]; then
   osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
-  if ! wait_for_app_exit "$installed_app"; then
+  if ! wait_for_app_exit "$previous_app"; then
     echo "installed app is still running; refusing to replace it" >&2
     exit 1
   fi
   backup_app="$(mktemp -d "$installed_parent/.token-station.backup.XXXXXX")"
   rmdir -- "$backup_app"
   replacement_active=1
-  mv -- "$installed_app" "$backup_app"
+  mv -- "$previous_app" "$backup_app"
 else
   replacement_active=1
 fi
 
+if [[ -e "$installed_app" || -L "$installed_app" ]]; then
+  echo "The target App path became occupied. Refusing to replace it." >&2
+  exit 1
+fi
 mv -- "$staging_app" "$installed_app"
+new_app_installed=1
 staging_app=""
 verify_app "$installed_app" "installed app"
 

@@ -25,12 +25,8 @@ pub(crate) fn bundle_id() -> &'static str {
     }
 }
 
-pub(crate) fn app_name() -> &'static str {
-    if is_scx_experiment() {
-        "Token Station SCX"
-    } else {
-        "Token Station"
-    }
+pub(crate) const fn app_name() -> &'static str {
+    "Token Station"
 }
 
 pub(crate) fn default_listen() -> &'static str {

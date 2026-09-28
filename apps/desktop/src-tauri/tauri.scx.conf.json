@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Token Station SCX",
+  "productName": "Token Station",
   "identifier": "com.tokenstation.desktop.scx",
   "app": {
     "windows": [
       {
-        "title": "Token Station SCX — Experimental",
+        "title": "Token Station",
         "width": 1040,
         "height": 720,
         "minWidth": 900,
@@ -18,6 +18,6 @@
   },
   "bundle": {
     "createUpdaterArtifacts": false,
-    "shortDescription": "Local SCX routing experiment with isolated settings"
+    "shortDescription": "Smart routing with local task classification"
   }
 }

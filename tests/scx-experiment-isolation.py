@@ -110,8 +110,8 @@ class IsolationTests(unittest.TestCase):
     def test_experimental_package_identity_is_explicit(self):
         overlay = json.loads((ROOT / "apps/desktop/src-tauri/tauri.scx.conf.json").read_text())
         self.assertEqual(overlay["identifier"], prepare.EXPERIMENT_ID)
-        self.assertEqual(overlay["productName"], "Token Station SCX")
-        self.assertEqual(overlay["app"]["windows"][0]["title"], "Token Station SCX — Experimental")
+        self.assertEqual(overlay["productName"], "Token Station")
+        self.assertEqual(overlay["app"]["windows"][0]["title"], "Token Station")
         self.assertFalse(overlay["bundle"]["createUpdaterArtifacts"])
 
     def test_installer_has_only_two_exact_targets(self):
@@ -119,7 +119,7 @@ class IsolationTests(unittest.TestCase):
         stable = subprocess.check_output(["bash", str(installer), "--print-target"], text=True)
         experiment = subprocess.check_output(["bash", str(installer), "--scx-experiment", "--print-target"], text=True)
         self.assertEqual(stable.splitlines(), ["/Applications/token-station.app", prepare.STABLE_ID])
-        self.assertEqual(experiment.splitlines(), ["/Applications/Token Station SCX.app", prepare.EXPERIMENT_ID])
+        self.assertEqual(experiment.splitlines(), ["/Applications/Token Station.app", prepare.EXPERIMENT_ID])
         for arguments in [["--target", "/Applications/token-station.app"], ["--copy-stable-settings"]]:
             result = subprocess.run(["bash", str(installer), *arguments], capture_output=True)
             self.assertEqual(result.returncode, 2)

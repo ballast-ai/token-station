@@ -31,7 +31,7 @@ done
 if [[ "$scx_experiment" == "true" ]]; then
   [[ "$mode" == "local" && "$(uname -s)" == "Darwin" ]] || usage
   expected_bundle_id="com.tokenstation.desktop.scx"
-  expected_app_name="Token Station SCX.app"
+  expected_app_name="Token Station.app"
 fi
 [[ -n "$binary" && -n "$bundle_root" && -n "$source_root" && -n "$rust_sysroot" && -n "$private_cargo_home" ]] || usage
 [[ -f "$binary" ]] || { echo "desktop executable missing: $binary" >&2; exit 1; }
