@@ -555,6 +555,9 @@ impl Guest for GeminiClient {
                 "modelVersion": model,
             }))?,
             StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
+            StreamEvent::RedactedThinking { .. } => {
+                return Err(invalid("gemini cannot render redacted thinking"));
+            }
             StreamEvent::Delta { index, content } => sse(&json!({
                 "candidates": [{"index": index, "content": {"role": "model", "parts": [{"text": content}]}}],
                 "modelVersion": model,
@@ -744,6 +747,24 @@ mod tests {
             messages[1].tool_call_id.as_deref(),
             Some(messages[0].tool_calls[0].id.as_str())
         );
+    }
+
+    #[test]
+    fn redacted_thinking_is_rejected_instead_of_dropped() {
+        let event = json!({
+            "type": "redacted_thinking",
+            "index": 0,
+            "data": "供应商原值+/=opaque"
+        });
+        let context = json!({
+            "stream_id": "stream-redacted",
+            "model": "gemini-test"
+        });
+
+        let error = GeminiClient::render_stream_event(event.to_string(), context.to_string())
+            .expect_err("Gemini has no redacted-thinking wire slot");
+        let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 }
 

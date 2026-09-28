@@ -47,6 +47,10 @@ pub enum StreamEvent {
     /// The signature fragment closing a thinking block (Anthropic
     /// `signature_delta`). Arrives after the block's text deltas.
     ThinkingSignatureDelta { index: u32, signature_delta: String },
+    /// One opaque redacted thinking block at the provider content block
+    /// `index`. Consumers must preserve the provider's JSON string value and
+    /// must not reinterpret it as text or as a thinking signature.
+    RedactedThinking { index: u32, data: String },
     /// The provider has chosen a finish reason, but the stream is not terminal
     /// yet. A final usage report may follow before [`Self::Done`].
     Finish {
@@ -124,6 +128,23 @@ mod tests {
     }
 
     #[test]
+    fn redacted_thinking_round_trips_opaque_value_with_block_index() {
+        let event = StreamEvent::RedactedThinking {
+            index: 7,
+            data: "供应商原值+/=opaque".to_owned(),
+        };
+
+        let json = serde_json::to_string(&event).expect("serializable event");
+        assert_eq!(
+            json,
+            r#"{"type":"redacted_thinking","index":7,"data":"供应商原值+/=opaque"}"#
+        );
+
+        let decoded: StreamEvent = serde_json::from_str(&json).expect("valid event");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
     fn every_variant_round_trips() {
         let events = vec![
             StreamEvent::Delta {
@@ -150,6 +171,10 @@ mod tests {
             StreamEvent::ThinkingSignatureDelta {
                 index: 0,
                 signature_delta: "EqQBCg".to_owned(),
+            },
+            StreamEvent::RedactedThinking {
+                index: 1,
+                data: "opaque+/=".to_owned(),
             },
             StreamEvent::Finish {
                 finish_reason: Some(FinishReason::Stop),

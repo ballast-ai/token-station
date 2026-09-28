@@ -1033,6 +1033,9 @@ impl Guest for AnthropicClient {
                     )?);
                     Ok(rendered)
                 }
+                StreamEvent::RedactedThinking { .. } => Err(invalid(
+                    "anthropic-messages cannot render redacted thinking until its wire mapping is defined",
+                )),
                 StreamEvent::ToolCallDelta {
                     index,
                     id,
@@ -1183,7 +1186,7 @@ export!(AnthropicClient);
 mod tests {
     use super::{fresh_input_tokens, AnthropicClient, Guest};
     use serde_json::{json, Value};
-    use token_station_protocol::Usage;
+    use token_station_protocol::{ErrorCode, ErrorEnvelope, Usage};
 
     #[test]
     fn canonical_input_is_denormalized_for_anthropic_wire_usage() {
@@ -1235,5 +1238,26 @@ mod tests {
         assert_eq!(rendered["usage"]["input_tokens"], json!(30));
         assert_eq!(rendered["usage"]["cache_read_input_tokens"], json!(100));
         assert_eq!(rendered["usage"]["cache_creation_input_tokens"], json!(20));
+    }
+
+    #[test]
+    fn redacted_thinking_is_rejected_until_the_wire_mapping_is_defined() {
+        let event = json!({
+            "type": "redacted_thinking",
+            "index": 0,
+            "data": "供应商原值+/=opaque"
+        });
+        let context = json!({
+            "stream_id": "stream-redacted",
+            "response_id": "msg-redacted",
+            "model": "claude-test",
+            "input_tokens": 1
+        });
+
+        let error =
+            <AnthropicClient as Guest>::render_stream_event(event.to_string(), context.to_string())
+                .expect_err("redacted thinking needs an explicit wire mapping");
+        let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 }

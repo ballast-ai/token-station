@@ -273,6 +273,11 @@ impl AgentAdapter for OpenAiClient {
                 serde_json::to_string(thinking_delta).map_err(internal)?
             ),
             StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
+            StreamEvent::RedactedThinking { .. } => {
+                return Err(invalid(
+                    "openai-chat-completions cannot render redacted thinking",
+                ));
+            }
             StreamEvent::Usage { usage } => format!(
                 "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{}}}}}\n\n",
                 usage.input_tokens, usage.output_tokens
@@ -581,4 +586,23 @@ fn a_hint_is_read_from_a_header_whose_value_survived_redaction() {
         .expect("hints extract");
     assert_eq!(hints.len(), 1);
     assert_eq!(hints[0].kind, HintKind::StepType);
+}
+
+#[test]
+fn openai_reference_rejects_redacted_thinking_without_a_wire_slot() {
+    let error = OpenAiClient
+        .render_stream_event(
+            &StreamEvent::RedactedThinking {
+                index: 3,
+                data: "opaque+/=".to_owned(),
+            },
+            &Value::Null,
+        )
+        .expect_err("OpenAI chat cannot render a redacted thinking block");
+
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert_eq!(
+        error.message,
+        "openai-chat-completions cannot render redacted thinking"
+    );
 }
