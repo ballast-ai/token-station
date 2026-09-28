@@ -4,11 +4,15 @@ This runtime serves one local classifier through private stdin/stdout IPC.
 It does not open a network listener or call an upstream inference API.
 The desktop controller owns its process, queue, timeouts, and routing fallback.
 
-The isolated SCX App enables classification for smart tiers automatically at each normal launch.
-It loads a prepared model in the background without a settings panel or manual enablement step.
+The isolated SCX App enables classification for smart tiers by default.
+Its compact **Local smart tiers** switch remembers the choice across App restarts.
+When enabled, it loads a prepared model in the background at each normal launch.
 If runtime assets are missing, it prepares the pinned assets and then starts classification.
 Preparation, loading, and classifier failures keep existing routing rules available.
-Each launch makes one automatic startup attempt. Restart the App after correcting a setup failure.
+Each enabled launch makes one automatic startup attempt. After correcting a setup failure, turn the switch off and on to retry.
+Turning the switch off stops preparation and the worker to release model memory.
+The preference is stored in `semantic-settings.json` beside the runtime directory.
+Normal shutdown stops the worker without changing this preference.
 The ordinary App and recovery safe mode do not start the classifier.
 
 The supported setup target is macOS on Apple Silicon with Python 3.11.15.

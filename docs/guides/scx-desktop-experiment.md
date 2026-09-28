@@ -33,12 +33,18 @@ The experimental App does not receive ordinary automatic updates.
 3. Check the low, medium, and high model pools.
 4. Start the proxy if it is stopped.
 
-Each normal experimental App launch enables SCX routing automatically.
+Local classification is enabled by default in the experimental App.
+Use **Local smart tiers** on the routing page to turn it on or off.
+The switch takes effect immediately and remembers the choice across App restarts.
+Turning it off stops model preparation and inference, releases model memory, and keeps the original routing rules active.
+The switch remains available in fixed-model and quota-first modes.
+When enabled, each normal experimental App launch starts SCX routing automatically.
 The App loads prepared assets or prepares missing pinned assets in the background.
-No SCX settings panel or manual enablement step is required.
+The App does not display the former experimental panel or comparison records.
 Existing routing stays available during preparation, loading, or classifier failures.
-Each launch makes one automatic startup attempt. Restart the App after correcting a setup failure.
+Each enabled launch makes one automatic startup attempt. After correcting a setup failure, turn the switch off and on to retry.
 Quit the App to stop its classifier process and release model memory.
+Quitting does not change the saved switch setting.
 SCX applies to global and Agent routes that use smart tiers.
 Fixed-model routes, quota-first routes, explicit model pins, user rules, and Agent hints keep priority.
 SCX uses the existing pools, capability checks, health ranking, recovery, and free-provider fallback restrictions.

@@ -418,6 +418,7 @@ export interface SemanticObservation {
 
 export interface SemanticStatus {
   available: boolean;
+  enabled: boolean;
   mode: SemanticMode;
   state: "unprepared" | "preparing" | "loading" | "ready" | "off" | "error";
   error: string | null;
@@ -967,6 +968,8 @@ export interface DiagnosticPreview {
 
 export const getState = () => invoke<StateView>("get_state");
 export const getSemanticStatus = () => invoke<SemanticStatus>("get_semantic_status");
+export const setSemanticEnabled = (enabled: boolean) =>
+  invoke<SemanticStatus>("set_semantic_enabled", { enabled });
 export const setSemanticMode = (mode: SemanticMode) =>
   invoke<SemanticStatus>("set_semantic_mode", { mode });
 export const prepareSemanticModel = () => invoke<SemanticStatus>("prepare_semantic_model");

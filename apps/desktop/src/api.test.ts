@@ -27,6 +27,7 @@ import {
   getRouterTable,
   getState,
   getSemanticStatus,
+  setSemanticEnabled,
   prepareSemanticModel,
   setSemanticMode,
   getStats,
@@ -97,9 +98,13 @@ describe("local semantic routing commands", () => {
   it("uses the local control commands without request content or model credentials", async () => {
     invokeMock.mockResolvedValue({ available: true });
     await getSemanticStatus();
+    await setSemanticEnabled(false);
+    await setSemanticEnabled(true);
     await prepareSemanticModel();
     await setSemanticMode("observe");
     expect(invokeMock).toHaveBeenCalledWith("get_semantic_status");
+    expect(invokeMock).toHaveBeenCalledWith("set_semantic_enabled", { enabled: false });
+    expect(invokeMock).toHaveBeenCalledWith("set_semantic_enabled", { enabled: true });
     expect(invokeMock).toHaveBeenCalledWith("prepare_semantic_model");
     expect(invokeMock).toHaveBeenCalledWith("set_semantic_mode", { mode: "observe" });
   });

@@ -499,6 +499,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             semantic_commands::get_semantic_status,
+            semantic_commands::set_semantic_enabled,
             semantic_commands::set_semantic_mode,
             semantic_commands::prepare_semantic_model,
             get_pricing_inventory,

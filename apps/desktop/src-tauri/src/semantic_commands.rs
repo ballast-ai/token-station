@@ -18,6 +18,14 @@ pub(crate) fn get_semantic_status(app: AppHandle) -> Status {
 }
 
 #[tauri::command]
+pub(crate) async fn set_semantic_enabled(app: AppHandle, enabled: bool) -> Result<Status, String> {
+    let controller = controller(&app)?;
+    tauri::async_runtime::spawn_blocking(move || controller.set_enabled(enabled))
+        .await
+        .map_err(|_| "SCX switch change failed.".to_owned())?
+}
+
+#[tauri::command]
 pub(crate) async fn set_semantic_mode(app: AppHandle, mode: Mode) -> Result<Status, String> {
     let controller = controller(&app)?;
     tauri::async_runtime::spawn_blocking(move || controller.set_mode(mode))

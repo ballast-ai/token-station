@@ -141,6 +141,8 @@ impl Fixture {
         }
         std::fs::write(root.join("worker.py"),format!("import json,sys,time,os\nprint(json.dumps({{'event':'ready'}}),flush=True)\nfor line in sys.stdin:\n job=json.loads(line)\n {body}\n")).unwrap();
         let controller = SemanticController::shared(&directory);
+        // No fixture may invoke the production downloader, even on a regression.
+        *controller.preparation_script.lock().unwrap() = Some(root.join("prepare-fixture.py"));
         Self {
             directory,
             controller,
@@ -168,6 +170,23 @@ impl Fixture {
         .unwrap();
         *self.controller.preparation_script.lock().unwrap() = Some(script);
     }
+    fn reconstruct(&mut self) {
+        self.controller.set_mode(Mode::Off).unwrap();
+        let old = std::mem::replace(
+            &mut self.controller,
+            SemanticController::shared(&self.directory.join("unused-controller")),
+        );
+        let previous = Arc::downgrade(&old);
+        drop(old);
+        let until = Instant::now() + Duration::from_secs(10);
+        while previous.strong_count() > 0 {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.controller = SemanticController::shared(&self.directory);
+        *self.controller.preparation_script.lock().unwrap() =
+            Some(self.directory.join("semantic-runtime/prepare-fixture.py"));
+    }
     fn context() -> RequestContext {
         RequestContext::detached(Duration::from_secs(10), Duration::from_secs(10))
     }
@@ -178,6 +197,226 @@ impl Drop for Fixture {
         self.controller.set_mode(Mode::Off).unwrap();
         std::fs::remove_dir_all(&self.directory).unwrap();
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn saved_off_survives_reconstruction_and_on_can_restart_the_worker() {
+    let mut fixture =
+        Fixture::new("print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)");
+    assert!(fixture.controller.start_automatic_route().unwrap().enabled);
+    fixture.wait_for_state("ready");
+    let status = fixture.controller.set_enabled(false).unwrap();
+    assert!(!status.enabled);
+    assert_eq!(status.mode, Mode::Off);
+    token_station_private_fs::verify_private_file(
+        &fixture.directory.join("semantic-settings.json"),
+    )
+    .unwrap();
+    fixture.reconstruct();
+    let status = fixture.controller.start_automatic_route().unwrap();
+    assert!(!status.enabled);
+    assert_eq!(status.state, "off");
+    assert!(fixture.controller.set_enabled(true).unwrap().enabled);
+    fixture.wait_for_state("ready");
+    let input = request(json!([{"role":"user","content":"Explain consensus"}]));
+    assert_eq!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .unwrap()
+            .tier,
+        Tier::High
+    );
+    // Shutdown stops the process without changing the saved choice.
+    fixture.reconstruct();
+    assert!(fixture.controller.start_automatic_route().unwrap().enabled);
+    fixture.wait_for_state("ready");
+}
+
+#[test]
+fn unavailable_status_never_reports_enabled() {
+    assert!(!Status::unavailable().enabled);
+}
+
+#[test]
+#[cfg(unix)]
+fn saved_off_does_not_prepare_missing_assets_on_restart() {
+    let mut fixture = Fixture::new("pass");
+    fixture.controller.set_enabled(false).unwrap();
+    std::fs::remove_file(fixture.directory.join("semantic-runtime/prepared.json")).unwrap();
+    fixture.reconstruct();
+    let status = fixture.controller.start_automatic_route().unwrap();
+    assert!(!status.enabled);
+    assert_eq!(status.mode, Mode::Off);
+    assert_eq!(status.state, "unprepared");
+    assert!(status.error.is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn preference_write_failure_preserves_both_choice_and_runtime() {
+    for enabled in [false, true] {
+        let fixture = Fixture::new(
+            "print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)",
+        );
+        fixture.controller.set_enabled(enabled).unwrap();
+        if enabled {
+            fixture.wait_for_state("ready");
+        }
+        let path = fixture.directory.join("semantic-settings.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let before = serde_json::to_value(fixture.controller.status()).unwrap();
+        assert!(fixture.controller.set_enabled(!enabled).is_err());
+        assert_eq!(
+            serde_json::to_value(fixture.controller.status()).unwrap(),
+            before
+        );
+        let input = request(json!([{"role":"user","content":"Explain consensus"}]));
+        let suggestion = fixture
+            .controller
+            .classify(&input, None, &Fixture::context());
+        assert_eq!(
+            suggestion.map(|suggestion| suggestion.tier),
+            enabled.then_some(Tier::High)
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn invalid_preferences_stay_off_until_an_explicit_choice_repairs_them() {
+    for contents in [
+        "{}".to_owned(),
+        r#"{"enabled":"false"}"#.to_owned(),
+        r#"{"enabled":true,"unknown":false}"#.to_owned(),
+        "x".repeat(2048),
+    ] {
+        let fixture = Fixture::new("pass");
+        std::fs::write(fixture.directory.join("semantic-settings.json"), contents).unwrap();
+        let status = fixture.controller.start_automatic_route().unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.mode, Mode::Off);
+        assert_eq!(status.state, "error");
+        assert!(
+            status
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("settings are invalid")
+        );
+        let status = fixture.controller.set_enabled(false).unwrap();
+        assert!(!status.enabled);
+        assert!(status.error.is_none());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn a_non_file_preference_keeps_classification_off_without_panicking() {
+    let fixture = Fixture::new("pass");
+    std::fs::create_dir(fixture.directory.join("semantic-settings.json")).unwrap();
+    let status = fixture.controller.start_automatic_route().unwrap();
+    assert!(!status.enabled);
+    assert_eq!(status.state, "error");
+    assert_eq!(status.mode, Mode::Off);
+    assert!(status.error.is_some());
+}
+
+#[test]
+#[cfg(unix)]
+fn repeated_on_preserves_the_active_worker_and_repeated_off_stays_off() {
+    let fixture = Fixture::new(
+        "count=globals().get('count',0)+1; print(json.dumps({'id':job['id'],'status':'ok','tier':'low' if count == 1 else 'high'}),flush=True)",
+    );
+    fixture.controller.set_enabled(true).unwrap();
+    fixture.wait_for_state("ready");
+    let input = request(json!([{"role":"user","content":"Explain consensus"}]));
+    assert_eq!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .unwrap()
+            .tier,
+        Tier::Low
+    );
+    fixture.controller.set_enabled(true).unwrap();
+    assert_eq!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .unwrap()
+            .tier,
+        Tier::High
+    );
+    for _ in 0..2 {
+        let status = fixture.controller.set_enabled(false).unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.state, "off");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn enabled_intent_survives_preparation_and_off_cancels_before_a_fresh_on() {
+    let fixture =
+        Fixture::new("print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)");
+    fixture.prepare_with("(root/'started').write_text('started')\nwhile not (root/'continue').exists(): time.sleep(0.01)\n(root/'prepared.json').write_text('fixture')");
+    let status = fixture.controller.set_enabled(true).unwrap();
+    assert!(status.enabled);
+    assert_eq!(status.state, "preparing");
+    assert_eq!(status.mode, Mode::Off);
+    let preparation = Arc::downgrade(
+        fixture
+            .controller
+            .inner
+            .lock()
+            .unwrap()
+            .preparation
+            .as_ref()
+            .unwrap(),
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while !fixture.directory.join("semantic-runtime/started").exists() {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fixture.controller.set_enabled(true).unwrap().enabled);
+    assert!(!fixture.controller.set_enabled(false).unwrap().enabled);
+    while preparation.upgrade().is_some() {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fixture.controller.status().mode, Mode::Off);
+    assert!(fixture.controller.status().error.is_none());
+    std::fs::write(
+        fixture.directory.join("semantic-runtime/continue"),
+        b"continue",
+    )
+    .unwrap();
+    assert!(fixture.controller.set_enabled(true).unwrap().enabled);
+    fixture.wait_for_state("ready");
+    let input = request(json!([{"role":"user","content":"Explain consensus"}]));
+    assert_eq!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .unwrap()
+            .tier,
+        Tier::High
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn enabling_during_manual_preparation_starts_route_after_completion() {
+    let fixture = Fixture::new("pass");
+    fixture.prepare_with("time.sleep(0.15)\n(root/'prepared.json').write_text('fixture')");
+    assert!(!fixture.controller.prepare().unwrap().enabled);
+    assert!(fixture.controller.set_enabled(true).unwrap().enabled);
+    fixture.wait_for_state("ready");
+    assert_eq!(fixture.controller.status().mode, Mode::Route);
 }
 
 #[test]
@@ -254,6 +493,7 @@ fn automatic_preparation_failure_keeps_fallback_and_does_not_retry() {
     fixture.controller.start_automatic_route().unwrap();
     fixture.wait_for_state("error");
     let status = fixture.controller.status();
+    assert!(status.enabled);
     assert_eq!(status.mode, Mode::Off);
     assert!(!status.model_ready);
     assert!(

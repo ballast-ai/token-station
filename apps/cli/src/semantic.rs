@@ -89,6 +89,7 @@ pub struct Counts {
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
     pub available: bool,
+    pub enabled: bool,
     pub mode: Mode,
     pub state: String,
     pub error: Option<String>,
@@ -102,6 +103,7 @@ impl Status {
     pub fn unavailable() -> Self {
         Self {
             available: false,
+            enabled: false,
             mode: Mode::Off,
             state: "off".into(),
             error: None,
@@ -150,21 +152,30 @@ struct Worker {
     sender: mpsc::SyncSender<Job>,
 }
 struct Inner {
+    enabled: bool,
     mode: Mode,
     state: &'static str,
     error: Option<String>,
     generation: u64,
     worker: Option<Worker>,
     preparation: Option<Arc<Process>>,
+    preparation_mode: Mode,
     observations: VecDeque<Observation>,
     counts: Counts,
 }
 pub struct SemanticController {
     root: PathBuf,
+    settings_path: PathBuf,
     inner: Mutex<Inner>,
     ids: AtomicU64,
     #[cfg(test)]
     preparation_script: Mutex<Option<PathBuf>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Settings {
+    enabled: bool,
 }
 
 /// A result retained only until the gateway applies or rejects the suggested pool.
@@ -199,13 +210,16 @@ impl SemanticController {
         }
         let controller = Arc::new(Self {
             root: data_dir.join("semantic-runtime"),
+            settings_path: data_dir.join("semantic-settings.json"),
             inner: Mutex::new(Inner {
+                enabled: false,
                 mode: Mode::Off,
                 state: "off",
                 error: None,
                 generation: 0,
                 worker: None,
                 preparation: None,
+                preparation_mode: Mode::Off,
                 observations: VecDeque::new(),
                 counts: Counts::default(),
             }),
@@ -245,6 +259,7 @@ impl SemanticController {
         let ready = self.model_ready();
         Status {
             available: true,
+            enabled: inner.enabled,
             mode: inner.mode,
             state: if inner.state == "off" && !ready {
                 "unprepared"
@@ -260,7 +275,7 @@ impl SemanticController {
         }
     }
 
-    /// Starts automatic routing once, without replacing later explicit choices.
+    /// Applies the saved startup preference once without replacing later choices.
     /// Missing assets are prepared in the background before the worker starts.
     /// The experimental desktop host owns whether this policy is enabled.
     ///
@@ -271,16 +286,76 @@ impl SemanticController {
     pub fn start_automatic_route(self: &Arc<Self>) -> Result<Status, String> {
         let mut inner = self.inner.lock().expect("semantic state lock");
         if inner.generation == 0 {
-            if self.model_ready() {
-                inner.generation += 1;
-                inner.mode = Mode::Route;
-                self.start_worker(&mut inner);
-            } else {
-                self.start_preparation(&mut inner, Mode::Route);
+            match self.read_enabled() {
+                Ok(enabled) => self.apply_enabled(&mut inner, enabled),
+                Err(error) => {
+                    inner.generation += 1;
+                    inner.state = "error";
+                    inner.error = Some(error);
+                }
             }
         }
         drop(inner);
         Ok(self.status())
+    }
+
+    fn read_enabled(&self) -> Result<bool, String> {
+        const READ_ERROR: &str = "Could not read local SCX settings. Classification remains off. Save a new switch setting to retry.";
+        const INVALID: &str = "Local SCX settings are invalid. Classification remains off. Save a new switch setting to retry.";
+        let metadata = match std::fs::symlink_metadata(&self.settings_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(_) => return Err(READ_ERROR.into()),
+        };
+        if !metadata.is_file() || metadata.len() > 1024 {
+            return Err(INVALID.into());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&self.settings_path)
+            .map_err(|_| READ_ERROR.to_owned())?
+            .take(1025)
+            .read_to_end(&mut bytes)
+            .map_err(|_| READ_ERROR.to_owned())?;
+        serde_json::from_slice::<Settings>(&bytes)
+            .map(|settings| settings.enabled)
+            .map_err(|_| INVALID.to_owned())
+    }
+
+    /// Saves user intent before changing the runtime. Shutdown uses `set_mode`
+    /// instead, so releasing model memory cannot overwrite the saved choice.
+    ///
+    /// # Errors
+    /// Returns a static diagnostic if the private preference cannot be saved.
+    /// # Panics
+    /// Panics if the state lock is poisoned.
+    pub fn set_enabled(self: &Arc<Self>, enabled: bool) -> Result<Status, String> {
+        let mut inner = self.inner.lock().expect("semantic state lock");
+        let bytes: &[u8] = if enabled {
+            b"{\"enabled\":true}\n"
+        } else {
+            b"{\"enabled\":false}\n"
+        };
+        crate::private_fs::write_atomic_private(&self.settings_path, bytes).map_err(|_| {
+            "Could not save local SCX settings. The previous choice remains active.".to_owned()
+        })?;
+        self.apply_enabled(&mut inner, enabled);
+        drop(inner);
+        Ok(self.status())
+    }
+
+    fn apply_enabled(self: &Arc<Self>, inner: &mut Inner, enabled: bool) {
+        inner.enabled = enabled;
+        if !enabled {
+            self.change_mode(inner, Mode::Off);
+        } else if inner.state == "preparing" {
+            inner.preparation_mode = Mode::Route;
+        } else if inner.mode == Mode::Route && matches!(inner.state, "ready" | "loading") {
+            // Repeated On preserves the current worker and its pending requests.
+        } else if self.model_ready() {
+            self.change_mode(inner, Mode::Route);
+        } else {
+            self.start_preparation(inner, Mode::Route);
+        }
     }
 
     /// Changes the process lifetime without restarting the gateway.
@@ -301,6 +376,12 @@ impl SemanticController {
         if inner.state == "preparing" && mode != Mode::Off {
             return Err("Wait for preparation to finish.".into());
         }
+        self.change_mode(&mut inner, mode);
+        drop(inner);
+        Ok(self.status())
+    }
+
+    fn change_mode(self: &Arc<Self>, inner: &mut Inner, mode: Mode) {
         inner.generation += 1;
         if let Some(preparation) = inner.preparation.take() {
             preparation.stop();
@@ -313,12 +394,9 @@ impl SemanticController {
         }
         if mode == Mode::Off {
             inner.state = "off";
-            drop(inner);
-            return Ok(self.status());
+        } else {
+            self.start_worker(inner);
         }
-        self.start_worker(&mut inner);
-        drop(inner);
-        Ok(self.status())
     }
 
     fn start_worker(self: &Arc<Self>, inner: &mut Inner) {
@@ -361,6 +439,7 @@ impl SemanticController {
         }
         inner.mode = Mode::Off;
         inner.state = "preparing";
+        inner.preparation_mode = mode_after;
         inner.error = None;
         let process = Process::new();
         inner.preparation = Some(Arc::clone(&process));
@@ -385,6 +464,7 @@ impl SemanticController {
                 if inner.generation == generation {
                     inner.preparation = None;
                     if result.is_ok() && controller.model_ready() {
+                        let mode_after = inner.preparation_mode;
                         inner.mode = mode_after;
                         if mode_after == Mode::Off {
                             inner.state = "off";
