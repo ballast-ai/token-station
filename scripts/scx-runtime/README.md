@@ -4,6 +4,13 @@ This runtime serves one local classifier through private stdin/stdout IPC.
 It does not open a network listener or call an upstream inference API.
 The desktop controller owns its process, queue, timeouts, and routing fallback.
 
+The isolated SCX App enables classification for smart tiers automatically at each normal launch.
+It loads a prepared model in the background without a settings panel or manual enablement step.
+If runtime assets are missing, it prepares the pinned assets and then starts classification.
+Preparation, loading, and classifier failures keep existing routing rules available.
+Each launch makes one automatic startup attempt. Restart the App after correcting a setup failure.
+The ordinary App and recovery safe mode do not start the classifier.
+
 The supported setup target is macOS on Apple Silicon with Python 3.11.15.
 The model is `scx-admin/scx-router-v0.1` at revision `b45625de43a3bac2861d3f11b96c15a93f4a026e`.
 Model SHA256 hashes, dependency versions, and seed-package checksums are in `assets.json`.

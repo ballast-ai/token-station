@@ -1,18 +1,7 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getSemanticStatus, type SemanticStatus } from "../api";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 import HomePage from "./HomePage";
-
-vi.mock("../api", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, getSemanticStatus: vi.fn() };
-});
-
-const status: SemanticStatus = {
-  available: true, mode: "route", state: "ready", error: null,
-  model_ready: true, timeout_ms: 400, observations: [],
-  counts: { classified: 0, disagreements: 0, fallbacks: 0 },
-};
 
 function props(): React.ComponentProps<typeof HomePage> {
   return {
@@ -32,27 +21,27 @@ function props(): React.ComponentProps<typeof HomePage> {
   };
 }
 
-beforeEach(() => {
-  vi.resetAllMocks();
-  vi.mocked(getSemanticStatus).mockResolvedValue(status);
-});
-
-describe("HomePage global classifier controls", () => {
-  it("keeps global SCX controls accessible after Home switches from smart tiers to Direct", async () => {
+describe("HomePage routing controls", () => {
+  it.each([
+    ["tiered", "智能分档"],
+    ["direct", "简单路由"],
+    ["quota_first", "额度优先"],
+  ] as const)("retains routing selection without SCX controls in %s mode", async (routingMode, selectedLabel) => {
+    const user = userEvent.setup();
     const initial = props();
-    const view = render(<HomePage {...initial} />);
-    expect(await screen.findByRole("radio", { name: "参与路由" })).toBeChecked();
-    view.rerender(<HomePage {...initial} routingMode="direct" />);
-    expect(screen.getByRole("region", { name: "SCX 本地分档" })).toBeVisible();
-    expect(screen.getByRole("radio", { name: "关闭" })).toBeEnabled();
-    expect(screen.getByRole("radio", { name: "参与路由" })).toBeChecked();
-    expect(screen.getByText("立即应用于使用智能分档的全局及 Agent 路由。")).toBeVisible();
-  });
+    render(<HomePage {...initial} routingMode={routingMode} />);
 
-  it("does not show experimental controls on the stable App in Direct mode", async () => {
-    vi.mocked(getSemanticStatus).mockResolvedValue({ ...status, available: false });
-    render(<HomePage {...props()} routingMode="direct" />);
-    await vi.waitFor(() => expect(getSemanticStatus).toHaveBeenCalledOnce());
     expect(screen.queryByRole("region", { name: "SCX 本地分档" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/SCX/)).not.toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "路由模式" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: selectedLabel })).toHaveAttribute("aria-selected", "true");
+    for (const label of ["简单路由", "智能分档", "额度优先"]) {
+      expect(screen.getByRole("tab", { name: label })).toBeEnabled();
+    }
+
+    const nextMode = routingMode === "direct" ? "tiered" : "direct";
+    const nextLabel = nextMode === "tiered" ? "智能分档" : "简单路由";
+    await user.click(screen.getByRole("tab", { name: nextLabel }));
+    expect(initial.onSetRoutingMode).toHaveBeenCalledWith(nextMode);
   });
 });

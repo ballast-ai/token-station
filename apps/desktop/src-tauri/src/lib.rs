@@ -367,9 +367,13 @@ pub fn run() {
             experimental::validate_draft(&desktop_paths.config_file, &draft)
                 .map_err(std::io::Error::other)?;
             if experimental::is_scx_experiment() {
-                app.manage(token_station_cli::semantic::SemanticController::shared(
+                let classifier = token_station_cli::semantic::SemanticController::shared(
                     &desktop_paths.data_dir,
-                ));
+                );
+                if let Err(error) = classifier.start_automatic_route() {
+                    eprintln!("SCX automatic startup failed: {error}");
+                }
+                app.manage(classifier);
             }
             let mut inner = AppInner::new_with_saved(
                 desktop_paths.config_file.clone(),

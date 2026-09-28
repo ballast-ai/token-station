@@ -31,19 +31,20 @@ The experimental App does not receive ordinary automatic updates.
 1. Open **Token Station SCX**.
 2. Select smart-tier routing on Home.
 3. Check the low, medium, and high model pools.
-4. Select **Prepare local model** if the model is not ready.
-5. Select **Observe** to compare suggestions with existing routing.
-6. Select **Route** when you want SCX suggestions to affect eligible requests.
-7. Select **Off** to stop the model and release its memory.
+4. Start the proxy if it is stopped.
 
-Each App launch starts with SCX Off.
-Changes apply to global and Agent routes that use smart tiers.
+Each normal experimental App launch enables SCX routing automatically.
+The App loads prepared assets or prepares missing pinned assets in the background.
+No SCX settings panel or manual enablement step is required.
+Existing routing stays available during preparation, loading, or classifier failures.
+Each launch makes one automatic startup attempt. Restart the App after correcting a setup failure.
+Quit the App to stop its classifier process and release model memory.
+SCX applies to global and Agent routes that use smart tiers.
 Fixed-model routes, quota-first routes, explicit model pins, user rules, and Agent hints keep priority.
 SCX uses the existing pools, capability checks, health ranking, recovery, and free-provider fallback restrictions.
 Classification does not rewrite the request sent to the selected provider.
 
-Observe queues a classification without waiting for its result.
-Route waits at most 400 milliseconds for a suggestion.
+Eligible requests wait at most 400 milliseconds for a suggestion.
 Loading, busy, failed, cancelled, or unsupported classifications retain the original routing decision.
 The worker accepts one inference at a time. It does not accumulate request text in a queue.
 A separate two-second watchdog stops an inference worker that does not respond.
@@ -91,7 +92,7 @@ Multimodal requests, unsupported native server-tool requests, and oversized cont
 Inputs above 16 KiB of projected text or 1,024 formatted SCX tokens are skipped without silent truncation.
 
 Recent observations contain only an identifier, mode, tiers, latency, and a closed outcome code.
-They remain in memory and are limited to 64 records. The panel displays the newest 10.
+They remain in memory and are limited to 64 records. The App does not display a comparison panel.
 Comparison counts reset when the App restarts.
 Normal request receipts can record the `classifier` decision reason.
 The settings-copy procedure disables request-body capture in the experimental configuration.

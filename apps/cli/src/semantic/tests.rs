@@ -148,11 +148,25 @@ impl Fixture {
     }
     fn start(&self, mode: Mode) {
         self.controller.set_mode(mode).unwrap();
+        self.wait_for_state("ready");
+    }
+    fn wait_for_state(&self, state: &str) {
         let until = Instant::now() + Duration::from_secs(10);
-        while self.controller.status().state != "ready" {
+        while self.controller.status().state != state {
             assert!(Instant::now() < until, "{:?}", self.controller.status());
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+    fn prepare_with(&self, body: &str) {
+        let root = self.directory.join("semantic-runtime");
+        std::fs::remove_file(root.join("prepared.json")).unwrap();
+        let script = root.join("prepare-fixture.py");
+        std::fs::write(
+            &script,
+            format!("import pathlib,sys,time\nroot=pathlib.Path(sys.argv[1])\n{body}\n"),
+        )
+        .unwrap();
+        *self.controller.preparation_script.lock().unwrap() = Some(script);
     }
     fn context() -> RequestContext {
         RequestContext::detached(Duration::from_secs(10), Duration::from_secs(10))
@@ -163,6 +177,180 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.controller.set_mode(Mode::Off).unwrap();
         std::fs::remove_dir_all(&self.directory).unwrap();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn automatic_start_uses_prepared_assets_once_and_preserves_a_later_off() {
+    let fixture = Fixture::new(
+        "count=globals().get('count',0)+1; print(json.dumps({'id':job['id'],'status':'ok','tier':'low' if count == 1 else 'high'}),flush=True)",
+    );
+    assert_eq!(fixture.controller.status().mode, Mode::Off);
+    let started = Instant::now();
+    let status = fixture.controller.start_automatic_route().unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(status.mode, Mode::Route);
+    fixture.wait_for_state("ready");
+    let input = request(json!([{"role":"user","content":"Explain consensus"}]));
+    assert_eq!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .unwrap()
+            .tier,
+        Tier::Low
+    );
+    fixture.controller.start_automatic_route().unwrap();
+    assert_eq!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .unwrap()
+            .tier,
+        Tier::High
+    );
+    fixture.controller.set_mode(Mode::Off).unwrap();
+    assert_eq!(
+        fixture.controller.start_automatic_route().unwrap().mode,
+        Mode::Off
+    );
+    assert!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .is_none()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn automatic_start_prepares_missing_assets_then_serves_requests() {
+    let fixture =
+        Fixture::new("print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)");
+    fixture.prepare_with("time.sleep(0.15)\n(root/'prepared.json').write_text('fixture')");
+    let started = Instant::now();
+    assert_eq!(
+        fixture.controller.start_automatic_route().unwrap().state,
+        "preparing"
+    );
+    assert!(started.elapsed() < Duration::from_millis(100));
+    fixture.controller.start_automatic_route().unwrap();
+    fixture.wait_for_state("ready");
+    assert_eq!(fixture.controller.status().mode, Mode::Route);
+    let input = request(json!([{"role":"user","content":"Explain consensus"}]));
+    let suggestion = fixture
+        .controller
+        .classify(&input, None, &Fixture::context())
+        .unwrap();
+    assert_eq!(suggestion.tier, Tier::High);
+}
+
+#[test]
+#[cfg(unix)]
+fn automatic_preparation_failure_keeps_fallback_and_does_not_retry() {
+    let fixture = Fixture::new("pass");
+    fixture.prepare_with("sys.exit(7)");
+    fixture.controller.start_automatic_route().unwrap();
+    fixture.wait_for_state("error");
+    let status = fixture.controller.status();
+    assert_eq!(status.mode, Mode::Off);
+    assert!(!status.model_ready);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("preparation failed")
+    );
+    let input = request(json!([{"role":"user","content":"Explain consensus"}]));
+    assert!(
+        fixture
+            .controller
+            .classify(&input, None, &Fixture::context())
+            .is_none()
+    );
+    assert_eq!(
+        fixture.controller.start_automatic_route().unwrap().state,
+        "error"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn automatic_preparation_requires_complete_assets_even_after_successful_exit() {
+    let fixture = Fixture::new("pass");
+    fixture.prepare_with("pass");
+    fixture.controller.start_automatic_route().unwrap();
+    fixture.wait_for_state("error");
+    assert_eq!(fixture.controller.status().mode, Mode::Off);
+    assert!(!fixture.controller.status().model_ready);
+}
+
+#[test]
+#[cfg(unix)]
+fn manual_preparation_stays_off_and_takes_precedence_over_automatic_start() {
+    let fixture = Fixture::new("pass");
+    fixture.prepare_with("(root/'prepared.json').write_text('fixture')");
+    fixture.controller.prepare().unwrap();
+    fixture.controller.start_automatic_route().unwrap();
+    fixture.wait_for_state("off");
+    let status = fixture.controller.status();
+    assert_eq!(status.mode, Mode::Off);
+    assert!(status.model_ready);
+    assert!(status.error.is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn cancelled_automatic_preparation_cannot_replace_off_or_a_new_observe_worker() {
+    for next_mode in [Mode::Off, Mode::Observe] {
+        let fixture = Fixture::new(
+            "print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)",
+        );
+        fixture.prepare_with("(root/'prepared.json').write_text('fixture')\ntime.sleep(30)");
+        fixture.controller.start_automatic_route().unwrap();
+        let preparation = Arc::downgrade(
+            fixture
+                .controller
+                .inner
+                .lock()
+                .unwrap()
+                .preparation
+                .as_ref()
+                .unwrap(),
+        );
+        // The fixture has reached a prepared filesystem, but its process is
+        // still running. Cancel before its delayed completion reaches the host.
+        let until = Instant::now() + Duration::from_secs(10);
+        while !fixture.controller.status().model_ready {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fixture.controller.set_mode(Mode::Off).unwrap();
+        if next_mode == Mode::Observe {
+            fixture.start(Mode::Observe);
+        }
+        // Wait for the old supervisor to finish before checking its effects.
+        while preparation.upgrade().is_some() {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status = fixture.controller.status();
+        assert_eq!(status.mode, next_mode);
+        assert_eq!(
+            status.state,
+            if next_mode == Mode::Off {
+                "off"
+            } else {
+                "ready"
+            }
+        );
+        assert!(status.error.is_none());
+        assert_eq!(
+            fixture.controller.start_automatic_route().unwrap().mode,
+            next_mode
+        );
     }
 }
 

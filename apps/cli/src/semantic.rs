@@ -163,6 +163,8 @@ pub struct SemanticController {
     root: PathBuf,
     inner: Mutex<Inner>,
     ids: AtomicU64,
+    #[cfg(test)]
+    preparation_script: Mutex<Option<PathBuf>>,
 }
 
 /// A result retained only until the gateway applies or rejects the suggested pool.
@@ -208,10 +210,12 @@ impl SemanticController {
                 counts: Counts::default(),
             }),
             ids: AtomicU64::new(1),
+            #[cfg(test)]
+            preparation_script: Mutex::new(None),
         });
         registry.retain(|_, value| value.strong_count() > 0);
         registry.insert(data_dir.to_path_buf(), Arc::downgrade(&controller));
-        // Every launch starts Off. Opting into live routing is intentionally explicit.
+        // Shared controllers stay Off until the host selects a startup policy.
         controller
     }
 
@@ -256,6 +260,29 @@ impl SemanticController {
         }
     }
 
+    /// Starts automatic routing once, without replacing later explicit choices.
+    /// Missing assets are prepared in the background before the worker starts.
+    /// The experimental desktop host owns whether this policy is enabled.
+    ///
+    /// # Errors
+    /// Background preparation and worker failures are reported in status.
+    /// # Panics
+    /// Panics if the state lock is poisoned.
+    pub fn start_automatic_route(self: &Arc<Self>) -> Result<Status, String> {
+        let mut inner = self.inner.lock().expect("semantic state lock");
+        if inner.generation == 0 {
+            if self.model_ready() {
+                inner.generation += 1;
+                inner.mode = Mode::Route;
+                self.start_worker(&mut inner);
+            } else {
+                self.start_preparation(&mut inner, Mode::Route);
+            }
+        }
+        drop(inner);
+        Ok(self.status())
+    }
+
     /// Changes the process lifetime without restarting the gateway.
     ///
     /// # Errors
@@ -289,6 +316,12 @@ impl SemanticController {
             drop(inner);
             return Ok(self.status());
         }
+        self.start_worker(&mut inner);
+        drop(inner);
+        Ok(self.status())
+    }
+
+    fn start_worker(self: &Arc<Self>, inner: &mut Inner) {
         let generation = inner.generation;
         let (sender, receiver) = mpsc::sync_channel(1);
         let process = Process::new();
@@ -300,8 +333,6 @@ impl SemanticController {
         let root = self.root.clone();
         let controller = Arc::downgrade(self);
         std::thread::spawn(move || run_worker(&controller, &root, generation, &process, &receiver));
-        drop(inner);
-        Ok(self.status())
     }
 
     /// Installs the pinned runtime in a background process; this is the only
@@ -317,6 +348,12 @@ impl SemanticController {
             drop(inner);
             return Ok(self.status());
         }
+        self.start_preparation(&mut inner, Mode::Off);
+        drop(inner);
+        Ok(self.status())
+    }
+
+    fn start_preparation(self: &Arc<Self>, inner: &mut Inner, mode_after: Mode) {
         inner.generation += 1;
         let generation = inner.generation;
         if let Some(worker) = inner.worker.take() {
@@ -329,24 +366,40 @@ impl SemanticController {
         inner.preparation = Some(Arc::clone(&process));
         let root = self.root.clone();
         let controller = Arc::downgrade(self);
+        #[cfg(test)]
+        let preparation_script = self.preparation_script.lock().unwrap().clone();
         std::thread::spawn(move || {
+            #[cfg(not(test))]
             let result = prepare_runtime(&root, &process);
+            #[cfg(test)]
+            let result = if let Some(script) = preparation_script {
+                let mut command = Command::new("/usr/bin/python3");
+                command.arg(script).arg(&root);
+                run_preparation_command(command, &process)
+            } else {
+                prepare_runtime(&root, &process)
+            };
             process.stop();
             if let Some(controller) = controller.upgrade() {
                 let mut inner = controller.inner.lock().expect("semantic state lock");
                 if inner.generation == generation {
                     inner.preparation = None;
-                    inner.state = if result.is_ok() && controller.model_ready() {
-                        "off"
+                    if result.is_ok() && controller.model_ready() {
+                        inner.mode = mode_after;
+                        if mode_after == Mode::Off {
+                            inner.state = "off";
+                        } else {
+                            // Keep the generation check and startup under one lock.
+                            // Off must not race with a delayed preparation result.
+                            controller.start_worker(&mut inner);
+                        }
                     } else {
-                        "error"
-                    };
-                    inner.error = (inner.state == "error").then(|| "SCX preparation failed. Install uv and verify network access, then retry. Existing routes remain available.".into());
+                        inner.state = "error";
+                        inner.error = Some("SCX preparation failed. Install uv and verify network access, then retry. Existing routes remain available.".into());
+                    }
                 }
             }
         });
-        drop(inner);
-        Ok(self.status())
     }
 
     fn record(&self, generation: u64, observation: Observation) {
@@ -814,7 +867,12 @@ fn prepare_runtime(root: &Path, process: &Process) -> Result<(), ()> {
     command
         .arg(root.join("setup.py"))
         .arg("--runtime-dir")
-        .arg(root)
+        .arg(root);
+    run_preparation_command(command, process)
+}
+
+fn run_preparation_command(mut command: Command, process: &Process) -> Result<(), ()> {
+    command
         .env_remove("PYTHONPATH")
         .env_remove("PYTHONHOME")
         .stdin(Stdio::null())
