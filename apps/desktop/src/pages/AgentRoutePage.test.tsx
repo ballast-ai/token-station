@@ -46,7 +46,10 @@ vi.mock("../api", () => ({
   setAgentTier: vi.fn(),
 }));
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+});
 
 function installation(path: string, version: string): AgentInstallationView {
   return {
@@ -143,6 +146,72 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(await screen.findByText("已接管 · 代理未运行")).toBeInTheDocument();
     expect(screen.queryByText("需修复")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "恢复官方配置并断开" })).toBeEnabled();
+  });
+
+  it("labels normal SCX disconnection as restoring the pre-connection configuration", async () => {
+    vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "1");
+    render(<AgentRoutePage {...connectionFixture(true)} pageMode="connection" />);
+    const disconnect = await screen.findByRole("button", { name: "恢复接入前配置并断开" });
+    expect(disconnect).toBeEnabled();
+    expect(disconnect).toHaveAttribute("title", "将此 Agent 的受管字段恢复为接入前的值，然后断开；其他字段保持不变。");
+    expect(screen.queryByRole("button", { name: "恢复官方配置并断开" })).not.toBeInTheDocument();
+  });
+
+  it("explains the SCX client switch and keeps Grok Build changes behind the existing confirmation", async () => {
+    vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "1");
+    const props = connectionFixture();
+    props.metadata = { agent_id: "grok-build", legacy_kind: null, display_name: "Grok Build", icon_key: "grok", admission: "supported" };
+    props.agent.metadata = props.metadata;
+    const found = props.agent.installations[0];
+    found.discovery.agent_id = "grok-build";
+    found.discovery.canonical_path = "/opt/homebrew/bin/grok";
+    found.discovery.config_candidates = ["/Users/x/.grok/config.toml"];
+    found.compatibility = { ...found.compatibility, agent_id: "grok-build", installation_path: found.discovery.canonical_path, connector_id: "grok-build-v1" };
+    vi.mocked(planAgentConnection).mockResolvedValue({
+      operation_id: "scx-grok-connect", confirmation_token: "scx-confirmation",
+      target_config_path: "/Users/x/.grok/config.toml",
+      changes: [{
+        operation: "replace", path: { segments: ["model", "tokenstation", "base_url"] },
+        sensitive: false, summary: "Switch the selected gateway",
+        before_preview: '"http://127.0.0.1:8787/agents/grok-build/v1"',
+        after_preview: '"http://127.0.0.1:18787/agents/grok-build/v1"',
+      }], human_diff: "gateway changed",
+    } as never);
+    const user = userEvent.setup();
+    render(<AgentRoutePage {...props} serveRunning pageMode="connection" />);
+    expect(screen.getByText(/接入会将所选 Agent 切换到 SCX 实验网关/)).toHaveTextContent("断开时恢复接入前配置。原 Token Station App 保留。");
+    expect(applyAgentPlan).not.toHaveBeenCalled();
+
+    await user.click(await screen.findByRole("button", { name: "预览并接入" }));
+    const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(preview).toHaveTextContent('"http://127.0.0.1:18787/agents/grok-build/v1"');
+    expect(preview).toHaveTextContent("原 Token Station App 保留。");
+    expect(applyAgentPlan).not.toHaveBeenCalled();
+    await user.click(within(preview).getByRole("button", { name: "确认接入" }));
+    await waitFor(() => expect(applyAgentPlan).toHaveBeenCalledExactlyOnceWith("scx-grok-connect", "scx-confirmation"));
+  });
+
+  it("keeps the SCX connection notice out of the ordinary App", () => {
+    vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "0");
+    render(<AgentRoutePage {...connectionFixture()} pageMode="connection" />);
+    expect(screen.queryByText(/SCX 实验网关/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the SCX connection notice out of routing-only views", () => {
+    vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "1");
+    render(<AgentRoutePage {...connectionFixture()} pageMode="routing" />);
+    expect(screen.queryByText(/SCX 实验网关/)).not.toBeInTheDocument();
+  });
+
+  it("does not promise the normal SCX connection workflow for Cursor", async () => {
+    vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "1");
+    vi.mocked(getCursorProviderStatus).mockResolvedValue({ state: "connected", message: null });
+    const props = connectionFixture();
+    props.metadata = { ...props.metadata, agent_id: "cursor", display_name: "Cursor" };
+    render(<AgentRoutePage {...props} pageMode="connection" />);
+    expect(screen.queryByText(/SCX 实验网关/)).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "恢复官方配置并断开" })).toBeEnabled();
   });
 
   it("starts explicitly before preview and cancels without another runtime mutation", async () => {

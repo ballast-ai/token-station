@@ -431,6 +431,14 @@ export default function AgentRoutePage({
 }: AgentRoutePageProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
+  const showScxConnectionNotice = import.meta.env.VITE_TOKEN_STATION_SCX_EXPERIMENT === "1"
+    && pageMode !== "routing" && metadata.agent_id !== "cursor";
+  const scxConnectionNotice = copy(
+    "Connecting switches the selected Agent to the SCX gateway at 127.0.0.1:18787. Disconnecting restores its prior settings. The original Token Station App stays installed.",
+    "接入会将所选 Agent 切换到 SCX 实验网关 127.0.0.1:18787；断开时恢复接入前配置。原 Token Station App 保留。",
+    "連線會將所選 Agent 切換到 SCX 實驗閘道 127.0.0.1:18787；中斷連線時恢復連線前設定。原 Token Station App 保留。",
+    "接続すると、選択した Agent は SCX ゲートウェイ 127.0.0.1:18787 を使用します。切断すると接続前の設定に戻ります。元の Token Station App は保持されます。",
+  );
   const [localSelectedPath, setLocalSelectedPath] = useState("");
   const selectedPath = selectedInstallationPath ?? localSelectedPath;
   const [busy, setBusy] = useState(false);
@@ -949,7 +957,12 @@ export default function AgentRoutePage({
               ? runState(ensureServeRunning)
               : previewConnection())}
             title={managed
-              ? copy(
+              ? showScxConnectionNotice ? copy(
+                "Restore this Agent's managed fields to their pre-connection values, then disconnect. Unrelated fields are preserved.",
+                "将此 Agent 的受管字段恢复为接入前的值，然后断开；其他字段保持不变。",
+                "將此 Agent 的受管欄位恢復為連線前的值，然後中斷連線；其他欄位保持不變。",
+                "この Agent の管理フィールドを接続前の値に戻して切断します。他のフィールドは保持されます。",
+              ) : copy(
                 "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
                 "剥掉 Token Station 注入的字段，让 Agent 回到官方默认配置，并清除接管记录。", "剝掉 Token Station 注入的欄位，讓 Agent 回到官方預設配置，並清除接管記錄。", "Token Station が注入したフィールドを除去し、Agent を公式のデフォルト設定に戻し、管理記録を削除してください。"
               )
@@ -958,7 +971,9 @@ export default function AgentRoutePage({
             {busy
               ? copy("Working…", "处理中…", "處理中…", "処理中…")
               : managed
-                ? copy("Restore official configuration & disconnect", "恢复官方配置并断开", "恢復官方配置並斷開", "公式設定を復元し、接続を解除")
+                ? showScxConnectionNotice
+                  ? copy("Restore pre-connection configuration & disconnect", "恢复接入前配置并断开", "恢復連線前設定並中斷連線", "接続前の設定を復元して切断")
+                  : copy("Restore official configuration & disconnect", "恢复官方配置并断开", "恢復官方配置並斷開", "公式設定を復元し、接続を解除")
                 : needsProxyStart
                   ? copy("Start proxy", "启动代理", "啟動代理", "プロキシを起動")
                 : cursorRepairRequired
@@ -985,6 +1000,8 @@ export default function AgentRoutePage({
           </div>
         </div>
       </header>
+
+      {showScxConnectionNotice && <p className="inline-note">{scxConnectionNotice}</p>}
 
       <AgentModelGuide
         key={metadata.agent_id}
@@ -1160,6 +1177,9 @@ export default function AgentRoutePage({
                 "設定ファイルはまだ変更されていません。続行する前に各フィールドを確認してください。ローカル認証情報は平文で表示されます。スクリーンショットと画面共有を避けてください。"
               )}</DialogDescription>
           </DialogHeader>
+          {showScxConnectionNotice && pendingPlan?.intent === "connect" && (
+            <p className="inline-note">{scxConnectionNotice}</p>
+          )}
           <div className="agent-backup-assurance">
             <ShieldCheck aria-hidden="true" />
             <div>

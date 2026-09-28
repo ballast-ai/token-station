@@ -54,12 +54,30 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) before pre
 Inference runs locally after preparation. It does not require a model API key or a classifier network service.
 See [runtime setup and protocol](../../scripts/scx-runtime/README.md) for pinned assets and verified local seeding.
 
-## Connect a trial client
+## Connect an Agent
 
-Use a separate client profile with base URL `http://127.0.0.1:18787/v1` and model `auto`.
+1. Open **Agent Connections** in the experimental App.
+2. Select the Agent and its installation.
+3. Select **Preview and connect**.
+4. Check that the scoped endpoint uses `127.0.0.1:18787`.
+5. Confirm the connection.
+6. Restart the Agent if it reads configuration only at startup.
+
+Preview does not write client settings. Confirmation saves an encrypted snapshot before writing the selected client's settings.
+Connecting switches that client from its previous gateway to the experimental gateway.
+Normal disconnect restores the previous managed settings, including the previous endpoint and key.
+Unrelated client settings remain in place. Keep the experimental snapshots until you disconnect the Agent.
+Use one App to manage a selected client's connection at a time.
+The ordinary App and its own settings remain available.
+
+Experimental connection records and snapshots use the experimental App's private directory.
+The experiment does not automatically refresh client metadata.
+Forced ownership removal stays disabled because it cannot restore the previous credentials.
+Cursor's separate HTTPS tunnel is not supported in this experiment. Use the ordinary App for Cursor.
+
+For a separate manual client profile, use base URL `http://127.0.0.1:18787/v1` and model `auto`.
 Use the experimental App's own gateway key. The ordinary gateway key does not carry over.
 For a configured Agent route, use its scoped endpoint under the same experimental origin.
-The experiment does not automatically rewrite existing Agent or Cursor connections.
 
 Provider credentials are copied into independent private files only when the settings-copy option is used.
 Actual model calls still use the configured providers and their normal billing.

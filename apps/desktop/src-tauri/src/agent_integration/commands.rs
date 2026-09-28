@@ -1586,8 +1586,6 @@ impl AgentCommandState {
         session_label: &str,
         runtime: &AgentProxyRuntime,
     ) -> Result<ConfigPlanView, AgentCommandError> {
-        crate::experimental::require_global_agent_writes()
-            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_session_label(session_label)?;
         let (record, decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
@@ -1681,8 +1679,6 @@ impl AgentCommandState {
         installation_path: &str,
         session_label: &str,
     ) -> Result<ConfigPlanView, AgentCommandError> {
-        crate::experimental::require_global_agent_writes()
-            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_session_label(session_label)?;
         let (record, decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
@@ -1737,7 +1733,7 @@ impl AgentCommandState {
         agent_id: &str,
         installation_path: &str,
     ) -> Result<(), AgentCommandError> {
-        crate::experimental::require_global_agent_writes()
+        crate::experimental::require_force_forget_support()
             .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_short_identifier(agent_id, "agent_id")?;
         let owned = self
@@ -2017,8 +2013,6 @@ impl AgentCommandState {
         snapshot_id: &str,
         session_label: &str,
     ) -> Result<ConfigPlanView, AgentCommandError> {
-        crate::experimental::require_global_agent_writes()
-            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_session_label(session_label)?;
         if let Some(warning) = self.snapshot_migration_warnings.get(snapshot_id) {
             return Err(AgentCommandError::boundary(
@@ -2256,8 +2250,6 @@ impl AgentCommandState {
         expected_intents: &[PlanIntent],
         runtime: Option<&AgentProxyRuntime>,
     ) -> Result<TransactionOutcome, AgentCommandError> {
-        crate::experimental::require_global_agent_writes()
-            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         self.refresh_scan()?;
         self.apply_from_cached_scan(
             operation_id,
@@ -6279,6 +6271,197 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
         std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn scx_grok_handoff_restores_the_stable_gateway_without_changing_its_ownership() {
+        let root = scratch("scx-grok-handoff");
+        let case = LifecycleCase {
+            label: "grok-build",
+            agent_id: "grok-build",
+            connector_id: "grok-build-v1",
+            version: "1.0.4",
+            installation_path: root.join("install/grok").to_string_lossy().into_owned(),
+            primary: LifecycleFileFixture {
+                path: root.join("home/.grok/config.toml"),
+                baseline: b"# Preserve the existing client settings.\nkeep = 'grok-user-setting'\n",
+                format: DocumentFormat::Toml,
+                marker: "grok-user-setting",
+            },
+            companions: Vec::new(),
+        };
+        seed_lifecycle_case(&case);
+        let stable = state("scx-grok-stable-store");
+        let experiment = state("scx-grok-experiment-store");
+        for command_state in [&stable, &experiment] {
+            let catalog = CompatibilityCatalog::builtin(&command_state.registry).unwrap();
+            install_scan(command_state, catalog, vec![lifecycle_record(&case)]);
+        }
+        assert_ne!(stable.paths.snapshot_root, experiment.paths.snapshot_root);
+        assert_ne!(stable.paths.ownership_root, experiment.paths.ownership_root);
+
+        let stable_runtime = runtime("vk-grok-stable-fixture");
+        apply_lifecycle_connection(&stable, &case, &stable_runtime, "stable-main");
+        let stable_bytes = std::fs::read(&case.primary.path).unwrap();
+        let stable_document =
+            parse_source_bytes(Some(&stable_bytes), case.primary.format, case.label).unwrap();
+        let mut expected_restored = semantic_json(&stable_document).unwrap();
+        let stable_ownership_path = stable.paths.ownership_root.join("ownership-index.json");
+        let stable_snapshot_index_path = stable.paths.snapshot_root.join("index.json");
+        let stable_ownership_bytes = std::fs::read(&stable_ownership_path).unwrap();
+        let stable_snapshot_index_bytes = std::fs::read(&stable_snapshot_index_path).unwrap();
+        let stale_stable_disconnect = stable
+            .plan_disconnect(case.agent_id, &case.installation_path, "stable-main")
+            .unwrap();
+
+        let experiment_runtime = AgentProxyRuntime::new(
+            "scx-fixture-runtime".to_string(),
+            "http://127.0.0.1:18787",
+            "vk-grok-scx-fixture".to_string(),
+            builtin_connectors()
+                .iter()
+                .map(|connector| (connector.capabilities().adapter_id.to_string(), true))
+                .collect(),
+            stable_runtime.model_metadata.clone(),
+            BTreeMap::new(),
+        );
+        let connection = experiment
+            .plan_connection(
+                case.agent_id,
+                &case.installation_path,
+                Some(case.version),
+                "scx-main",
+                &experiment_runtime,
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), stable_bytes);
+        assert!(experiment
+            .snapshots
+            .list_agent(case.agent_id)
+            .unwrap()
+            .is_empty());
+        assert_lifecycle_ownership(&experiment, &case, 0);
+        assert!(serde_json::to_string(&connection.plan)
+            .unwrap()
+            .contains("http://127.0.0.1:18787/agents/grok-build/v1"));
+        experiment
+            .apply_from_cached_scan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "scx-main",
+                &[PlanIntent::Connect],
+                Some(&experiment_runtime),
+            )
+            .unwrap();
+        assert!(experiment.any_connected_to(&experiment_runtime).unwrap());
+        assert!(!stable.any_connected_to(&stable_runtime).unwrap());
+        assert_lifecycle_ownership(&stable, &case, 1);
+        assert_lifecycle_ownership(&experiment, &case, 1);
+        let connected_bytes = std::fs::read(&case.primary.path).unwrap();
+        let connected_text = String::from_utf8_lossy(&connected_bytes);
+        assert!(connected_text.contains("http://127.0.0.1:18787/agents/grok-build/v1"));
+        assert!(connected_text.contains(experiment_runtime.virtual_key()));
+        assert!(!connected_text.contains(stable_runtime.virtual_key()));
+        assert!(connected_text.contains(case.primary.marker));
+
+        let experiment_ownership = experiment
+            .ownership
+            .list_agent_installation(case.agent_id, &case.installation_path)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let baseline = experiment
+            .snapshots
+            .load(&experiment_ownership.baseline_snapshot_id)
+            .unwrap();
+        assert_eq!(baseline.exact_bytes.as_slice(), stable_bytes.as_slice());
+        assert!(baseline.record.pinned);
+        assert!(stable
+            .snapshots
+            .load(&experiment_ownership.baseline_snapshot_id)
+            .is_err());
+
+        // A stale stable-App confirmation and a new stable-App disconnect
+        // must both fail without replacing the experiment's connection.
+        let stale_error = stable
+            .apply_from_cached_scan(
+                &stale_stable_disconnect.plan.operation_id,
+                &stale_stable_disconnect.confirmation_token,
+                "stable-main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(stale_error.code, "before_hash_changed");
+        let drift_error = stable
+            .plan_disconnect(case.agent_id, &case.installation_path, "stable-main")
+            .err()
+            .expect("the stable App must reject the experiment's managed values");
+        assert_eq!(drift_error.code, OWNED_VALUES_CHANGED);
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), connected_bytes);
+
+        let restore_preview = experiment
+            .plan_restore(&baseline.record.snapshot_id, "scx-main")
+            .unwrap();
+        assert_eq!(restore_preview.plan.intent, PlanIntent::Restore);
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), connected_bytes);
+        experiment
+            .discard_plan(
+                &restore_preview.plan.operation_id,
+                &restore_preview.confirmation_token,
+                "scx-main",
+            )
+            .unwrap();
+
+        let mut with_user_change = connected_bytes.clone();
+        with_user_change.extend_from_slice(b"\n[user_experiment_note]\nkeep = true\n");
+        std::fs::write(&case.primary.path, &with_user_change).unwrap();
+        let disconnect = experiment
+            .plan_disconnect(case.agent_id, &case.installation_path, "scx-main")
+            .unwrap();
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), with_user_change);
+        experiment
+            .apply_from_cached_scan(
+                &disconnect.plan.operation_id,
+                &disconnect.confirmation_token,
+                "scx-main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+
+        let restored_bytes = std::fs::read(&case.primary.path).unwrap();
+        let restored_document =
+            parse_source_bytes(Some(&restored_bytes), case.primary.format, case.label).unwrap();
+        expected_restored["user_experiment_note"] = json!({"keep": true});
+        assert_eq!(
+            semantic_json(&restored_document).unwrap(),
+            expected_restored
+        );
+        let restored_text = String::from_utf8_lossy(&restored_bytes);
+        assert!(restored_text.contains("http://127.0.0.1:8787/agents/grok-build/v1"));
+        assert!(restored_text.contains(stable_runtime.virtual_key()));
+        assert!(!restored_text.contains(experiment_runtime.virtual_key()));
+        assert!(stable.any_connected_to(&stable_runtime).unwrap());
+        assert!(!experiment.any_connected_to(&experiment_runtime).unwrap());
+        assert_lifecycle_ownership(&stable, &case, 1);
+        assert_lifecycle_ownership(&experiment, &case, 0);
+        assert!(experiment
+            .snapshots
+            .list_agent(case.agent_id)
+            .unwrap()
+            .iter()
+            .all(|snapshot| !snapshot.pinned));
+        assert_eq!(
+            std::fs::read(stable_ownership_path).unwrap(),
+            stable_ownership_bytes
+        );
+        assert_eq!(
+            std::fs::read(stable_snapshot_index_path).unwrap(),
+            stable_snapshot_index_bytes
+        );
+        clean_lifecycle_case(&experiment, &root);
+        clean_lifecycle_case(&stable, &root);
     }
 
     #[test]

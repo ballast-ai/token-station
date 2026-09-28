@@ -7,8 +7,10 @@ use serde_json::Value;
 pub(crate) const SCX_BUNDLE_ID: &str = "com.tokenstation.desktop.scx";
 pub(crate) const STABLE_BUNDLE_ID: &str = "com.tokenstation.desktop";
 pub(crate) const SCX_LISTEN: &str = "127.0.0.1:18787";
-pub(crate) const GLOBAL_AGENT_SETTINGS_DISABLED: &str =
-    "SCX 实验版不会修改现有 Agent 连接。请使用独立客户端连接实验网关 127.0.0.1:18787。";
+pub(crate) const FORCE_FORGET_DISABLED: &str =
+    "SCX 实验版不支持强制清除接管记录，以免丢失接入前的连接。请使用正常断开或快照恢复。";
+pub(crate) const CURSOR_TUNNEL_DISABLED: &str =
+    "SCX 实验版暂不支持 Cursor 专用 HTTPS 隧道。请在原版中管理 Cursor；其他 Agent 可在实验版预览并接入。";
 pub(crate) const UPDATES_DISABLED: &str = "SCX 实验版使用独立安装，不接收正式版自动更新。";
 
 pub(crate) fn is_scx_experiment() -> bool {
@@ -39,9 +41,17 @@ pub(crate) fn default_listen() -> &'static str {
     }
 }
 
-pub(crate) fn require_global_agent_writes() -> Result<(), String> {
+pub(crate) fn require_force_forget_support() -> Result<(), String> {
     if is_scx_experiment() {
-        Err(GLOBAL_AGENT_SETTINGS_DISABLED.to_owned())
+        Err(FORCE_FORGET_DISABLED.to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn require_cursor_tunnel_support() -> Result<(), String> {
+    if is_scx_experiment() {
+        Err(CURSOR_TUNNEL_DISABLED.to_owned())
     } else {
         Ok(())
     }
