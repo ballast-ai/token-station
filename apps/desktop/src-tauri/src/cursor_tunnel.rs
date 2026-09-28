@@ -883,6 +883,7 @@ pub(crate) async fn configure_cursor_provider(
     paths: State<'_, AgentIntegrationPaths>,
     tunnel_state: State<'_, CursorTunnelState>,
 ) -> Result<CursorProviderStatusView, String> {
+    crate::experimental::require_global_agent_writes()?;
     if matches!(
         status_view(&tunnel_state, &paths).state,
         CursorProviderState::Connected
@@ -1017,6 +1018,7 @@ pub(crate) fn restore_cursor_provider(
     paths: State<'_, AgentIntegrationPaths>,
     tunnel_state: State<'_, CursorTunnelState>,
 ) -> Result<CursorProviderStatusView, String> {
+    crate::experimental::require_global_agent_writes()?;
     if cursor_is_running()? {
         return Err(
             "cursor_running: Cursor 正在运行。请手动退出 Cursor 后再恢复官方配置。".to_string(),

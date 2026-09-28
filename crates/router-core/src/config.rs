@@ -46,10 +46,7 @@ pub struct RouterConfig {
     /// Layer 2. Consulted only when no rule matched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hint_routes: Vec<HintRoute>,
-    /// Layer 3. Consulted only when no rule and no hint matched.
-    ///
-    /// The learned classifier of `C3#2` replaces this layer, and until it ships
-    /// this *is* that layer, per the routing design's staged rollout.
+    /// Consulted when no rule, hint, or valid host classifier pool decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heuristic: Option<Heuristic>,
     /// Where a request goes when nothing above decided. Empty is legal only in
@@ -271,7 +268,7 @@ pub struct HintRoute {
     pub route_to: String,
 }
 
-/// Layer 3: score the request, compare to a threshold, pick a pool.
+/// Score the request when no earlier layer selects a pool.
 ///
 /// Integer arithmetic throughout. A float score would let the local client and
 /// the server gateway disagree in the last bit and route the same request to

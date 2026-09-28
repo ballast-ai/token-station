@@ -56,7 +56,9 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
 /// - v13: records whether input usage is legacy provider-reported or canonical.
-pub const SCHEMA_VERSION: u32 = 14;
+/// - v14: adds allowlisted usage observations.
+/// - v15: admits the content-free classifier decision reason.
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// Allowlisted numeric observations. Missing fields remain unknown, including
 /// for receipts written before this metadata existed. Input is inclusive.
@@ -160,6 +162,7 @@ pub enum RecordedDecidedBy {
         kind: token_station_protocol::HintKind,
         value: String,
     },
+    Classifier,
     Heuristic {
         score: u32,
         matched_band_at_least: u32,
@@ -179,6 +182,7 @@ impl From<&DecidedBy> for RecordedDecidedBy {
                 kind: *kind,
                 value: value.clone(),
             },
+            DecidedBy::Classifier => Self::Classifier,
             DecidedBy::Heuristic { score, threshold } => Self::Heuristic {
                 score: *score,
                 matched_band_at_least: *threshold,
@@ -816,6 +820,23 @@ mod tests {
         assert_eq!(record.pool, "sota");
         assert_eq!(record.fallbacks, 1);
         assert_eq!(record.features.estimated_input_tokens, 42);
+    }
+
+    #[test]
+    fn classifier_reason_records_only_its_stable_token() {
+        let mut decision = decision();
+        decision.decided_by = DecidedBy::Classifier;
+        let record = RoutingRecord::from(&decision);
+        let encoded = serde_json::to_value(&record).expect("serializable record");
+        assert_eq!(
+            encoded["decided_by"],
+            serde_json::json!({"tier": "classifier"})
+        );
+        assert_eq!(
+            serde_json::from_value::<RoutingRecord>(encoded).expect("valid record"),
+            record
+        );
+        assert_eq!(record.decided_by, super::RecordedDecidedBy::Classifier);
     }
 
     #[test]

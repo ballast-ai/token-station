@@ -37,6 +37,7 @@ pub mod quota_ledger;
 pub mod quota_tracker;
 pub mod request_context;
 pub mod secrets;
+pub mod semantic;
 pub mod server;
 pub mod south_component;
 pub(crate) mod south_provider_call;

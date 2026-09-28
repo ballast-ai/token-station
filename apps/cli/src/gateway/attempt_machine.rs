@@ -399,6 +399,55 @@ impl Gateway {
         (Some(unix_millis()), session_key())
     }
 
+    pub(super) fn route_with_semantics(
+        &self,
+        ctx: &RequestContext,
+        router: &Router,
+        request: &ChatRequest,
+        hints: &[token_station_protocol::AgentHint],
+        candidates: &[Candidate],
+        session: &str,
+    ) -> Result<Decision, NoRoute> {
+        use crate::semantic::{Outcome, Tier};
+        let baseline = self.route_with_mode(router, request, hints, candidates, session);
+        let Some(classifier) = &self.semantic else {
+            return baseline;
+        };
+        let baseline_tier = baseline
+            .as_ref()
+            .ok()
+            .and_then(|decision| Tier::from_pool(&decision.pool));
+        if !router.accepts_classifier(request, hints)
+            || !["tier_low", "tier_mid", "tier_high"]
+                .iter()
+                .all(|pool| router.config().pools.contains_key(*pool))
+        {
+            classifier.bypass(baseline_tier, Outcome::Overridden);
+            return baseline;
+        }
+        let Some(suggestion) = classifier.classify(request, baseline_tier, ctx) else {
+            return baseline;
+        };
+        if !classifier.is_current(&suggestion) {
+            return baseline;
+        }
+        // Input projection only admits text. Every capability, health and recovery
+        // check is still owned by router-core, including tool/schema requirements.
+        if let Ok(mut decision) = router.route_with_classifier_pool(
+            request,
+            hints,
+            candidates,
+            Some(suggestion.tier.pool()),
+        ) {
+            retain_free_fallbacks(&mut decision, &self.free_upstreams);
+            classifier.finish(suggestion, true);
+            Ok(decision)
+        } else {
+            classifier.finish(suggestion, false);
+            baseline
+        }
+    }
+
     /// The shared routing step: Tiered consults the router alone; Quota-first
     /// additionally seeds it with the conversation's last-serving account.
     pub(super) fn route_with_mode(
@@ -1117,6 +1166,7 @@ mod cancelled_settlement_tests {
             south_runtime: None,
             recorder: Arc::new(token_station_metrics::NoopRecorder),
             body_log: None,
+            semantic: None,
         }
     }
 

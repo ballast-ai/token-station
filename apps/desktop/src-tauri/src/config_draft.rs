@@ -22,7 +22,7 @@ pub(crate) fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path
         .expect("the built-in price table always serializes");
     json!({
         "version": 1,
-        "server": { "listen": "127.0.0.1:8787", "auth": true },
+        "server": { "listen": experimental::default_listen(), "auth": true },
         "data": { "dir": data_dir, "metrics": true },
         "plugins": {
             "dir": plugins_dir,
@@ -1327,6 +1327,7 @@ impl AppInner {
 
     /// Materialize and validate the draft as ClientConfig, returning a human-readable error on failure.
     pub(crate) fn materialize(&self) -> Result<ClientConfig, String> {
+        experimental::validate_draft(&self.config_path, &self.draft)?;
         if let Some(upstreams) = self.draft["upstreams"].as_object() {
             for (name, provider) in upstreams {
                 if provider["access_tier"].as_str() == Some("free") {

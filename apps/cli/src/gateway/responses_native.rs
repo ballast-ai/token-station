@@ -204,6 +204,12 @@ impl Gateway {
         record.stream = stream;
 
         let last_upstream_error = RefCell::new(None);
+        if let Some(classifier) = &self.semantic {
+            classifier.bypass(
+                crate::semantic::Tier::from_pool(&decision.pool),
+                crate::semantic::Outcome::Unsupported,
+            );
+        }
         let result = self.execute_routed_attempt(
             ctx,
             agent,

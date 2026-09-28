@@ -144,7 +144,7 @@ pub(crate) fn collect_installed_self_test() -> Result<Value, String> {
         Ok(json!({
             "passed": true,
             "bundle": {
-                "id": "com.tokenstation.desktop",
+                "id": experimental::bundle_id(),
                 "desktop_version": env!("CARGO_PKG_VERSION"),
                 "core_version": upgrade::CURRENT_VERSION,
                 "os": std::env::consts::OS,
@@ -185,7 +185,7 @@ pub fn run_installed_self_test(output: &std::path::Path) -> Result<(), String> {
         Err(error) => json!({
             "passed": false,
             "bundle": {
-                "id": "com.tokenstation.desktop",
+                "id": experimental::bundle_id(),
                 "desktop_version": env!("CARGO_PKG_VERSION"),
                 "core_version": upgrade::CURRENT_VERSION,
                 "os": std::env::consts::OS,
@@ -219,7 +219,7 @@ mod tests {
     fn installed_artifact_self_test_exercises_storage_plugins_and_gateway_composition() {
         let report = collect_installed_self_test().expect("installed artifact self-test passes");
         assert_eq!(report["passed"], json!(true));
-        assert_eq!(report["bundle"]["id"], json!("com.tokenstation.desktop"));
+        assert_eq!(report["bundle"]["id"], json!(experimental::bundle_id()));
         assert_eq!(
             report["plugins"].as_array().map(Vec::len),
             Some(token_station_cli::plugins::OFFICIAL_PACKAGE_IDS.len())

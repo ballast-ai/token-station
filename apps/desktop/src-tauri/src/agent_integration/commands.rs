@@ -1288,6 +1288,9 @@ impl AgentCommandState {
         agent_id: Option<&str>,
         runtime: &AgentProxyRuntime,
     ) -> Result<usize, AgentCommandError> {
+        if crate::experimental::is_scx_experiment() {
+            return Ok(0);
+        }
         if let Some(agent_id) = agent_id {
             validate_short_identifier(agent_id, "agent_id")?;
         }
@@ -1583,6 +1586,8 @@ impl AgentCommandState {
         session_label: &str,
         runtime: &AgentProxyRuntime,
     ) -> Result<ConfigPlanView, AgentCommandError> {
+        crate::experimental::require_global_agent_writes()
+            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_session_label(session_label)?;
         let (record, decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
@@ -1676,6 +1681,8 @@ impl AgentCommandState {
         installation_path: &str,
         session_label: &str,
     ) -> Result<ConfigPlanView, AgentCommandError> {
+        crate::experimental::require_global_agent_writes()
+            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_session_label(session_label)?;
         let (record, decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
@@ -1730,6 +1737,8 @@ impl AgentCommandState {
         agent_id: &str,
         installation_path: &str,
     ) -> Result<(), AgentCommandError> {
+        crate::experimental::require_global_agent_writes()
+            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_short_identifier(agent_id, "agent_id")?;
         let owned = self
             .ownership
@@ -2008,6 +2017,8 @@ impl AgentCommandState {
         snapshot_id: &str,
         session_label: &str,
     ) -> Result<ConfigPlanView, AgentCommandError> {
+        crate::experimental::require_global_agent_writes()
+            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_session_label(session_label)?;
         if let Some(warning) = self.snapshot_migration_warnings.get(snapshot_id) {
             return Err(AgentCommandError::boundary(
@@ -2245,6 +2256,8 @@ impl AgentCommandState {
         expected_intents: &[PlanIntent],
         runtime: Option<&AgentProxyRuntime>,
     ) -> Result<TransactionOutcome, AgentCommandError> {
+        crate::experimental::require_global_agent_writes()
+            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         self.refresh_scan()?;
         self.apply_from_cached_scan(
             operation_id,

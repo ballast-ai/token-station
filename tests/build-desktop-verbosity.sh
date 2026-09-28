@@ -20,6 +20,7 @@ make_fixture() {
   mkdir -p "$repo/scripts" "$repo/apps/desktop/src-tauri" "$repo/plugins/official" "$fake_bin" "$state" "$fixture/rust-sysroot"
   cp "$project_root/scripts/build-desktop.sh" "$repo/scripts/build-desktop.sh"
   cp "$project_root/scripts/official-packages.py" "$repo/scripts/official-packages.py"
+  cp "$project_root/apps/desktop/src-tauri/tauri.scx.conf.json" "$repo/apps/desktop/src-tauri/tauri.scx.conf.json"
   cp "$project_root/plugins/official/packages.json" "$repo/plugins/official/packages.json"
   chmod +x "$repo/scripts/build-desktop.sh" "$repo/scripts/official-packages.py"
   printf '{\n  "version": "1.1.3"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
@@ -81,6 +82,7 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >"$TEST_STATE/npm-args"
+printf '%s\n' "${TOKEN_STATION_SCX_EXPERIMENT:-unset}" "${VITE_TOKEN_STATION_SCX_EXPERIMENT:-unset}" >"$TEST_STATE/scx-flags"
 printf '%s' "${TAURI_SIGNING_PRIVATE_KEY:-<unset>}" >"$TEST_STATE/tauri-private-key"
 printf '%s\t%s\n' "$*" "${TAURI_SIGNING_PRIVATE_KEY:-<unset>}" >>"$TEST_STATE/tauri-calls"
 previous=""
@@ -314,6 +316,23 @@ test_production_build_rejects_private_material_in_the_public_key_variable() {
   fi
 }
 
+test_scx_build_uses_isolated_identity_without_release_updates() {
+  make_fixture scx-local Darwin
+  run_build --local --target aarch64-apple-darwin --scx-experiment >/dev/null
+  [[ "$(cat "$state/scx-flags")" == $'1\n1' ]] || fail "SCX build flags do not match"
+  grep -Fq '"identifier": "com.tokenstation.desktop.scx"' "$state/tauri-configs" \
+    || fail "SCX identity overlay was not supplied to Tauri"
+  grep -Fxq -- '--scx-experiment' "$state/audit-args" || fail "SCX audit identity was not selected"
+  [[ ! -f "$state/dmg-package-args" ]] || fail "SCX build produced a release installer"
+  if run_build --preview --target aarch64-apple-darwin --scx-experiment >"$state/rejected" 2>&1; then
+    fail "SCX build accepted a release channel"
+  fi
+  TOKEN_STATION_SCX_EXPERIMENT=1 VITE_TOKEN_STATION_SCX_EXPERIMENT=1 \
+    run_build --local --target aarch64-apple-darwin >/dev/null
+  [[ "$(cat "$state/scx-flags")" == $'0\n0' ]] || fail "normal build inherited SCX flags"
+}
+
+test_scx_build_uses_isolated_identity_without_release_updates
 test_normal_build_does_not_enable_verbose_tauri_logs
 test_test_version_build_enables_two_verbose_levels
 test_all_rust_builds_remap_private_host_paths

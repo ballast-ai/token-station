@@ -24,6 +24,8 @@ mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
+#[cfg(test)]
+mod semantic_tests;
 mod web_search;
 
 #[allow(clippy::wildcard_imports)]
@@ -1691,6 +1693,7 @@ pub struct Gateway {
     /// Optional Desktop-only body sink. It is separate from every [`Recorder`]
     /// so `RequestRecord`, `SQLite`, and the JSONL request log remain body-free.
     body_log: Option<Arc<BodyLog>>,
+    semantic: Option<Arc<crate::semantic::SemanticController>>,
 }
 
 /// An Agent router that has already passed every fallible construction step.
@@ -2193,6 +2196,7 @@ impl Gateway {
             south_runtime,
             recorder,
             body_log: None,
+            semantic: None,
         })
     }
 
@@ -2200,6 +2204,16 @@ impl Gateway {
     #[must_use]
     pub fn with_body_log(mut self, body_log: Arc<BodyLog>) -> Self {
         self.body_log = Some(body_log);
+        self
+    }
+
+    /// Attaches the isolated desktop classifier without changing ordinary hosts.
+    #[must_use]
+    pub fn with_semantic_routing(
+        mut self,
+        controller: Arc<crate::semantic::SemanticController>,
+    ) -> Self {
+        self.semantic = Some(controller);
         self
     }
 
@@ -3790,7 +3804,7 @@ impl Gateway {
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
         let decision = self
-            .route_with_mode(router, &request, &hints, &candidates, &session)
+            .route_with_semantics(ctx, router, &request, &hints, &candidates, &session)
             .map_err(|error| route_error(&error))?;
         eprintln!(
             "route -> {} ({:?}), {} fallback(s)",

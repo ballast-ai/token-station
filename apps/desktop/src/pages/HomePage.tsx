@@ -12,6 +12,7 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
+import SemanticRoutingPanel from "../components/SemanticRoutingPanel";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 
@@ -122,6 +123,8 @@ export default function HomePage({
         disabled={busy}
         onValueChange={onSetRoutingMode}
       />
+
+      <SemanticRoutingPanel />
 
       {routingMode === "direct" ? (
         <DirectRoutePanel

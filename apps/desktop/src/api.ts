@@ -217,6 +217,7 @@ export type ReceiptDecidedByView =
   | { tier: "rule"; rule: string }
   | { tier: "hint"; kind: "step_type" | "task_type" | "preference" | "capability"; value: string }
   | { tier: "heuristic"; score: number; matched_band_at_least: number }
+  | { tier: "classifier" }
   | { tier: "default" }
   | { tier: "exact_model"; model: string }
   | { tier: "quota" };
@@ -402,6 +403,29 @@ export interface ServeView {
 export type TierSlot = "high" | "mid" | "low";
 
 export type RoutingMode = "direct" | "tiered" | "quota_first";
+
+export type SemanticMode = "off" | "observe" | "route";
+
+export interface SemanticObservation {
+  id: number;
+  mode: Exclude<SemanticMode, "off">;
+  baseline_tier: string | null;
+  suggested_tier: string | null;
+  applied: boolean;
+  latency_ms: number | null;
+  outcome: string;
+}
+
+export interface SemanticStatus {
+  available: boolean;
+  mode: SemanticMode;
+  state: "unprepared" | "preparing" | "loading" | "ready" | "off" | "error";
+  error: string | null;
+  model_ready: boolean;
+  timeout_ms: number;
+  observations: SemanticObservation[];
+  counts: { classified: number; disagreements: number; fallbacks: number };
+}
 
 export interface DirectRouteTarget {
   upstream: string;
@@ -942,6 +966,10 @@ export interface DiagnosticPreview {
 }
 
 export const getState = () => invoke<StateView>("get_state");
+export const getSemanticStatus = () => invoke<SemanticStatus>("get_semantic_status");
+export const setSemanticMode = (mode: SemanticMode) =>
+  invoke<SemanticStatus>("set_semantic_mode", { mode });
+export const prepareSemanticModel = () => invoke<SemanticStatus>("prepare_semantic_model");
 export const setDockThemeIcon = (theme: "light" | "dark") =>
   invoke<void>("set_dock_theme_icon", { theme });
 export const getRecoveryState = () => invoke<RecoveryState>("get_recovery_state");

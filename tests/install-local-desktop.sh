@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly test_scx_experiment="${TOKEN_STATION_TEST_SCX_EXPERIMENT:-0}"
 readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/token-station-install-test.XXXXXX")"
 background_pid_one=""
 background_pid_two=""
@@ -36,8 +37,15 @@ make_fixture() {
   applications="$fixture/Applications"
   state="$fixture/state"
   fake_bin="$fixture/bin"
-  installed_app="$applications/token-station.app"
-  built_app="$repo/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/token-station.app"
+  local app_name="token-station.app"
+  test_bundle_id="com.tokenstation.desktop"
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    app_name="Token Station SCX.app"
+    test_bundle_id="com.tokenstation.desktop.scx"
+  fi
+  installed_app="$applications/$app_name"
+  stable_app="$applications/token-station.app"
+  built_app="$repo/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/$app_name"
 
   mkdir -p \
     "$repo/scripts" \
@@ -48,6 +56,10 @@ make_fixture() {
   touch "$built_app/Contents/Info.plist"
   touch "$installed_app/Contents/Info.plist" "$installed_app/Contents/MacOS/token-station"
   echo "old" > "$installed_app/old.version"
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    mkdir -p "$stable_app"
+    echo "protected-stable-version" > "$stable_app/stable.version"
+  fi
 
   cat > "$built_app/Contents/MacOS/token-station" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -59,7 +71,8 @@ exit 0
 SCRIPT
 
   sed \
-    -e "s|/Applications/token-station.app|$installed_app|g" \
+    -e "s|/Applications/token-station.app|$stable_app|g" \
+    -e "s|/Applications/Token Station SCX.app|$installed_app|g" \
     -e "s|/usr/libexec/PlistBuddy|$fake_bin/PlistBuddy|g" \
     "$project_root/scripts/install-local-desktop.sh" \
     > "$repo/scripts/install-local-desktop.sh"
@@ -92,13 +105,13 @@ SCRIPT
 if [[ "$*" == *"CFBundleExecutable"* ]]; then
   echo token-station
 else
-  echo com.tokenstation.desktop
+  echo "$TEST_BUNDLE_ID"
 fi
 SCRIPT
 
   cat > "$fake_bin/codesign" <<'SCRIPT'
 #!/usr/bin/env bash
-if [[ "${FAIL_INSTALLED_CODESIGN:-0}" == "1" && "$*" == *"/Applications/token-station.app"* ]]; then
+if [[ "${FAIL_INSTALLED_CODESIGN:-0}" == "1" && "$*" == *"$TEST_INSTALLED_APP"* ]]; then
   exit 31
 fi
 exit 0
@@ -150,9 +163,21 @@ SCRIPT
 }
 
 run_installer() {
+  local installer_args=("$repo/scripts/install-local-desktop.sh")
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    installer_args+=(--scx-experiment)
+    local config_dir="$fixture/Library/Application Support/com.tokenstation.desktop.scx"
+    mkdir -p "$config_dir"
+    if [[ -f "$fixture/token-station.json" ]]; then
+      cp "$fixture/token-station.json" "$config_dir/token-station.json"
+    fi
+  fi
   env \
+    HOME="$fixture" \
     PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     TEST_STATE="$state" \
+    TEST_BUNDLE_ID="$test_bundle_id" \
+    TEST_INSTALLED_APP="$installed_app" \
     DITTO_FAIL="${DITTO_FAIL:-0}" \
     FAIL_INSTALLED_CODESIGN="${FAIL_INSTALLED_CODESIGN:-0}" \
     RUNNING_AFTER_OPEN="${RUNNING_AFTER_OPEN:-0}" \
@@ -162,7 +187,7 @@ run_installer() {
     WAIT_BUILD="${WAIT_BUILD:-0}" \
     TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS=0 \
     TOKEN_STATION_LAUNCH_CHECK_SAMPLES=2 \
-    "$repo/scripts/install-local-desktop.sh"
+    "${installer_args[@]}"
 }
 
 test_copy_failure_preserves_old_app() {
@@ -261,6 +286,10 @@ test_stable_launch_succeeds() {
     || fail "successful installation kept the old App as the active version"
   grep -q "installed and launched" "$fixture/output" \
     || fail "successful installation omitted the success message"
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    [[ "$(cat "$stable_app/stable.version")" == "protected-stable-version" ]] \
+      || fail "experimental installation changed the stable App"
+  fi
 }
 
 test_a_transient_launch_refusal_is_retried_not_rolled_back() {

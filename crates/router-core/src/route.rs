@@ -143,6 +143,50 @@ impl Router {
         hints: &[AgentHint],
         candidates: &[Candidate],
     ) -> Result<Decision, NoRoute> {
+        self.route_with_classifier_pool(request, hints, candidates, None)
+    }
+
+    /// Whether a host classifier can influence this tiered request.
+    ///
+    /// Exact model pins, matching rules, and matching hints take precedence.
+    /// The host must also exclude Direct mode and explicit Harness mappings.
+    /// Those host modes can compile into a tiered core configuration.
+    #[must_use]
+    pub fn accepts_classifier(&self, request: &ChatRequest, hints: &[AgentHint]) -> bool {
+        if self.config.routing_mode != RoutingMode::Tiered
+            || (self.config.honor_exact_model && request.model != "auto")
+        {
+            return false;
+        }
+        let features = RequestFeatures::extract(request, hints);
+        self.select_priority_pool(request, hints, &features)
+            .is_none()
+    }
+
+    /// Routes a tiered request with an optional host-selected configured pool.
+    ///
+    /// The pool takes precedence over the heuristic, after exact pins, rules,
+    /// and hints. Empty or unknown pools retain normal routing. Quota mode
+    /// ignores this optional selection. Call [`Self::route_quota_first`] for
+    /// quota routing, as with [`Self::route`].
+    /// Candidate capabilities, locality, health, and recovery stay unchanged.
+    /// The core performs no classification, I/O, or timing.
+    ///
+    /// # Errors
+    ///
+    /// [`NoRoute`] when the selected pool has no usable candidate.
+    ///
+    /// # Panics
+    ///
+    /// As with [`Self::route`], the router must have a validated tiered pool
+    /// configuration. Classifier input cannot introduce an unknown pool.
+    pub fn route_with_classifier_pool(
+        &self,
+        request: &ChatRequest,
+        hints: &[AgentHint],
+        candidates: &[Candidate],
+        classifier_pool: Option<&str>,
+    ) -> Result<Decision, NoRoute> {
         let features = RequestFeatures::extract(request, hints);
 
         // Exact-model Agents pin a concrete caller model. `auto` is the host's
@@ -151,7 +195,7 @@ impl Router {
             return self.route_exact(request, features, candidates);
         }
 
-        let (pool, decided_by) = self.select_pool(request, hints, &features);
+        let (pool, decided_by) = self.select_pool(request, hints, &features, classifier_pool);
 
         let members = self
             .config
@@ -394,21 +438,21 @@ impl Router {
         })
     }
 
-    /// Layer 1, then 2, then 3, then the default. First to answer wins.
-    fn select_pool<'config>(
+    /// Rules precede hints. Both take precedence over host classification.
+    fn select_priority_pool<'config>(
         &'config self,
         request: &ChatRequest,
         hints: &[AgentHint],
         features: &RequestFeatures,
-    ) -> (&'config str, DecidedBy) {
+    ) -> Option<(&'config str, DecidedBy)> {
         for rule in &self.config.rules {
             if rule.matcher.matches(features, request) {
-                return (
+                return Some((
                     &rule.route_to,
                     DecidedBy::Rule {
                         rule: rule.id.clone(),
                     },
-                );
+                ));
             }
         }
 
@@ -417,7 +461,7 @@ impl Router {
                 .iter()
                 .any(|hint| hint.kind == route.kind && hint.value == route.value)
             {
-                return (
+                return Some((
                     &route.route_to,
                     DecidedBy::Hint {
                         kind: route.kind,
@@ -426,8 +470,30 @@ impl Router {
                         // write its own text into a persisted decision record.
                         value: route.value.clone(),
                     },
-                );
+                ));
             }
+        }
+
+        None
+    }
+
+    fn select_pool<'config>(
+        &'config self,
+        request: &ChatRequest,
+        hints: &[AgentHint],
+        features: &RequestFeatures,
+        classifier_pool: Option<&str>,
+    ) -> (&'config str, DecidedBy) {
+        if let Some(selected) = self.select_priority_pool(request, hints, features) {
+            return selected;
+        }
+
+        if self.config.routing_mode == RoutingMode::Tiered
+            && let Some(pool) = classifier_pool.filter(|pool| !pool.is_empty())
+            && let Some((configured_pool, _)) = self.config.pools.get_key_value(pool)
+        {
+            // Persist the configured key, never the host's input string.
+            return (configured_pool.as_str(), DecidedBy::Classifier);
         }
 
         if let Some(heuristic) = &self.config.heuristic {

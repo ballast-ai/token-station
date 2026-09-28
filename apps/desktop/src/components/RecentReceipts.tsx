@@ -75,6 +75,8 @@ function formatDecisionReason(
         `Heuristic score ${reason.score} · matched band ≥ ${reason.matched_band_at_least}`,
         `启发式评分 ${reason.score} · 命中档位下界 ≥ ${reason.matched_band_at_least}`, `啟發式評分 ${reason.score} · 命中檔位下界 ≥ ${reason.matched_band_at_least}`, `ヒューリスティックスコア ${reason.score} · 命中バンド下限 ≥ ${reason.matched_band_at_least}`
       );
+    case "classifier":
+      return copy("SCX local classifier", "SCX 本地分档", "SCX 本機分檔", "SCX ローカル分類");
     case "exact_model":
       return copy(`Exact model · ${reason.model}`, `指定模型 · ${reason.model}`, `指定模型 · ${reason.model}`, `指定モデル · ${reason.model}`);
     case "quota":

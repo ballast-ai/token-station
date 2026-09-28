@@ -26,6 +26,9 @@ import {
   getCachedAgentViews,
   getRouterTable,
   getState,
+  getSemanticStatus,
+  prepareSemanticModel,
+  setSemanticMode,
   getStats,
   listAgentRegistry,
   listFreeProviderPresets,
@@ -89,6 +92,18 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
+
+describe("local semantic routing commands", () => {
+  it("uses the local control commands without request content or model credentials", async () => {
+    invokeMock.mockResolvedValue({ available: true });
+    await getSemanticStatus();
+    await prepareSemanticModel();
+    await setSemanticMode("observe");
+    expect(invokeMock).toHaveBeenCalledWith("get_semantic_status");
+    expect(invokeMock).toHaveBeenCalledWith("prepare_semantic_model");
+    expect(invokeMock).toHaveBeenCalledWith("set_semantic_mode", { mode: "observe" });
+  });
+});
 const forbiddenKeys = new Set([
   "patch",
   "patches",

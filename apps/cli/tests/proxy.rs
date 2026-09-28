@@ -809,6 +809,14 @@ fn spawn_proxy_with_body_log(config: &ClientConfig) -> Proxy {
 }
 
 fn spawn_proxy_inner(config: &ClientConfig, body_log: bool) -> Proxy {
+    spawn_proxy_inner_with_semantic(config, body_log, None)
+}
+
+fn spawn_proxy_inner_with_semantic(
+    config: &ClientConfig,
+    body_log: bool,
+    semantic: Option<Arc<token_station_cli::semantic::SemanticController>>,
+) -> Proxy {
     // Fixtures deserialize straight into `ClientConfig`, which skips the
     // validation `ClientConfig::load` runs. Without this a test can prove
     // behaviour for a shape the product refuses to start on — one already did,
@@ -836,6 +844,9 @@ fn spawn_proxy_inner(config: &ClientConfig, body_log: bool) -> Proxy {
     let mut gateway =
         Gateway::new_with_provider_runtime(config, recorder, runtime.handle().clone())
             .expect("gateway assembles");
+    if let Some(controller) = semantic {
+        gateway = gateway.with_semantic_routing(controller);
+    }
     if body_log {
         gateway = gateway.with_body_log(Arc::new(
             token_station_cli::bodylog::BodyLog::open(&config.data.dir).expect("body log opens"),
@@ -1891,6 +1902,226 @@ fn egress_https_proxy_child() {
 }
 
 // -- the tests -----------------------------------------------------------------------
+
+#[cfg(unix)]
+struct SemanticHttpFixture {
+    data: PathBuf,
+    controller: Arc<token_station_cli::semantic::SemanticController>,
+}
+
+#[cfg(unix)]
+impl SemanticHttpFixture {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let data = std::env::temp_dir().join(format!(
+            "ts-semantic-http-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let runtime = data.join("semantic-runtime");
+        std::fs::create_dir_all(runtime.join(".venv/bin")).unwrap();
+        std::fs::create_dir_all(runtime.join("models/scx")).unwrap();
+        for name in ["assets.json", "prepared.json"] {
+            std::fs::write(runtime.join(name), b"fixture").unwrap();
+        }
+        let python = runtime.join(".venv/bin/python");
+        std::fs::write(&python, b"#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n").unwrap();
+        std::fs::set_permissions(python, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for name in [
+            "config.json",
+            "tokenizer.json",
+            "model.safetensors",
+            "tokenizer_config.json",
+            "chat_template.jinja",
+            "README.md",
+        ] {
+            std::fs::write(runtime.join("models/scx").join(name), b"fixture only").unwrap();
+        }
+        std::fs::write(
+            runtime.join("worker.py"),
+            r#"import json
+import sys
+print(json.dumps({"event": "ready"}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({"id": request["id"], "status": "ok", "tier": "high"}), flush=True)
+"#,
+        )
+        .unwrap();
+        Self {
+            controller: token_station_cli::semantic::SemanticController::shared(&data),
+            data,
+        }
+    }
+
+    fn wait_for(
+        &self,
+        predicate: impl Fn(&token_station_cli::semantic::Status) -> bool,
+    ) -> token_station_cli::semantic::Status {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = self.controller.status();
+            if predicate(&status) {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "classifier state: {status:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SemanticHttpFixture {
+    fn drop(&mut self) {
+        let _ = self
+            .controller
+            .set_mode(token_station_cli::semantic::Mode::Off);
+        let _ = std::fs::remove_dir_all(&self.data);
+    }
+}
+
+#[cfg(unix)]
+fn semantic_http_config(data: &Path, low: &MockUpstream, high: &MockUpstream) -> ClientConfig {
+    serde_json::from_value(json!({
+        "version": 1,
+        "server": {"listen": "127.0.0.1:0"},
+        "data": {"dir": data, "metrics": true, "request_body_capture": false},
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai"],
+            "providers": {"openai-compatible": "provider-openai-compatible-v2"}
+        },
+        "upstreams": {
+            "mock_low": {
+                "provider": "openai-compatible", "base_url": low.base_url(),
+                "models": [{"model": "low-model", "context_window": 8192}]
+            },
+            "mock_high": {
+                "provider": "openai-compatible", "base_url": high.base_url(),
+                "models": [{"model": "high-model", "context_window": 8192}]
+            }
+        },
+        "routing": {"mode": "tiered"},
+        "router": {
+            "version": 1,
+            "pools": {
+                "tier_low": [{"upstream": "mock_low", "model": "low-model"}],
+                "tier_mid": [{"upstream": "mock_low", "model": "low-model"}],
+                "tier_high": [{"upstream": "mock_high", "model": "high-model"}]
+            },
+            "default_pool": "tier_low",
+            "heuristic": {
+                "weights": {
+                    "tokens_per_point": 1000, "per_tool": 0, "json_schema": 0,
+                    "image": 0, "per_code_block": 0, "per_extra_turn": 0
+                },
+                "threshold": 1, "above": "tier_high", "below": "tier_low"
+            }
+        }
+    }))
+    .expect("three-tier HTTP fixture parses")
+}
+
+#[cfg(unix)]
+fn assert_semantic_http_round_trip(mode: token_station_cli::semantic::Mode) {
+    use token_station_cli::semantic::{Mode, Outcome, Tier};
+
+    let answer = json!({
+        "id": "semantic-http-response",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello."}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 2}
+    });
+    let low = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let high = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let fixture = SemanticHttpFixture::new();
+    let config = semantic_http_config(&fixture.data, &low, &high);
+    let proxy =
+        spawn_proxy_inner_with_semantic(&config, false, Some(Arc::clone(&fixture.controller)));
+    let request = json!({
+        "model": "auto",
+        "messages": [
+            {"role": "system", "content": "Return a short greeting."},
+            {"role": "user", "content": "Hello, 世界!"}
+        ],
+        "max_tokens": 128,
+        "temperature": 0.2,
+        "stream": false
+    });
+
+    let (status, body) = post_chat(&proxy, &request, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(low.seen().len(), 1);
+    assert!(high.seen().is_empty());
+    let baseline_payload = low.seen()[0].body.clone();
+    assert_eq!(baseline_payload["model"], "low-model");
+    let baseline_receipt = last_row(&proxy.data_dir);
+    assert_eq!(baseline_receipt["tier"], "Text(\"heuristic\")");
+
+    fixture.controller.set_mode(mode).unwrap();
+    fixture.wait_for(|status| status.state == "ready");
+    let (status, body) = post_chat(&proxy, &request, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"],
+        "Hello."
+    );
+    let observed = fixture.wait_for(|status| status.observations.len() == 1);
+    settle();
+    let receipt = last_row(&proxy.data_dir);
+    let decision = last_decision(&proxy.data_dir);
+    let observation = &observed.observations[0];
+    assert_eq!(observation.baseline_tier, Some(Tier::Low));
+    assert_eq!(observation.suggested_tier, Some(Tier::High));
+    assert_eq!(request["model"], "auto");
+
+    if mode == Mode::Route {
+        assert_eq!(low.seen().len(), 1);
+        let seen = high.seen();
+        assert_eq!(seen.len(), 1);
+        let mut expected_payload = baseline_payload;
+        expected_payload["model"] = json!("high-model");
+        assert_eq!(
+            seen[0].body, expected_payload,
+            "classification must only change the routed target"
+        );
+        assert_eq!(receipt["upstream"], "Text(\"mock_high\")");
+        assert_eq!(receipt["requested_model"], "Text(\"auto\")");
+        assert_eq!(receipt["tier"], "Text(\"classifier\")");
+        assert_eq!(decision["decision_kind"], "Text(\"classifier\")");
+        assert_eq!(observation.outcome, Outcome::Applied);
+        assert!(observation.applied);
+    } else {
+        assert!(high.seen().is_empty());
+        let seen = low.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[1].body, baseline_payload,
+            "Observe must preserve the complete baseline payload"
+        );
+        assert_eq!(receipt["upstream"], "Text(\"mock_low\")");
+        assert_eq!(receipt["tier"], "Text(\"heuristic\")");
+        assert_eq!(decision["decision_kind"], "Text(\"heuristic\")");
+        assert_eq!(observation.outcome, Outcome::Observed);
+        assert!(!observation.applied);
+    }
+    let diagnostics = serde_json::to_string(&observed).unwrap();
+    assert!(!diagnostics.contains("Hello, 世界!"));
+    assert!(!diagnostics.contains("Return a short greeting."));
+    proxy.control.stop_accepting();
+}
+
+#[test]
+#[cfg(unix)]
+fn semantic_route_http_selects_the_high_mock_without_rewriting_payload_content() {
+    assert_semantic_http_round_trip(token_station_cli::semantic::Mode::Route);
+}
+
+#[test]
+#[cfg(unix)]
+fn semantic_observe_http_keeps_the_baseline_mock_and_payload() {
+    assert_semantic_http_round_trip(token_station_cli::semantic::Mode::Observe);
+}
 
 #[test]
 fn a_chat_completion_round_trips_with_the_credential_injected() {

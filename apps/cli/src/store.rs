@@ -440,6 +440,73 @@ const MIGRATIONS: &[Migration] = &[
         to: 14,
         sql: "ALTER TABLE requests ADD COLUMN usage_observation TEXT;",
     },
+    Migration {
+        // v14 -> v15: admit the classifier reason. Preserve every feature and
+        // quota column through a named copy while widening the closed check.
+        to: 15,
+        sql: "
+            DROP TABLE IF EXISTS decisions_v15;
+            CREATE TABLE decisions_v15 (
+                request_id TEXT PRIMARY KEY,
+                upstream TEXT NOT NULL,
+                model TEXT NOT NULL,
+                pool TEXT NOT NULL,
+                decision_kind TEXT NOT NULL
+                    CHECK (decision_kind IN ('rule', 'hint', 'classifier', 'heuristic', 'default', 'exact_model', 'quota')),
+                rule_id TEXT,
+                hint_kind TEXT,
+                hint_value TEXT,
+                heuristic_score INTEGER,
+                heuristic_threshold INTEGER,
+                fallbacks INTEGER NOT NULL,
+                est_input_tokens INTEGER NOT NULL,
+                conversation_tokens INTEGER NOT NULL DEFAULT 0,
+                message_count INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                has_images INTEGER NOT NULL,
+                requires_json_schema INTEGER NOT NULL,
+                code_block_count INTEGER NOT NULL,
+                requested_max_output_tokens INTEGER,
+                hint_count INTEGER NOT NULL,
+                reasoning_marker_count INTEGER NOT NULL,
+                technical_term_count INTEGER NOT NULL,
+                simple_indicator_count INTEGER NOT NULL,
+                code_keyword_count INTEGER NOT NULL,
+                math_term_count INTEGER NOT NULL,
+                creative_term_count INTEGER NOT NULL,
+                multi_step_signal INTEGER NOT NULL,
+                question_count INTEGER NOT NULL,
+                system_format_hint INTEGER NOT NULL,
+                quota_reset_ms INTEGER,
+                quota_remaining_permille INTEGER,
+                quota_headroom_permille INTEGER,
+                quota_pressured INTEGER,
+                quota_exhausted INTEGER
+            );
+            INSERT INTO decisions_v15 (
+                request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
+                hint_value, heuristic_score, heuristic_threshold, fallbacks,
+                est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
+                requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+                reasoning_marker_count, technical_term_count, simple_indicator_count,
+                code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+                question_count, system_format_hint, quota_reset_ms, quota_remaining_permille,
+                quota_headroom_permille, quota_pressured, quota_exhausted
+            )
+            SELECT
+                request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
+                hint_value, heuristic_score, heuristic_threshold, fallbacks,
+                est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
+                requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+                reasoning_marker_count, technical_term_count, simple_indicator_count,
+                code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+                question_count, system_format_hint, quota_reset_ms, quota_remaining_permille,
+                quota_headroom_permille, quota_pressured, quota_exhausted
+            FROM decisions;
+            DROP TABLE decisions;
+            ALTER TABLE decisions_v15 RENAME TO decisions;
+        ",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -513,7 +580,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     model TEXT NOT NULL,
     pool TEXT NOT NULL,
     decision_kind TEXT NOT NULL
-        CHECK (decision_kind IN ('rule', 'hint', 'heuristic', 'default', 'exact_model', 'quota')),
+        CHECK (decision_kind IN ('rule', 'hint', 'classifier', 'heuristic', 'default', 'exact_model', 'quota')),
     rule_id TEXT,
     hint_kind TEXT,
     hint_value TEXT,
@@ -672,6 +739,14 @@ fn decision_columns(decided_by: &RecordedDecidedBy) -> DecisionColumns {
             rule_id: None,
             hint_kind: Some(hint_kind_name(*kind).to_owned()),
             hint_value: Some(value.clone()),
+            score: None,
+            threshold: None,
+        },
+        RecordedDecidedBy::Classifier => DecisionColumns {
+            kind: "classifier",
+            rule_id: None,
+            hint_kind: None,
+            hint_value: None,
             score: None,
             threshold: None,
         },
@@ -1296,6 +1371,7 @@ fn decided_by(
             kind: hint_kind(column, hint_kind_value.unwrap_or(""))?,
             value: hint_value.unwrap_or_default(),
         }),
+        "classifier" => Ok(RecordedDecidedBy::Classifier),
         "heuristic" => Ok(RecordedDecidedBy::Heuristic {
             score: score.unwrap_or(0),
             matched_band_at_least: threshold.unwrap_or(0),
@@ -2116,6 +2192,120 @@ mod tests {
         assert_eq!(count, 1);
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn classifier_decisions_round_trip_without_diagnostic_payloads() {
+        let path = scratch("classifier-decision");
+        std::fs::remove_file(&path).ok();
+        let mut record = receipt("classifier-new", 10);
+        record.decision.as_mut().unwrap().decided_by = RecordedDecidedBy::Classifier;
+        record.routing.as_mut().unwrap().decided_by = RecordedDecidedBy::Classifier;
+        {
+            let store = SqliteStore::open(&path).expect("creates");
+            store.record(&record);
+            let connection = store.connection.lock().expect("lock");
+            let details: (String, i64) = connection
+                .query_row(
+                    "SELECT decision_kind,
+                    (rule_id IS NULL AND hint_kind IS NULL AND hint_value IS NULL
+                     AND heuristic_score IS NULL AND heuristic_threshold IS NULL)
+                 FROM decisions WHERE request_id = 'classifier-new'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("classifier decision persists");
+            assert_eq!(details, ("classifier".to_owned(), 1));
+            let flat_reason: String = connection
+                .query_row(
+                    "SELECT tier FROM requests WHERE request_id = 'classifier-new'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("flat routing reason persists");
+            assert_eq!(flat_reason, "classifier");
+        }
+        let receipts = recent_receipts(&path, 10).expect("reads after reopening");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].decision, record.decision);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn v14_classifier_migration_preserves_complete_existing_receipts() {
+        let path = scratch("migrate-v14-classifier");
+        std::fs::remove_file(&path).ok();
+        let old_receipts = {
+            let connection = rusqlite::Connection::open(&path).expect("opens");
+            connection.execute_batch(V3_SCHEMA).expect("v3 schema");
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=14).contains(&migration.to))
+            {
+                connection
+                    .execute_batch(migration.sql)
+                    .expect("migrates to v14");
+            }
+            connection
+                .pragma_update(None, "user_version", 14)
+                .expect("stamps v14");
+            let store = SqliteStore {
+                connection: std::sync::Mutex::new(connection),
+            };
+            let mut old = receipt("old-quota", 1);
+            let decision = old.decision.as_mut().unwrap();
+            decision.decided_by = RecordedDecidedBy::Quota;
+            decision.quota = Some(QuotaDecisionSnapshot {
+                reset_ms: Some(123_456),
+                remaining_permille: Some(456),
+                headroom_permille: 789,
+                pressured: true,
+                exhausted: false,
+            });
+            store.record(&old);
+            let mut heuristic = receipt("old-heuristic", 2);
+            heuristic.decision.as_mut().unwrap().decided_by = RecordedDecidedBy::Heuristic {
+                score: 55,
+                matched_band_at_least: 22,
+            };
+            store.record(&heuristic);
+            store.read_recent(10).expect("v14 receipts read")
+        };
+        assert_eq!(old_receipts.len(), 2);
+        {
+            let store = SqliteStore::open(&path).expect("v14 migrates");
+            assert_eq!(
+                store.read_recent(10).expect("migrated receipts read"),
+                old_receipts
+            );
+            let mut new = receipt("new-classifier", 3);
+            new.decision.as_mut().unwrap().decided_by = RecordedDecidedBy::Classifier;
+            store.record(&new);
+            let receipts = store.read_recent(10).expect("all receipts read");
+            assert_eq!(receipts.len(), 3);
+            assert_eq!(receipts[0].decision, new.decision);
+            assert_eq!(&receipts[1..], old_receipts.as_slice());
+            let connection = store.connection.lock().expect("lock");
+            let version: u32 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, super::SCHEMA_VERSION);
+            assert!(connection.execute(
+                "UPDATE decisions SET decision_kind = 'unrecognized' WHERE request_id = 'new-classifier'", []
+            ).is_err(), "the widened enum remains closed");
+        }
+        let backup = path.with_extension("v14.bak");
+        let backup_connection = rusqlite::Connection::open(&backup).expect("backup exists");
+        let old_version: u32 = backup_connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old_version, 14);
+        drop(backup_connection);
+        let store = SqliteStore::open(&path).expect("reopens without another migration");
+        assert_eq!(store.read_recent(10).unwrap().len(), 3);
+        drop(store);
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(backup).ok();
     }
 
     #[test]

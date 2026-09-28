@@ -15,6 +15,7 @@ mod config_state;
 mod cursor_tunnel;
 mod desktop_shell;
 pub mod desktop_update;
+mod experimental;
 mod free_provider_catalog;
 mod model_catalog;
 mod pricing_catalog;
@@ -35,6 +36,7 @@ mod provider_discovery;
 mod recovery_commands;
 mod routing_commands;
 mod self_test;
+mod semantic_commands;
 mod serve_supervisor;
 mod stats_commands;
 mod views;
@@ -312,6 +314,12 @@ pub fn run() {
                 app.path().app_config_dir()?,
                 app.path().app_data_dir()?,
             );
+            experimental::validate_identity(
+                &app.config().identifier,
+                &app.path().app_config_dir()?,
+                &app.path().app_data_dir()?,
+            )
+            .map_err(std::io::Error::other)?;
             desktop_paths.create_writable_dirs().map_err(|error| {
                 std::io::Error::other(format!(
                     "初始化桌面应用目录失败（配置：{}，数据：{}，插件：{}）：{error}",
@@ -326,6 +334,7 @@ pub fn run() {
             // Agent command state, so normal read/write IPC cannot be invoked
             // behind the recovery shell.
             app.manage(desktop_paths.clone());
+
             app.manage(DesktopUpdateOperation::default());
             desktop_shell::prepare_close_fallback(app.handle());
             if recovery::inspect_recovery_state(&desktop_paths.data_dir).mode == RecoveryMode::Safe
@@ -355,6 +364,13 @@ pub fn run() {
                 &desktop_paths.data_dir,
                 &desktop_paths.plugins_dir,
             );
+            experimental::validate_draft(&desktop_paths.config_file, &draft)
+                .map_err(std::io::Error::other)?;
+            if experimental::is_scx_experiment() {
+                app.manage(token_station_cli::semantic::SemanticController::shared(
+                    &desktop_paths.data_dir,
+                ));
+            }
             let mut inner = AppInner::new_with_saved(
                 desktop_paths.config_file.clone(),
                 draft,
@@ -478,6 +494,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            semantic_commands::get_semantic_status,
+            semantic_commands::set_semantic_mode,
+            semantic_commands::prepare_semantic_model,
             get_pricing_inventory,
             set_price_sync_enabled,
             sync_model_prices,
@@ -574,6 +593,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
     app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(controller) =
+                app.try_state::<Arc<token_station_cli::semantic::SemanticController>>()
+            {
+                let _ = controller.set_mode(token_station_cli::semantic::Mode::Off);
+            }
+        }
         #[cfg(not(target_os = "macos"))]
         let _ = (app, &event);
         #[cfg(target_os = "macos")]

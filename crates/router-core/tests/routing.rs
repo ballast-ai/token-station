@@ -1,4 +1,4 @@
-//! The four layers, in the order they are promised to fire, and the one
+//! The routing layers, in the order they are promised to fire, and the one
 //! property that outlives every request: a decision cannot carry content.
 
 use std::collections::BTreeMap;
@@ -144,6 +144,183 @@ fn candidates() -> Vec<Candidate> {
 
 fn ask(text: &str) -> ChatRequest {
     ChatRequest::new("auto", vec![Message::text(Role::User, text)])
+}
+
+#[test]
+fn classifier_pool_precedes_heuristic_and_default() {
+    let request = ask("hello");
+    for heuristic in [config().heuristic, None] {
+        let router = Router::new(RouterConfig {
+            heuristic,
+            ..config()
+        })
+        .expect("valid");
+        assert!(router.accepts_classifier(&request, &[]));
+        let decision = router
+            .route_with_classifier_pool(&request, &[], &candidates(), Some("sota"))
+            .expect("the classifier selects a configured pool");
+        assert_eq!(decision.pool, "sota");
+        assert_eq!(decision.decided_by, DecidedBy::Classifier);
+        assert_eq!(decision.chosen, target("openai_personal", "gpt-5.5"));
+    }
+}
+
+#[test]
+fn rules_and_hints_precede_classifier_selection() {
+    let router = router();
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+    for (request, hints, classifier_pool) in [
+        (ask("Give a proof."), hints.as_slice(), "cheap"),
+        (ask("hello"), hints.as_slice(), "sota"),
+    ] {
+        assert!(!router.accepts_classifier(&request, hints));
+        assert_eq!(
+            router.route_with_classifier_pool(
+                &request,
+                hints,
+                &candidates(),
+                Some(classifier_pool)
+            ),
+            router.route(&request, hints, &candidates())
+        );
+    }
+    assert!(router.accepts_classifier(
+        &ask("hello"),
+        &[AgentHint::new(HintKind::StepType, "unmatched")]
+    ));
+}
+
+#[test]
+fn exact_model_pins_precede_classifier_selection() {
+    let router = Router::new(RouterConfig {
+        honor_exact_model: true,
+        ..config()
+    })
+    .expect("valid");
+    let mut request = ask("hello");
+    request.model = "gpt-5.5".to_owned();
+    assert!(!router.accepts_classifier(&request, &[]));
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("cheap")),
+        router.route(&request, &[], &candidates())
+    );
+    request.model = "auto".to_owned();
+    assert!(router.accepts_classifier(&request, &[]));
+}
+
+#[test]
+fn quota_mode_does_not_accept_a_classifier_pool() {
+    let router = Router::new(RouterConfig {
+        routing_mode: RoutingMode::QuotaFirst,
+        quota_accounts: vec![target("openai_personal", "gpt-5.5")],
+        ..config()
+    })
+    .expect("valid");
+    let request = ask("hello");
+    assert!(!router.accepts_classifier(&request, &[]));
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("sota")),
+        router.route(&request, &[], &candidates())
+    );
+}
+
+#[test]
+fn absent_empty_and_unknown_classifier_pools_preserve_normal_routing() {
+    let router = router();
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+    for request in [ask("hello"), ask("Give a proof."), ask(&"x".repeat(20_000))] {
+        for hints in [&[][..], hints.as_slice()] {
+            let normal = router.route(&request, hints, &candidates());
+            for pool in [None, Some(""), Some("unknown"), Some(" sota ")] {
+                assert_eq!(
+                    router.route_with_classifier_pool(&request, hints, &candidates(), pool),
+                    normal
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn classifier_selection_preserves_capability_failure_and_does_not_escape_to_recovery() {
+    let router = Router::new(RouterConfig {
+        recovery: RecoveryPolicy::Ordered {
+            pools: vec!["sota".to_owned()],
+        },
+        ..config()
+    })
+    .expect("valid");
+    let mut request = ask("hello");
+    request.response_format = Some(ResponseFormat::JsonObject);
+    let expected = NoRoute::Unsatisfiable {
+        pool: "cheap".to_owned(),
+        reason: UnmetRequirement::JsonSchema,
+    };
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("cheap")),
+        Err(expected)
+    );
+}
+
+#[test]
+fn classifier_selection_preserves_ordered_recovery_candidates() {
+    let router = Router::new(RouterConfig {
+        recovery: RecoveryPolicy::Ordered {
+            pools: vec!["cheap".to_owned()],
+        },
+        ..config()
+    })
+    .expect("valid");
+    let request = ask(&"x".repeat(20_000));
+    let mut normal = router
+        .route(&request, &[], &candidates())
+        .expect("routable");
+    let classified = router
+        .route_with_classifier_pool(&request, &[], &candidates(), Some("sota"))
+        .expect("routable");
+    normal.decided_by = DecidedBy::Classifier;
+    assert_eq!(classified, normal);
+    assert_eq!(
+        classified.fallbacks.last(),
+        Some(&target("ollama_local", "llama3.3"))
+    );
+}
+
+#[test]
+fn classifier_selection_preserves_local_only_and_missing_candidate_failures() {
+    let local = Router::new(local_only_config(false)).expect("valid");
+    let request = ask(&"x".repeat(20_000));
+    let existing_failure = local.route(&request, &[], &candidates());
+    assert!(existing_failure.is_err());
+    assert_eq!(
+        local.route_with_classifier_pool(&request, &[], &candidates(), Some("sota")),
+        existing_failure
+    );
+    let router = router();
+    assert_eq!(
+        router.route_with_classifier_pool(&ask("hello"), &[], &[], Some("sota")),
+        Err(NoRoute::Unsatisfiable {
+            pool: "sota".to_owned(),
+            reason: UnmetRequirement::Unknown,
+        })
+    );
+}
+
+#[test]
+fn classifier_reason_is_a_content_free_json_token() {
+    let decision = router()
+        .route_with_classifier_pool(&ask("private text"), &[], &candidates(), Some("sota"))
+        .expect("routable");
+    let encoded = serde_json::to_value(&decision).expect("serializable");
+    assert_eq!(
+        encoded["decided_by"],
+        serde_json::json!({"tier": "classifier"})
+    );
+    assert!(!encoded.to_string().contains("private text"));
+    assert_eq!(
+        serde_json::from_value::<token_station_router_core::Decision>(encoded).unwrap(),
+        decision
+    );
 }
 
 #[test]

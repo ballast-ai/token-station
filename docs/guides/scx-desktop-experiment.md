@@ -1,0 +1,83 @@
+# Local SCX desktop experiment
+
+Token Station SCX is a separate macOS Apple Silicon App for testing local three-tier classification.
+It preserves the installed `token-station.app` and uses separate configuration, credentials, data, and gateway port.
+It does not establish production routing quality or measured cost savings.
+
+## Install
+
+Build from source with the normal desktop prerequisites.
+For the first installation, copy the existing routing settings into the experiment:
+
+```sh
+scripts/install-local-desktop.sh --scx-experiment --copy-stable-settings
+```
+
+The settings copy requires an absent experiment directory. It never merges or replaces existing settings.
+For later installations, omit the copy option:
+
+```sh
+scripts/install-local-desktop.sh --scx-experiment
+```
+
+The App is `/Applications/Token Station SCX.app`.
+Its bundle identifier is `com.tokenstation.desktop.scx`.
+Its authenticated gateway uses `127.0.0.1:18787`.
+The ordinary App and its gateway keep their existing settings.
+The experimental App does not receive ordinary automatic updates.
+
+## Use
+
+1. Open **Token Station SCX**.
+2. Select smart-tier routing on Home.
+3. Check the low, medium, and high model pools.
+4. Select **Prepare local model** if the model is not ready.
+5. Select **Observe** to compare suggestions with existing routing.
+6. Select **Route** when you want SCX suggestions to affect eligible requests.
+7. Select **Off** to stop the model and release its memory.
+
+Each App launch starts with SCX Off.
+Changes apply to global and Agent routes that use smart tiers.
+Fixed-model routes, quota-first routes, explicit model pins, user rules, and Agent hints keep priority.
+SCX uses the existing pools, capability checks, health ranking, recovery, and free-provider fallback restrictions.
+Classification does not rewrite the request sent to the selected provider.
+
+Observe queues a classification without waiting for its result.
+Route waits at most 400 milliseconds for a suggestion.
+Loading, busy, failed, cancelled, or unsupported classifications retain the original routing decision.
+The worker accepts one inference at a time. It does not accumulate request text in a queue.
+A separate two-second watchdog stops an inference worker that does not respond.
+Model loading and preparation have separate startup deadlines.
+
+The first preparation downloads pinned Python packages and approximately 2.5 GB of model files.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) before preparation.
+Inference runs locally after preparation. It does not require a model API key or a classifier network service.
+See [runtime setup and protocol](../../scripts/scx-runtime/README.md) for pinned assets and verified local seeding.
+
+## Connect a trial client
+
+Use a separate client profile with base URL `http://127.0.0.1:18787/v1` and model `auto`.
+Use the experimental App's own gateway key. The ordinary gateway key does not carry over.
+For a configured Agent route, use its scoped endpoint under the same experimental origin.
+The experiment does not automatically rewrite existing Agent or Cursor connections.
+
+Provider credentials are copied into independent private files only when the settings-copy option is used.
+Actual model calls still use the configured providers and their normal billing.
+The local classifier itself does not call those providers.
+
+## Limits and observations
+
+The initial worker supports visible user and assistant text.
+It excludes system scaffolding, tool output, and reasoning traces.
+Multimodal requests, unsupported native server-tool requests, and oversized context use existing routing.
+Inputs above 16 KiB of projected text or 1,024 formatted SCX tokens are skipped without silent truncation.
+
+Recent observations contain only an identifier, mode, tiers, latency, and a closed outcome code.
+They remain in memory and are limited to 64 records. The panel displays the newest 10.
+Comparison counts reset when the App restarts.
+Normal request receipts can record the `classifier` decision reason.
+The settings-copy procedure disables request-body capture in the experimental configuration.
+
+SCX scores are not calibrated probabilities of answer success.
+Tier disagreements are useful review signals. They do not prove that either model choice is correct.
+Keep the ordinary App available while evaluating the experiment on representative tasks.

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=TOKEN_STATION_SCX_EXPERIMENT");
     generate_connector_registry();
     tauri_build::build()
 }

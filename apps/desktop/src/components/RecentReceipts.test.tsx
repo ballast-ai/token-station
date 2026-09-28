@@ -83,6 +83,18 @@ beforeEach(() => {
 });
 
 describe("RecentReceipts", () => {
+  it("identifies a local classifier decision instead of calling it a default route", async () => {
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      decision: {
+        upstream: "provider-final", model: "model-final", pool: "tier_mid",
+        decided_by: { tier: "classifier" }, fallbacks: 0, features,
+      },
+    })]);
+    render(<RecentReceipts />);
+    expect(await screen.findByText(/SCX 本地分档/)).toBeInTheDocument();
+    expect(screen.queryByText(/默认路由/)).not.toBeInTheDocument();
+  });
+
   it("把无 Agent 命名空间的请求显示为主页路由", async () => {
     vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, { agent_id: null })]);
     render(<RecentReceipts />);
