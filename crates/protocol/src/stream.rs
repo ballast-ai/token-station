@@ -43,20 +43,33 @@ pub enum StreamEvent {
     Usage { usage: Usage },
     /// Incremental reasoning text (Anthropic `thinking_delta`;
     /// OpenAI-compatible `reasoning_content` deltas). `index` is the provider
-    /// content-block ordinal, not a choice index. All text and signature
-    /// fragments for one thinking block carry the same ordinal.
-    ThinkingDelta { index: u32, thinking_delta: String },
+    /// choice index; `block_index` is the provider content-block ordinal. All
+    /// text and signature fragments for one thinking block carry the same pair.
+    ThinkingDelta {
+        index: u32,
+        block_index: u32,
+        thinking_delta: String,
+    },
     /// The signature fragment closing a thinking block (Anthropic
     /// `signature_delta`). Arrives after the block's text deltas. `index` is
-    /// the provider content-block ordinal and pairs the signature with those
-    /// deltas; consumers must not merge distinct blocks by choice.
-    ThinkingSignatureDelta { index: u32, signature_delta: String },
-    /// One opaque redacted thinking block at the provider content block
-    /// ordinal `index`, using the same index space as [`Self::ThinkingDelta`]
-    /// and [`Self::ThinkingSignatureDelta`]. Consumers must preserve the
-    /// provider's JSON string value and must not reinterpret it as text or as
-    /// a thinking signature.
-    RedactedThinking { index: u32, data: String },
+    /// the provider choice index; `block_index` is the provider content-block
+    /// ordinal that pairs the signature with those deltas.
+    ThinkingSignatureDelta {
+        index: u32,
+        block_index: u32,
+        signature_delta: String,
+    },
+    /// One opaque redacted thinking block. `index` is the provider choice
+    /// index; `block_index` is the provider content-block ordinal, using the
+    /// same index space as [`Self::ThinkingDelta`] and
+    /// [`Self::ThinkingSignatureDelta`]. Consumers must preserve the provider's
+    /// JSON string value and must not reinterpret it as text or as a thinking
+    /// signature.
+    RedactedThinking {
+        index: u32,
+        block_index: u32,
+        data: String,
+    },
     /// The provider has chosen a finish reason, but the stream is not terminal
     /// yet. A final usage report may follow before [`Self::Done`].
     Finish {
@@ -136,14 +149,15 @@ mod tests {
     #[test]
     fn redacted_thinking_round_trips_opaque_value_with_block_index() {
         let event = StreamEvent::RedactedThinking {
-            index: 7,
+            index: 0,
+            block_index: 7,
             data: "供应商原值+/=opaque".to_owned(),
         };
 
         let json = serde_json::to_string(&event).expect("serializable event");
         assert_eq!(
             json,
-            r#"{"type":"redacted_thinking","index":7,"data":"供应商原值+/=opaque"}"#
+            r#"{"type":"redacted_thinking","index":0,"block_index":7,"data":"供应商原值+/=opaque"}"#
         );
 
         let decoded: StreamEvent = serde_json::from_str(&json).expect("valid event");
@@ -151,55 +165,75 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_event_indices_preserve_provider_content_block_pairing() {
+    fn reasoning_events_encode_choice_and_content_block_indices() {
         let events = vec![
             StreamEvent::ThinkingDelta {
-                index: 2,
+                index: 0,
+                block_index: 2,
                 thinking_delta: "first block".to_owned(),
             },
             StreamEvent::ThinkingSignatureDelta {
-                index: 2,
+                index: 0,
+                block_index: 2,
                 signature_delta: "first signature".to_owned(),
             },
             StreamEvent::ThinkingDelta {
-                index: 5,
+                index: 0,
+                block_index: 5,
                 thinking_delta: "second block".to_owned(),
             },
             StreamEvent::ThinkingSignatureDelta {
-                index: 5,
+                index: 0,
+                block_index: 5,
                 signature_delta: "second signature".to_owned(),
             },
             StreamEvent::RedactedThinking {
-                index: 8,
+                index: 0,
+                block_index: 8,
                 data: "opaque third block".to_owned(),
             },
         ];
 
-        let encoded = serde_json::to_string(&events).expect("serializable reasoning events");
-        let decoded: Vec<StreamEvent> =
-            serde_json::from_str(&encoded).expect("valid reasoning events");
+        let encoded = serde_json::to_value(&events).expect("serializable reasoning events");
+        assert_eq!(
+            encoded,
+            serde_json::json!([
+                {
+                    "type": "thinking_delta",
+                    "index": 0,
+                    "block_index": 2,
+                    "thinking_delta": "first block"
+                },
+                {
+                    "type": "thinking_signature_delta",
+                    "index": 0,
+                    "block_index": 2,
+                    "signature_delta": "first signature"
+                },
+                {
+                    "type": "thinking_delta",
+                    "index": 0,
+                    "block_index": 5,
+                    "thinking_delta": "second block"
+                },
+                {
+                    "type": "thinking_signature_delta",
+                    "index": 0,
+                    "block_index": 5,
+                    "signature_delta": "second signature"
+                },
+                {
+                    "type": "redacted_thinking",
+                    "index": 0,
+                    "block_index": 8,
+                    "data": "opaque third block"
+                }
+            ])
+        );
 
+        let decoded: Vec<StreamEvent> =
+            serde_json::from_value(encoded).expect("valid reasoning events");
         assert_eq!(decoded, events);
-        assert!(matches!(
-            &decoded[0],
-            StreamEvent::ThinkingDelta { index: 2, .. }
-        ));
-        assert!(matches!(
-            &decoded[1],
-            StreamEvent::ThinkingSignatureDelta { index: 2, .. }
-        ));
-        assert!(matches!(
-            &decoded[2],
-            StreamEvent::ThinkingDelta { index: 5, .. }
-        ));
-        assert!(matches!(
-            &decoded[3],
-            StreamEvent::ThinkingSignatureDelta { index: 5, .. }
-        ));
-        assert!(matches!(
-            &decoded[4],
-            StreamEvent::RedactedThinking { index: 8, .. }
-        ));
     }
 
     #[test]
@@ -224,14 +258,17 @@ mod tests {
             },
             StreamEvent::ThinkingDelta {
                 index: 0,
+                block_index: 0,
                 thinking_delta: "hmm ".to_owned(),
             },
             StreamEvent::ThinkingSignatureDelta {
                 index: 0,
+                block_index: 0,
                 signature_delta: "EqQBCg".to_owned(),
             },
             StreamEvent::RedactedThinking {
-                index: 1,
+                index: 0,
+                block_index: 1,
                 data: "opaque+/=".to_owned(),
             },
             StreamEvent::Finish {

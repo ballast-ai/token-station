@@ -264,9 +264,12 @@ impl AgentAdapter for OpenAiClient {
             // 0.3.0: reasoning deltas ride the openai-compat
             // `delta.reasoning_content` slot; the signature fragment has no
             // openai wire slot and renders nothing (adapters for wires that
-            // carry it — anthropic `signature_delta` — must emit it).
+            // carry it — anthropic `signature_delta` — must emit it). This
+            // wire has no content-block ordinal, so it ignores `block_index`
+            // while preserving `index` as the choice index.
             StreamEvent::ThinkingDelta {
                 index,
+                block_index: _,
                 thinking_delta,
             } => format!(
                 "data: {{\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
@@ -594,6 +597,7 @@ fn openai_reference_rejects_redacted_thinking_without_a_wire_slot() {
         .render_stream_event(
             &StreamEvent::RedactedThinking {
                 index: 3,
+                block_index: 7,
                 data: "opaque+/=".to_owned(),
             },
             &Value::Null,

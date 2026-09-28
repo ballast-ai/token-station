@@ -546,9 +546,11 @@ impl Guest for GeminiClient {
         let data = match event {
             // 0.3.0: reasoning deltas stream as Gemini thought parts; a
             // signature fragment has no streaming wire slot and renders
-            // nothing.
+            // nothing. This wire ignores `block_index` while preserving
+            // `index` as the candidate choice index.
             StreamEvent::ThinkingDelta {
                 index,
+                block_index: _,
                 thinking_delta,
             } => sse(&json!({
                 "candidates": [{"index": index, "content": {"role": "model", "parts": [{"text": thinking_delta, "thought": true}]}}],
@@ -754,6 +756,7 @@ mod tests {
         let event = json!({
             "type": "redacted_thinking",
             "index": 0,
+            "block_index": 2,
             "data": "供应商原值+/=opaque"
         });
         let context = json!({

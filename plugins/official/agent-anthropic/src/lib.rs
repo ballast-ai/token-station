@@ -994,11 +994,14 @@ impl Guest for AnthropicClient {
                     )?);
                     Ok(rendered)
                 }
-                // 0.3.0: reasoning streams as native Anthropic thinking
-                // blocks, one per choice index, closed at `Done` with the
-                // other open blocks.
+                // Reasoning streams as native Anthropic thinking blocks, one
+                // per choice index, closed at `Done` with the other open
+                // blocks. This renderer remaps the source `block_index` to its
+                // own outbound block ordinal while preserving `index` as the
+                // choice index.
                 StreamEvent::ThinkingDelta {
                     index,
+                    block_index: _,
                     thinking_delta,
                 } => {
                     let state = states.get_mut(stream_id).expect("state inserted above");
@@ -1017,6 +1020,7 @@ impl Guest for AnthropicClient {
                 }
                 StreamEvent::ThinkingSignatureDelta {
                     index,
+                    block_index: _,
                     signature_delta,
                 } => {
                     let state = states.get_mut(stream_id).expect("state inserted above");
@@ -1245,6 +1249,7 @@ mod tests {
         let event = json!({
             "type": "redacted_thinking",
             "index": 0,
+            "block_index": 2,
             "data": "供应商原值+/=opaque"
         });
         let context = json!({

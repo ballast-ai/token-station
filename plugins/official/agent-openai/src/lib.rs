@@ -497,9 +497,12 @@ impl Guest for OpenAiClient {
             ),
             // 0.3.0: reasoning deltas ride the openai-compat
             // `delta.reasoning_content` slot; the signature fragment has no
-            // openai wire slot and renders nothing.
+            // openai wire slot and renders nothing. This wire has no
+            // content-block ordinal, so it ignores `block_index` while
+            // preserving `index` as the choice index.
             StreamEvent::ThinkingDelta {
                 index,
+                block_index: _,
                 thinking_delta,
             } => format!(
                 "data: {{{stream_identity}\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
@@ -731,6 +734,7 @@ mod tests {
         let event = json!({
             "type": "thinking_delta",
             "index": 0,
+            "block_index": 2,
             "thinking_delta": "checking"
         });
         let context = json!({
@@ -760,6 +764,7 @@ mod tests {
         let event = json!({
             "type": "redacted_thinking",
             "index": 0,
+            "block_index": 2,
             "data": "供应商原值+/=opaque"
         });
         let context = json!({

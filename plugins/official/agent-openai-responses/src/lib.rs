@@ -1789,11 +1789,15 @@ mod tests {
             "model":"deepseek-reasoner"
         })
         .to_string();
+        // The pinned shared codec ignores this wire's content-block ordinal;
+        // the Responses renderer still consumes `index` as the choice index.
         let delta = <ResponsesClient as Guest>::render_stream_event(
-            serde_json::to_string(&StreamEvent::ThinkingDelta {
-                index: 0,
-                thinking_delta: "Inspect first.".to_owned(),
-            })
+            serde_json::to_string(&json!({
+                "type": "thinking_delta",
+                "index": 0,
+                "block_index": 2,
+                "thinking_delta": "Inspect first."
+            }))
             .expect("event serializes"),
             context.clone(),
         )
