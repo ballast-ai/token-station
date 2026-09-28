@@ -10,7 +10,7 @@ dependencies = [
  "serde_json",
  "south-north-codec",
  "token-station-protocol 0.3.0",
- "token-station-protocol 0.3.0 (git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35)",
+ "token-station-protocol 0.4.0",
  "wit-bindgen",
 ]
 
@@ -190,7 +190,7 @@ source = "git+https://github.com/ballast-ai/token-station-south.git?tag=v0.37.0#
 dependencies = [
  "serde_json",
  "thiserror",
- "token-station-protocol 0.3.0 (git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35)",
+ "token-station-protocol 0.3.0",
 ]
 
 [[package]]
@@ -238,6 +238,7 @@ dependencies = [
 [[package]]
 name = "token-station-protocol"
 version = "0.3.0"
+source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
 dependencies = [
  "serde",
  "serde_json",
@@ -245,8 +246,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-protocol"
-version = "0.3.0"
-source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
