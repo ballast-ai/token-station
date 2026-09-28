@@ -21,11 +21,11 @@ pub struct StreamChunk {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    /// Incremental assistant text for the choice at `index`.
+    /// Incremental assistant text. `index` is the provider choice index.
     Delta { index: u32, content: String },
-    /// Incremental tool-call arguments. `id` and `name` arrive on the first
-    /// fragment of a call and are absent afterwards, matching how providers
-    /// stream them.
+    /// Incremental tool-call arguments. `index` is the tool-call index within
+    /// its choice. `id` and `name` arrive on the first fragment of a call and
+    /// are absent afterwards, matching how providers stream them.
     ToolCallDelta {
         index: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,15 +41,21 @@ pub enum StreamEvent {
     /// [`crate::Usage::absorb`]: field-wise, last-nonzero-wins, so a zero in
     /// a later report never erases an earlier nonzero bucket.
     Usage { usage: Usage },
-    /// Incremental reasoning text for the choice at `index` (Anthropic
-    /// `thinking_delta`; OpenAI-compatible `reasoning_content` deltas).
+    /// Incremental reasoning text (Anthropic `thinking_delta`;
+    /// OpenAI-compatible `reasoning_content` deltas). `index` is the provider
+    /// content-block ordinal, not a choice index. All text and signature
+    /// fragments for one thinking block carry the same ordinal.
     ThinkingDelta { index: u32, thinking_delta: String },
     /// The signature fragment closing a thinking block (Anthropic
-    /// `signature_delta`). Arrives after the block's text deltas.
+    /// `signature_delta`). Arrives after the block's text deltas. `index` is
+    /// the provider content-block ordinal and pairs the signature with those
+    /// deltas; consumers must not merge distinct blocks by choice.
     ThinkingSignatureDelta { index: u32, signature_delta: String },
     /// One opaque redacted thinking block at the provider content block
-    /// `index`. Consumers must preserve the provider's JSON string value and
-    /// must not reinterpret it as text or as a thinking signature.
+    /// ordinal `index`, using the same index space as [`Self::ThinkingDelta`]
+    /// and [`Self::ThinkingSignatureDelta`]. Consumers must preserve the
+    /// provider's JSON string value and must not reinterpret it as text or as
+    /// a thinking signature.
     RedactedThinking { index: u32, data: String },
     /// The provider has chosen a finish reason, but the stream is not terminal
     /// yet. A final usage report may follow before [`Self::Done`].
@@ -142,6 +148,58 @@ mod tests {
 
         let decoded: StreamEvent = serde_json::from_str(&json).expect("valid event");
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn reasoning_event_indices_preserve_provider_content_block_pairing() {
+        let events = vec![
+            StreamEvent::ThinkingDelta {
+                index: 2,
+                thinking_delta: "first block".to_owned(),
+            },
+            StreamEvent::ThinkingSignatureDelta {
+                index: 2,
+                signature_delta: "first signature".to_owned(),
+            },
+            StreamEvent::ThinkingDelta {
+                index: 5,
+                thinking_delta: "second block".to_owned(),
+            },
+            StreamEvent::ThinkingSignatureDelta {
+                index: 5,
+                signature_delta: "second signature".to_owned(),
+            },
+            StreamEvent::RedactedThinking {
+                index: 8,
+                data: "opaque third block".to_owned(),
+            },
+        ];
+
+        let encoded = serde_json::to_string(&events).expect("serializable reasoning events");
+        let decoded: Vec<StreamEvent> =
+            serde_json::from_str(&encoded).expect("valid reasoning events");
+
+        assert_eq!(decoded, events);
+        assert!(matches!(
+            &decoded[0],
+            StreamEvent::ThinkingDelta { index: 2, .. }
+        ));
+        assert!(matches!(
+            &decoded[1],
+            StreamEvent::ThinkingSignatureDelta { index: 2, .. }
+        ));
+        assert!(matches!(
+            &decoded[2],
+            StreamEvent::ThinkingDelta { index: 5, .. }
+        ));
+        assert!(matches!(
+            &decoded[3],
+            StreamEvent::ThinkingSignatureDelta { index: 5, .. }
+        ));
+        assert!(matches!(
+            &decoded[4],
+            StreamEvent::RedactedThinking { index: 8, .. }
+        ));
     }
 
     #[test]
