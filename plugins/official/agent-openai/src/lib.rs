@@ -771,6 +771,10 @@ mod tests {
             .expect_err("OpenAI chat has no redacted-thinking wire slot");
         let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "openai-chat-completions cannot render redacted thinking"
+        );
     }
 
     #[test]

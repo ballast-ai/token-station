@@ -1034,7 +1034,7 @@ impl Guest for AnthropicClient {
                     Ok(rendered)
                 }
                 StreamEvent::RedactedThinking { .. } => Err(invalid(
-                    "anthropic-messages cannot render redacted thinking until its wire mapping is defined",
+                    "anthropic-messages redacted thinking is not implemented by this adapter version",
                 )),
                 StreamEvent::ToolCallDelta {
                     index,
@@ -1241,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_is_rejected_until_the_wire_mapping_is_defined() {
+    fn redacted_thinking_rejection_names_the_adapter_version() {
         let event = json!({
             "type": "redacted_thinking",
             "index": 0,
@@ -1259,5 +1259,9 @@ mod tests {
                 .expect_err("redacted thinking needs an explicit wire mapping");
         let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "anthropic-messages redacted thinking is not implemented by this adapter version"
+        );
     }
 }
