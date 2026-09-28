@@ -496,6 +496,42 @@ mod native_transport {
     #[allow(clippy::wildcard_imports)]
     use super::*;
 
+    #[derive(Default)]
+    struct RecordedRequests(std::sync::Mutex<Vec<Value>>);
+
+    impl token_station_metrics::Recorder for RecordedRequests {
+        fn record(&self, record: &token_station_metrics::RequestRecord) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(record).unwrap());
+        }
+    }
+
+    fn long_messages(skipped: bool) -> Value {
+        json!([
+            {"role":"user", "content":"INITIAL CONSTRAINT: preserve all original data"},
+            {"role":"assistant", "content":"OMITTED HISTORY ".repeat(2048)},
+            {"role":"user", "content":if skipped {"LATEST QUESTION ".repeat(2048)} else {"LATEST QUESTION: explain the invariant".into()}}
+        ])
+    }
+
+    fn assert_input_record(records: &RecordedRequests, skipped: bool) {
+        let rows = records.0.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["status"], 200);
+        assert_eq!(rows[0]["error_code"], Value::Null);
+        assert_eq!(
+            rows[0]["classifier_input"],
+            json!({
+                "classifier":"jev", "handling":if skipped {"skipped"} else {"reduced"}, "reason":"byte_limit"
+            })
+        );
+        let encoded = rows[0]["classifier_input"].to_string();
+        assert!(!encoded.contains("LATEST QUESTION"));
+        assert!(!encoded.contains("synthetic-provider-key"));
+    }
+
     fn gateway(
         fixture: &Fixture,
         low: &Endpoint,
@@ -622,6 +658,86 @@ mod native_transport {
                 assert!(!classified[0].contains("synthetic-private-user"));
                 assert!(!classified[0].contains("synthetic-provider-key"));
             }
+        }
+    }
+
+    #[test]
+    fn jev_native_input_limits_only_change_the_classifier_copy_and_record_neutral_diagnostics() {
+        for dialect in ["anthropic-native", "responses-native"] {
+            for skipped in [false, true] {
+                for stream in [false, true] {
+                    let fixture = Fixture::new(true);
+                    let low = answer(dialect, stream);
+                    let high = answer(dialect, stream);
+                    let mut gateway = gateway(&fixture, &low, &high, dialect, dialect);
+                    let records = Arc::new(RecordedRequests::default());
+                    gateway.recorder = records.clone();
+                    let mut body = body(dialect, stream);
+                    body[if dialect == "anthropic-native" {
+                        "messages"
+                    } else {
+                        "input"
+                    }] = long_messages(skipped);
+                    send(&gateway, dialect, &body);
+                    if skipped {
+                        assert_payload(&low, body, "low", dialect);
+                        assert_eq!(high.hits.load(Ordering::SeqCst), 0);
+                        assert_eq!(fixture.endpoint.hits.load(Ordering::SeqCst), 0);
+                    } else {
+                        assert_payload(&high, body, "high", dialect);
+                        assert_eq!(low.hits.load(Ordering::SeqCst), 0);
+                        assert_eq!(fixture.endpoint.hits.load(Ordering::SeqCst), 1);
+                        let seen = fixture.endpoint.seen.lock().unwrap();
+                        assert!(seen[0].contains("INITIAL CONSTRAINT"));
+                        assert!(seen[0].contains("LATEST QUESTION"));
+                        assert!(!seen[0].contains("OMITTED HISTORY"));
+                        assert!(!seen[0].contains("synthetic-private-system"));
+                    }
+                    assert_input_record(&records, skipped);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jev_canonical_input_limits_preserve_the_complete_generation_messages() {
+        for skipped in [false, true] {
+            let fixture = Fixture::new(true);
+            let reply = json!({"id":"chat_fixture","object":"chat.completion","model":"selected",
+                "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}});
+            let low = Endpoint::new(200, reply.clone());
+            let high = Endpoint::new(200, reply);
+            let mut gateway = gateway(&fixture, &low, &high, "translated", "translated");
+            let records = Arc::new(RecordedRequests::default());
+            gateway.recorder = records.clone();
+            let messages = long_messages(skipped);
+            let body = json!({"model":"auto", "messages":messages, "stream":false});
+            let mut status = None;
+            gateway.chat(
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                body.to_string().as_bytes(),
+                &mut |reply| {
+                    if let Reply::BeginJson(reply) = reply {
+                        status = Some(reply.status);
+                    }
+                    true
+                },
+            );
+            assert_eq!(status, Some(200));
+            let served = if skipped { &low } else { &high };
+            let seen = served.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            let (_, wire) = seen[0].split_once("\r\n\r\n").unwrap();
+            let upstream: Value = serde_json::from_str(wire).unwrap();
+            assert_eq!(upstream["messages"], messages);
+            assert_eq!(
+                fixture.endpoint.hits.load(Ordering::SeqCst),
+                u64::from(!skipped)
+            );
+            assert_input_record(&records, skipped);
         }
     }
 

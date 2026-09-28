@@ -73,6 +73,8 @@ semantic-runtime/
 
 The desktop embeds the four source assets listed above outside `.venv/` and `models/`.
 No private repository path is required at runtime.
+Before each worker launch, the host atomically refreshes the managed `worker.py` from the App bundle.
+This protocol update does not download or replace the prepared environment or model files.
 
 ## Worker protocol
 
@@ -101,6 +103,7 @@ Each reply contains the same identifier and a closed status:
 {"id":1,"status":"ok","tier":"low"}
 {"id":2,"status":"unsupported"}
 {"id":3,"status":"error"}
+{"id":4,"status":"unsupported","reason":"token_limit"}
 ```
 
 IDs are unsigned 64-bit integers or 1–128 ASCII letters, digits, underscores, periods, or hyphens.
@@ -124,10 +127,15 @@ It disables remote model code, hub access, telemetry, and progress output.
 Inference uses local safetensors and `torch.inference_mode()`.
 
 The complete SCX context and label segments are tokenized before inference.
-More than 1,024 combined tokens returns `unsupported`; the worker does not classify a truncated request.
+More than 1,024 combined tokens returns `unsupported` with `reason:token_limit`.
+The worker does not classify a truncated request.
 Empty text and reserved GLiClass delimiter tokens also return `unsupported`.
 Input is bounded to 256 KiB per protocol line and 64 KiB per text field.
+The host also preserves its 16 KiB admission limit for the complete visible conversation.
 The host must reject multimodal, tool-only, or unsupported native projections before sending text.
+Request receipts distinguish host byte rejection from worker token rejection without storing prompt content.
+Observe mode does not wait for token validation or update a completed receipt.
+Its receipt can report synchronous byte rejection, but later token handling remains unknown.
 
 ## Tests
 

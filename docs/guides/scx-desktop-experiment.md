@@ -98,6 +98,11 @@ The initial worker supports visible user and assistant text.
 It excludes system scaffolding, tool output, and reasoning traces.
 Multimodal requests, unsupported native server-tool requests, and oversized context use existing routing.
 Inputs above 16 KiB of projected text or 1,024 formatted SCX tokens are skipped without silent truncation.
+Request receipts distinguish the host byte limit from the worker's exact formatted-token limit.
+They record only the classifier name, input handling, and a closed limit reason.
+Length skips use the existing route and do not truncate the original generation request.
+Observe mode does not wait for tokenization and does not add late diagnostics to completed receipts.
+An existing prepared runtime refreshes its managed worker script before startup without downloading model assets again.
 
 Recent observations contain only an identifier, mode, tiers, latency, and a closed outcome code.
 They remain in memory and are limited to 64 records. The App does not display a comparison panel.

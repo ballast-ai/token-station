@@ -58,7 +58,40 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v13: records whether input usage is legacy provider-reported or canonical.
 /// - v14: adds allowlisted usage observations.
 /// - v15: admits the content-free classifier decision reason.
-pub const SCHEMA_VERSION: u32 = 15;
+/// - v16: records request-scoped classifier input handling without content.
+pub const SCHEMA_VERSION: u32 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierKind {
+    Scx,
+    Jev,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierInputHandling {
+    Full,
+    Reduced,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierInputReason {
+    ByteLimit,
+    TokenLimit,
+}
+
+/// Input handling for this request, recorded before classification can fail.
+/// Full refers only to eligible text, not excluded system or tool content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassifierInputDiagnostic {
+    pub classifier: ClassifierKind,
+    pub handling: ClassifierInputHandling,
+    pub reason: Option<ClassifierInputReason>,
+}
 
 /// Allowlisted numeric observations. Missing fields remain unknown, including
 /// for receipts written before this metadata existed. Input is inclusive.
@@ -627,6 +660,9 @@ pub struct RequestRecord {
     /// Ordered, content-free conversion stage outcomes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversion_reports: Vec<ConversionRecord>,
+    /// Content-free classifier input handling. Missing historical data is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_input: Option<ClassifierInputDiagnostic>,
     /// `None` when the upstream reported none (or the stream carried no usage
     /// event). Absence is information; it is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -671,6 +707,7 @@ impl RequestRecord {
             decision: None,
             attempt_records: Vec::new(),
             conversion_reports: Vec::new(),
+            classifier_input: None,
             usage: None,
             usage_observation: None,
             cost_micros: None,
@@ -736,6 +773,8 @@ pub struct ReceiptView {
     pub attempt_records: Vec<AttemptRecord>,
     #[serde(default)]
     pub conversion_reports: Vec<ConversionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_input: Option<ClassifierInputDiagnostic>,
 }
 
 /// The routing decision, flattened for storage.
@@ -784,6 +823,40 @@ impl Recorder for NoopRecorder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn classifier_input_diagnostics_are_closed_and_legacy_records_remain_unknown() {
+        use super::{
+            ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+            ClassifierKind,
+        };
+        let diagnostic = ClassifierInputDiagnostic {
+            classifier: ClassifierKind::Jev,
+            handling: ClassifierInputHandling::Reduced,
+            reason: Some(ClassifierInputReason::ByteLimit),
+        };
+        let value = serde_json::to_value(diagnostic).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"classifier":"jev","handling":"reduced","reason":"byte_limit"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClassifierInputDiagnostic>(value).unwrap(),
+            diagnostic
+        );
+        for value in [
+            serde_json::json!({"classifier":"caller-content","handling":"full","reason":null}),
+            serde_json::json!({"classifier":"scx","handling":"caller-content","reason":null}),
+            serde_json::json!({"classifier":"scx","handling":"skipped","reason":"caller-content"}),
+        ] {
+            assert!(serde_json::from_value::<ClassifierInputDiagnostic>(value).is_err());
+        }
+        let old = super::RequestRecord::begin(1, "openai");
+        let mut value = serde_json::to_value(old).unwrap();
+        value.as_object_mut().unwrap().remove("classifier_input");
+        let restored: super::RequestRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.classifier_input, None);
+    }
+
     use super::{ProviderCallEngine, RequestRecord, RoutingRecord};
     use token_station_protocol::Usage;
     use token_station_router_core::{

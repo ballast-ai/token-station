@@ -273,45 +273,203 @@ fn disabled_local_only_unsupported_and_cancelled_requests_do_not_connect() {
     assert!(listener.accept().is_err());
 }
 
-#[test]
-fn projection_bounds_the_recent_utf8_tail_and_rejects_empty_input() {
-    let mut input = request();
-    input.messages.push(Message::text(Role::User, "   "));
-    assert_eq!(project(&input), Err(Outcome::Unsupported));
-    input.messages = vec![Message::text(
-        Role::User,
-        format!("{}CURRENT TASK", "早期上下文".repeat(MAX_TEXT_BYTES)),
-    )];
-    let projected = project(&input).unwrap();
-    assert!(projected.len() <= MAX_TEXT_BYTES);
-    assert!(projected.starts_with("User: "));
-    assert!(projected.ends_with("CURRENT TASK"));
-    input
-        .messages
-        .insert(0, Message::text(Role::User, "OLD FIRST TURN"));
-    assert!(!project(&input).unwrap().contains("OLD FIRST TURN"));
-    input.messages.clear();
-    assert_eq!(project(&input), Err(Outcome::Unsupported));
+fn input_diagnostic(ctx: &RequestContext) -> Value {
+    serde_json::to_value(ctx.classifier_input()).unwrap()
 }
 
 #[test]
-fn recent_tail_retains_role_order_and_rejects_hidden_unsupported_history() {
+fn short_projection_is_unchanged_and_reports_only_closed_input_fields() {
     let mut input = request();
     input.messages = serde_json::from_value(json!([
-        {"role":"user","content":"old".repeat(MAX_TEXT_BYTES)},
-        {"role":"assistant","content":[{"type":"text","text":"previous answer"},{"type":"thinking","thinking":"PRIVATE"}]},
-        {"role":"user","content":[{"type":"text","text":"latest question"},{"type":"text","text":"current detail"}]}
+        {"role":"system","content":"PRIVATE SYSTEM"},
+        {"role":"user","content":"  Earlier task  "},
+        {"role":"assistant","content":[{"type":"text","text":" first "},{"type":"thinking","thinking":"PRIVATE THOUGHT"},{"type":"text","text":" second "}]},
+        {"role":"tool","content":"PRIVATE TOOL"},
+        {"role":"user","content":" Latest task "}
     ])).unwrap();
-    let projected = project(&input).unwrap();
-    assert!(projected.len() <= MAX_TEXT_BYTES);
-    assert!(
-        projected.ends_with("Assistant: previous answer\n\nUser: latest question\ncurrent detail")
+    let before = input.clone();
+    let ctx = context();
+    assert_eq!(
+        project(&input, &ctx).unwrap(),
+        "User: Earlier task\n\nAssistant: first\nsecond\n\nUser: Latest task"
     );
-    assert!(!projected.contains("PRIVATE"));
+    assert_eq!(input, before);
+    assert_eq!(
+        input_diagnostic(&ctx),
+        json!({"classifier":"jev","handling":"full","reason":null})
+    );
+}
+
+#[test]
+fn oversized_history_reserves_complete_latest_user_anchor_and_recent_turns() {
+    let mut input = request();
+    input.messages = vec![
+        Message::text(Role::User, "INITIAL CONSTRAINT"),
+        Message::text(Role::Assistant, "old".repeat(MAX_TEXT_BYTES)),
+        Message::text(Role::User, "RECENT CONTEXT"),
+        Message::text(Role::Assistant, "RECENT ANSWER"),
+        Message::text(Role::User, "完整最新任务🙂"),
+        Message::text(Role::Assistant, "trailing".repeat(MAX_TEXT_BYTES)),
+    ];
+    let before = input.clone();
+    let ctx = context();
+    let projected = project(&input, &ctx).unwrap();
+    assert_eq!(
+        projected,
+        "User: INITIAL CONSTRAINT\n\nUser: RECENT CONTEXT\n\nAssistant: RECENT ANSWER\n\nUser: 完整最新任务🙂"
+    );
+    assert!(projected.len() <= MAX_TEXT_BYTES);
+    assert_eq!(input, before);
+    assert_eq!(
+        input_diagnostic(&ctx),
+        json!({"classifier":"jev","handling":"reduced","reason":"byte_limit"})
+    );
+}
+
+#[test]
+fn latest_user_must_fit_completely_at_the_exact_rendered_byte_boundary() {
+    let mut input = request();
+    let text = format!(
+        "{}中",
+        "x".repeat(MAX_TEXT_BYTES - "User: ".len() - "中".len())
+    );
+    input.messages = vec![Message::text(Role::User, &text)];
+    let ctx = context();
+    assert_eq!(project(&input, &ctx).unwrap(), format!("User: {text}"));
+    assert_eq!(input_diagnostic(&ctx)["handling"], "full");
+    input.messages[0] = Message::text(Role::User, format!("{text}x"));
+    let ctx = context();
+    assert_eq!(project(&input, &ctx), Err(Outcome::Unsupported));
+    assert_eq!(
+        input_diagnostic(&ctx),
+        json!({"classifier":"jev","handling":"skipped","reason":"byte_limit"})
+    );
+}
+
+#[test]
+fn latest_user_precedes_an_anchor_that_cannot_fit_and_keeps_complete_parts() {
+    let mut input = request();
+    input.messages = vec![
+        Message::text(Role::User, "EARLIEST".repeat(MAX_TEXT_BYTES)),
+        Message::text(Role::Assistant, "nearby"),
+        Message {
+            content: Some(Content::Parts(vec![
+                ContentPart::Text {
+                    text: "first".into(),
+                },
+                ContentPart::Thinking {
+                    thinking: "PRIVATE".into(),
+                    signature: None,
+                },
+                ContentPart::Text {
+                    text: "second".into(),
+                },
+            ])),
+            ..Message::text(Role::User, "")
+        },
+    ];
+    let ctx = context();
+    assert_eq!(
+        project(&input, &ctx).unwrap(),
+        "Assistant: nearby\n\nUser: first\nsecond"
+    );
+    assert_eq!(input_diagnostic(&ctx)["handling"], "reduced");
+}
+
+#[test]
+fn history_selection_prefers_anchor_then_recent_complete_messages() {
+    let anchor = format!("ANCHOR{}", "a".repeat(6000));
+    let recent = format!("RECENT{}", "r".repeat(6000));
+    let input = ChatRequest::new(
+        "auto",
+        vec![
+            Message::text(Role::User, &anchor),
+            Message::text(Role::Assistant, format!("OLDER{}", "o".repeat(6000))),
+            Message::text(Role::Assistant, &recent),
+            Message::text(Role::User, "LATEST"),
+        ],
+    );
+    let ctx = context();
+    assert_eq!(
+        project(&input, &ctx).unwrap(),
+        format!("User: {anchor}\n\nAssistant: {recent}\n\nUser: LATEST")
+    );
+    assert_eq!(input_diagnostic(&ctx)["handling"], "reduced");
+}
+
+#[test]
+fn unsupported_history_and_empty_latest_user_are_not_reported_as_length_limits() {
+    let mut input = request();
+    input.messages = vec![
+        Message::text(Role::User, "old".repeat(MAX_TEXT_BYTES)),
+        Message::text(Role::User, " "),
+    ];
+    let ctx = context();
+    assert_eq!(project(&input, &ctx), Err(Outcome::Unsupported));
+    assert!(ctx.classifier_input().is_none());
+    input.messages[1] = Message::text(Role::User, "current");
     input.messages[0].content = Some(Content::Parts(vec![ContentPart::Unknown(
         json!({"type":"image"}),
     )]));
-    assert_eq!(project(&input), Err(Outcome::Unsupported));
+    let ctx = context();
+    assert_eq!(project(&input, &ctx), Err(Outcome::Unsupported));
+    assert!(ctx.classifier_input().is_none());
+    input.messages.clear();
+    assert_eq!(project(&input, &context()), Err(Outcome::Unsupported));
+}
+
+#[test]
+fn reduced_input_diagnostic_survives_network_failure_and_is_request_scoped() {
+    let dir = Scratch::new();
+    let (endpoint, captured) = fixture(401, "{}".into(), Duration::ZERO);
+    let controller = configured(&dir, &endpoint);
+    let mut input = request();
+    input.messages.insert(
+        0,
+        Message::text(Role::Assistant, "PRIVATE OMITTED".repeat(MAX_TEXT_BYTES)),
+    );
+    let before = input.clone();
+    let ctx = context();
+    assert!(
+        controller
+            .classify(&input, &ctx, &EgressConfig::default())
+            .is_none()
+    );
+    let wire = captured.recv().unwrap();
+    assert!(!wire.contains("PRIVATE OMITTED"));
+    assert_eq!(input, before);
+    assert_eq!(
+        controller.status().last_outcome,
+        Some(Outcome::Unauthorized)
+    );
+    assert_eq!(
+        input_diagnostic(&ctx),
+        json!({"classifier":"jev","handling":"reduced","reason":"byte_limit"})
+    );
+    assert!(context().classifier_input().is_none());
+}
+
+#[test]
+fn oversized_latest_user_does_not_open_a_connection() {
+    let dir = Scratch::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+    let controller = configured(&dir, &endpoint);
+    let input = ChatRequest::new(
+        "auto",
+        vec![Message::text(Role::User, "x".repeat(MAX_TEXT_BYTES))],
+    );
+    let before = input.clone();
+    let ctx = context();
+    assert!(
+        controller
+            .classify(&input, &ctx, &EgressConfig::default())
+            .is_none()
+    );
+    assert!(listener.accept().is_err());
+    assert_eq!(input, before);
+    assert_eq!(input_diagnostic(&ctx)["handling"], "skipped");
 }
 
 #[test]

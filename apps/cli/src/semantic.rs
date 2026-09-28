@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 use crate::request_context::RequestContext;
 use serde::{Deserialize, Serialize};
+use token_station_metrics::{
+    ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason, ClassifierKind,
+};
 use token_station_protocol::{ChatRequest, Content, ContentPart, Role};
 
 const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -184,11 +187,17 @@ pub struct Suggestion {
     observation: Observation,
     pub tier: Tier,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prediction {
+    Tier(Tier),
+    TokenLimit,
+}
+
 struct Job {
     generation: u64,
     observation: Observation,
     text: String,
-    reply: Option<mpsc::SyncSender<Result<Tier, Outcome>>>,
+    reply: Option<mpsc::SyncSender<Result<Prediction, Outcome>>>,
     started: Instant,
 }
 
@@ -566,7 +575,7 @@ impl SemanticController {
             return None;
         }
         let worker = worker.expect("ready worker");
-        let text = match project(request) {
+        let text = match project(request, ctx) {
             Ok(text) => text,
             Err(outcome) => {
                 observation.outcome = outcome;
@@ -623,7 +632,14 @@ impl SemanticController {
                 self.record(generation, observation);
                 None
             }
-            Ok(tier) => {
+            Ok(Prediction::TokenLimit) => {
+                record_input(ctx, Some(ClassifierInputReason::TokenLimit));
+                observation.outcome = Outcome::Unsupported;
+                self.record(generation, observation);
+                None
+            }
+            Ok(Prediction::Tier(tier)) => {
+                record_input(ctx, None);
                 observation.suggested_tier = Some(tier);
                 Some(Suggestion {
                     generation,
@@ -709,6 +725,13 @@ fn worker_loop(
     process: &Process,
     receiver: &mpsc::Receiver<Job>,
 ) -> Result<(), ()> {
+    // Prepared environments survive App updates. Refresh only the managed
+    // protocol script before launch, without invoking setup or downloads.
+    crate::private_fs::write_atomic_private(
+        &root.join("worker.py"),
+        include_bytes!("../../../scripts/scx-runtime/worker.py"),
+    )
+    .map_err(|_| ())?;
     let mut command = Command::new(root.join(".venv/bin/python"));
     command
         .arg("-u")
@@ -790,11 +813,12 @@ fn worker_loop(
         } else if let Some(controller) = controller.upgrade() {
             job.observation.latency_ms = Some(elapsed_ms(job.started));
             job.observation.outcome = match result {
-                Ok(tier) if job.started.elapsed() <= TIMEOUT => {
+                Ok(Prediction::Tier(tier)) if job.started.elapsed() <= TIMEOUT => {
                     job.observation.suggested_tier = Some(tier);
                     Outcome::Observed
                 }
-                Ok(_) => Outcome::Timeout,
+                Ok(Prediction::TokenLimit) => Outcome::Unsupported,
+                Ok(Prediction::Tier(_)) => Outcome::Timeout,
                 Err(outcome) => outcome,
             };
             controller.record(job.generation, job.observation);
@@ -849,21 +873,68 @@ fn read_worker_lines(stdout: std::process::ChildStdout) -> mpsc::Receiver<String
     output
 }
 
-fn parse_prediction(line: &str, id: u64) -> Result<Tier, Outcome> {
+fn parse_prediction(line: &str, id: u64) -> Result<Prediction, Outcome> {
     let value: serde_json::Value = serde_json::from_str(line).map_err(|_| Outcome::Invalid)?;
     if value.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
         return Err(Outcome::Invalid);
     }
     match value.get("status").and_then(serde_json::Value::as_str) {
+        Some("unsupported")
+            if value.get("reason").and_then(serde_json::Value::as_str) == Some("token_limit") =>
+        {
+            Ok(Prediction::TokenLimit)
+        }
         Some("unsupported") => Err(Outcome::Unsupported),
         Some("ok") => serde_json::from_value(value.get("tier").cloned().unwrap_or_default())
+            .map(Prediction::Tier)
             .map_err(|_| Outcome::Invalid),
         _ => Err(Outcome::Error),
     }
 }
-fn project(request: &ChatRequest) -> Result<String, Outcome> {
-    let mut turns = Vec::new();
+fn record_input(context: &RequestContext, reason: Option<ClassifierInputReason>) {
+    context.set_classifier_input(ClassifierInputDiagnostic {
+        classifier: ClassifierKind::Scx,
+        handling: if reason.is_some() {
+            ClassifierInputHandling::Skipped
+        } else {
+            ClassifierInputHandling::Full
+        },
+        reason,
+    });
+}
+
+fn project(request: &ChatRequest, context: &RequestContext) -> Result<String, Outcome> {
+    // Validate all visible turns before assigning a length reason. In particular,
+    // an empty latest user or hidden media is not a size-limit rejection.
     let mut latest_user_nonempty = false;
+    for message in &request.messages {
+        if !matches!(message.role, Role::User | Role::Assistant) {
+            continue;
+        }
+        let nonempty = match &message.content {
+            None => false,
+            Some(Content::Text(text)) => !text.trim().is_empty(),
+            Some(Content::Parts(parts)) => {
+                let mut nonempty = false;
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => nonempty |= !text.trim().is_empty(),
+                        ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. } => {}
+                        _ => return Err(Outcome::Unsupported),
+                    }
+                }
+                nonempty
+            }
+        };
+        if message.role == Role::User {
+            latest_user_nonempty = nonempty;
+        }
+    }
+    if !latest_user_nonempty {
+        return Err(Outcome::Unsupported);
+    }
+
+    let mut turns = Vec::new();
     let mut bytes = 0;
     for message in &request.messages {
         if !matches!(message.role, Role::User | Role::Assistant) {
@@ -888,14 +959,12 @@ fn project(request: &ChatRequest) -> Result<String, Outcome> {
             }
         };
         let text = text.trim();
-        if message.role == Role::User {
-            latest_user_nonempty = !text.is_empty();
-        }
         if text.is_empty() {
             continue;
         }
         bytes += text.len() + 12;
         if bytes > MAX_TEXT_BYTES {
+            record_input(context, Some(ClassifierInputReason::ByteLimit));
             return Err(Outcome::Unsupported);
         }
         turns.push(format!(
@@ -906,9 +975,6 @@ fn project(request: &ChatRequest) -> Result<String, Outcome> {
                 "Assistant"
             }
         ));
-    }
-    if !latest_user_nonempty {
-        return Err(Outcome::Unsupported);
     }
     Ok(turns.join("\n\n"))
 }

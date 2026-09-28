@@ -285,6 +285,13 @@ export interface ReceiptConversionView {
     | null;
 }
 
+/** Content-free input handling recorded for this request, never inferred from shared classifier status. */
+export interface ClassifierInputView {
+  classifier: "scx" | "jev";
+  handling: "full" | "reduced" | "skipped";
+  reason: "byte_limit" | "token_limit" | null;
+}
+
 export interface ReceiptView {
   usage_observation?: (Partial<Record<keyof ReceiptUsageView | "cache_write_5m_tokens" | "cache_write_1h_tokens", number | null>> & { incomplete?: boolean }) | null;
   request_id: string;
@@ -316,6 +323,7 @@ export interface ReceiptView {
   running_revision: number | null;
   cost_kind: ReceiptCostKind;
   decision: ReceiptRouteView | null;
+  classifier_input?: ClassifierInputView | null;
   attempt_records: ReceiptAttemptView[];
   conversion_reports: ReceiptConversionView[];
 }

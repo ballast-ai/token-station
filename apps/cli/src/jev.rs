@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use token_station_metrics::{
+    ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason, ClassifierKind,
+};
 use token_station_protocol::{ChatRequest, Content, ContentPart, Role};
 
 use crate::cancel::{CancelReason, CancelToken};
@@ -311,7 +314,7 @@ impl JevController {
                 return Err(Outcome::LocalOnly);
             }
             check_context(context)?;
-            let text = project(request)?;
+            let text = project(request, context)?;
             let key = key.ok_or(Outcome::MissingKey)?;
             self.predict(text, key, generation, context, egress)
         })();
@@ -675,10 +678,29 @@ fn parse_prediction(body: &str) -> Result<Tier, Outcome> {
     Ok(tier.choice)
 }
 
-fn project(request: &ChatRequest) -> Result<String, Outcome> {
+struct TextTurn<'a> {
+    role: Role,
+    parts: Vec<&'a str>,
+    bytes: usize,
+}
+impl TextTurn<'_> {
+    const fn prefix(&self) -> &'static str {
+        if matches!(self.role, Role::User) {
+            "User: "
+        } else {
+            "Assistant: "
+        }
+    }
+
+    fn render(&self) -> String {
+        format!("{}{}", self.prefix(), self.parts.join("\n"))
+    }
+}
+
+fn validate_text_input(request: &ChatRequest) -> Result<(), Outcome> {
     let mut latest_user_nonempty = false;
-    // Inspect the full eligible history before selecting a bounded recent tail.
-    // An image outside the retained text must not turn into a text-only request.
+    // Check all eligible history before considering a size limit. Omitted media
+    // must not turn an unsupported request into a text-only classification.
     for message in &request.messages {
         if !matches!(message.role, Role::User | Role::Assistant) {
             continue;
@@ -703,35 +725,103 @@ fn project(request: &ChatRequest) -> Result<String, Outcome> {
     if !latest_user_nonempty {
         return Err(Outcome::Unsupported);
     }
-    let mut turns = Vec::new();
-    let mut remaining = MAX_TEXT_BYTES;
-    let mut has_user = false;
-    for message in request.messages.iter().rev() {
-        let prefix = match message.role {
-            Role::User => "User: ",
-            Role::Assistant => "Assistant: ",
-            _ => continue,
-        };
-        let overhead = prefix.len() + if turns.is_empty() { 0 } else { 2 };
-        if remaining <= overhead {
-            break;
-        }
-        let text = text_tail(message.content.as_ref(), remaining - overhead);
-        if text.is_empty() {
-            continue;
-        }
-        has_user |= message.role == Role::User;
-        remaining -= overhead + text.len();
-        turns.push(format!("{prefix}{text}"));
-    }
-    if !has_user {
-        return Err(Outcome::Unsupported);
-    }
-    turns.reverse();
-    Ok(turns.join("\n\n"))
+    Ok(())
 }
 
-fn text_parts(content: Option<&Content>) -> Box<dyn DoubleEndedIterator<Item = &str> + '_> {
+fn project(request: &ChatRequest, context: &RequestContext) -> Result<String, Outcome> {
+    validate_text_input(request)?;
+    // Keep references until admission is complete. A large discarded turn does
+    // not need a second full allocation.
+    let turns: Vec<_> = request
+        .messages
+        .iter()
+        .filter_map(|message| {
+            if !matches!(message.role, Role::User | Role::Assistant) {
+                return None;
+            }
+            let parts: Vec<_> = text_parts(message.content.as_ref())
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect();
+            if parts.is_empty() {
+                return None;
+            }
+            let mut turn = TextTurn {
+                role: message.role,
+                parts,
+                bytes: 0,
+            };
+            turn.bytes = turn
+                .parts
+                .iter()
+                .fold(turn.prefix().len(), |bytes, part| {
+                    bytes.saturating_add(part.len())
+                })
+                .saturating_add(turn.parts.len() - 1);
+            Some(turn)
+        })
+        .collect();
+    let total = turns
+        .iter()
+        .fold(0_usize, |bytes, turn| bytes.saturating_add(turn.bytes))
+        .saturating_add(turns.len().saturating_sub(1).saturating_mul(2));
+    if total <= MAX_TEXT_BYTES {
+        record_input(context, ClassifierInputHandling::Full);
+        return Ok(turns
+            .iter()
+            .map(TextTurn::render)
+            .collect::<Vec<_>>()
+            .join("\n\n"));
+    }
+    let latest = turns
+        .iter()
+        .rposition(|turn| turn.role == Role::User)
+        .expect("nonempty latest user");
+    if turns[latest].bytes > MAX_TEXT_BYTES {
+        record_input(context, ClassifierInputHandling::Skipped);
+        return Err(Outcome::Unsupported);
+    }
+    let mut retained = vec![false; turns.len()];
+    retained[latest] = true;
+    let mut used = turns[latest].bytes;
+    let anchor = turns
+        .iter()
+        .position(|turn| turn.role == Role::User)
+        .expect("nonempty latest user");
+    // Reserve the complete task first, then its first user-context anchor. All
+    // remaining selections are whole turns, ordered by recency for admission.
+    for index in std::iter::once(anchor).chain((0..turns.len()).rev()) {
+        if retained[index] {
+            continue;
+        }
+        let size = turns[index].bytes.saturating_add(2);
+        if size <= MAX_TEXT_BYTES - used {
+            retained[index] = true;
+            used += size;
+        }
+    }
+    let text = turns
+        .iter()
+        .zip(retained)
+        .filter(|(_, selected)| *selected)
+        .map(|(turn, _)| turn.render())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    debug_assert!(text.len() <= MAX_TEXT_BYTES);
+    record_input(context, ClassifierInputHandling::Reduced);
+    Ok(text)
+}
+
+fn record_input(context: &RequestContext, handling: ClassifierInputHandling) {
+    context.set_classifier_input(ClassifierInputDiagnostic {
+        classifier: ClassifierKind::Jev,
+        handling,
+        reason: (handling != ClassifierInputHandling::Full)
+            .then_some(ClassifierInputReason::ByteLimit),
+    });
+}
+
+fn text_parts(content: Option<&Content>) -> Box<dyn Iterator<Item = &str> + '_> {
     match content {
         Some(Content::Text(text)) => Box::new(std::iter::once(text.as_str())),
         Some(Content::Parts(parts)) => Box::new(parts.iter().filter_map(|part| match part {
@@ -740,37 +830,6 @@ fn text_parts(content: Option<&Content>) -> Box<dyn DoubleEndedIterator<Item = &
         })),
         None => Box::new(std::iter::empty()),
     }
-}
-
-fn text_tail(content: Option<&Content>, mut remaining: usize) -> String {
-    let mut pieces = Vec::new();
-    for text in text_parts(content).rev() {
-        let text = text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        if !pieces.is_empty() {
-            remaining = remaining.saturating_sub(1);
-        }
-        if remaining == 0 {
-            break;
-        }
-        let mut boundary = text.len().saturating_sub(remaining);
-        while !text.is_char_boundary(boundary) {
-            boundary += 1;
-        }
-        let suffix = &text[boundary..];
-        if suffix.is_empty() {
-            break;
-        }
-        pieces.push(suffix);
-        remaining -= suffix.len();
-        if boundary != 0 {
-            break;
-        }
-    }
-    pieces.reverse();
-    pieces.join("\n")
 }
 
 fn elapsed_ms(started: Instant) -> u64 {

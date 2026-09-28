@@ -1926,7 +1926,11 @@ impl SemanticHttpFixture {
             std::fs::write(runtime.join(name), b"fixture").unwrap();
         }
         let python = runtime.join(".venv/bin/python");
-        std::fs::write(&python, b"#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n").unwrap();
+        std::fs::write(
+            &python,
+            b"#!/bin/sh\nexec /usr/bin/python3 -u \"$(dirname \"$0\")/../../fixture-worker.py\"\n",
+        )
+        .unwrap();
         std::fs::set_permissions(python, std::fs::Permissions::from_mode(0o700)).unwrap();
         for name in [
             "config.json",
@@ -1939,7 +1943,7 @@ impl SemanticHttpFixture {
             std::fs::write(runtime.join("models/scx").join(name), b"fixture only").unwrap();
         }
         std::fs::write(
-            runtime.join("worker.py"),
+            runtime.join("fixture-worker.py"),
             r#"import json
 import sys
 print(json.dumps({"event": "ready"}), flush=True)
@@ -1949,6 +1953,7 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
+        std::fs::write(runtime.join("worker.py"), b"# managed worker placeholder\n").unwrap();
         Self {
             controller: token_station_cli::semantic::SemanticController::shared(&data),
             data,

@@ -523,6 +523,31 @@ describe("UsageRequestLog", () => {
     expect(within(row).getByText("inbound_normalize")).toBeInTheDocument();
   });
 
+  it("shows the recorded input notice in the routing tab when opened by keyboard", async () => {
+    vi.mocked(getRequestReceipts).mockResolvedValue({
+      items: [receipt({
+        classifier_input: { classifier: "jev", handling: "reduced", reason: "byte_limit" },
+        decision: { ...receipt({}).routing!, decided_by: { tier: "classifier" } },
+      })],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    const user = userEvent.setup();
+    render(<UsageRequestLog since="24h" agentId="" upstream="" model="" refreshKey={0} />);
+    await user.click((await screen.findAllByText("deepseek/deepseek-v4-pro"))[0]);
+    const dialog = screen.getByRole("dialog", { name: "请求详情" });
+    const tab = within(dialog).getByRole("tab", { name: "路由" });
+    tab.focus();
+    await user.keyboard("{Enter}");
+    expect(tab).toHaveAttribute("aria-selected", "true");
+    const decision = within(dialog).getByLabelText("决策记录");
+    expect(decision).toHaveTextContent("Jev 云端分档");
+    expect(decision).toHaveTextContent("分类输入超过字节上限，已缩减分类用上下文，并保留完整最新问题");
+    expect(decision).toHaveTextContent("原始生成请求不受此操作影响");
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("explains when an older receipt has no retained plaintext", async () => {
     const user = userEvent.setup();
     render(

@@ -29,6 +29,7 @@ pub struct RequestContext {
     http_trace: Mutex<Option<HttpTraceCapture>>,
     accounting: Mutex<crate::accounting::AccountingTap>,
     error_diagnostic: Mutex<Option<ErrorDiagnosticCapture>>,
+    classifier_input: Mutex<Option<token_station_metrics::ClassifierInputDiagnostic>>,
 }
 
 const MAX_HTTP_TRACE_BODY_BYTES: usize = 1024 * 1024;
@@ -132,6 +133,7 @@ impl RequestContext {
             upstream_response_limit: None,
             http_trace: Mutex::new(None),
             error_diagnostic: Mutex::new(None),
+            classifier_input: Mutex::new(None),
             accounting: Mutex::new(crate::accounting::AccountingTap::default()),
         }
     }
@@ -228,6 +230,26 @@ impl RequestContext {
     pub(crate) fn begin_accounting(&self, endpoint: &str) {
         *self.accounting.lock().expect("accounting lock") =
             crate::accounting::AccountingTap::new(endpoint);
+    }
+
+    /// Record this request's classifier input handling, independently of attempts.
+    ///
+    /// # Panics
+    /// Panics if the classifier input lock is poisoned.
+    pub fn set_classifier_input(
+        &self,
+        diagnostic: token_station_metrics::ClassifierInputDiagnostic,
+    ) {
+        *self.classifier_input.lock().expect("classifier input lock") = Some(diagnostic);
+    }
+
+    /// Snapshot this request's classifier input handling without consuming it.
+    ///
+    /// # Panics
+    /// Panics if the classifier input lock is poisoned.
+    #[must_use]
+    pub fn classifier_input(&self) -> Option<token_station_metrics::ClassifierInputDiagnostic> {
+        *self.classifier_input.lock().expect("classifier input lock")
     }
 
     pub(crate) fn finish_accounting(&self, record: &mut token_station_metrics::RequestRecord) {
@@ -498,6 +520,46 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn classifier_input_is_request_scoped_and_survives_attempt_accounting() {
+        use token_station_metrics::{
+            ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+            ClassifierKind, RequestRecord,
+        };
+        let first = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let second = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let diagnostic = ClassifierInputDiagnostic {
+            classifier: ClassifierKind::Jev,
+            handling: ClassifierInputHandling::Reduced,
+            reason: Some(ClassifierInputReason::ByteLimit),
+        };
+        first.set_classifier_input(diagnostic);
+        for _ in 0..2 {
+            first.begin_accounting("https://example.test/v1");
+            first.finish_accounting(&mut RequestRecord::begin(1, "openai"));
+            assert_eq!(first.classifier_input(), Some(diagnostic));
+            assert_eq!(second.classifier_input(), None);
+        }
+        first.cancel();
+        assert_eq!(first.classifier_input(), Some(diagnostic));
+        let second_diagnostic = ClassifierInputDiagnostic {
+            classifier: ClassifierKind::Scx,
+            handling: ClassifierInputHandling::Skipped,
+            reason: Some(ClassifierInputReason::TokenLimit),
+        };
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for (context, expected) in [(&first, diagnostic), (&second, second_diagnostic)] {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    context.set_classifier_input(expected);
+                    barrier.wait();
+                    assert_eq!(context.classifier_input(), Some(expected));
+                });
+            }
+        });
+    }
+
     use super::{CappedJsonWriter, MAX_HTTP_TRACE_BODY_BYTES, RequestContext};
     use crate::bodylog::{HttpTraceSnapshot, MAX_BODY_BYTES};
     use crate::cancel::{CancelReason, CancelToken};

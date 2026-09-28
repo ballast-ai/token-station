@@ -16,7 +16,11 @@ fn projection_keeps_conversation_and_excludes_scaffolding_and_tool_payloads() {
         {"role":"tool","content":"PRIVATE TOOL","tool_call_id":"a"},
         {"role":"user","content":"Continue"}
     ]));
-    let text = project(&input).unwrap();
+    let text = project(
+        &input,
+        &RequestContext::detached(Duration::from_secs(10), Duration::from_secs(10)),
+    )
+    .unwrap();
     assert!(text.contains("payment protocol"));
     assert!(text.ends_with("User: Continue"));
     assert!(!text.contains("PRIVATE"));
@@ -28,7 +32,13 @@ fn projection_never_reuses_history_for_an_empty_latest_user_turn() {
         {"role":"user","content":"Earlier task"},
         {"role":"user","content":" "}
     ]));
-    assert_eq!(project(&input), Err(Outcome::Unsupported));
+    assert_eq!(
+        project(
+            &input,
+            &RequestContext::detached(Duration::from_secs(10), Duration::from_secs(10))
+        ),
+        Err(Outcome::Unsupported)
+    );
 }
 
 #[test]
@@ -37,20 +47,32 @@ fn projection_skips_images_even_when_text_is_present() {
         {"type":"text","text":"What is in this image?"},
         {"type":"image_url","image_url":{"url":"https://example.invalid/image"}}
     ]}]));
-    assert_eq!(project(&input), Err(Outcome::Unsupported));
+    assert_eq!(
+        project(
+            &input,
+            &RequestContext::detached(Duration::from_secs(10), Duration::from_secs(10))
+        ),
+        Err(Outcome::Unsupported)
+    );
 }
 
 #[test]
 fn projection_does_not_silently_cut_a_large_user_request() {
     let input = request(json!([{"role":"user","content":"x".repeat(MAX_TEXT_BYTES + 1)}]));
-    assert_eq!(project(&input), Err(Outcome::Unsupported));
+    assert_eq!(
+        project(
+            &input,
+            &RequestContext::detached(Duration::from_secs(10), Duration::from_secs(10))
+        ),
+        Err(Outcome::Unsupported)
+    );
 }
 
 #[test]
 fn model_output_only_accepts_closed_tier_and_matching_request_id() {
     assert_eq!(
         parse_prediction(r#"{"id":7,"status":"ok","tier":"high"}"#, 7),
-        Ok(Tier::High)
+        Ok(Prediction::Tier(Tier::High))
     );
     assert_eq!(
         parse_prediction(r#"{"id":8,"status":"ok","tier":"high"}"#, 7),
@@ -121,7 +143,7 @@ impl Fixture {
         }
         std::fs::write(
             root.join(".venv/bin/python"),
-            "#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n",
+            "#!/bin/sh\nexec /usr/bin/python3 -u \"$(dirname \"$0\")/../../fixture-worker.py\"\n",
         )
         .unwrap();
         std::fs::set_permissions(
@@ -139,7 +161,8 @@ impl Fixture {
         ] {
             std::fs::write(root.join("models/scx").join(file), b"test").unwrap();
         }
-        std::fs::write(root.join("worker.py"),format!("import json,sys,time,os\nprint(json.dumps({{'event':'ready'}}),flush=True)\nfor line in sys.stdin:\n job=json.loads(line)\n {body}\n")).unwrap();
+        std::fs::write(root.join("worker.py"), b"old managed worker").unwrap();
+        std::fs::write(root.join("fixture-worker.py"),format!("import json,sys,time,os\nprint(json.dumps({{'event':'ready'}}),flush=True)\nfor line in sys.stdin:\n job=json.loads(line)\n {body}\n")).unwrap();
         let controller = SemanticController::shared(&directory);
         // No fixture may invoke the production downloader, even on a regression.
         *controller.preparation_script.lock().unwrap() = Some(root.join("prepare-fixture.py"));
@@ -751,7 +774,7 @@ fn mode_change_discards_inflight_observation_and_recent_history_is_bounded() {
 fn hard_watchdog_covers_a_child_that_stops_reading_escaped_input() {
     let fixture = Fixture::new("pass");
     std::fs::write(
-        fixture.directory.join("semantic-runtime/worker.py"),
+        fixture.directory.join("semantic-runtime/fixture-worker.py"),
         "import json,time\nprint(json.dumps({'event':'ready'}),flush=True)\ntime.sleep(60)\n",
     )
     .unwrap();
@@ -797,4 +820,114 @@ fn cancelled_preparation_cannot_report_an_incomplete_model_as_ready() {
     assert!(!fixture.controller.status().model_ready);
     assert!(fixture.controller.set_mode(Mode::Observe).is_err());
     assert_eq!(fixture.controller.status().state, "unprepared");
+}
+
+#[test]
+#[cfg(unix)]
+fn byte_limit_diagnostic_preserves_existing_admission_and_request() {
+    let mut input = request(json!([{"role":"user","content":"x".repeat(MAX_TEXT_BYTES - 12)}]));
+    let ctx = Fixture::context();
+    assert!(project(&input, &ctx).is_ok());
+    input.messages[0] = Message::text(Role::User, "x".repeat(MAX_TEXT_BYTES - 11));
+    let before = input.clone();
+    assert_eq!(project(&input, &ctx), Err(Outcome::Unsupported));
+    assert_eq!(input, before);
+    assert_eq!(
+        serde_json::to_value(ctx.classifier_input()).unwrap(),
+        json!({"classifier":"scx","handling":"skipped","reason":"byte_limit"})
+    );
+    input.messages.push(Message::text(Role::User, " "));
+    let ctx = Fixture::context();
+    assert_eq!(project(&input, &ctx), Err(Outcome::Unsupported));
+    assert!(ctx.classifier_input().is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn unsupported_history_is_not_misreported_as_a_byte_limit() {
+    let input = request(json!([
+        {"role":"user","content":"x".repeat(MAX_TEXT_BYTES)},
+        {"role":"assistant","content":[{"type":"image_url","image_url":{"url":"private"}}]},
+        {"role":"user","content":"current"}
+    ]));
+    let ctx = Fixture::context();
+    assert_eq!(project(&input, &ctx), Err(Outcome::Unsupported));
+    assert!(ctx.classifier_input().is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn route_records_exact_token_limit_without_confusing_other_unsupported_input() {
+    for (reason, expected) in [("token_limit", true), ("reserved_marker", false)] {
+        let fixture = Fixture::new(&format!(
+            "print(json.dumps({{'id':job['id'],'status':'unsupported','reason':'{reason}'}}),flush=True)"
+        ));
+        fixture.start(Mode::Route);
+        let ctx = Fixture::context();
+        let input = request(json!([{"role":"user","content":"PRIVATE TASK"}]));
+        assert!(fixture.controller.classify(&input, None, &ctx).is_none());
+        let diagnostic = serde_json::to_value(ctx.classifier_input()).unwrap();
+        if expected {
+            assert_eq!(
+                diagnostic,
+                json!({"classifier":"scx","handling":"skipped","reason":"token_limit"})
+            );
+        } else {
+            assert!(diagnostic.is_null());
+        }
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("PRIVATE")
+        );
+        assert_eq!(
+            fixture.controller.status().observations[0].outcome,
+            Outcome::Unsupported
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn observe_does_not_wait_or_write_a_late_token_diagnostic() {
+    let fixture = Fixture::new(
+        "time.sleep(0.15); print(json.dumps({'id':job['id'],'status':'unsupported','reason':'token_limit'}),flush=True)",
+    );
+    fixture.start(Mode::Observe);
+    let ctx = Fixture::context();
+    let input = request(json!([{"role":"user","content":"task"}]));
+    let started = Instant::now();
+    assert!(fixture.controller.classify(&input, None, &ctx).is_none());
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert!(ctx.classifier_input().is_none());
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(ctx.classifier_input().is_none());
+    assert_eq!(
+        fixture.controller.status().observations[0].outcome,
+        Outcome::Unsupported
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn existing_prepared_runtime_refreshes_only_the_managed_worker_before_start() {
+    let fixture =
+        Fixture::new("print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)");
+    let root = fixture.directory.join("semantic-runtime");
+    let preserved = [
+        ".venv/bin/python",
+        "prepared.json",
+        "assets.json",
+        "models/scx/model.safetensors",
+    ]
+    .map(|name| (name, std::fs::read(root.join(name)).unwrap()));
+    fixture.start(Mode::Route);
+    assert_eq!(
+        std::fs::read_to_string(root.join("worker.py")).unwrap(),
+        include_str!("../../../../scripts/scx-runtime/worker.py")
+    );
+    token_station_private_fs::verify_private_file(&root.join("worker.py")).unwrap();
+    for (name, bytes) in preserved {
+        assert_eq!(std::fs::read(root.join(name)).unwrap(), bytes, "{name}");
+    }
 }

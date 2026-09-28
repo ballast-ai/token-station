@@ -73,6 +73,45 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(self.worker.UnsupportedInput):
             backend.classify("input")
 
+    def test_token_limit_reason_is_distinct_from_unsupported_content(self):
+        class TooLong:
+            def classify(self, text):
+                raise self_worker.TokenLimit()
+        self_worker = self.worker
+        result = self.worker.handle({"id": 8, "text": "task"}, TooLong())
+        self.assertEqual(result, {"id": 8, "status": "unsupported", "reason": "token_limit"})
+        marker = self.worker.handle({"id": 9, "text": "<<LABEL>>private"}, Backend())
+        self.assertEqual(marker, {"id": 9, "status": "unsupported"})
+        self.assertNotIn("private", json.dumps(marker))
+
+    def test_formatted_token_boundary_is_exact_and_never_enables_truncation(self):
+        import contextlib
+        class Pipe:
+            def _build_context_and_labels(self, texts, labels, same, examples, prompt):
+                return [texts[0]], ["y" * 24]
+        class Tokenizer:
+            def __call__(self, text, **kwargs):
+                self.assertions.append(kwargs)
+                return {"input_ids": list(text)}
+        class Pipeline:
+            pipe = Pipe()
+            calls = 0
+            def __call__(self, *args, **kwargs):
+                self.calls += 1
+                return [{label: 1.0 if index == 0 else 0.0 for index, label in enumerate(self_worker.LABELS)}]
+        self_worker = self.worker
+        backend = object.__new__(self.worker.SCXBackend)
+        backend.pipeline = Pipeline()
+        backend.tokenizer = Tokenizer()
+        backend.tokenizer.assertions = []
+        backend.torch = type("Torch", (), {"inference_mode": staticmethod(contextlib.nullcontext)})()
+        backend.device = type("Device", (), {"type": "cpu"})()
+        self.assertEqual(backend.classify("x" * 1000), "low")
+        with self.assertRaises(self.worker.TokenLimit):
+            backend.classify("x" * 1001)
+        self.assertEqual(backend.pipeline.calls, 1)
+        self.assertTrue(all(not call["truncation"] for call in backend.tokenizer.assertions))
+
     def test_stream_recovers_after_invalid_json_and_large_line(self):
         data = b'{\n' + b'x' * (self.worker.MAX_LINE_BYTES + 1) + b'\n'
         data += b'{"id":"next","text":"hi"}\n'

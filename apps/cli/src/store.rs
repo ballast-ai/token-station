@@ -20,7 +20,8 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, named_params, types::Type,
 };
 use token_station_metrics::{
-    AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
+    AttemptRecord, ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+    ClassifierKind, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
     ConversionRecord, ConversionStage, CostKind, DecisionRecord, ProviderCallEngine,
     QuotaDecisionSnapshot, ReceiptView, RecordedDecidedBy, Recorder, RequestPathKind,
     RequestRecord, RoutingRecord, SCHEMA_VERSION, UsageSemantics,
@@ -507,6 +508,17 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE decisions_v15 RENAME TO decisions;
         ",
     },
+    Migration {
+        // v15 -> v16: one optional content-free input diagnostic per request.
+        // Historical requests have no row. Their input handling stays unknown.
+        to: 16,
+        sql: "CREATE TABLE classifier_inputs (
+            request_id TEXT PRIMARY KEY,
+            classifier TEXT NOT NULL CHECK (classifier IN ('scx', 'jev')),
+            handling TEXT NOT NULL CHECK (handling IN ('full', 'reduced', 'skipped')),
+            reason TEXT CHECK (reason IS NULL OR reason IN ('byte_limit', 'token_limit'))
+        );",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -573,6 +585,13 @@ CREATE INDEX IF NOT EXISTS requests_started_at ON requests (started_at_ms);
 -- table rebuild) is idempotent. Empty ids (legacy rows) are exempt.
 CREATE UNIQUE INDEX IF NOT EXISTS requests_request_id
     ON requests (request_id) WHERE request_id <> '';
+
+CREATE TABLE IF NOT EXISTS classifier_inputs (
+    request_id TEXT PRIMARY KEY,
+    classifier TEXT NOT NULL CHECK (classifier IN ('scx', 'jev')),
+    handling TEXT NOT NULL CHECK (handling IN ('full', 'reduced', 'skipped')),
+    reason TEXT CHECK (reason IS NULL OR reason IN ('byte_limit', 'token_limit'))
+);
 
 CREATE TABLE IF NOT EXISTS decisions (
     request_id TEXT PRIMARY KEY,
@@ -897,6 +916,9 @@ impl SqliteStore {
             if seed.persisted_request_id.is_empty() {
                 continue;
             }
+            seed.view.classifier_input =
+                read_classifier_input(&connection, &seed.persisted_request_id)
+                    .map_err(|error| format!("request classifier input decode: {error}"))?;
             seed.view.decision = read_decision(&connection, &seed.persisted_request_id)
                 .map_err(|error| format!("request decision decode: {error}"))?;
             seed.view.attempt_records = read_attempts(&connection, &seed.persisted_request_id)
@@ -1091,7 +1113,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)] // one atomic parent + three child-table write
+    #[allow(clippy::too_many_lines)] // one atomic parent + four child-table write
     fn insert(&self, record: &RequestRecord) -> Result<(), rusqlite::Error> {
         let routing = record.routing.as_ref();
         let features = routing.map(|routing| routing.features);
@@ -1180,6 +1202,26 @@ impl SqliteStore {
         if inserted == 0 {
             transaction.commit()?;
             return Ok(());
+        }
+
+        if let Some(diagnostic) = record.classifier_input {
+            let classifier = match diagnostic.classifier {
+                ClassifierKind::Scx => "scx",
+                ClassifierKind::Jev => "jev",
+            };
+            let handling = match diagnostic.handling {
+                ClassifierInputHandling::Full => "full",
+                ClassifierInputHandling::Reduced => "reduced",
+                ClassifierInputHandling::Skipped => "skipped",
+            };
+            let reason = diagnostic.reason.map(|reason| match reason {
+                ClassifierInputReason::ByteLimit => "byte_limit",
+                ClassifierInputReason::TokenLimit => "token_limit",
+            });
+            transaction.execute(
+                "INSERT INTO classifier_inputs (request_id, classifier, handling, reason) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![record.request_id, classifier, handling, reason],
+            )?;
         }
 
         if let Some(decision) = &record.decision {
@@ -1568,6 +1610,9 @@ impl SqliteStore {
             if seed.persisted_request_id.is_empty() {
                 continue;
             }
+            seed.view.classifier_input =
+                read_classifier_input(&connection, &seed.persisted_request_id)
+                    .map_err(|error| format!("request classifier input decode: {error}"))?;
             seed.view.decision = read_decision(&connection, &seed.persisted_request_id)
                 .map_err(|error| format!("request decision decode: {error}"))?;
             seed.view.attempt_records = read_attempts(&connection, &seed.persisted_request_id)
@@ -1597,6 +1642,7 @@ pub(crate) fn read_usage_observation(
         .transpose()
 }
 
+#[allow(clippy::too_many_lines)] // The fixed read model follows the query column order.
 fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
     let database_id = row.get::<_, i64>(0)?;
     let persisted_request_id = row.get::<_, String>(1)?;
@@ -1697,8 +1743,45 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
             decision: None,
             attempt_records: Vec::new(),
             conversion_reports: Vec::new(),
+            classifier_input: None,
         },
     })
+}
+
+fn read_classifier_input(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<ClassifierInputDiagnostic>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT classifier, handling, reason FROM classifier_inputs WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                let classifier = match row.get::<_, String>(0)?.as_str() {
+                    "scx" => ClassifierKind::Scx,
+                    "jev" => ClassifierKind::Jev,
+                    other => return Err(invalid_enum(0, "classifier", other)),
+                };
+                let handling = match row.get::<_, String>(1)?.as_str() {
+                    "full" => ClassifierInputHandling::Full,
+                    "reduced" => ClassifierInputHandling::Reduced,
+                    "skipped" => ClassifierInputHandling::Skipped,
+                    other => return Err(invalid_enum(1, "classifier input handling", other)),
+                };
+                let reason = match row.get::<_, Option<String>>(2)?.as_deref() {
+                    None => None,
+                    Some("byte_limit") => Some(ClassifierInputReason::ByteLimit),
+                    Some("token_limit") => Some(ClassifierInputReason::TokenLimit),
+                    Some(other) => return Err(invalid_enum(2, "classifier input reason", other)),
+                };
+                Ok(ClassifierInputDiagnostic {
+                    classifier,
+                    handling,
+                    reason,
+                })
+            },
+        )
+        .optional()
 }
 
 fn read_decision(
@@ -1977,6 +2060,126 @@ mod fallback_reason_catalogue_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn classifier_input_round_trips_per_request_and_duplicate_writes_do_not_replace_it() {
+        use token_station_metrics::{
+            ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+            ClassifierKind,
+        };
+        let path = scratch("classifier-input");
+        std::fs::remove_file(&path).ok();
+        let diagnostics = [
+            ClassifierInputDiagnostic {
+                classifier: ClassifierKind::Scx,
+                handling: ClassifierInputHandling::Full,
+                reason: None,
+            },
+            ClassifierInputDiagnostic {
+                classifier: ClassifierKind::Jev,
+                handling: ClassifierInputHandling::Reduced,
+                reason: Some(ClassifierInputReason::ByteLimit),
+            },
+            ClassifierInputDiagnostic {
+                classifier: ClassifierKind::Scx,
+                handling: ClassifierInputHandling::Skipped,
+                reason: Some(ClassifierInputReason::TokenLimit),
+            },
+        ];
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            for (index, diagnostic) in diagnostics.iter().enumerate() {
+                let mut record = receipt(&format!("diagnostic-{index}"), index as u64);
+                record.classifier_input = Some(*diagnostic);
+                if index == 2 {
+                    record.status = 503;
+                    record.error_code = Some(ErrorCode::UpstreamUnavailable);
+                    record.decision = None;
+                    record.routing = None;
+                    record.attempts = 0;
+                    record.attempt_records.clear();
+                }
+                store.insert(&record).unwrap();
+                record.classifier_input = Some(diagnostics[(index + 1) % diagnostics.len()]);
+                store.insert(&record).unwrap();
+            }
+            let connection = store.connection.lock().unwrap();
+            for (column, value) in [
+                ("classifier", "private-canary"),
+                ("handling", "private-canary"),
+                ("reason", "private-canary"),
+            ] {
+                assert!(
+                    connection
+                        .execute(
+                            &format!("UPDATE classifier_inputs SET {column} = ?1"),
+                            [value]
+                        )
+                        .is_err()
+                );
+            }
+        }
+        let recent = SqliteStore::recent_receipts(&path, 5).unwrap();
+        assert_eq!(recent.len(), 3);
+        for row in &recent {
+            assert_eq!(
+                row.classifier_input,
+                Some(diagnostics[usize::try_from(row.started_at_ms).unwrap()])
+            );
+        }
+        let page = SqliteStore::receipt_page(&path, &ReceiptQuery::default(), 10, 0).unwrap();
+        assert_eq!(page.items, recent);
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains("private-canary")
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn v15_classifier_input_migration_preserves_unknown_history_and_is_idempotent() {
+        let path = scratch("migrate-v15-classifier-input");
+        std::fs::remove_file(&path).ok();
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch(V3_SCHEMA).unwrap();
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=15).contains(&migration.to))
+            {
+                connection.execute_batch(migration.sql).unwrap();
+            }
+            connection.pragma_update(None, "user_version", 15).unwrap();
+            connection.execute("INSERT INTO requests (request_id,started_at_ms,latency_ms,protocol,requested_model,stream,status,attempts) VALUES ('legacy-input',1,2,'openai','auto',0,200,0)", []).unwrap();
+        }
+        for _ in 0..2 {
+            let rows = SqliteStore::recent_receipts(&path, 5).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].classifier_input, None);
+            assert_eq!(rows[0].request_id, "legacy-input");
+            assert_eq!(rows[0].latency_ms, 2);
+            let json = serde_json::to_value(&rows[0]).unwrap();
+            let old_view: token_station_metrics::ReceiptView =
+                serde_json::from_value(json).unwrap();
+            assert_eq!(old_view.classifier_input, None);
+        }
+        let backup = path.with_extension("v15.bak");
+        let connection = rusqlite::Connection::open(&backup).unwrap();
+        let version: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 15);
+        let table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'classifier_inputs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+        drop(connection);
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(backup).ok();
+    }
+
     use super::{ReceiptQuery, SqliteStore, recent_receipts};
     use token_station_metrics::{
         AttemptRecord, ConversionOutcome, ConversionRecord, ConversionStage, CostKind,
@@ -2269,7 +2472,17 @@ mod tests {
                 matched_band_at_least: 22,
             };
             store.record(&heuristic);
-            store.read_recent(10).expect("v14 receipts read")
+            // The current reader requires the new diagnostic table. Build its
+            // expected view separately while leaving the v14 fixture untouched.
+            let reference_path = scratch("migrate-v14-reference");
+            std::fs::remove_file(&reference_path).ok();
+            let reference = SqliteStore::open(&reference_path).expect("reference store");
+            reference.record(&old);
+            reference.record(&heuristic);
+            let expected = reference.read_recent(10).expect("reference receipts read");
+            drop(reference);
+            std::fs::remove_file(reference_path).ok();
+            expected
         };
         assert_eq!(old_receipts.len(), 2);
         {
@@ -2433,7 +2646,13 @@ mod tests {
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
             assert_eq!(version, super::SCHEMA_VERSION, "brought up to current");
-            for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+            for table in [
+                "requests",
+                "decisions",
+                "attempts",
+                "conversion_reports",
+                "classifier_inputs",
+            ] {
                 let exists: i64 = connection
                     .query_row(
                         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -2727,6 +2946,11 @@ mod tests {
         std::fs::remove_file(&path).ok();
         let store = SqliteStore::open(&path).expect("creates");
         let mut record = receipt("req-rollback", 1);
+        record.classifier_input = Some(super::ClassifierInputDiagnostic {
+            classifier: super::ClassifierKind::Jev,
+            handling: super::ClassifierInputHandling::Reduced,
+            reason: Some(super::ClassifierInputReason::ByteLimit),
+        });
         record.attempt_records[1].ordinal = record.attempt_records[0].ordinal;
 
         assert!(
@@ -2734,7 +2958,13 @@ mod tests {
             "duplicate child ordinal fails"
         );
         let connection = store.connection.lock().expect("lock");
-        for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+        for table in [
+            "requests",
+            "decisions",
+            "attempts",
+            "conversion_reports",
+            "classifier_inputs",
+        ] {
             let count: i64 = connection
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
                     row.get(0)
@@ -3190,7 +3420,13 @@ mod tests {
         let mut statement = connection
             .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
             .expect("prepares");
-        for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+        for table in [
+            "requests",
+            "decisions",
+            "attempts",
+            "conversion_reports",
+            "classifier_inputs",
+        ] {
             let columns = statement
                 .query_map([table], |row| row.get::<_, String>(0))
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)

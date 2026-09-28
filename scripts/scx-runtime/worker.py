@@ -20,6 +20,10 @@ class UnsupportedInput(Exception):
     pass
 
 
+class TokenLimit(UnsupportedInput):
+    pass
+
+
 def digest(path):
     value = hashlib.sha256()
     with path.open("rb") as stream:
@@ -81,7 +85,7 @@ class SCXBackend:
         # Use the exact formatter used by the pinned pipeline. Context and label
         # segments are tokenized separately there. Count both before inference.
         if full_token_count(self.pipeline.pipe, self.tokenizer, text) > MAX_TOKENS:
-            raise UnsupportedInput()
+            raise TokenLimit()
         with self.torch.inference_mode():
             scores = self.pipeline(text, LABELS, batch_size=1, return_hierarchical=True)[0]
         if self.device.type == "mps":
@@ -116,6 +120,8 @@ def handle(value, backend):
         if tier not in TIERS:
             raise ValueError("Invalid tier")
         return {"id": request_id, "status": "ok", "tier": tier}
+    except TokenLimit:
+        return {"id": request_id, "status": "unsupported", "reason": "token_limit"}
     except UnsupportedInput:
         return {"id": request_id, "status": "unsupported"}
     except Exception:

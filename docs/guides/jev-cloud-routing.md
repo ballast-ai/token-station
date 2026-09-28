@@ -29,6 +29,20 @@ The initial classification deadline is 1500 milliseconds. Results below 0.70 con
 Timeouts, authentication errors, rate limits, invalid responses, and unavailable tiers also use the existing route.
 The control shows the latest classification outcome without displaying conversation text.
 
+## Long classification input
+
+Jev classification text is limited to 16 KiB. Short inputs retain all allowed visible text.
+For longer conversations, Token Station reserves the complete latest user message first.
+It then retains the first user message when space allows and selects recent complete messages.
+Selected messages retain their original order. No individual message is cut to fit.
+If the latest user message alone exceeds the limit, Token Station skips Jev and uses its existing route.
+Reduced history can omit important constraints. It does not guarantee complete task context.
+
+The request receipt explains when classification history was reduced or classification was skipped for length.
+These are informational routing details, not request errors.
+This operation changes only the classifier's copy. The original generation request remains intact.
+Historical receipts without input diagnostics do not reconstruct a classifier source or limit reason.
+
 ## Data and credentials
 
 Enabled Jev sends bounded user and assistant text to `https://api.typesafe.ai/v1/systemone`.

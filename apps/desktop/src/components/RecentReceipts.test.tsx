@@ -83,7 +83,7 @@ beforeEach(() => {
 });
 
 describe("RecentReceipts", () => {
-  it("identifies a local classifier decision instead of calling it a default route", async () => {
+  it("keeps the classifier source unknown on historical receipts", async () => {
     vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
       decision: {
         upstream: "provider-final", model: "model-final", pool: "tier_mid",
@@ -91,8 +91,115 @@ describe("RecentReceipts", () => {
       },
     })]);
     render(<RecentReceipts />);
-    expect(await screen.findByText(/SCX 本地分档/)).toBeInTheDocument();
+    expect(await screen.findByText(/分类器/)).toBeInTheDocument();
+    expect(screen.queryByText(/SCX|Jev/)).not.toBeInTheDocument();
     expect(screen.queryByText(/默认路由/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["scx", "SCX 本地分档", "Jev 云端分档"],
+    ["jev", "Jev 云端分档", "SCX 本地分档"],
+  ] as const)("names the recorded %s classifier without showing a size notice for full input", async (classifier, expected, other) => {
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      classifier_input: { classifier, handling: "full", reason: null },
+      decision: {
+        upstream: "provider-final", model: "model-final", pool: "tier_mid",
+        decided_by: { tier: "classifier" }, fallbacks: 0, features,
+      },
+    })]);
+    render(<RecentReceipts />);
+    const row = (await screen.findAllByTestId("receipt-row"))[0];
+    expect(within(row).getByLabelText("决策记录")).toHaveTextContent(expected);
+    expect(within(row).queryByText(new RegExp(other))).not.toBeInTheDocument();
+    expect(within(row).queryByText(/分类输入|历史上下文|长度限制/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["en", "Jev cloud classifier", "Classification input exceeded the input byte limit, so the context used for classification was reduced.", "The latest question was kept in full.", "This operation leaves the original generation request unchanged."],
+    ["zh-CN", "Jev 云端分档", "分类输入超过字节上限，已缩减分类用上下文", "保留完整最新问题", "原始生成请求不受此操作影响"],
+    ["zh-TW", "Jev 雲端分檔", "分類輸入超過位元組上限，已縮減分類用上下文", "保留完整最新問題", "原始生成請求不受此操作影響"],
+    ["ja", "Jev クラウド分類", "分類入力が入力バイト上限を超えたため分類用の文脈を削減", "最新の質問は全文保持", "元の生成リクエストを変更しません"],
+  ])("explains reduced classification context neutrally in %s", async (language, source, history, latest, unchanged) => {
+    window.localStorage.setItem("token-station-language", language);
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      classifier_input: { classifier: "jev", handling: "reduced", reason: "byte_limit" },
+      decision: {
+        upstream: "provider-final", model: "model-final", pool: "tier_mid",
+        decided_by: { tier: "classifier" }, fallbacks: 0, features,
+      },
+    })]);
+    const user = userEvent.setup();
+    render(<ErrorToastProvider><RecentReceipts /></ErrorToastProvider>);
+    const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
+    const disclosure = row.querySelector("summary")!;
+    disclosure.focus();
+    expect(disclosure).toHaveFocus();
+    await user.click(disclosure);
+    expect(row.open).toBe(true);
+    const notice = within(row).getByText((content) => content.includes(history));
+    expect(notice.tagName).toBe("P");
+    expect(notice).toHaveTextContent("Jev");
+    expect(notice).toHaveTextContent(latest);
+    expect(notice).toHaveTextContent(unchanged);
+    expect(row).toHaveTextContent(source);
+    expect(within(row).getByText("HTTP 200")).toHaveClass("success");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(notice).not.toHaveAttribute("aria-live");
+  });
+
+  it.each([
+    ["en", "formatted token limit", "input byte limit", "The existing route was retained.", "The generation request was not trimmed."],
+    ["zh-CN", "格式化 token 上限", "字节上限", "沿用原路由", "生成请求未裁剪"],
+    ["zh-TW", "格式化 token 上限", "位元組上限", "沿用原路由", "生成請求未裁剪"],
+    ["ja", "整形後のトークン上限", "入力バイト上限", "既存のルートを維持", "生成リクエストは切り詰めていません"],
+  ])("explains each request's own input limit without changing successful status in %s", async (language, tokenLimit, byteLimit, baseline, unchanged) => {
+    window.localStorage.setItem("token-station-language", language);
+    vi.mocked(getRecentReceipts).mockResolvedValue([
+      receipt(1, {
+        classifier_input: { classifier: "scx", handling: "skipped", reason: "token_limit" },
+        decision: receipt(1).routing,
+      }),
+      receipt(2, {
+        classifier_input: { classifier: "jev", handling: "skipped", reason: "byte_limit" },
+        decision: receipt(2).routing,
+      }),
+    ]);
+    render(<ErrorToastProvider><RecentReceipts /></ErrorToastProvider>);
+    const [scx, jev] = await screen.findAllByTestId("receipt-row");
+    const scxNotice = within(scx).getByText((content) => content.includes(tokenLimit));
+    const jevNotice = within(jev).getByText((content) => content.includes(byteLimit));
+    expect(scxNotice).toHaveTextContent("SCX");
+    expect(scxNotice).not.toHaveTextContent("Jev");
+    expect(jevNotice).toHaveTextContent("Jev");
+    expect(jevNotice).not.toHaveTextContent("SCX");
+    for (const notice of [scxNotice, jevNotice]) {
+      expect(notice).toHaveTextContent(baseline);
+      expect(notice).toHaveTextContent(unchanged);
+      expect(notice).not.toHaveAttribute("role");
+    }
+    expect(within(scx).getByText("HTTP 200")).toHaveClass("success");
+    expect(within(jev).getByText("HTTP 200")).toHaveClass("success");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("retains the input notice when no route decision exists and keeps a separate route failure diagnosis", async () => {
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      classifier_input: { classifier: "jev", handling: "skipped", reason: "byte_limit" },
+      status: 503,
+      error_code: "capacity",
+      decision: null,
+      routing: null,
+      attempts: 0,
+    })]);
+    const user = userEvent.setup();
+    render(<ErrorToastProvider><RecentReceipts /></ErrorToastProvider>);
+    const row = (await screen.findAllByTestId("receipt-row"))[0];
+    await user.click(row.querySelector("summary")!);
+    const decision = within(row).getByLabelText("决策记录");
+    expect(decision).toHaveTextContent("没有决策记录");
+    expect(decision).toHaveTextContent("Jev 分类输入超过字节上限");
+    expect(within(row).getByLabelText("错误诊断")).not.toHaveTextContent("字节上限");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("把无 Agent 命名空间的请求显示为主页路由", async () => {

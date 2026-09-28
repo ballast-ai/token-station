@@ -22,6 +22,8 @@
 
 mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw SSE relay
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
+#[cfg(all(test, feature = "builtin-plugins"))]
+mod classifier_input_tests;
 mod jev_routing;
 #[cfg(test)]
 mod jev_tests;
@@ -3505,6 +3507,9 @@ impl Gateway {
         }
 
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // Snapshot request input handling even when routing or every attempt failed.
+        // Attempt accounting is reset between upstreams and cannot own this value.
+        record.classifier_input = ctx.classifier_input();
         if record_body
             && let Some(body_log) = &self.body_log
             && let Err(error) = body_log.record_with_http_trace(

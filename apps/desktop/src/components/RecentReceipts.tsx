@@ -64,6 +64,7 @@ function formatTokens(
 function formatDecisionReason(
   reason: ReceiptDecidedByView,
   copy: LocalizedCopy,
+  classifier?: "scx" | "jev",
 ): string {
   switch (reason.tier) {
     case "rule":
@@ -76,7 +77,9 @@ function formatDecisionReason(
         `启发式评分 ${reason.score} · 命中档位下界 ≥ ${reason.matched_band_at_least}`, `啟發式評分 ${reason.score} · 命中檔位下界 ≥ ${reason.matched_band_at_least}`, `ヒューリスティックスコア ${reason.score} · 命中バンド下限 ≥ ${reason.matched_band_at_least}`
       );
     case "classifier":
-      return copy("SCX local classifier", "SCX 本地分档", "SCX 本機分檔", "SCX ローカル分類");
+      if (classifier === "scx") return copy("SCX local classifier", "SCX 本地分档", "SCX 本機分檔", "SCX ローカル分類");
+      if (classifier === "jev") return copy("Jev cloud classifier", "Jev 云端分档", "Jev 雲端分檔", "Jev クラウド分類");
+      return copy("Classifier", "分类器", "分類器", "分類器");
     case "exact_model":
       return copy(`Exact model · ${reason.model}`, `指定模型 · ${reason.model}`, `指定模型 · ${reason.model}`, `指定モデル · ${reason.model}`);
     case "quota":
@@ -163,6 +166,28 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
   const attempts = receipt.attempt_records ?? [];
   const conversions = receipt.conversion_reports ?? [];
   const diagnosis = humanizeReceiptError(receipt, language);
+  const classifierInput = receipt.classifier_input;
+  const classifier = classifierInput?.classifier === "jev" ? "Jev" : "SCX";
+  const inputLimit = classifierInput?.reason === "token_limit"
+    ? copy("formatted token limit", "格式化 token 上限", "格式化 token 上限", "整形後のトークン上限")
+    : classifierInput?.reason === "byte_limit"
+      ? copy("input byte limit", "字节上限", "位元組上限", "入力バイト上限")
+      : copy("input size limit", "输入长度上限", "輸入長度上限", "入力サイズ上限");
+  const inputNotice = classifierInput?.handling === "reduced"
+    ? copy(
+      `${classifier}: Classification input exceeded the ${inputLimit}, so the context used for classification was reduced. The latest question was kept in full. This operation leaves the original generation request unchanged.`,
+      `${classifier} 分类输入超过${inputLimit}，已缩减分类用上下文，并保留完整最新问题。原始生成请求不受此操作影响。`,
+      `${classifier} 分類輸入超過${inputLimit}，已縮減分類用上下文，並保留完整最新問題。原始生成請求不受此操作影響。`,
+      `${classifier}：分類入力が${inputLimit}を超えたため分類用の文脈を削減し、最新の質問は全文保持しました。この処理は元の生成リクエストを変更しません。`,
+    )
+    : classifierInput?.handling === "skipped"
+      ? copy(
+        `${classifier} classification was skipped because the ${inputLimit} was exceeded. The existing route was retained. The generation request was not trimmed.`,
+        `${classifier} 分类输入超过${inputLimit}，已跳过该分类器并沿用原路由。生成请求未裁剪。`,
+        `${classifier} 分類輸入超過${inputLimit}，已略過該分類器並沿用原路由。生成請求未裁剪。`,
+        `${classifier} は${inputLimit}を超えたため分類を省略し、既存のルートを維持しました。生成リクエストは切り詰めていません。`,
+      )
+      : null;
   const stoppedDuringInbound = receipt.decision == null
     && receipt.attempt_records.length === 0
     && receipt.conversion_reports.some(
@@ -196,7 +221,7 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
             <div>
               <strong>{formatRoute(receipt.decision, copy("No route", "未产生路由", "未產生路由", "ルーティングが生成されませんでした"))}</strong>
               <span>
-                {receipt.decision.pool} · {formatDecisionReason(receipt.decision.decided_by, copy)} · {copy(
+                {receipt.decision.pool} · {formatDecisionReason(receipt.decision.decided_by, copy, receipt.classifier_input?.classifier)} · {copy(
                   `${receipt.decision.fallbacks} fallback candidates`,
                   `${receipt.decision.fallbacks} 个候选回退`, `${receipt.decision.fallbacks} 個候補回退`, `${receipt.decision.fallbacks} 個の候補フォールバック`
                 )}
@@ -217,6 +242,7 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
             )
             : copy("No decision record", "没有决策记录", "沒有決策記錄", "決定記録がありません")}</p>
         )}
+        {inputNotice && <p className="receipt-section-empty">{inputNotice}</p>}
       </section>
 
       <section aria-label={copy("Upstream attempt records", "上游尝试记录", "上游嘗試記錄", "アップストリームの試行記録")}>
