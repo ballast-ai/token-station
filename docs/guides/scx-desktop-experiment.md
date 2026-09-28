@@ -34,10 +34,10 @@ The experimental App does not receive ordinary automatic updates.
 4. Start the proxy if it is stopped.
 
 Local classification is enabled by default in the experimental App.
-Use **Local smart tiers** on the routing page to turn it on or off.
+In **Smart tiers** mode, use **Local smart tiers** on the routing page to turn it on or off.
 The switch takes effect immediately and remembers the choice across App restarts.
 Turning it off stops model preparation and inference, releases model memory, and keeps the original routing rules active.
-The switch remains available in fixed-model and quota-first modes.
+The switch is hidden in fixed-model and quota-first modes. Changing the routing mode keeps its saved preference.
 When enabled, each normal experimental App launch starts SCX routing automatically.
 The App loads prepared assets or prepares missing pinned assets in the background.
 The App does not display the former experimental panel or comparison records.

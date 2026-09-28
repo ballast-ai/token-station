@@ -124,7 +124,7 @@ export default function HomePage({
         onValueChange={onSetRoutingMode}
       />
 
-      <SemanticRoutingSwitch />
+      {routingMode === "tiered" && <SemanticRoutingSwitch />}
 
       {routingMode === "direct" ? (
         <DirectRoutePanel

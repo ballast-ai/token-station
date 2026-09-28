@@ -10,6 +10,7 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 beforeEach(() => {
+  vi.mocked(getSemanticStatus).mockClear();
   vi.mocked(getSemanticStatus).mockResolvedValue({
     available: true, enabled: true, mode: "route", state: "ready", error: null,
     model_ready: true, timeout_ms: 400, observations: [],
@@ -40,13 +41,18 @@ describe("HomePage routing controls", () => {
     ["tiered", "智能分档"],
     ["direct", "简单路由"],
     ["quota_first", "额度优先"],
-  ] as const)("keeps the compact memory switch and routing selection in %s mode", async (routingMode, selectedLabel) => {
+  ] as const)("shows the memory switch only for smart tiers while preserving %s mode controls", async (routingMode, selectedLabel) => {
     const user = userEvent.setup();
     const initial = props();
     render(<HomePage {...initial} routingMode={routingMode} />);
 
     expect(screen.queryByRole("region", { name: "SCX 本地分档" })).not.toBeInTheDocument();
-    expect(await screen.findByRole("switch", { name: "本地智能分档" })).toBeEnabled();
+    if (routingMode === "tiered") {
+      expect(await screen.findByRole("switch", { name: "本地智能分档" })).toBeEnabled();
+    } else {
+      expect(screen.queryByRole("switch", { name: "本地智能分档" })).not.toBeInTheDocument();
+      expect(getSemanticStatus).not.toHaveBeenCalled();
+    }
     expect(screen.queryByRole("radio", { name: "仅观察" })).not.toBeInTheDocument();
     expect(screen.getByRole("tablist", { name: "路由模式" })).toBeVisible();
     expect(screen.getByRole("tab", { name: selectedLabel })).toHaveAttribute("aria-selected", "true");
