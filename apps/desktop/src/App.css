@@ -13681,6 +13681,19 @@ samp {
   padding-inline: 2px;
 }
 
+.home-page > .route-panel {
+  padding-top: 0;
+}
+
+.home-page > .route-panel > .panel-head h2 {
+  margin-bottom: 0;
+}
+
+.home-page > .route-panel > .route-actions {
+  margin-top: 6px;
+  padding-top: 0;
+}
+
 .direct-provider-list,
 .quota-entry-grid {
   gap: 8px;
@@ -13711,6 +13724,7 @@ samp {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
+  margin-top: 10px;
 }
 
 .tier-table-head {
@@ -13718,7 +13732,8 @@ samp {
 }
 
 .route-panel .tier-row {
-  padding: 12px 14px;
+  padding: 8px 14px;
+  row-gap: 4px;
   border: 0;
   border-radius: 12px;
   background: var(--surface-2);

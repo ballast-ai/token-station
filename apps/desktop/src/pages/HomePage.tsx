@@ -158,10 +158,6 @@ export default function HomePage({
         <div className="panel-head split-heading">
           <div>
             <h2>{copy("Smart routing", "智能路由", "智慧路由", "スマートルーティング")}</h2>
-            <p className="sub">{copy(
-              "Choose models by task complexity.",
-              "根据任务复杂度选择不同模型。", "根據任務複雜度選擇不同模型。", "タスクの複雑さに応じてモデルを選択します。"
-            )}</p>
           </div>
           <div className="route-heading-actions">
             {profiles.length > 0 && (
