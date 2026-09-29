@@ -1,11 +1,10 @@
-.jev-routing-control {
+.jev-routing-control,
+.jev-routing-details {
   display: grid;
   gap: 10px;
   min-width: 0;
 }
 
-.jev-routing-heading,
-.jev-routing-toggle,
 .jev-routing-key-actions,
 .jev-routing-retry {
   display: flex;
@@ -15,15 +14,52 @@
 }
 
 .jev-routing-heading {
-  flex-wrap: wrap;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
 }
 
-.jev-routing-toggle label {
+.jev-routing-heading .jev-routing-disclosure {
+  height: auto;
+  min-height: 32px;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 4px;
+  text-align: left;
+  white-space: normal;
+}
+
+.jev-routing-summary-labels {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 12px;
+  min-width: 0;
+}
+
+.jev-routing-title {
   color: var(--ink);
   font-size: 13px;
   font-weight: 500;
-  cursor: pointer;
+}
+
+.jev-routing-key-state {
+  flex-shrink: 0;
+}
+
+.jev-routing-chevron {
+  color: var(--muted);
+}
+
+.jev-routing-disclosure[aria-expanded="true"] .jev-routing-chevron {
+  transform: rotate(180deg);
+}
+
+.jev-routing-details[hidden] {
+  display: none;
 }
 
 .jev-routing-note,

@@ -6,7 +6,7 @@ Token Station still selects the generation model from your configured tiers. You
 ## Set up Jev
 
 1. Open **Global routing** and select **Smart tiers**.
-2. Enter your TypeSafe API key in the Jev control.
+2. Expand the Jev settings row. Enter your TypeSafe API key.
 3. Save the key.
 4. Test the connection.
 5. Read the data-sharing notice and enable Jev.

@@ -35,13 +35,66 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("JevRoutingControl", () => {
+  it("starts compact and keeps the cloud notice and key state visible", async () => {
+    vi.mocked(getJevStatus).mockResolvedValue(status({ has_key: true }));
+    render(<JevRoutingControl />);
+    expect(await screen.findByText("已配置 Key")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Jev 设置" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "Jev 设置" })).toHaveAccessibleDescription("已配置 Key");
+    expect(screen.getByText("文本发送至 TypeSafe · 独立 API 计费")).toBeVisible();
+    expect(screen.getByLabelText("Jev API Key")).not.toBeVisible();
+    expect(screen.queryByRole("button", { name: "测试连接" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("expands by keyboard and retains a draft without mutating routing", async () => {
+    const user = userEvent.setup();
+    render(<JevRoutingControl />);
+    await screen.findByText("未配置 Key");
+    await user.tab();
+    const disclosure = screen.getByRole("button", { name: "Jev 设置" });
+    expect(disclosure).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    const panel = document.getElementById(disclosure.getAttribute("aria-controls")!);
+    expect(panel).toBeVisible();
+    const input = screen.getByLabelText("Jev API Key");
+    await user.type(input, "unsaved-draft");
+    await user.click(disclosure);
+    expect(input).not.toBeVisible();
+    await user.tab();
+    expect(input).not.toHaveFocus();
+    await user.click(disclosure);
+    expect(input).toHaveValue("unsaved-draft");
+    await user.keyboard(" ");
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    for (const operation of [saveJevKey, clearJevKey, setJevEnabled, testJevConnection]) {
+      expect(operation).not.toHaveBeenCalled();
+    }
+    expect(Object.values(window.localStorage)).not.toContain("unsaved-draft");
+  });
+
+  it("switches routing while collapsed without expanding the settings", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getJevStatus).mockResolvedValue(status({ has_key: true }));
+    vi.mocked(setJevEnabled).mockResolvedValue(status({ has_key: true, enabled: true }));
+    render(<JevRoutingControl />);
+    await screen.findByText("已配置 Key");
+    await user.click(screen.getByRole("switch"));
+    expect(setJevEnabled).toHaveBeenCalledExactlyOnceWith(true);
+    expect(screen.getByRole("switch")).toBeChecked();
+    expect(screen.getByRole("button", { name: "Jev 设置" })).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("shows the cloud, cost, fallback, and plaintext storage boundaries before activation", async () => {
+    const user = userEvent.setup();
     render(<JevRoutingControl />);
     expect(await screen.findByText("未配置 Key")).toBeVisible();
     const control = screen.getByRole("switch", { name: "Jev 云端智能分档" });
     expect(control).not.toBeChecked();
     expect(control).toBeDisabled();
     expect(control).toHaveAccessibleDescription(/TypeSafe/);
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     expect(screen.getByText(/有长度上限的用户和助手文本/)).toBeVisible();
     expect(screen.getByText(/独立 API 费用/)).toBeVisible();
     expect(screen.getByText(/低置信度/)).toHaveTextContent("不再调用本地分档");
@@ -55,6 +108,7 @@ describe("JevRoutingControl", () => {
     vi.mocked(saveJevKey).mockResolvedValue(status({ has_key: true }));
     render(<JevRoutingControl />);
     await screen.findByText("未配置 Key");
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     const input = screen.getByLabelText("Jev API Key");
     await user.type(input, "  synthetic-jev-key  {Enter}");
     expect(saveJevKey).toHaveBeenCalledExactlyOnceWith("synthetic-jev-key");
@@ -75,6 +129,7 @@ describe("JevRoutingControl", () => {
     vi.mocked(clearJevKey).mockResolvedValue(status());
     render(<JevRoutingControl onEnabledChange={onEnabledChange} />);
     await screen.findByText("已配置 Key");
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     await user.type(screen.getByLabelText("Jev API Key"), "replacement-key");
     const save = screen.getByRole("button", { name: "保存 Key" });
     await user.click(save);
@@ -104,6 +159,7 @@ describe("JevRoutingControl", () => {
     vi.mocked(testJevConnection).mockResolvedValue(status({ has_key: true, last_outcome: "ready", last_latency_ms: 120 }));
     render(<JevRoutingControl />);
     await screen.findByText("已配置 Key");
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     expect(screen.getByText(/测试仅发送合成文本/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "测试连接" }));
     expect(testJevConnection).toHaveBeenCalledExactlyOnceWith();
@@ -121,6 +177,8 @@ describe("JevRoutingControl", () => {
     await screen.findByText("已配置 Key");
     await user.click(screen.getByRole("switch"));
     expect(screen.getByRole("alert")).toHaveTextContent("设置未保存，请重试");
+    expect(screen.getByRole("alert")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Jev 设置" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText(/sk-private/)).not.toBeInTheDocument();
     expect(screen.getByRole("switch")).not.toBeChecked();
     await user.click(screen.getByRole("switch"));
@@ -160,6 +218,7 @@ describe("JevRoutingControl", () => {
     vi.mocked(testJevConnection).mockRejectedValue(new Error("private response body"));
     render(<JevRoutingControl />);
     await screen.findByText("已配置 Key");
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     await user.click(screen.getByRole("button", { name: "测试连接" }));
     expect(screen.getByRole("alert")).toHaveTextContent("Key 无效");
     expect(screen.getByRole("alert")).toHaveTextContent("连接测试失败");
@@ -177,6 +236,7 @@ describe("JevRoutingControl", () => {
     vi.mocked(clearJevKey).mockRejectedValue(new Error("synthetic storage failure"));
     render(<JevRoutingControl />);
     await act(async () => {});
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     await user.click(screen.getByRole("button", { name: "移除 Key" }));
     expect(screen.getByRole("switch")).not.toBeChecked();
@@ -192,9 +252,11 @@ describe("JevRoutingControl", () => {
     ["unauthorized", "Key 无效"], ["local_only", "仅本地请求"],
     ["rate_limited", "限流"], ["unsupported", "不支持"],
   ])("explains the %s outcome without raw server details", async (outcome, label) => {
+    const user = userEvent.setup();
     vi.mocked(getJevStatus).mockResolvedValue(status({ has_key: true, enabled: true, last_outcome: outcome }));
     render(<JevRoutingControl />);
     await screen.findByText("已配置 Key");
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     expect(screen.getByRole(outcome === "unauthorized" ? "alert" : "status")).toHaveTextContent(label);
   });
 
@@ -216,6 +278,7 @@ describe("JevRoutingControl", () => {
     vi.mocked(clearJevKey).mockResolvedValue(status());
     const view = render(<JevRoutingControl />);
     await act(async () => {});
+    await user.click(screen.getByRole("button", { name: "Jev 设置" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     expect(getJevStatus).toHaveBeenCalledTimes(2);
     await user.click(screen.getByRole("button", { name: "移除 Key" }));
@@ -230,13 +293,15 @@ describe("JevRoutingControl", () => {
   });
 
   it.each([
-    ["en", "Jev cloud smart tiers", "Save key"],
-    ["zh-TW", "Jev 雲端智慧分檔", "儲存 Key"],
-    ["ja", "Jev クラウドスマート分層", "キーを保存"],
-  ])("provides accessible controls in %s", async (language, switchName, saveName) => {
+    ["en", "Jev cloud smart tiers", "Save key", "Jev settings"],
+    ["zh-TW", "Jev 雲端智慧分檔", "儲存 Key", "Jev 設定"],
+    ["ja", "Jev クラウドスマート分層", "キーを保存", "Jev 設定"],
+  ])("provides accessible controls in %s", async (language, switchName, saveName, settingsName) => {
+    const user = userEvent.setup();
     window.localStorage.setItem("token-station-language", language);
     render(<LanguageProvider><JevRoutingControl /></LanguageProvider>);
     expect(await screen.findByRole("switch", { name: switchName })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: settingsName }));
     expect(screen.getByRole("button", { name: saveName })).toBeVisible();
     expect(screen.getByLabelText("Jev API Key")).toHaveAttribute("autocomplete", "off");
   });

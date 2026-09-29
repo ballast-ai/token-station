@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import {
   clearJevKey, getJevStatus, saveJevKey, setJevEnabled, testJevConnection,
   type JevStatus,
@@ -38,6 +39,7 @@ function outcomeMessage(outcome: string | null, copy: Copy): string | null {
 export default function JevRoutingControl({ onEnabledChange }: { onEnabledChange?: (enabled: boolean) => void }) {
   const { copy } = useLocalizedCopy();
   const id = useId();
+  const [expanded, setExpanded] = useState(false);
   const [status, setStatus] = useState<JevStatus | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [pending, setPending] = useState<Operation | null>(null);
@@ -146,81 +148,99 @@ export default function JevRoutingControl({ onEnabledChange }: { onEnabledChange
   return (
     <section className="panel jev-routing-control" aria-label={title}>
       <div className="jev-routing-heading">
-        <div className="jev-routing-toggle">
-          <Switch
-            id={`${id}-enabled`}
-            checked={status?.enabled ?? false}
-            disabled={locked || (!status?.has_key && !status?.enabled)}
-            aria-busy={pending === "enable"}
-            aria-describedby={`${id}-disclosure ${id}-fallback`}
-            onCheckedChange={(enabled) => void mutate("enable", () => setJevEnabled(enabled))}
-          />
-          <label htmlFor={`${id}-enabled`}>{title}</label>
-        </div>
-        <span className="jev-routing-key-state">{status
-          ? status.has_key
-            ? copy("Key saved", "已配置 Key", "已設定 Key", "キー設定済み")
-            : copy("No key configured", "未配置 Key", "未設定 Key", "キー未設定")
-          : readFailed
-            ? copy("Status unavailable", "状态不可用", "狀態無法取得", "状態を取得できません")
-            : copy("Reading status…", "正在读取状态…", "正在讀取狀態…", "状態を取得中…")}</span>
+        <Switch
+          id={`${id}-enabled`}
+          aria-labelledby={`${id}-title`}
+          checked={status?.enabled ?? false}
+          disabled={locked || (!status?.has_key && !status?.enabled)}
+          aria-busy={pending === "enable"}
+          aria-describedby={`${id}-disclosure ${id}-fallback`}
+          onCheckedChange={(enabled) => void mutate("enable", () => setJevEnabled(enabled))}
+        />
+        <Button
+          type="button" variant="ghost" className="jev-routing-disclosure"
+          aria-label={copy("Jev settings", "Jev 设置", "Jev 設定", "Jev 設定")}
+          aria-expanded={expanded} aria-controls={`${id}-settings`}
+          aria-describedby={`${id}-key-state`}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <span className="jev-routing-summary-labels">
+            <span className="jev-routing-title" id={`${id}-title`}>{title}</span>
+            <span className="jev-routing-note">{copy(
+              "Text sent to TypeSafe · Separate API charges",
+              "文本发送至 TypeSafe · 独立 API 计费",
+              "文字傳送至 TypeSafe · 獨立 API 計費",
+              "TypeSafe にテキスト送信 · API 料金別途",
+            )}</span>
+          </span>
+          <span className="jev-routing-key-state" id={`${id}-key-state`}>{status
+            ? status.has_key
+              ? copy("Key saved", "已配置 Key", "已設定 Key", "キー設定済み")
+              : copy("No key configured", "未配置 Key", "未設定 Key", "キー未設定")
+            : readFailed
+              ? copy("Status unavailable", "状态不可用", "狀態無法取得", "状態を取得できません")
+              : copy("Reading status…", "正在读取状态…", "正在讀取狀態…", "状態を取得中…")}</span>
+          <ChevronDown className="jev-routing-chevron" aria-hidden="true" />
+        </Button>
       </div>
-      <p className="jev-routing-note" id={`${id}-disclosure`}>{copy(
-        "When enabled, bounded user and assistant text is sent to TypeSafe. Separate API charges apply. Local-only requests skip Jev.",
-        "启用后，有长度上限的用户和助手文本会发送给 TypeSafe，产生独立 API 费用。仅本地请求会跳过 Jev。",
-        "啟用後，有長度上限的使用者和助手文字會傳送給 TypeSafe，產生獨立 API 費用。僅本機請求會略過 Jev。",
-        "有効にすると、長さを制限したユーザーとアシスタントのテキストを TypeSafe に送信します。別途 API 料金が発生します。ローカル限定のリクエストは対象外です。",
-      )}</p>
-      <p className="jev-routing-note" id={`${id}-fallback`}>{copy(
-        "Jev takes priority over local classification. Timeout, failure, or low confidence uses existing rules without calling the local classifier.",
-        "Jev 优先于本地分档。超时、失败或低置信度时使用原有规则，不再调用本地分档。",
-        "Jev 優先於本機分檔。逾時、失敗或低信心度時使用原有規則，不再呼叫本機分檔。",
-        "Jev はローカル分類より優先されます。タイムアウト、失敗、信頼度不足の場合、ローカル分類を呼ばずに既存のルールを使用します。",
-      )}</p>
-      <form className="jev-routing-key-form" onSubmit={(event) => { event.preventDefault(); submitKey(); }}>
-        <label className="jev-routing-key-label" htmlFor={`${id}-key`}>Jev API Key</label>
-        <div className="jev-routing-key-actions">
-          <Input
-            id={`${id}-key`} type="password" autoComplete="off" spellCheck={false}
-            value={apiKey} disabled={locked} aria-describedby={`${id}-storage`}
-            placeholder={status?.has_key
-              ? copy("Enter a replacement key", "输入新的 Key 以替换", "輸入新的 Key 以取代", "変更するキーを入力")
-              : copy("Enter your Jev API key", "输入你的 Jev API Key", "輸入你的 Jev API Key", "Jev API キーを入力")}
-            onChange={(event) => setApiKey(event.target.value)}
-          />
-          <Button type="submit" disabled={locked || !apiKey.trim()}>{copy("Save key", "保存 Key", "儲存 Key", "キーを保存")}</Button>
-          <Button type="button" variant="outline" disabled={locked || !status?.has_key} onClick={() => void mutate("test", testJevConnection)}>{copy("Test connection", "测试连接", "測試連線", "接続テスト")}</Button>
-          <Button type="button" variant="ghost" disabled={locked || !status?.has_key} onClick={() => void mutate("remove", clearJevKey)}>{copy("Remove key", "移除 Key", "移除 Key", "キーを削除")}</Button>
+      <div className="jev-routing-details" id={`${id}-settings`} hidden={!expanded}>
+        <p className="jev-routing-note" id={`${id}-disclosure`}>{copy(
+          "When enabled, bounded user and assistant text is sent to TypeSafe. Separate API charges apply. Local-only requests skip Jev.",
+          "启用后，有长度上限的用户和助手文本会发送给 TypeSafe，产生独立 API 费用。仅本地请求会跳过 Jev。",
+          "啟用後，有長度上限的使用者和助手文字會傳送給 TypeSafe，產生獨立 API 費用。僅本機請求會略過 Jev。",
+          "有効にすると、長さを制限したユーザーとアシスタントのテキストを TypeSafe に送信します。別途 API 料金が発生します。ローカル限定のリクエストは対象外です。",
+        )}</p>
+        <p className="jev-routing-note" id={`${id}-fallback`}>{copy(
+          "Jev takes priority over local classification. Timeout, failure, or low confidence uses existing rules without calling the local classifier.",
+          "Jev 优先于本地分档。超时、失败或低置信度时使用原有规则，不再调用本地分档。",
+          "Jev 優先於本機分檔。逾時、失敗或低信心度時使用原有規則，不再呼叫本機分檔。",
+          "Jev はローカル分類より優先されます。タイムアウト、失敗、信頼度不足の場合、ローカル分類を呼ばずに既存のルールを使用します。",
+        )}</p>
+        <form className="jev-routing-key-form" onSubmit={(event) => { event.preventDefault(); submitKey(); }}>
+          <label className="jev-routing-key-label" htmlFor={`${id}-key`}>Jev API Key</label>
+          <div className="jev-routing-key-actions">
+            <Input
+              id={`${id}-key`} type="password" autoComplete="off" spellCheck={false}
+              value={apiKey} disabled={locked} aria-describedby={`${id}-storage`}
+              placeholder={status?.has_key
+                ? copy("Enter a replacement key", "输入新的 Key 以替换", "輸入新的 Key 以取代", "変更するキーを入力")
+                : copy("Enter your Jev API key", "输入你的 Jev API Key", "輸入你的 Jev API Key", "Jev API キーを入力")}
+              onChange={(event) => setApiKey(event.target.value)}
+            />
+            <Button type="submit" disabled={locked || !apiKey.trim()}>{copy("Save key", "保存 Key", "儲存 Key", "キーを保存")}</Button>
+            <Button type="button" variant="outline" disabled={locked || !status?.has_key} onClick={() => void mutate("test", testJevConnection)}>{copy("Test connection", "测试连接", "測試連線", "接続テスト")}</Button>
+            <Button type="button" variant="ghost" disabled={locked || !status?.has_key} onClick={() => void mutate("remove", clearJevKey)}>{copy("Remove key", "移除 Key", "移除 Key", "キーを削除")}</Button>
+          </div>
+        </form>
+        <p className="jev-routing-note" id={`${id}-storage`}>{copy(
+          "The key is stored as plaintext in private local storage, not the system Keychain. Tests send synthetic text only and do not enable routing.",
+          "Key 以明文保存在权限受限的本地存储中，不是系统钥匙串。测试仅发送合成文本，不会启用路由。",
+          "Key 以明文儲存在權限受限的本機儲存空間中，不是系統鑰匙圈。測試僅傳送合成文字，不會啟用路由。",
+          "キーはアクセス制限付きのローカル領域に平文で保存されます。システムのキーチェーンではありません。テストは合成テキストのみを送信し、ルーティングを有効にしません。",
+        )}</p>
+        {status && <p className="jev-routing-note jev-routing-settings">{copy(
+          `${status.model} · Deadline ${status.timeout_ms} ms · Confidence ≥ ${Math.round(status.confidence_threshold * 100)}%`,
+          `${status.model} · 超时 ${status.timeout_ms} ms · 置信度 ≥ ${Math.round(status.confidence_threshold * 100)}%`,
+          `${status.model} · 逾時 ${status.timeout_ms} ms · 信心度 ≥ ${Math.round(status.confidence_threshold * 100)}%`,
+          `${status.model} · タイムアウト ${status.timeout_ms} ms · 信頼度 ≥ ${Math.round(status.confidence_threshold * 100)}%`,
+        )}</p>}
+        <div className="jev-routing-status" role="status" aria-live="polite">
+          {pending
+            ? copy("Updating Jev…", "正在处理 Jev 操作…", "正在處理 Jev 操作…", "Jev の操作を処理中…")
+            : <>
+                {testPassed && <p>{copy("Connection test passed.", "连接测试通过。", "連線測試通過。", "接続テストに成功しました。")}</p>}
+                {status && <p>{status.enabled
+                  ? copy("Jev is enabled and takes priority over local classification.", "Jev 已启用，优先于本地分档。", "Jev 已啟用，優先於本機分檔。", "Jev は有効です。ローカル分類より優先されます。")
+                  : copy("Jev is off. Your existing routing remains active.", "Jev 已关闭，继续使用现有路由。", "Jev 已關閉，繼續使用現有路由。", "Jev は無効です。既存のルーティングを使用します。")}</p>}
+                {outcome && !needsKey && <p>{outcome}</p>}
+                {status?.last_outcome === "applied" && status.last_tier && <p>{copy("Last tier", "最近档位", "最近檔位", "直近の分層")}: {status.last_tier === "low"
+                  ? copy("Low", "低档", "低檔", "低")
+                  : status.last_tier === "medium"
+                    ? copy("Medium", "中档", "中檔", "中")
+                    : copy("High", "高档", "高檔", "高")}</p>}
+                {status?.last_latency_ms != null && <p>{copy("Last latency", "最近耗时", "最近耗時", "直近の処理時間")}: {status.last_latency_ms} ms</p>}
+              </>}
         </div>
-      </form>
-      <p className="jev-routing-note" id={`${id}-storage`}>{copy(
-        "The key is stored as plaintext in private local storage, not the system Keychain. Tests send synthetic text only and do not enable routing.",
-        "Key 以明文保存在权限受限的本地存储中，不是系统钥匙串。测试仅发送合成文本，不会启用路由。",
-        "Key 以明文儲存在權限受限的本機儲存空間中，不是系統鑰匙圈。測試僅傳送合成文字，不會啟用路由。",
-        "キーはアクセス制限付きのローカル領域に平文で保存されます。システムのキーチェーンではありません。テストは合成テキストのみを送信し、ルーティングを有効にしません。",
-      )}</p>
-      {status && <p className="jev-routing-note jev-routing-settings">{copy(
-        `${status.model} · Deadline ${status.timeout_ms} ms · Confidence ≥ ${Math.round(status.confidence_threshold * 100)}%`,
-        `${status.model} · 超时 ${status.timeout_ms} ms · 置信度 ≥ ${Math.round(status.confidence_threshold * 100)}%`,
-        `${status.model} · 逾時 ${status.timeout_ms} ms · 信心度 ≥ ${Math.round(status.confidence_threshold * 100)}%`,
-        `${status.model} · タイムアウト ${status.timeout_ms} ms · 信頼度 ≥ ${Math.round(status.confidence_threshold * 100)}%`,
-      )}</p>}
-      <div className="jev-routing-status" role="status" aria-live="polite">
-        {pending
-          ? copy("Updating Jev…", "正在处理 Jev 操作…", "正在處理 Jev 操作…", "Jev の操作を処理中…")
-          : <>
-              {testPassed && <p>{copy("Connection test passed.", "连接测试通过。", "連線測試通過。", "接続テストに成功しました。")}</p>}
-              {status && <p>{status.enabled
-                ? copy("Jev is enabled and takes priority over local classification.", "Jev 已启用，优先于本地分档。", "Jev 已啟用，優先於本機分檔。", "Jev は有効です。ローカル分類より優先されます。")
-                : copy("Jev is off. Your existing routing remains active.", "Jev 已关闭，继续使用现有路由。", "Jev 已關閉，繼續使用現有路由。", "Jev は無効です。既存のルーティングを使用します。")}</p>}
-              {outcome && !needsKey && <p>{outcome}</p>}
-              {status?.last_outcome === "applied" && status.last_tier && <p>{copy("Last tier", "最近档位", "最近檔位", "直近の分層")}: {status.last_tier === "low"
-                ? copy("Low", "低档", "低檔", "低")
-                : status.last_tier === "medium"
-                  ? copy("Medium", "中档", "中檔", "中")
-                  : copy("High", "高档", "高檔", "高")}</p>}
-              {status?.last_latency_ms != null && <p>{copy("Last latency", "最近耗时", "最近耗時", "直近の処理時間")}: {status.last_latency_ms} ms</p>}
-            </>}
       </div>
       {(failedMessage || needsKey || readFailed) && <div className="jev-routing-error" role="alert">
         {failedMessage && <p>{failedMessage}</p>}
