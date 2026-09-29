@@ -1,34 +1,9 @@
-.semantic-routing-switch {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 14px;
-  min-width: 0;
-}
-
-.semantic-routing-switch-control {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.semantic-routing-switch-control label {
-  cursor: pointer;
-}
-
 .semantic-routing-switch-note,
 .semantic-routing-switch-state {
   margin: 0;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.6;
-}
-
-.semantic-routing-switch-state {
-  flex-basis: 100%;
 }
 
 .semantic-routing-switch-state.is-error {

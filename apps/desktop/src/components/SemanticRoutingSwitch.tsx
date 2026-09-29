@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { getSemanticStatus, setSemanticEnabled, type SemanticStatus } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
-import { Switch } from "./ui/switch";
+import RoutingClassifierCard from "./RoutingClassifierCard";
 import "./SemanticRoutingSwitch.css";
 
 export default function SemanticRoutingSwitch({ overriddenByJev = false }: { overriddenByJev?: boolean }) {
@@ -83,18 +83,28 @@ export default function SemanticRoutingSwitch({ overriddenByJev = false }: { ove
             : null;
 
   return (
-    <div className="semantic-routing-switch">
-      <div className="semantic-routing-switch-control">
-        <Switch
-          id={id}
-          checked={status.enabled}
-          disabled={pending}
-          aria-busy={pending}
-          aria-describedby={`${id}-note${!status.model_ready ? ` ${id}-setup` : ""}${message ? ` ${id}-state` : ""}`}
-          onCheckedChange={(enabled) => void changeEnabled(enabled)}
-        />
-        <label htmlFor={id}>{copy("Local smart tiers", "本地智能分档", "本機智慧分檔", "ローカルスマート分層")}</label>
-      </div>
+    <RoutingClassifierCard
+      id={id} title={copy("Local smart tiers", "本地智能分档", "本機智慧分檔", "ローカルスマート分層")}
+      summary={!status.model_ready
+        ? copy("First download ≈ 2.5 GB · Requires uv", "首次下载约 2.5 GB · 需要 uv", "首次下載約 2.5 GB · 需要 uv", "初回約 2.5 GB · uv が必要")
+        : overriddenByJev
+          ? copy("Jev takes priority · Local preference kept", "Jev 优先 · 保留本地设置", "Jev 優先 · 保留本機設定", "Jev を優先 · ローカル設定を保持")
+          : copy("On-device · Off releases memory", "本机运行 · 关闭后释放内存", "本機執行 · 關閉後釋放記憶體", "デバイスで実行 · オフでメモリ解放")}
+      statusLabel={hasError
+        ? copy("Needs attention", "需处理", "需處理", "要確認")
+        : overriddenByJev && status.enabled && !status.model_ready
+          ? copy("Jev takes priority", "Jev 优先", "Jev 優先", "Jev を優先")
+          : status.state === "preparing" || status.state === "loading"
+            ? copy("Preparing", "准备中", "準備中", "準備中")
+            : status.model_ready
+              ? copy("Model ready", "模型就绪", "模型就緒", "モデル準備済み")
+              : copy("Not prepared", "待准备", "待準備", "未準備")}
+      settingsLabel={copy("Local tier settings", "本地分档设置", "本機分檔設定", "ローカル分層設定")}
+      enabled={status.enabled} disabled={pending} busy={pending}
+      describedBy={`${id}-note${!status.model_ready ? ` ${id}-setup` : ""}${message ? ` ${id}-state` : ""}`}
+      onEnabledChange={(enabled) => void changeEnabled(enabled)}
+      feedback={message && <p className={`semantic-routing-switch-state${hasError ? " is-error" : ""}`} id={`${id}-state`} role={hasError ? "alert" : "status"}>{message}</p>}
+    >
       <p className="semantic-routing-switch-note" id={`${id}-note`}>
         {overriddenByJev
           ? copy("Jev takes priority. This switch keeps your local preference. Jev failures use existing rules without local classification.", "Jev 优先，本地开关仅保留设置。Jev 失败时使用原有规则，不调用本地分档。", "Jev 優先，本機開關僅保留設定。Jev 失敗時使用原有規則，不呼叫本機分檔。", "Jev を優先します。このスイッチはローカル設定を保持します。Jev が失敗した場合、ローカル分類を呼ばずに既存のルールを使用します。")
@@ -108,7 +118,6 @@ export default function SemanticRoutingSwitch({ overriddenByJev = false }: { ove
           "初回の有効化時にローカル実行環境を準備し、約 2.5 GB のモデルをダウンロードします。事前に uv をインストールしてください。準備後の分類はこのデバイスで実行します。",
         )}
       </p>}
-      {message && <p className={`semantic-routing-switch-state${hasError ? " is-error" : ""}`} id={`${id}-state`} role={hasError ? "alert" : "status"}>{message}</p>}
-    </div>
+    </RoutingClassifierCard>
   );
 }

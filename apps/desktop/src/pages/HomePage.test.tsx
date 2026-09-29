@@ -1,15 +1,17 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getJevStatus, getSemanticStatus, type SemanticStatus } from "../api";
+import { getJevStatus, getSemanticStatus, setJevEnabled, setSemanticEnabled, type SemanticStatus } from "../api";
 import HomePage from "./HomePage";
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, getSemanticStatus: vi.fn(), getJevStatus: vi.fn() };
+  return { ...actual, getSemanticStatus: vi.fn(), getJevStatus: vi.fn(), setJevEnabled: vi.fn(), setSemanticEnabled: vi.fn() };
 });
 
 beforeEach(() => {
+  vi.mocked(setJevEnabled).mockReset();
+  vi.mocked(setSemanticEnabled).mockReset();
   vi.mocked(getJevStatus).mockClear();
   vi.mocked(getJevStatus).mockResolvedValue({
     enabled: false, has_key: false, model: "jev-latest", timeout_ms: 1500,
@@ -55,7 +57,10 @@ describe("HomePage routing controls", () => {
     if (routingMode === "tiered") {
       expect(await screen.findByRole("switch", { name: "本地智能分档" })).toBeEnabled();
       expect(await screen.findByRole("switch", { name: "Jev 云端智能分档" })).toBeVisible();
+      const classifiers = screen.getByRole("group", { name: "智能分档方式" });
+      expect(within(classifiers).getAllByRole("switch")).toHaveLength(2);
     } else {
+      expect(screen.queryByRole("group", { name: "智能分档方式" })).not.toBeInTheDocument();
       expect(screen.queryByRole("switch", { name: "本地智能分档" })).not.toBeInTheDocument();
       expect(getSemanticStatus).not.toHaveBeenCalled();
       expect(screen.queryByRole("switch", { name: "Jev 云端智能分档" })).not.toBeInTheDocument();
@@ -81,6 +86,58 @@ describe("HomePage routing controls", () => {
     expect(screen.queryByRole("switch", { name: "本地智能分档" })).not.toBeInTheDocument();
   });
 
+  it("keeps both classifier switches independent while Jev takes priority", async () => {
+    const user = userEvent.setup();
+    const jev = {
+      enabled: false, has_key: true, model: "jev-latest", timeout_ms: 1500,
+      confidence_threshold: 0.7, last_outcome: null, last_tier: null, last_latency_ms: null,
+    };
+    const semantic: SemanticStatus = {
+      available: true, enabled: true, mode: "route", state: "ready", error: null,
+      model_ready: true, timeout_ms: 400, observations: [],
+      counts: { classified: 0, disagreements: 0, fallbacks: 0 },
+    };
+    vi.mocked(getJevStatus).mockResolvedValue(jev);
+    vi.mocked(setJevEnabled).mockImplementation(async (enabled) => ({ ...jev, enabled }));
+    vi.mocked(setSemanticEnabled).mockImplementation(async (enabled) => ({
+      ...semantic, enabled, mode: enabled ? "route" : "off", state: enabled ? "ready" : "off",
+    }));
+    render(<HomePage {...props()} />);
+    const classifiers = screen.getByRole("group", { name: "智能分档方式" });
+    const local = await within(classifiers).findByRole("switch", { name: "本地智能分档" });
+    const cloud = within(classifiers).getByRole("switch", { name: "Jev 云端智能分档" });
+    const localDetails = within(classifiers).getByRole("button", { name: "本地分档设置" });
+    const cloudDetails = within(classifiers).getByRole("button", { name: "Jev 设置" });
+    expect(local).toBeChecked();
+    expect(cloud).not.toBeChecked();
+
+    await user.click(cloud);
+    expect(setJevEnabled).toHaveBeenNthCalledWith(1, true);
+    expect(setSemanticEnabled).not.toHaveBeenCalled();
+    expect(cloud).toBeChecked();
+    expect(local).toBeChecked();
+    expect(local).toBeEnabled();
+    expect(local).toHaveAccessibleDescription(/本地开关仅保留设置/);
+
+    await user.click(local);
+    expect(setSemanticEnabled).toHaveBeenNthCalledWith(1, false);
+    expect(local).not.toBeChecked();
+    expect(cloud).toBeChecked();
+    expect(setJevEnabled).toHaveBeenCalledTimes(1);
+
+    await user.click(local);
+    expect(setSemanticEnabled).toHaveBeenNthCalledWith(2, true);
+    expect(local).toBeChecked();
+    await user.click(cloud);
+    expect(setJevEnabled).toHaveBeenNthCalledWith(2, false);
+    expect(cloud).not.toBeChecked();
+    expect(local).toBeChecked();
+    expect(local).toBeEnabled();
+    expect(local).toHaveAccessibleDescription(/关闭后释放模型内存/);
+    expect(localDetails).toHaveAttribute("aria-expanded", "false");
+    expect(cloudDetails).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("explains that an enabled Jev takes precedence over the saved local classifier preference", async () => {
     vi.mocked(getJevStatus).mockResolvedValue({
       enabled: true, has_key: true, model: "jev-latest", timeout_ms: 1500,
@@ -89,6 +146,7 @@ describe("HomePage routing controls", () => {
     render(<HomePage {...props()} />);
     const local = await screen.findByRole("switch", { name: "本地智能分档" });
     expect(local).toBeChecked();
+    expect(local).toBeEnabled();
     expect(local).toHaveAccessibleDescription(/本地开关仅保留设置/);
     expect(screen.getByRole("switch", { name: "Jev 云端智能分档" })).toBeChecked();
   });

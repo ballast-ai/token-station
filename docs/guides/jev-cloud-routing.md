@@ -6,7 +6,7 @@ Token Station still selects the generation model from your configured tiers. You
 ## Set up Jev
 
 1. Open **Global routing** and select **Smart tiers**.
-2. Expand the Jev settings row. Enter your TypeSafe API key.
+2. Select **Jev settings** on the Jev card. Enter your TypeSafe API key in the dialog.
 3. Save the key.
 4. Test the connection.
 5. Read the data-sharing notice and enable Jev.
@@ -14,6 +14,7 @@ Token Station still selects the generation model from your configured tiers. You
 The connection test sends synthetic text. It does not send your conversations or enable cloud routing.
 Saving a key does not enable Jev. Changes apply to new requests without a gateway restart.
 Remove the key to disable Jev and delete its saved credential.
+The Jev and local classifier cards have independent switches. Select either card's settings to open its dialog.
 
 ## Routing behavior
 

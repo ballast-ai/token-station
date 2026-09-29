@@ -126,10 +126,10 @@ export default function HomePage({
         onValueChange={onSetRoutingMode}
       />
 
-      {routingMode === "tiered" && <>
+      {routingMode === "tiered" && <div className="routing-classifier-controls" role="group" aria-label={copy("Smart tier classifiers", "智能分档方式", "智慧分檔方式", "スマート分層方式")}>
         <JevRoutingControl onEnabledChange={setJevEnabled} />
         <SemanticRoutingSwitch overriddenByJev={jevEnabled} />
-      </>}
+      </div>}
 
       {routingMode === "direct" ? (
         <DirectRoutePanel

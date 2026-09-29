@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,40 +41,43 @@ describe("JevRoutingControl", () => {
     expect(await screen.findByText("已配置 Key")).toBeVisible();
     expect(screen.getByRole("button", { name: "Jev 设置" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("button", { name: "Jev 设置" })).toHaveAccessibleDescription("已配置 Key");
-    expect(screen.getByText("文本发送至 TypeSafe · 独立 API 计费")).toBeVisible();
+    expect(screen.getByText("文本发至 TypeSafe · 按量计费")).toBeVisible();
     expect(screen.getByLabelText("Jev API Key")).not.toBeVisible();
     expect(screen.queryByRole("button", { name: "测试连接" })).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Jev 设置" })).toHaveAttribute("aria-haspopup", "dialog");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("expands by keyboard and retains a draft without mutating routing", async () => {
+  it("opens a dialog by keyboard and retains a draft without mutating routing", async () => {
     const user = userEvent.setup();
     render(<JevRoutingControl />);
     await screen.findByText("未配置 Key");
     await user.tab();
-    const disclosure = screen.getByRole("button", { name: "Jev 设置" });
-    expect(disclosure).toHaveFocus();
+    const settings = screen.getByRole("button", { name: "Jev 设置" });
+    expect(settings).toHaveFocus();
     await user.keyboard("{Enter}");
-    expect(disclosure).toHaveAttribute("aria-expanded", "true");
-    const panel = document.getElementById(disclosure.getAttribute("aria-controls")!);
-    expect(panel).toBeVisible();
-    const input = screen.getByLabelText("Jev API Key");
-    await user.type(input, "unsaved-draft");
-    await user.click(disclosure);
-    expect(input).not.toBeVisible();
-    await user.tab();
-    expect(input).not.toHaveFocus();
-    await user.click(disclosure);
-    expect(input).toHaveValue("unsaved-draft");
-    await user.keyboard(" ");
-    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(settings).toHaveAttribute("aria-expanded", "true");
+    const dialog = screen.getByRole("dialog", { name: "Jev 设置" });
+    expect(dialog).toBeVisible();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    await user.type(within(dialog).getByLabelText("Jev API Key"), "unsaved-draft");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(settings).toHaveFocus();
+    expect(screen.getByLabelText("Jev API Key")).not.toBeVisible();
+    await user.keyboard("{Enter}");
+    expect(within(screen.getByRole("dialog")).getByLabelText("Jev API Key")).toHaveValue("unsaved-draft");
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    expect(settings).toHaveAttribute("aria-expanded", "false");
+    expect(settings).toHaveFocus();
     for (const operation of [saveJevKey, clearJevKey, setJevEnabled, testJevConnection]) {
       expect(operation).not.toHaveBeenCalled();
     }
     expect(Object.values(window.localStorage)).not.toContain("unsaved-draft");
   });
 
-  it("switches routing while collapsed without expanding the settings", async () => {
+  it("switches routing from the card without opening settings", async () => {
     const user = userEvent.setup();
     vi.mocked(getJevStatus).mockResolvedValue(status({ has_key: true }));
     vi.mocked(setJevEnabled).mockResolvedValue(status({ has_key: true, enabled: true }));
@@ -113,7 +116,7 @@ describe("JevRoutingControl", () => {
     await user.type(input, "  synthetic-jev-key  {Enter}");
     expect(saveJevKey).toHaveBeenCalledExactlyOnceWith("synthetic-jev-key");
     expect(input).toHaveValue("");
-    expect(screen.getByText("已配置 Key")).toBeVisible();
+    expect(within(screen.getByRole("dialog")).getByText("已配置 Key")).toBeVisible();
     expect(setJevEnabled).not.toHaveBeenCalled();
     expect(screen.getByRole("switch", { name: "Jev 云端智能分档" })).toBeEnabled();
     expect(Object.values(window.localStorage)).not.toContain("synthetic-jev-key");
@@ -241,7 +244,7 @@ describe("JevRoutingControl", () => {
     await user.click(screen.getByRole("button", { name: "移除 Key" }));
     expect(screen.getByRole("switch")).not.toBeChecked();
     expect(screen.getByRole("alert")).toHaveTextContent("Key 未移除");
-    expect(screen.getByText("已配置 Key")).toBeVisible();
+    expect(within(screen.getByRole("dialog")).getByText("已配置 Key")).toBeVisible();
     await act(async () => stale.resolve(status({ has_key: true, enabled: true })));
     expect(screen.getByRole("switch")).not.toBeChecked();
     expect(screen.getByRole("alert")).toHaveTextContent("Key 未移除");
@@ -284,7 +287,7 @@ describe("JevRoutingControl", () => {
     await user.click(screen.getByRole("button", { name: "移除 Key" }));
     await act(async () => stale.resolve(status({ has_key: true, enabled: true })));
     expect(screen.getByRole("switch")).not.toBeChecked();
-    expect(screen.getByText("未配置 Key")).toBeVisible();
+    expect(within(screen.getByRole("dialog")).getByText("未配置 Key")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
     expect(getJevStatus).toHaveBeenCalledTimes(2);
     view.unmount();

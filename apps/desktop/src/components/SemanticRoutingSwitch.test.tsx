@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSemanticStatus, setSemanticEnabled, type SemanticStatus } from "../api";
@@ -44,21 +44,69 @@ describe("SemanticRoutingSwitch", () => {
   });
 
   it.each([
-    ["en", "Local smart tiers", "First enable prepares a local runtime and downloads about 2.5 GB of model files. Install uv first. Classification then runs on this device."],
-    ["zh-CN", "本地智能分档", "首次开启会准备本地运行环境并下载约 2.5 GB 模型文件，请先安装 uv。准备完成后，分类在本机运行。"],
-    ["zh-TW", "本機智慧分檔", "首次啟用會準備本機執行環境並下載約 2.5 GB 模型檔案，請先安裝 uv。準備完成後，分類在本機執行。"],
-    ["ja", "ローカルスマート分層", "初回の有効化時にローカル実行環境を準備し、約 2.5 GB のモデルをダウンロードします。事前に uv をインストールしてください。準備後の分類はこのデバイスで実行します。"],
-  ])("explains first-use preparation without enabling classification in %s", async (language, label, description) => {
+    ["en", "Local smart tiers", "Local tier settings", "First enable prepares a local runtime and downloads about 2.5 GB of model files. Install uv first. Classification then runs on this device."],
+    ["zh-CN", "本地智能分档", "本地分档设置", "首次开启会准备本地运行环境并下载约 2.5 GB 模型文件，请先安装 uv。准备完成后，分类在本机运行。"],
+    ["zh-TW", "本機智慧分檔", "本機分檔設定", "首次啟用會準備本機執行環境並下載約 2.5 GB 模型檔案，請先安裝 uv。準備完成後，分類在本機執行。"],
+    ["ja", "ローカルスマート分層", "ローカル分層設定", "初回の有効化時にローカル実行環境を準備し、約 2.5 GB のモデルをダウンロードします。事前に uv をインストールしてください。準備後の分類はこのデバイスで実行します。"],
+  ])("explains first-use preparation without enabling classification in %s", async (language, label, settingsLabel, description) => {
+    const user = userEvent.setup();
     window.localStorage.setItem("token-station-language", language);
     vi.mocked(getSemanticStatus).mockResolvedValue(status({ enabled: false, mode: "off", state: "off", model_ready: false }));
     render(<SemanticRoutingSwitch />);
     const control = await screen.findByRole("switch", { name: label });
     expect(control).not.toBeChecked();
     expect(control).toBeEnabled();
-    expect(screen.getByText(description)).toBeVisible();
     expect(control).toHaveAccessibleDescription(expect.stringContaining(description));
+    const details = screen.getByRole("button", { name: settingsLabel });
+    expect(details).toHaveAttribute("aria-haspopup", "dialog");
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(description)).not.toBeVisible();
+    expect(within(details).getByText(/2\.5 GB.*uv|uv.*2\.5 GB/)).toBeVisible();
+    await user.click(details);
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    const dialog = await screen.findByRole("dialog", { name: settingsLabel });
+    expect(within(dialog).getByText(description)).toBeVisible();
+    expect(within(dialog).getByRole("switch", { name: label })).not.toBeChecked();
     expect(setSemanticEnabled).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows Jev priority and first-download requirements before local preparation while collapsed", async () => {
+    vi.mocked(getSemanticStatus).mockResolvedValue(status({ enabled: true, mode: "off", state: "off", model_ready: false }));
+    render(<SemanticRoutingSwitch overriddenByJev />);
+    const control = await screen.findByRole("switch", { name: "本地智能分档" });
+    const details = screen.getByRole("button", { name: "本地分档设置" });
+    expect(control).toBeChecked();
+    expect(control).toBeEnabled();
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(within(details).getByText(/2\.5 GB.*uv|uv.*2\.5 GB/)).toBeVisible();
+    expect(within(details).getByText("Jev 优先")).toBeVisible();
+    expect(setSemanticEnabled).not.toHaveBeenCalled();
+  });
+
+  it("opens the settings dialog with Enter and returns focus after Escape without changing classification", async () => {
+    const user = userEvent.setup();
+    render(<SemanticRoutingSwitch />);
+    const details = await screen.findByRole("button", { name: "本地分档设置" });
+    const explanation = "关闭后释放模型内存，使用原有路由规则。";
+    expect(details).toHaveAttribute("aria-haspopup", "dialog");
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(explanation)).not.toBeVisible();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    details.focus();
+    await user.keyboard("{Enter}");
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    const dialog = await screen.findByRole("dialog", { name: "本地分档设置" });
+    expect(within(dialog).getByText(explanation)).toBeVisible();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    expect(within(dialog).getByRole("switch", { name: "本地智能分档" })).toBeChecked();
+    await user.keyboard("{Escape}");
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByText(explanation)).not.toBeVisible();
+    expect(details).toHaveFocus();
+    expect(setSemanticEnabled).not.toHaveBeenCalled();
   });
 
   it("reflects saved intent while preparing and allows one pending Off request", async () => {
@@ -70,6 +118,8 @@ describe("SemanticRoutingSwitch", () => {
     const control = await screen.findByRole("switch", { name: "本地智能分档" });
     expect(control).toBeChecked();
     expect(control).toBeEnabled();
+    expect(screen.getByRole("button", { name: "本地分档设置" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("status")).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent("正在准备模型，暂用原有规则。");
 
     await user.click(control);
@@ -93,15 +143,22 @@ describe("SemanticRoutingSwitch", () => {
     render(<SemanticRoutingSwitch />);
     const control = await screen.findByRole("switch", { name: "本地智能分档" });
     expect(control).not.toBeChecked();
+    const details = screen.getByRole("button", { name: "本地分档设置" });
+    expect(details).toHaveAttribute("aria-expanded", "false");
 
     await user.click(control);
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(setSemanticEnabled).toHaveBeenNthCalledWith(1, true);
     expect(control).toBeChecked();
     expect(control).toBeEnabled();
+    expect(screen.getByRole("status")).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent("正在加载模型，暂用原有规则。");
     await user.click(control);
     expect(setSemanticEnabled).toHaveBeenNthCalledWith(2, false);
     expect(control).not.toBeChecked();
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("keeps the previous choice when saving fails and permits retry", async () => {
@@ -113,6 +170,8 @@ describe("SemanticRoutingSwitch", () => {
     await user.click(control);
     expect(control).toBeChecked();
     expect(control).toBeEnabled();
+    expect(screen.getByRole("button", { name: "本地分档设置" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("alert")).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent("设置未保存，请重试。");
     await user.click(control);
     expect(control).not.toBeChecked();
