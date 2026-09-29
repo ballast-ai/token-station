@@ -404,6 +404,12 @@ fn upstream_image_error() -> ErrorEnvelope {
     error
 }
 
+fn request_contains_images(request: &ChatRequest) -> bool {
+    request.messages.iter().filter_map(|message| message.content.as_ref()).any(|content| {
+        matches!(content, Content::Parts(parts) if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. })))
+    })
+}
+
 fn raw_contains_images(value: &Value) -> bool {
     match value {
         Value::Array(items) => items.iter().any(raw_contains_images),
@@ -513,6 +519,23 @@ fn native_rejects_image(status: u16, body: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return false;
     };
+    // A generic capability sentence must not override a structured policy,
+    // credential, quota, or malformed-input classification. Unknown classifiers
+    // also remain request failures rather than permanent channel evidence.
+    for object in [&value, &value["error"]] {
+        for field in ["code", "type"] {
+            if let Some(classification) = object.get(field).filter(|value| !value.is_null())
+                && !classification.as_str().is_some_and(|value| {
+                    matches!(
+                        value,
+                        "" | "invalid_request" | "invalid_request_error" | "error"
+                    )
+                })
+            {
+                return false;
+            }
+        }
+    }
     let Some(message) = value["error"]["message"]
         .as_str()
         .or_else(|| value["message"].as_str())
@@ -1655,6 +1678,10 @@ pub struct Gateway {
     /// gateway remains available for Agent setup and rejects model traffic
     /// until the user applies a personal or enterprise route.
     home_router: Option<Arc<Router>>,
+    /// Home with exact-model pinning disabled. Only the host-owned Claude Code
+    /// `token-station-auto` virtual model may select this variant; keeping the
+    /// exception here preserves router-core's frozen exact-model contract.
+    home_dynamic_router: Option<Arc<Router>>,
     /// Per-Agent fallback routers and exact Harness overlays. Missing fallback
     /// entries use Home. Harness overlays run before every fallback strategy.
     ///
@@ -1724,13 +1751,34 @@ struct HarnessRouter {
 #[derive(Clone, Default)]
 struct AgentRouters {
     fallback: Option<Arc<Router>>,
+    dynamic_fallback: Option<Arc<Router>>,
     harness: Option<HarnessRouter>,
 }
 
 impl AgentRouters {
     fn is_empty(&self) -> bool {
-        self.fallback.is_none() && self.harness.is_none()
+        self.fallback.is_none() && self.dynamic_fallback.is_none() && self.harness.is_none()
     }
+}
+
+fn router_with_dynamic_variant(
+    config: RouterConfig,
+    owner: &str,
+) -> Result<(Arc<Router>, Arc<Router>), String> {
+    let exact_model = config.honor_exact_model;
+    let mut dynamic_config = config.clone();
+    dynamic_config.honor_exact_model = false;
+    let router = Router::new(config)
+        .map(Arc::new)
+        .map_err(|error| format!("{owner}: {error}"))?;
+    let dynamic = if exact_model {
+        Router::new(dynamic_config)
+            .map(Arc::new)
+            .map_err(|error| format!("{owner} dynamic route: {error}"))?
+    } else {
+        Arc::clone(&router)
+    };
+    Ok((router, dynamic))
 }
 
 fn settle_estimated_cost(
@@ -2141,23 +2189,23 @@ impl Gateway {
 
         let quota_plans = Self::quota_plans_from(config);
 
-        let home_router = home_router_config
-            .map(|router| {
-                Router::new(router)
-                    .map(Arc::new)
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
+        let (home_router, home_dynamic_router) = home_router_config.map_or_else(
+            || Ok((None, None)),
+            |router| {
+                router_with_dynamic_variant(router, "Home route")
+                    .map(|(router, dynamic)| (Some(router), Some(dynamic)))
+            },
+        )?;
         let mut agent_routers = BTreeMap::new();
         for agent_id in &supported_agent_ids {
-            let fallback = config
+            let (fallback, dynamic_fallback) = config
                 .custom_router_for_agent(agent_id)?
                 .map(|router| {
-                    Router::new(router)
-                        .map(Arc::new)
-                        .map_err(|error| format!("Agent `{agent_id}` route: {error}"))
+                    router_with_dynamic_variant(router, &format!("Agent `{agent_id}` route"))
+                        .map(|(router, dynamic)| (Some(router), Some(dynamic)))
                 })
-                .transpose()?;
+                .transpose()?
+                .unwrap_or((None, None));
             let harness = config
                 .harness_router_for_agent(agent_id)?
                 .map(|overlay| {
@@ -2170,7 +2218,11 @@ impl Gateway {
                         .map_err(|error| format!("Agent `{agent_id}` Harness route: {error}"))
                 })
                 .transpose()?;
-            let routers = AgentRouters { fallback, harness };
+            let routers = AgentRouters {
+                fallback,
+                dynamic_fallback,
+                harness,
+            };
             if !routers.is_empty() {
                 agent_routers.insert(agent_id.clone(), routers);
             }
@@ -2183,6 +2235,7 @@ impl Gateway {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
             home_router,
+            home_dynamic_router,
             agent_routers: std::sync::RwLock::new(agent_routers),
             supported_agent_ids,
             upstreams,
@@ -2205,6 +2258,14 @@ impl Gateway {
             semantic: None,
             jev: crate::jev::JevController::shared(&config.data.dir),
         })
+    }
+
+    /// Pin captured Provider and egress credentials before this Gateway sends requests.
+    /// The snapshot has no live source fallback and never writes credentials to disk.
+    #[must_use]
+    pub fn with_secret_snapshot(mut self, snapshot: crate::secrets::SecretSnapshot) -> Self {
+        self.secrets = snapshot.into_store();
+        self
     }
 
     /// Attach the Desktop's dedicated owner-only request-body store.
@@ -2288,13 +2349,13 @@ impl Gateway {
         router: Option<RouterConfig>,
         harness: Option<HarnessRouterConfig>,
     ) -> Result<PrevalidatedAgentRouter, String> {
-        let fallback = router
+        let (fallback, dynamic_fallback) = router
             .map(|config| {
-                Router::new(config)
-                    .map(Arc::new)
-                    .map_err(|error| format!("Agent `{agent_id}` route: {error}"))
+                router_with_dynamic_variant(config, &format!("Agent `{agent_id}` route"))
+                    .map(|(router, dynamic)| (Some(router), Some(dynamic)))
             })
-            .transpose()?;
+            .transpose()?
+            .unwrap_or((None, None));
         let harness = harness
             .map(|overlay| {
                 Router::new(overlay.router)
@@ -2306,7 +2367,11 @@ impl Gateway {
                     .map_err(|error| format!("Agent `{agent_id}` Harness route: {error}"))
             })
             .transpose()?;
-        let routers = AgentRouters { fallback, harness };
+        let routers = AgentRouters {
+            fallback,
+            dynamic_fallback,
+            harness,
+        };
         Ok(PrevalidatedAgentRouter {
             agent_id: agent_id.to_owned(),
             routers: (!routers.is_empty()).then_some(routers),
@@ -3306,9 +3371,15 @@ impl Gateway {
                             })
                     })
                 };
-                harness_router
-                    .or(routers.fallback)
-                    .or_else(|| self.home_router.clone())
+                if token_station_auto {
+                    routers
+                        .dynamic_fallback
+                        .or_else(|| self.home_dynamic_router.clone())
+                } else {
+                    harness_router
+                        .or(routers.fallback)
+                        .or_else(|| self.home_router.clone())
+                }
             }
             Some(agent_id) => {
                 let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
@@ -3822,6 +3893,28 @@ impl Gateway {
             decision.decided_by,
             decision.fallbacks.len()
         );
+
+        if agent.protocol == "openai-responses"
+            && request_contains_images(&request)
+            && self
+                .upstreams
+                .get(decision.chosen.upstream.as_str())
+                .is_some_and(|upstream| upstream.dialect == ApiDialect::ResponsesNative)
+        {
+            return self.execute_normalized_responses(
+                ctx,
+                agent,
+                &request,
+                headers,
+                body,
+                &decision,
+                &candidates,
+                quota_now_ms,
+                &session,
+                emit,
+                record,
+            );
+        }
 
         self.execute_routed_attempt(
             ctx,
@@ -4676,6 +4769,49 @@ mod unsupported_media_tests {
     }
 
     #[test]
+    fn native_image_rejection_respects_structured_error_classification() {
+        for classification in [
+            "content_policy_violation",
+            "content_filter",
+            "authentication_error",
+            "invalid_api_key",
+            "permission_error",
+            "insufficient_quota",
+            "billing_error",
+            "rate_limit_error",
+            "invalid_image_format",
+            "invalid_image",
+            "unsupported_image_format",
+            "invalid_image_url",
+        ] {
+            for field in ["code", "type"] {
+                for nested in [false, true] {
+                    let mut error = json!({"message":"Image input unsupported"});
+                    error[field] = json!(classification);
+                    let body = if nested {
+                        json!({"error":error})
+                    } else {
+                        error
+                    };
+                    assert!(
+                        !super::native_rejects_image(400, &body.to_string()),
+                        "{classification} in {field}, nested={nested} must not establish channel evidence"
+                    );
+                }
+            }
+        }
+        for error in [
+            json!({"message":"Image input unsupported"}),
+            json!({"type":"invalid_request_error","code":null,"message":"Image input unsupported"}),
+        ] {
+            assert!(super::native_rejects_image(
+                400,
+                &json!({"error":error}).to_string()
+            ));
+        }
+    }
+
+    #[test]
     fn complete_channel_image_rejections_remain_recognized() {
         use super::{ErrorCode, ErrorEnvelope, is_unsupported_media_error};
         for message in [
@@ -5079,5 +5215,46 @@ mod estimation_eligibility_tests {
         settle_estimated_cost(&pricing, &mut record, &target);
         assert_eq!(record.cost_kind, CostKind::Estimated);
         assert!(record.cost_micros.is_some());
+    }
+
+    #[test]
+    fn estimation_rejects_reasoning_above_output_and_preserves_actual_charge() {
+        let pricing = crate::pricing::PriceTable::builtin();
+        let target = UpstreamModel::new(UpstreamRef::new("test").unwrap(), "deepseek-v4-pro");
+        for observed in [false, true] {
+            let mut record = RequestRecord::begin(0, "openai");
+            record.usage = Some(Usage {
+                input_tokens: 10,
+                output_tokens: 2,
+                reasoning_tokens: 100,
+                ..Usage::default()
+            });
+            record.usage_observation = observed.then_some(UsageObservation {
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                reasoning_tokens: Some(100),
+                ..UsageObservation::default()
+            });
+            settle_estimated_cost(&pricing, &mut record, &target);
+            assert_eq!(
+                (record.cost_kind, record.cost_micros),
+                (CostKind::Unknown, None)
+            );
+            record.cost_kind = CostKind::Actual;
+            record.cost_micros = Some(17);
+            settle_estimated_cost(&pricing, &mut record, &target);
+            assert_eq!(
+                (record.cost_kind, record.cost_micros),
+                (CostKind::Actual, Some(17))
+            );
+            record.cost_kind = CostKind::Unknown;
+            record.cost_micros = None;
+            record.usage.as_mut().unwrap().reasoning_tokens = 2;
+            if let Some(observation) = record.usage_observation.as_mut() {
+                observation.reasoning_tokens = Some(2);
+            }
+            settle_estimated_cost(&pricing, &mut record, &target);
+            assert_eq!(record.cost_kind, CostKind::Estimated);
+        }
     }
 }

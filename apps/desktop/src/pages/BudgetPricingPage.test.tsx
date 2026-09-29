@@ -10,7 +10,7 @@ vi.mock("../api", async (loadOriginal) => ({
   ...await loadOriginal<typeof import("../api")>(),
   getAgentBudgets: vi.fn(), listAgentRegistry: vi.fn(), setAgentBudget: vi.fn(),
 }));
-it("retains Agent B draft when an earlier Agent A write completes", async () => {
+it("waits for an Agent A write before allowing Agent B selection", async () => {
   const initial: BudgetStatus[] = ["codex", "claude-code"].map((agent_id, index) => ({
     agent_id, limit_micros: index ? 50_000_000 : 10_000_000,
     used_micros: 0, remaining_micros: index ? 50_000_000 : 10_000_000,
@@ -35,10 +35,11 @@ it("retains Agent B draft when an earlier Agent A write completes", async () => 
   await user.type(limit, "25");
   await user.click(screen.getByRole("button", { name: "保存预算" }));
   expect(setAgentBudget).toHaveBeenNthCalledWith(1, "codex", 25_000_000, 80, null, null, 7);
+  expect(screen.getByRole("combobox", { name: "Agent" })).toBeDisabled();
+  expect(limit).toHaveValue(25);
+  await act(async () => { resolveSave(afterSave); await pendingSave; });
   await user.click(screen.getByRole("combobox", { name: "Agent" }));
   await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "Claude Code" }));
-  expect(limit).toHaveValue(50);
-  await act(async () => { resolveSave(afterSave); await pendingSave; });
   expect(screen.getByRole("combobox", { name: "Agent" })).toHaveTextContent("Claude Code");
   expect(limit).toHaveValue(50);
   await user.click(screen.getByRole("button", { name: "保存预算" }));
@@ -73,6 +74,9 @@ it("confirms leaving edits made after a pending budget submission", async () => 
     await user.click(screen.getByRole("combobox", { name: "Agent" }));
     await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "Claude Code" }));
   };
+  expect(screen.getByRole("combobox", { name: "Agent" })).toBeDisabled();
+  await act(async () => { resolveSave(afterSave); await pendingSave; });
+  expect(limit).toHaveValue(35);
   await chooseOther();
   await user.click(screen.getByRole("button", { name: "继续编辑" }));
   expect(limit).toHaveValue(35);
@@ -80,6 +84,35 @@ it("confirms leaving edits made after a pending budget submission", async () => 
   await chooseOther();
   await user.click(screen.getByRole("button", { name: "放弃更改并离开" }));
   expect(limit).toHaveValue(50);
-  await act(async () => { resolveSave(afterSave); await pendingSave; });
-  expect(limit).toHaveValue(50);
+});
+
+it("retains a rejected budget submission and requires confirmation before switching Agent", async () => {
+  vi.mocked(listAgentRegistry).mockResolvedValue(["codex", "claude-code"].map((agent_id) => ({
+    agent_id, legacy_kind: null, display_name: agent_id, icon_key: agent_id, admission: "supported",
+  })));
+  vi.mocked(getAgentBudgets).mockResolvedValue([]);
+  let rejectSave!: (reason: Error) => void;
+  const pendingSave = new Promise<BudgetStatus[]>((_, reject) => { rejectSave = reject; });
+  vi.mocked(setAgentBudget).mockReset().mockReturnValueOnce(pendingSave).mockResolvedValue([]);
+  const user = userEvent.setup();
+  render(<ErrorToastProvider><DraftNavigationBoundary><BudgetPricingPage onBack={vi.fn()} /></DraftNavigationBoundary></ErrorToastProvider>);
+  const selector = screen.getByRole("combobox", { name: "Agent" });
+  await waitFor(() => expect(selector).toHaveTextContent("codex"));
+  const limit = screen.getByRole("spinbutton", { name: "预算上限" });
+  await user.clear(limit); await user.type(limit, "25");
+  await user.click(screen.getByRole("button", { name: "保存预算" }));
+  expect(selector).toBeDisabled();
+  await user.click(selector);
+  expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  await act(async () => { rejectSave(new Error("budget storage unavailable")); await pendingSave.catch(() => undefined); });
+  expect(selector).toBeEnabled();
+  expect(selector).toHaveTextContent("codex");
+  expect(limit).toHaveValue(25);
+  await user.click(selector);
+  await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "claude-code" }));
+  await user.click(screen.getByRole("button", { name: "继续编辑" }));
+  expect(selector).toHaveTextContent("codex");
+  expect(limit).toHaveValue(25);
+  await user.click(screen.getByRole("button", { name: "保存预算" }));
+  expect(setAgentBudget).toHaveBeenNthCalledWith(2, "codex", 25_000_000, 80, null, null, 7);
 });

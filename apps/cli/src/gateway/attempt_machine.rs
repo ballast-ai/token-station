@@ -2,6 +2,29 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+// Include schema input in receipts without changing frozen routing policy.
+pub(super) fn estimated_input_with_schemas(
+    request: &ChatRequest,
+    hints: &[token_station_protocol::AgentHint],
+) -> u32 {
+    use token_station_router_core::{RequestFeatures, estimate_tokens};
+    let mut tokens = RequestFeatures::extract(request, hints).estimated_input_tokens;
+    for tool in &request.tools {
+        tokens = tokens
+            .saturating_add(estimate_tokens(&tool.name))
+            .saturating_add(estimate_tokens(
+                tool.description.as_deref().unwrap_or_default(),
+            ))
+            .saturating_add(estimate_tokens(&tool.parameters.to_string()));
+    }
+    if let Some(token_station_protocol::ResponseFormat::JsonSchema { json_schema }) =
+        &request.response_format
+    {
+        tokens = tokens.saturating_add(estimate_tokens(&json_schema.to_string()));
+    }
+    tokens
+}
+
 /// One logical request's fallback limits. Count, wall-clock and per-attempt
 /// timeout are always active. Cost is optional until the router has a trusted
 /// preflight estimator; when configured, an unknown estimate fails closed.
@@ -443,7 +466,10 @@ impl Gateway {
             hints,
             candidates,
             Some(suggestion.tier.pool()),
-        ) {
+        ) && decision.decided_by == token_station_router_core::DecidedBy::Classifier
+            && decision.pool == suggestion.tier.pool()
+        {
+            decision.features.estimated_input_tokens = estimated_input_with_schemas(request, hints);
             retain_free_fallbacks(&mut decision, &self.free_upstreams);
             classifier.finish(suggestion, true);
             Ok(decision)
@@ -482,6 +508,7 @@ impl Gateway {
             if router.routing_mode() == RoutingMode::Tiered {
                 retain_free_fallbacks(&mut decision, &self.free_upstreams);
             }
+            decision.features.estimated_input_tokens = estimated_input_with_schemas(request, hints);
             return Ok(decision);
         }
 
@@ -521,6 +548,7 @@ impl Gateway {
         if router.routing_mode() == RoutingMode::Tiered {
             retain_free_fallbacks(&mut decision, &self.free_upstreams);
         }
+        decision.features.estimated_input_tokens = estimated_input_with_schemas(request, hints);
         rank_image_targets(router, decision, candidates, &self.free_upstreams)
     }
 
@@ -560,34 +588,45 @@ impl Gateway {
             });
         }
         let result = self.dispatch(ctx, agent, payload, inbound_tools, decision, emit, record);
-        self.settle_quota(session, unix_millis(), record, &result);
+        self.settle_quota(session, record, &result);
         result
     }
 
-    /// Charge the serving account after every routing mode. Only quota routing
-    /// records conversation affinity. Actual attempts own their own leases.
+    /// Remember conversation affinity after the exchange. Each actual attempt
+    /// has already settled its own consumption and released its lease.
     fn settle_quota(
         &self,
         session: &str,
-        now_ms: u64,
         record: &RequestRecord,
         result: &Result<(UpstreamModel, StreamOutcome), ErrorEnvelope>,
     ) {
         let mut quota = self.quota.lock().expect("quota lock");
-        if let Ok((served, outcome)) = result {
-            quota.record_settled(
-                served.upstream.as_str(),
-                &record.request_id,
-                now_ms,
-                record.usage.as_ref(),
-                *outcome == StreamOutcome::Complete,
-            );
-            if !session.is_empty()
-                && (*outcome == StreamOutcome::Complete || record.usage.is_some())
-            {
-                quota.remember(session, served.clone());
-            }
+        if let Ok((served, outcome)) = result
+            && !session.is_empty()
+            && (*outcome == StreamOutcome::Complete || record.usage.is_some())
+        {
+            quota.remember(session, served.clone());
         }
+    }
+
+    fn settle_attempt_quota(
+        &self,
+        target: &UpstreamModel,
+        now_ms: u64,
+        record: &RequestRecord,
+        result: &Result<StreamOutcome, ErrorEnvelope>,
+    ) {
+        // A retry can consume tokens before failing. Preserve that consumption
+        // before the next attempt resets the accounting tap. The ordinal keeps
+        // two attempts on the same provider distinct while settlement stays idempotent.
+        let receipt_id = format!("{}:attempt:{}", record.request_id, record.attempts);
+        self.quota.lock().expect("quota lock").record_settled(
+            target.upstream.as_str(),
+            &receipt_id,
+            now_ms,
+            record.usage.as_ref(),
+            matches!(result, Ok(StreamOutcome::Complete)),
+        );
     }
 
     /// Tries the decision's targets in order; moves on only while the error
@@ -663,9 +702,16 @@ impl Gateway {
                 if decision.features.has_images
                     && let Reply::BeginJson(ref reply) = reply
                 {
-                    valid_image_response = completed_image_json_response(&reply.body);
+                    valid_image_response &= completed_image_json_response(&reply.body);
                 }
-                emit(reply)
+                // Once a complete reply is accepted, the server may drop its
+                // cancellation guard before this worker records the observation.
+                // Snapshot cancellation before delivery, and retain a rejected
+                // send even on native paths that return Complete regardless.
+                valid_image_response &= !ctx.is_cancelled();
+                let accepted = emit(reply);
+                valid_image_response &= accepted;
+                accepted
             };
             let result = self.try_upstream(
                 ctx,
@@ -706,9 +752,9 @@ impl Gateway {
                         error
                     }
                 });
-            if decision.features.has_images && !ctx.is_cancelled() {
+            if decision.features.has_images {
                 let observation = match &result {
-                    Err(error) if is_image_channel_refusal(error) => {
+                    Err(error) if !ctx.is_cancelled() && is_image_channel_refusal(error) => {
                         Some(CapabilityState::Unsupported)
                     }
                     Ok(StreamOutcome::Complete)
@@ -872,6 +918,7 @@ impl Gateway {
             provider_call_engine,
         );
         Self::finish_attempt_accounting(ctx, record, &result);
+        self.settle_attempt_quota(target, unix_millis(), record, &result);
         result
     }
 
@@ -1131,6 +1178,7 @@ mod cancelled_settlement_tests {
             agents: Vec::new(),
             skipped_agents: Vec::new(),
             home_router: None,
+            home_dynamic_router: None,
             agent_routers: std::sync::RwLock::new(BTreeMap::new()),
             supported_agent_ids: BTreeSet::new(),
             upstreams: BTreeMap::new(),
@@ -1174,6 +1222,49 @@ mod cancelled_settlement_tests {
             semantic: None,
             jev: crate::jev::JevController::shared(&config.data.dir),
         }
+    }
+
+    #[test]
+    fn failed_attempt_usage_and_same_account_retries_settle_once_each() {
+        let gateway = gateway();
+        let a = UpstreamModel::new(UpstreamRef::new("a").unwrap(), "shared");
+        let b = UpstreamModel::new(UpstreamRef::new("b").unwrap(), "shared");
+        let mut record = RequestRecord::begin(1, "openai");
+        let failure = Err(ErrorEnvelope::new(
+            ErrorCode::ProviderProtocolError,
+            502,
+            "invalid response",
+        ));
+        record.attempts = 1;
+        record.usage = Some(Usage {
+            input_tokens: 100,
+            ..Usage::default()
+        });
+        gateway.settle_attempt_quota(&a, 1_000, &record, &failure);
+        gateway.settle_attempt_quota(&a, 1_000, &record, &failure);
+        assert_eq!(
+            gateway.quota.lock().unwrap().snapshot(&["a".into()], 1_000)[0].windows[0].used,
+            100
+        );
+        record.attempts = 2;
+        record.usage.as_mut().unwrap().input_tokens = 200;
+        gateway.settle_attempt_quota(&a, 1_000, &record, &failure);
+        record.attempts = 3;
+        record.usage.as_mut().unwrap().input_tokens = 300;
+        gateway.settle_attempt_quota(&b, 1_000, &record, &Ok(StreamOutcome::Complete));
+        gateway.settle_quota(
+            "conversation",
+            &record,
+            &Ok((b.clone(), StreamOutcome::Complete)),
+        );
+        record.attempts = 4;
+        record.usage = None;
+        gateway.settle_attempt_quota(&b, 1_000, &record, &failure);
+        let quota = gateway.quota.lock().unwrap();
+        let snapshots = quota.snapshot(&["a".into(), "b".into()], 1_000);
+        assert_eq!(snapshots[0].windows[0].used, 300);
+        assert_eq!(snapshots[1].windows[0].used, 300);
+        assert_eq!(quota.last_account("conversation"), Some(&b));
     }
 
     #[test]
@@ -1283,6 +1374,8 @@ mod cancelled_settlement_tests {
             &record,
         ));
 
+        gateway.settle_attempt_quota(&a, 1_000, &record, &Err(error));
+
         // Freeze the real loop boundary: A failed with observed usage, B is
         // pending, and the client disconnects before B can enter its wrapper.
         ctx.cancel();
@@ -1296,7 +1389,7 @@ mod cancelled_settlement_tests {
             },
             &record,
         );
-        gateway.settle_quota("conversation", 1_000, &record, &result);
+        gateway.settle_quota("conversation", &record, &result);
         let (served, outcome) = result.unwrap();
         gateway.settle(&mut record, &served, outcome);
 
@@ -1321,7 +1414,7 @@ mod cancelled_settlement_tests {
         let mut record = RequestRecord::begin(1, "openai");
         ctx.cancel();
         let result = Gateway::cancel_before_attempt(&ctx, &pending, &mut |_| true, &record);
-        gateway.settle_quota("unstarted", 1_000, &record, &result);
+        gateway.settle_quota("unstarted", &record, &result);
         let (served, outcome) = result.unwrap();
         gateway.settle(&mut record, &served, outcome);
         let quota = gateway.quota.lock().unwrap();
@@ -1749,5 +1842,224 @@ mod south_stream_fallback_policy_tests {
                 .expect("a live attempt retains one millisecond"),
             Duration::from_millis(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_estimate_tests {
+    use super::*;
+    use token_station_protocol::{CapabilityState, Message, ResponseFormat, Role};
+    use token_station_router_core::{Health, RouterConfig};
+
+    fn gateway() -> Gateway {
+        let config: ClientConfig = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        Gateway {
+            agents: Vec::new(),
+            skipped_agents: Vec::new(),
+            home_router: None,
+            home_dynamic_router: None,
+            agent_routers: std::sync::RwLock::new(BTreeMap::new()),
+            supported_agent_ids: BTreeSet::new(),
+            upstreams: BTreeMap::new(),
+            local_upstreams: BTreeSet::new(),
+            free_upstreams: BTreeSet::new(),
+            catalog: Vec::new(),
+            image_observations: std::sync::Mutex::new(BTreeMap::new()),
+            health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
+                eject_after: 3,
+                cooldown: Duration::from_secs(1),
+            })),
+            quota: std::sync::Mutex::new(crate::quota_tracker::QuotaTracker::new(
+                std::collections::HashMap::new(),
+            )),
+            admission: Admission::new(config.concurrency),
+            pricing: config.pricing.clone(),
+            secrets: SecretStore::from_config(&config, &config.data.dir),
+            egress: EgressPolicy::new(config.egress),
+            south_runtime: None,
+            recorder: Arc::new(token_station_metrics::NoopRecorder),
+            body_log: None,
+            semantic: None,
+            jev: crate::jev::JevController::shared(&config.data.dir),
+        }
+    }
+
+    fn candidate(upstream: &str, context_window: u32) -> Candidate {
+        Candidate::new(
+            UpstreamModel::new(UpstreamRef::new(upstream).unwrap(), "shared"),
+            ModelCapability {
+                tool: true,
+                tool_state: Some(CapabilityState::Declared),
+                json_schema: true,
+                json_schema_state: Some(CapabilityState::Declared),
+                context_window,
+                ..ModelCapability::default()
+            },
+            Health::Healthy,
+        )
+    }
+
+    fn router(mode: RoutingMode, candidates: &[Candidate], assumed: u32, exact: bool) -> Router {
+        let targets: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.target.clone())
+            .collect();
+        let mut config: RouterConfig = serde_json::from_value(json!({
+            "version": 1,
+            "pools": {"primary": targets},
+            "default_pool": "primary",
+            "assumed_context_window": assumed,
+            "honor_exact_model": exact,
+            "routing_mode": mode,
+            "quota_accounts": targets,
+        }))
+        .unwrap();
+        if candidates.len() == 4 {
+            config
+                .pools
+                .insert("primary".to_owned(), targets[..2].to_vec());
+            config
+                .pools
+                .insert("backup".to_owned(), targets[2..].to_vec());
+            config.recovery = token_station_router_core::RecoveryPolicy::Ordered {
+                pools: vec!["backup".to_owned()],
+            };
+        }
+        let example: ClientConfig = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        config.heuristic = example.router.heuristic.map(|mut heuristic| {
+            heuristic.above = "primary".to_owned();
+            heuristic.below = "primary".to_owned();
+            heuristic
+        });
+        Router::new(config).unwrap()
+    }
+
+    fn request(output_schema: bool) -> ChatRequest {
+        let mut request = ChatRequest::new("shared", vec![Message::text(Role::User, "hello")]);
+        let schema = json!({"type": "object", "description": "schema detail ".repeat(2000)});
+        if output_schema {
+            request.response_format = Some(ResponseFormat::JsonSchema {
+                json_schema: schema,
+            });
+        } else {
+            request.tools.push(ToolDef {
+                name: "lookup".to_owned(),
+                description: Some("Read a record".to_owned()),
+                parameters: schema,
+            });
+        }
+        request
+    }
+
+    #[test]
+    fn schema_estimates_preserve_primary_recovery_and_exact_decisions_in_both_modes() {
+        let gateway = gateway();
+        let candidates = vec![
+            candidate("small", 100),
+            candidate("large", 100_000),
+            candidate("small_backup", 100),
+            candidate("large_backup", 100_000),
+        ];
+        for mode in [RoutingMode::Tiered, RoutingMode::QuotaFirst] {
+            for exact in [false, true] {
+                for output_schema in [false, true] {
+                    let router = router(mode, &candidates, 8192, exact);
+                    let request = request(output_schema);
+                    let baseline = match mode {
+                        RoutingMode::Tiered => router.route(&request, &[], &candidates),
+                        RoutingMode::QuotaFirst => {
+                            router.route_quota_first(&request, &candidates, None)
+                        }
+                    }
+                    .unwrap();
+                    let mut actual = gateway
+                        .route_with_mode(&router, &request, &[], &candidates, "test")
+                        .unwrap();
+                    assert!(
+                        !actual.fallbacks.is_empty(),
+                        "exercise recovery and fallback order"
+                    );
+                    assert!(actual.features.estimated_input_tokens > 100);
+                    actual.features.estimated_input_tokens =
+                        baseline.features.estimated_input_tokens;
+                    assert_eq!(actual, baseline);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schema_estimates_preserve_soft_overflow_and_unknown_window_assumptions() {
+        let gateway = gateway();
+        let candidates = vec![candidate("unknown", 0), candidate("known", 200)];
+        for mode in [RoutingMode::Tiered, RoutingMode::QuotaFirst] {
+            for assumed in [100, 100_000] {
+                let router = router(mode, &candidates, assumed, false);
+                let mut request = request(false);
+                request
+                    .messages
+                    .push(Message::text(Role::User, "conversation ".repeat(1000)));
+                let baseline = match mode {
+                    RoutingMode::Tiered => router.route(&request, &[], &candidates),
+                    RoutingMode::QuotaFirst => {
+                        router.route_quota_first(&request, &candidates, None)
+                    }
+                }
+                .unwrap();
+                let mut actual = gateway
+                    .route_with_mode(&router, &request, &[], &candidates, "test")
+                    .unwrap();
+                if mode == RoutingMode::Tiered {
+                    assert_eq!(
+                        actual.chosen,
+                        candidates[usize::from(assumed == 100)].target
+                    );
+                }
+                assert!(
+                    actual.features.estimated_input_tokens
+                        > baseline.features.estimated_input_tokens
+                );
+                actual.features.estimated_input_tokens = baseline.features.estimated_input_tokens;
+                assert_eq!(
+                    actual, baseline,
+                    "overflow must forward with the original order"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schema_estimates_preserve_conversation_features_and_routing_policy() {
+        let gateway = gateway();
+        let candidates = vec![candidate("large", 100_000)];
+        for mode in [RoutingMode::Tiered, RoutingMode::QuotaFirst] {
+            for output_schema in [false, true] {
+                let router = router(mode, &candidates, 8192, false);
+                let request = request(output_schema);
+                let baseline = match mode {
+                    RoutingMode::Tiered => router.route(&request, &[], &candidates),
+                    RoutingMode::QuotaFirst => {
+                        router.route_quota_first(&request, &candidates, None)
+                    }
+                }
+                .unwrap();
+                let mut actual = gateway
+                    .route_with_mode(&router, &request, &[], &candidates, "test")
+                    .unwrap();
+                assert!(
+                    actual.features.estimated_input_tokens
+                        > baseline.features.estimated_input_tokens
+                );
+                assert_eq!(
+                    actual.features.conversation_tokens,
+                    baseline.features.conversation_tokens
+                );
+                actual.features.estimated_input_tokens = baseline.features.estimated_input_tokens;
+                assert_eq!(
+                    actual, baseline,
+                    "only the reported input estimate may change"
+                );
+            }
+        }
     }
 }

@@ -1,100 +1,80 @@
-# Local SCX desktop experiment
+# Local SCX routing
 
-Token Station is a macOS Apple Silicon App with local three-tier classification in this build.
-It preserves the installed `token-station.app` and uses separate configuration, credentials, data, and gateway port.
-It does not establish production routing quality or measured cost savings.
+SCX is an optional local classifier for smart tier routing in Token Station.
+It selects a low, medium, or high tier. Token Station selects the generation model from your configured pools.
+Local SCX preparation is supported on macOS Apple Silicon.
 
-## Install
+## Set up local smart tiers
 
-Build from source with the normal desktop prerequisites.
-For the first installation, copy the existing routing settings into the experiment:
+1. Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+2. Open Token Station.
+3. Open **Global routing** and select **Smart tiers**.
+4. Check the low, medium, and high model pools.
+5. Enable **Local smart tiers**.
+6. Start the proxy if it is stopped.
+
+The standard desktop App includes this control on supported systems.
+For a local source installation, use the normal desktop prerequisites and installer:
 
 ```sh
-scripts/install-local-desktop.sh --scx-experiment --copy-stable-settings
+scripts/install-local-desktop.sh
 ```
 
-The settings copy requires an absent experiment directory. It never merges or replaces existing settings.
-For later installations, omit the copy option:
+New installations and settings without a saved choice start with local smart tiers off.
+An existing saved choice remains in effect. Installing an update does not enable classification or start a model download without that choice.
+The first enable action prepares pinned Python packages and downloads approximately 2.5 GB of model files.
+Existing routing stays available during preparation, loading, and classifier failures.
+Inference runs locally after preparation. The classifier does not need a model API key or a network inference service.
+Generation requests still use the configured providers and their normal billing.
 
-```sh
-scripts/install-local-desktop.sh --scx-experiment
-```
-
-The App is `/Applications/Token Station.app`.
-The installer replaces the former `Token Station SCX.app` name after the new build passes its checks.
-The bundle identifier and private data directory stay unchanged, so existing settings and model assets remain available.
-Its bundle identifier is `com.tokenstation.desktop.scx`.
-Its authenticated gateway uses `127.0.0.1:18787`.
-The ordinary App and its gateway keep their existing settings.
-The experimental App does not receive ordinary automatic updates.
-
-## Use
-
-1. Open **Token Station**.
-2. Select smart-tier routing on Home.
-3. Check the low, medium, and high model pools.
-4. Start the proxy if it is stopped.
-
-Local classification is enabled by default in the experimental App.
-In **Smart tiers** mode, use **Local smart tiers** on the routing page to turn it on or off.
 The switch takes effect immediately and remembers the choice across App restarts.
-Turning it off stops model preparation and inference, releases model memory, and keeps the original routing rules active.
+Turning it off stops preparation and inference, releases model memory, and keeps the original routing rules active.
 The switch is hidden in fixed-model and quota-first modes. Changing the routing mode keeps its saved preference.
-When enabled, each normal experimental App launch starts SCX routing automatically.
-The App loads prepared assets or prepares missing pinned assets in the background.
-The App does not display the former experimental panel or comparison records.
-Existing routing stays available during preparation, loading, or classifier failures.
+When enabled, each normal App launch loads prepared assets or prepares missing pinned assets in the background.
 Each enabled launch makes one automatic startup attempt. After correcting a setup failure, turn the switch off and on to retry.
 Quit the App to stop its classifier process and release model memory.
-Quitting does not change the saved switch setting.
+Quitting does not change the saved choice. Recovery safe mode does not start the classifier.
+
+See [runtime setup and protocol](../../scripts/scx-runtime/README.md) for pinned assets and verified local seeding.
+
+## Routing behavior
+
 SCX applies to global and Agent routes that use smart tiers.
 Fixed-model routes, quota-first routes, explicit model pins, user rules, and Agent hints keep priority.
 SCX uses the existing pools, capability checks, health ranking, recovery, and free-provider fallback restrictions.
 Classification does not rewrite the request sent to the selected provider.
 
-Eligible requests wait at most 400 milliseconds for a suggestion.
+When [Jev cloud routing](jev-cloud-routing.md) is enabled, Jev takes priority over SCX.
+The local switch keeps its saved choice. A Jev failure uses the original routing decision without calling SCX.
+
+Eligible requests wait at most 400 milliseconds for an SCX suggestion.
 Loading, busy, failed, cancelled, or unsupported classifications retain the original routing decision.
 The worker accepts one inference at a time. It does not accumulate request text in a queue.
 A separate two-second watchdog stops an inference worker that does not respond.
 Model loading and preparation have separate startup deadlines.
 
-The first preparation downloads pinned Python packages and approximately 2.5 GB of model files.
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) before preparation.
-Inference runs locally after preparation. It does not require a model API key or a classifier network service.
-See [runtime setup and protocol](../../scripts/scx-runtime/README.md) for pinned assets and verified local seeding.
-
 ## Connect an Agent
 
-1. Open **Agent Connections** in the experimental App.
+1. Open **Agent Connections**.
 2. Select the Agent and its installation.
 3. Select **Preview and connect**.
-4. Check that the scoped endpoint uses `127.0.0.1:18787`.
+4. Review the endpoint and configuration changes shown in the preview.
 5. Confirm the connection.
 6. Restart the Agent if it reads configuration only at startup.
 
+The gateway uses the configured listen address. Local classification does not require a different port.
 Preview does not write client settings. Confirmation saves an encrypted snapshot before writing the selected client's settings.
-Connecting switches that client from its previous gateway to the experimental gateway.
-Normal disconnect restores the previous managed settings, including the previous endpoint and key.
-Unrelated client settings remain in place. Keep the experimental snapshots until you disconnect the Agent.
+For non-Cursor Agents, normal disconnect restores the managed settings from before connection, including the previous endpoint and key.
+Unrelated client settings remain in place. Keep the snapshots while the Agent is connected.
 Use one App to manage a selected client's connection at a time.
-The ordinary App and its own settings remain available.
+Cursor keeps its separate connection and configuration restoration workflow.
 
-Experimental connection records and snapshots use the experimental App's private directory.
-The experiment does not automatically refresh client metadata.
-Forced ownership removal stays disabled because it cannot restore the previous credentials.
-Cursor's separate HTTPS tunnel is not supported in this experiment. Use the ordinary App for Cursor.
+For a manual client profile, use the App's displayed endpoint and gateway key with model `auto`.
+For a configured Agent route, use its scoped endpoint.
 
-For a separate manual client profile, use base URL `http://127.0.0.1:18787/v1` and model `auto`.
-Use the experimental App's own gateway key. The ordinary gateway key does not carry over.
-For a configured Agent route, use its scoped endpoint under the same experimental origin.
+## Input limits and request details
 
-Provider credentials are copied into independent private files only when the settings-copy option is used.
-Actual model calls still use the configured providers and their normal billing.
-The local classifier itself does not call those providers.
-
-## Limits and observations
-
-The initial worker supports visible user and assistant text.
+SCX classifies visible user and assistant text.
 It excludes system scaffolding, tool output, and reasoning traces.
 Multimodal requests, unsupported native server-tool requests, and oversized context use existing routing.
 Inputs above 16 KiB of projected text or 1,024 formatted SCX tokens are skipped without silent truncation.
@@ -108,8 +88,7 @@ Recent observations contain only an identifier, mode, tiers, latency, and a clos
 They remain in memory and are limited to 64 records. The App does not display a comparison panel.
 Comparison counts reset when the App restarts.
 Normal request receipts can record the `classifier` decision reason.
-The settings-copy procedure disables request-body capture in the experimental configuration.
 
 SCX scores are not calibrated probabilities of answer success.
-Tier disagreements are useful review signals. They do not prove that either model choice is correct.
-Keep the ordinary App available while evaluating the experiment on representative tasks.
+Tier disagreements are review signals. They do not prove that either model choice is correct.
+Evaluate task success, incorrect downgrades, added latency, and total cost with your own workload.

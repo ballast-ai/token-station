@@ -389,10 +389,15 @@ pub(crate) fn complete_serve_start<R: Runtime>(
     }
 }
 
+pub(crate) enum ServeStartExpectation {
+    Stopped(u64),
+    Running(u64),
+}
+
 pub(crate) fn begin_serve_start_inner<R, F>(
     app: AppHandle<R>,
     state: &AppStateManaged,
-    expected_stopped_generation: Option<u64>,
+    expectation: Option<ServeStartExpectation>,
     prepare: F,
 ) -> Result<Option<StateView>, String>
 where
@@ -401,15 +406,23 @@ where
 {
     let (config, generation, snapshot, serve_view, metrics_db, upstream_epochs) = {
         let mut inner = state.0.lock().unwrap();
-        if let Some(expected) = expected_stopped_generation {
-            if !menu_action_expectation_matches(
+        // Check the expected lifecycle under the same lock that reserves the replacement.
+        // A capability refresh must never turn a completed manual stop into a start.
+        let matches_expectation = match expectation {
+            None => true,
+            Some(ServeStartExpectation::Stopped(expected)) => menu_action_expectation_matches(
                 expected,
                 inner.server.generation(),
                 desktop_shell::ProxyMenuAction::Start,
                 lifecycle_proxy_action(&inner.server),
-            ) {
-                return Ok(None);
-            }
+            ),
+            Some(ServeStartExpectation::Running(expected)) => matches!(
+                inner.server,
+                ServerLifecycle::Running { generation, .. } if generation == expected
+            ),
+        };
+        if !matches_expectation {
+            return Ok(None);
         }
         inner.ensure_editable()?;
         match &inner.server {
@@ -503,8 +516,32 @@ where
     R: Runtime,
     F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
 {
-    begin_serve_start_inner(app, state, Some(expected_generation), prepare)
-        .map(|snapshot| snapshot.is_some())
+    begin_serve_start_inner(
+        app,
+        state,
+        Some(ServeStartExpectation::Stopped(expected_generation)),
+        prepare,
+    )
+    .map(|snapshot| snapshot.is_some())
+}
+
+pub(crate) fn begin_serve_apply_if_generation<R, F>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    expected_generation: u64,
+    prepare: F,
+) -> Result<StateView, String>
+where
+    R: Runtime,
+    F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
+{
+    begin_serve_start_inner(
+        app,
+        state,
+        Some(ServeStartExpectation::Running(expected_generation)),
+        prepare,
+    )
+    .map(|snapshot| snapshot.unwrap_or_else(|| state.0.lock().unwrap().snapshot()))
 }
 
 #[tauri::command]

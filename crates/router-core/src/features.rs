@@ -120,21 +120,6 @@ impl RequestFeatures {
             }
         }
 
-        // Tool definitions and output schemas consume context but are Agent
-        // scaffolding, not conversation difficulty. Keep only their size.
-        for tool in &request.tools {
-            estimated_input_tokens = estimated_input_tokens
-                .saturating_add(estimate_tokens(&tool.name))
-                .saturating_add(estimate_tokens(
-                    tool.description.as_deref().unwrap_or_default(),
-                ))
-                .saturating_add(estimate_tokens(&tool.parameters.to_string()));
-        }
-        if let Some(ResponseFormat::JsonSchema { json_schema }) = &request.response_format {
-            estimated_input_tokens =
-                estimated_input_tokens.saturating_add(estimate_tokens(&json_schema.to_string()));
-        }
-
         let user_text = last_user_text(request).to_lowercase();
         let system_text = system_text(request).to_lowercase();
 

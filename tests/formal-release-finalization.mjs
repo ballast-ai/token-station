@@ -13,9 +13,18 @@ const releaseWorkflow = read(".github/workflows/release.yml");
 const linuxWorkflow = read(".github/workflows/linux-desktop.yml");
 assert.match(releaseWorkflow, /desktop-macos:/);
 assert.match(releaseWorkflow, /desktop-windows:/);
-assert.match(releaseWorkflow, /verify-main-full-ci:\n    runs-on:/);
-assert.match(releaseWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
-assert.match(releaseWorkflow, /needs: \[release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows\]/);
+assert.match(releaseWorkflow, /pull-requests: read/);
+assert.match(releaseWorkflow, /release-target:\n    runs-on:/);
+assert.match(releaseWorkflow, /release_tag:/);
+assert.match(releaseWorkflow, /git merge-base --is-ancestor "\$sha" origin\/main/);
+assert.match(releaseWorkflow, /checkout_ref: \$\{\{ needs\.release-target\.outputs\.sha \}\}/);
+assert.match(
+  releaseWorkflow,
+  /gh api \\\n\s+--method GET \\\n\s+"repos\/\$\{\{ github\.repository \}\}\/actions\/workflows\/full-ci\.yml\/runs"/,
+);
+assert.match(releaseWorkflow, /verify-main-full-ci:\n    needs: release-target\n    runs-on:/);
+assert.match(releaseWorkflow, /platform-gates:\n    needs: release-target\n    uses: \.\/\.github\/workflows\/platform\.yml/);
+assert.match(releaseWorkflow, /needs: \[release-target, release-mode, verify-main-full-ci, platform-gates, linux-desktop, build, reproducibility, desktop-macos, desktop-windows\]/);
 assert.match(releaseWorkflow, /token-station-desktop-\$\{\{ matrix\.target \}\}/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/dmg\/\*\.dmg/);
 assert.match(releaseWorkflow, /apps\/desktop\/src-tauri\/target\/\$\{\{ matrix\.target \}\}\/release\/bundle\/macos\/\*\.app\.tar\.gz/);
@@ -25,9 +34,27 @@ for (const asset of ["x86_64.msi", "x86_64.deb", "x86_64.AppImage", "x86_64.rpm"
 }
 assert.doesNotMatch(releaseWorkflow, /^[ \t]+.*\*\.sig[ \t]*$/m);
 assert.match(releaseWorkflow, /Awaiting offline CLI and updater signatures/);
+assert.match(releaseWorkflow, /pattern: dist-\*/);
+assert.match(releaseWorkflow, /pattern: token-station-desktop-\*/);
+assert.match(releaseWorkflow, /collect-formal-release-artifacts\.sh/);
+assert.doesNotMatch(releaseWorkflow, /merge-multiple: true/);
+const publishJob = releaseWorkflow.slice(releaseWorkflow.indexOf("\n  publish:"));
+const trustedCollectorStage = publishJob.indexOf("Stage the trusted formal artifact collector");
+const taggedPublishCheckout = publishJob.indexOf("ref: ${{ needs.release-target.outputs.sha }}");
+const trustedCollectorRun = publishJob.indexOf(
+  '"$RUNNER_TEMP/collect-formal-release-artifacts.sh"',
+  taggedPublishCheckout,
+);
+assert.ok(trustedCollectorStage >= 0 && trustedCollectorStage < taggedPublishCheckout);
+assert.ok(taggedPublishCheckout < trustedCollectorRun);
+assert.doesNotMatch(publishJob, /token-station-windows-msi-lifecycle-logs/);
 
 const desktopWorkflow = read(".github/workflows/desktop-release.yml");
 assert.match(desktopWorkflow, /workflow_dispatch:/);
+assert.match(
+  desktopWorkflow,
+  /gh api \\\n\s+--method GET \\\n\s+"repos\/\$\{\{ github\.repository \}\}\/actions\/workflows\/full-ci\.yml\/runs"/,
+);
 assert.doesNotMatch(desktopWorkflow, /push:\s*\n\s*tags:/);
 assert.match(desktopWorkflow, /verify-main-full-ci:\n    runs-on:/);
 assert.match(desktopWorkflow, /platform-gates:\n    uses: \.\/\.github\/workflows\/platform\.yml/);
@@ -42,11 +69,13 @@ assert.match(
 assert.doesNotMatch(desktopWorkflow, /if: \$\{\{ false \}\}/);
 
 assert.match(linuxWorkflow, /workflow_call:/);
+assert.match(linuxWorkflow, /checkout_ref:/);
 assert.doesNotMatch(linuxWorkflow, /push:\s*\n\s*tags:/);
-assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[verify-main-full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);
+assert.match(releaseWorkflow, /linux-desktop:\n    needs: \[release-target, verify-main-full-ci, platform-gates\]\n    uses: \.\/\.github\/workflows\/linux-desktop\.yml/);
 
 for (const script of [
   "scripts/release-latest-formal.sh",
+  "scripts/collect-formal-release-artifacts.sh",
   "scripts/prepare-formal-release.sh",
   "scripts/sign-formal-release.sh",
   "scripts/publish-formal-release.sh",
@@ -79,6 +108,7 @@ assert.doesNotMatch(publish, /SIGNING_PRIVATE_KEY|release-signing\.key/);
 
 const entry = read("scripts/release-latest-formal.sh");
 assert.match(entry, /start\) start_release/);
+assert.match(entry, /recover-draft\) recover_draft/);
 assert.match(entry, /prepare\) prepare_release/);
 assert.match(entry, /sign\) sign_release/);
 assert.match(entry, /publish\) publish_release/);
@@ -94,10 +124,26 @@ assert.match(entry, /TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED/);
 assert.match(entry, /TOKEN_STATION_RELEASE_PUBKEY_HEX/);
 assert.match(entry, /TOKEN_STATION_UPDATER_PUBKEY/);
 assert.match(entry, /APPLE_CERTIFICATE_PASSWORD/);
+assert.match(entry, /if \[\[ "\$version" != "2\.0\.0" && "\$version" != "2\.1\.1" && "\$version" != "2\.1\.2" && "\$version" != "2\.1\.3" \]\]/);
 assert.match(entry, /WINDOWS_CERTIFICATE_PASSWORD/);
 assert.match(entry, /gh secret list/);
 assert.match(entry, /gh run watch/);
 assert.match(entry, /isDraft,isPrerelease/);
+assert.match(entry, /gh run download/);
+assert.match(entry, /--name "\$artifact"/);
+assert.match(entry, /collect-formal-release-artifacts\.sh/);
+assert.match(entry, /workflowName,event,status,conclusion,url/);
+assert.match(entry, /run \$run_id is not completed/);
+
+assert.match(releaseWorkflow, /--production --unsigned-windows --target x86_64-pc-windows-msvc/);
+assert.match(releaseWorkflow, /needs\.release-target\.outputs\.tag != 'v2\.0\.0' && needs\.release-target\.outputs\.tag != 'v2\.1\.1' && needs\.release-target\.outputs\.tag != 'v2\.1\.2' && needs\.release-target\.outputs\.tag != 'v2\.1\.3'/);
+assert.match(releaseWorkflow, /scripts\/build-desktop\.sh --production --target x86_64-pc-windows-msvc/);
+
+const desktopBuild = read("scripts/build-desktop.sh");
+assert.match(desktopBuild, /--unsigned-windows/);
+assert.match(desktopBuild, /restricted to Token Station 2\.0\.0/);
+assert.match(desktopBuild, /production Windows build needs WINDOWS_CERTIFICATE_THUMBPRINT/);
+assert.match(read(".github/workflows/full-ci.yml"), /tests\/windows-authenticode-audit\.sh/);
 
 const inTreeTransfer = spawnSync(
   path.join(root, "scripts/release-latest-formal.sh"),

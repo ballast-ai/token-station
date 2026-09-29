@@ -1,11 +1,13 @@
-# SCX experimental runtime
+# SCX local classification runtime
 
 This runtime serves one local classifier through private stdin/stdout IPC.
 It does not open a network listener or call an upstream inference API.
 The desktop controller owns its process, queue, timeouts, and routing fallback.
 
-The isolated SCX App enables classification for smart tiers by default.
-Its compact **Local smart tiers** switch remembers the choice across App restarts.
+The standard desktop App supports local classification for smart tiers on macOS Apple Silicon.
+New installations and settings without a saved choice default to off.
+The **Local smart tiers** switch remembers the choice across App restarts.
+Only an explicit enable action or an existing enabled preference starts preparation.
 When enabled, it loads a prepared model in the background at each normal launch.
 If runtime assets are missing, it prepares the pinned assets and then starts classification.
 Preparation, loading, and classifier failures keep existing routing rules available.
@@ -13,7 +15,7 @@ Each enabled launch makes one automatic startup attempt. After correcting a setu
 Turning the switch off stops preparation and the worker to release model memory.
 The preference is stored in `semantic-settings.json` beside the runtime directory.
 Normal shutdown stops the worker without changing this preference.
-The ordinary App and recovery safe mode do not start the classifier.
+Unsupported systems and recovery safe mode do not start the classifier.
 
 The supported setup target is macOS on Apple Silicon with Python 3.11.15.
 The model is `scx-admin/scx-router-v0.1` at revision `b45625de43a3bac2861d3f11b96c15a93f4a026e`.
@@ -28,7 +30,7 @@ Setup searches PATH, `~/.local/bin/uv`, `~/.cargo/bin/uv`, and `/opt/homebrew/bi
 Setup does not install uv through a shell script.
 
 ```sh
-python3 scripts/scx-runtime/setup.py --runtime-dir /private/experiment/semantic-runtime
+python3 scripts/scx-runtime/setup.py --runtime-dir /private/token-station-data/semantic-runtime
 ```
 
 Preparation can download the pinned Python runtime, package wheels, and model files.
@@ -39,7 +41,7 @@ Reuse an explicitly selected, verified local installation without downloading th
 
 ```sh
 python3 scripts/scx-runtime/setup.py \
-  --runtime-dir /private/experiment/semantic-runtime \
+  --runtime-dir /private/token-station-data/semantic-runtime \
   --seed-python-env /local/verified/.venv \
   --seed-model /local/verified/models/scx
 ```
@@ -50,7 +52,7 @@ It does not reuse the seed environment's console scripts or bytecode caches.
 Model seeds must match all pinned model hashes.
 The copied runtime has independent package and model files.
 Its Python interpreter uses uv's persistent managed Python installation.
-Keep that managed Python installation available while using the experimental App.
+Keep that managed Python installation available while using local SCX classification.
 
 Run preparation again to verify and reuse an existing runtime.
 A file lock permits only one preparation process.
@@ -79,9 +81,9 @@ This protocol update does not download or replace the prepared environment or mo
 ## Worker protocol
 
 ```sh
-/private/experiment/semantic-runtime/.venv/bin/python -I \
-  /private/experiment/semantic-runtime/worker.py \
-  --model /private/experiment/semantic-runtime/models/scx
+/private/token-station-data/semantic-runtime/.venv/bin/python -I \
+  /private/token-station-data/semantic-runtime/worker.py \
+  --model /private/token-station-data/semantic-runtime/models/scx
 ```
 
 The worker verifies model hashes, loads locally, and warms inference before readiness:

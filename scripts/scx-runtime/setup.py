@@ -201,7 +201,7 @@ def main():
     os.umask(0o077)
     try:
         if sys.platform != "darwin" or platform.machine() != "arm64":
-            raise ValueError("This experimental runtime requires macOS on Apple Silicon.")
+            raise ValueError("Local SCX routing requires macOS on Apple Silicon.")
         runtime = args.runtime_dir.expanduser().resolve()
         if runtime == Path.home() or runtime == Path("/"):
             raise ValueError("Select a private semantic-runtime directory.")

@@ -175,6 +175,13 @@ impl Fixture {
         self.controller.set_mode(mode).unwrap();
         self.wait_for_state("ready");
     }
+    fn save_enabled_preference(&self) {
+        crate::private_fs::write_atomic_private(
+            &self.directory.join("semantic-settings.json"),
+            b"{\"enabled\":true}\n",
+        )
+        .unwrap();
+    }
     fn wait_for_state(&self, state: &str) {
         let until = Instant::now() + Duration::from_secs(10);
         while self.controller.status().state != state {
@@ -224,9 +231,30 @@ impl Drop for Fixture {
 
 #[test]
 #[cfg(unix)]
+fn missing_preference_stays_off_without_starting_a_worker_or_preparation() {
+    for prepared in [true, false] {
+        let fixture = Fixture::new("pass");
+        if !prepared {
+            fixture.prepare_with("raise RuntimeError('preparation must not run')");
+        }
+        let status = fixture.controller.start_automatic_route().unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.mode, Mode::Off);
+        assert_eq!(status.state, if prepared { "off" } else { "unprepared" });
+        assert!(status.error.is_none());
+        assert!(!fixture.directory.join("semantic-settings.json").exists());
+        let inner = fixture.controller.inner.lock().unwrap();
+        assert!(inner.worker.is_none());
+        assert!(inner.preparation.is_none());
+    }
+}
+
+#[test]
+#[cfg(unix)]
 fn saved_off_survives_reconstruction_and_on_can_restart_the_worker() {
     let mut fixture =
         Fixture::new("print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)");
+    fixture.save_enabled_preference();
     assert!(fixture.controller.start_automatic_route().unwrap().enabled);
     fixture.wait_for_state("ready");
     let status = fixture.controller.set_enabled(false).unwrap();
@@ -448,6 +476,7 @@ fn automatic_start_uses_prepared_assets_once_and_preserves_a_later_off() {
     let fixture = Fixture::new(
         "count=globals().get('count',0)+1; print(json.dumps({'id':job['id'],'status':'ok','tier':'low' if count == 1 else 'high'}),flush=True)",
     );
+    fixture.save_enabled_preference();
     assert_eq!(fixture.controller.status().mode, Mode::Off);
     let started = Instant::now();
     let status = fixture.controller.start_automatic_route().unwrap();
@@ -490,6 +519,7 @@ fn automatic_start_uses_prepared_assets_once_and_preserves_a_later_off() {
 fn automatic_start_prepares_missing_assets_then_serves_requests() {
     let fixture =
         Fixture::new("print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)");
+    fixture.save_enabled_preference();
     fixture.prepare_with("time.sleep(0.15)\n(root/'prepared.json').write_text('fixture')");
     let started = Instant::now();
     assert_eq!(
@@ -512,6 +542,7 @@ fn automatic_start_prepares_missing_assets_then_serves_requests() {
 #[cfg(unix)]
 fn automatic_preparation_failure_keeps_fallback_and_does_not_retry() {
     let fixture = Fixture::new("pass");
+    fixture.save_enabled_preference();
     fixture.prepare_with("sys.exit(7)");
     fixture.controller.start_automatic_route().unwrap();
     fixture.wait_for_state("error");
@@ -543,6 +574,7 @@ fn automatic_preparation_failure_keeps_fallback_and_does_not_retry() {
 #[cfg(unix)]
 fn automatic_preparation_requires_complete_assets_even_after_successful_exit() {
     let fixture = Fixture::new("pass");
+    fixture.save_enabled_preference();
     fixture.prepare_with("pass");
     fixture.controller.start_automatic_route().unwrap();
     fixture.wait_for_state("error");
@@ -554,6 +586,7 @@ fn automatic_preparation_requires_complete_assets_even_after_successful_exit() {
 #[cfg(unix)]
 fn manual_preparation_stays_off_and_takes_precedence_over_automatic_start() {
     let fixture = Fixture::new("pass");
+    fixture.save_enabled_preference();
     fixture.prepare_with("(root/'prepared.json').write_text('fixture')");
     fixture.controller.prepare().unwrap();
     fixture.controller.start_automatic_route().unwrap();
@@ -571,6 +604,7 @@ fn cancelled_automatic_preparation_cannot_replace_off_or_a_new_observe_worker() 
         let fixture = Fixture::new(
             "print(json.dumps({'id':job['id'],'status':'ok','tier':'high'}),flush=True)",
         );
+        fixture.save_enabled_preference();
         fixture.prepare_with("(root/'prepared.json').write_text('fixture')\ntime.sleep(30)");
         fixture.controller.start_automatic_route().unwrap();
         let preparation = Arc::downgrade(

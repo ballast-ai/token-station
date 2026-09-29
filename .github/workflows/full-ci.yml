@@ -221,8 +221,10 @@ jobs:
       - run: tests/package-list-line-endings.sh
       - run: node tests/diagram-supersession.mjs
       - run: node tests/source-release-mode.mjs
+      - run: node tests/macos-signing-import-policy.mjs
       - run: node tests/release-script-variable-order.mjs
       - run: node tests/formal-release-finalization.mjs
+      - run: tests/formal-release-artifact-collection.sh
       - run: node tests/formal-release-notes.mjs
       # Prime the locked Rust dependencies before the test enters its offline signing phase.
       - run: cargo test -p token-station-release --no-run --locked
@@ -236,6 +238,7 @@ jobs:
           version=$(node -p "require('./apps/desktop/package.json').version")
           node scripts/check-release-readiness.mjs --version "$version"
       - run: tests/build-desktop-verbosity.sh
+      - run: tests/windows-authenticode-audit.sh
       - run: tests/desktop-updater-release.sh
       - run: tests/report-legacy-usage.sh
 

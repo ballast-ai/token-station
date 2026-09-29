@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AgentModelGuide from "./AgentModelGuide";
+import { LanguageProvider, useLanguage } from "./LanguageProvider";
 import { ErrorToastProvider } from "./ErrorToast";
 import AgentRoutePage from "../pages/AgentRoutePage";
 import registry from "../../src-tauri/agent-registry/builtin-agents.json";
@@ -18,7 +19,86 @@ beforeEach(() => {
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
 });
 
+afterEach(() => vi.useRealTimers());
+
+function deferredCopy() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 describe("Agent model selection guide", () => {
+  it("ignores an older copy failure after the newest copy succeeds", async () => {
+    const first = deferredCopy();
+    vi.mocked(navigator.clipboard.writeText).mockReturnValueOnce(first.promise).mockResolvedValueOnce(undefined);
+    render(<ErrorToastProvider><AgentModelGuide metadata={metadata} connected /></ErrorToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "复制模型名称" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "复制模型名称" })); });
+    expect(screen.getByRole("status")).toHaveTextContent("已复制");
+    await act(async () => { first.reject(new Error("late denial")); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("已复制");
+  });
+
+  it("does not claim success when an older copy completes after the newest copy fails", async () => {
+    const first = deferredCopy();
+    vi.mocked(navigator.clipboard.writeText).mockReturnValueOnce(first.promise).mockRejectedValueOnce(new Error("denied"));
+    render(<ErrorToastProvider><AgentModelGuide metadata={metadata} connected /></ErrorToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "复制模型名称" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "复制模型名称" })); });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await act(async () => { first.resolve(); });
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("uses the current language when a pending copy fails after a language change", async () => {
+    function LanguageSwitch() {
+      const { setLanguage } = useLanguage();
+      return <button onClick={() => setLanguage("en")}>English</button>;
+    }
+    const pending = deferredCopy();
+    vi.mocked(navigator.clipboard.writeText).mockReturnValueOnce(pending.promise);
+    render(<ErrorToastProvider><LanguageProvider><LanguageSwitch /><AgentModelGuide metadata={metadata} connected /></LanguageProvider></ErrorToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "复制模型名称" }));
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    await act(async () => { pending.reject(new Error("denied")); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Unable to copy the model name. Select and copy it manually.");
+  });
+
+  it("ignores a late copy failure after the guide unmounts", async () => {
+    const pending = deferredCopy();
+    vi.mocked(navigator.clipboard.writeText).mockReturnValueOnce(pending.promise);
+    const { rerender } = render(<ErrorToastProvider><AgentModelGuide metadata={metadata} connected /></ErrorToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "复制模型名称" }));
+    rerender(<ErrorToastProvider><div>Another page</div></ErrorToastProvider>);
+    await act(async () => { pending.reject(new Error("late denial")); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("ignores a pending copy result after selecting another Agent", async () => {
+    const pending = deferredCopy();
+    vi.mocked(navigator.clipboard.writeText).mockReturnValueOnce(pending.promise);
+    const { rerender } = render(<ErrorToastProvider><AgentModelGuide metadata={metadata} connected /></ErrorToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "复制模型名称" }));
+    rerender(<ErrorToastProvider><AgentModelGuide metadata={{ agent_id: "codex", display_name: "Codex" }} connected /></ErrorToastProvider>);
+    await act(async () => { pending.reject(new Error("late denial")); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("keeps feedback visible for 1600 milliseconds after the latest successful copy", async () => {
+    vi.useFakeTimers();
+    render(<AgentModelGuide metadata={metadata} connected />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "复制模型名称" })); });
+    act(() => vi.advanceTimersByTime(1000));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "复制模型名称" })); });
+    act(() => vi.advanceTimersByTime(600));
+    expect(screen.getByRole("status")).toHaveTextContent("已复制");
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  });
+
   it.each(registry.agents.filter((agent) => agent.admission === "supported" || agent.agent_id === "cursor"))(
     "provides guidance for the registered $agent_id identity",
     (agent) => {

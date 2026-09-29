@@ -295,6 +295,7 @@ mod tests {
 
     fn discovery(agent_id: &str, version: Option<&str>) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: agent_id.to_string(),
             executable_path: format!("/tmp/{agent_id}"),
             canonical_path: format!("/tmp/{agent_id}"),

@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use super::config_codec::{ConfigDocument, DocumentFormat};
-use super::types::{BaseUrlShape, ConfigPath, PatchKind, PatchOperation, Platform};
+use super::types::{
+    BaseUrlShape, ConfigPath, ConnectorRuntimePaths, PatchKind, PatchOperation, Platform,
+};
 
 include!(concat!(env!("OUT_DIR"), "/builtin_connectors.rs"));
 
@@ -246,6 +248,14 @@ pub trait Connector: Sync {
     ) -> Result<Vec<CompanionProjection>, String> {
         Ok(Vec::new())
     }
+    fn companion_projections_with_context(
+        &self,
+        primary_target: &Path,
+        input: &ConnectInput<'_>,
+        _runtime_paths: Option<&ConnectorRuntimePaths>,
+    ) -> Result<Vec<CompanionProjection>, String> {
+        self.companion_projections(primary_target, input)
+    }
     fn legacy_companion_format(
         &self,
         _primary_target: &Path,
@@ -295,6 +305,7 @@ pub trait Connector: Sync {
         _primary_target: &Path,
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
+        _runtime_paths: Option<&ConnectorRuntimePaths>,
     ) -> Result<(), String> {
         self.validate_projected(document, input)
     }
@@ -1444,7 +1455,7 @@ mod tests {
             adapter_ready: true,
             model_metadata: Some(&metadata),
         };
-        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json5, "OpenCode").unwrap();
         apply_patch(
             &mut opencode,
             &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),
@@ -1599,7 +1610,7 @@ experimental_bearer_token = "fixture-codex-key"
             adapter_ready: true,
             model_metadata: Some(&metadata),
         };
-        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json5, "OpenCode").unwrap();
         apply_patch(
             &mut opencode,
             &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),

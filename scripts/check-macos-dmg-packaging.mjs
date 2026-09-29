@@ -111,6 +111,25 @@ for (const [label, pattern] of [
 ]) {
   if (!pattern.test(auditor)) failures.push(`scripts/audit-macos-dmg.sh 缺少${label}`);
 }
+for (const coordinate of [
+  "'app=300,240'",
+  "'applications=880,240'",
+  "'readme=590,455'",
+  "'app=300,285'",
+  "'applications=880,285'",
+  "'readme=590,500'",
+]) {
+  if (!auditor.includes(coordinate)) {
+    failures.push(`scripts/audit-macos-dmg.sh lacks exact Finder coordinate ${coordinate}`);
+  }
+}
+if (
+  !/\[\[ "\$actual_finder_layout" == "\$expected_content_finder_layout" \|\| "\$actual_finder_layout" == "\$expected_reported_finder_layout" \]\]/.test(
+    auditor,
+  )
+) {
+  failures.push("scripts/audit-macos-dmg.sh must accept only the two complete Finder coordinate profiles");
+}
 
 const finderLayout = read("packaging/macos/configure-dmg-layout.applescript");
 for (const [label, pattern] of [

@@ -1317,7 +1317,7 @@ describe("desktop station navigation", () => {
   });
 
   it("reveals startup Agent rows in stable order with a capped stagger", async () => {
-    const user = userEvent.setup();
+    vi.useFakeTimers();
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
@@ -1325,20 +1325,32 @@ describe("desktop station navigation", () => {
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
-    render(<App />);
-    await openAgents(user);
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      await act(async () => {
+        view = render(<App />);
+      });
+      await act(async () => {
+        const navigation = screen.getByRole("navigation", { name: /主导航|Main navigation/ });
+        navigation.querySelector<HTMLButtonElement>('button[aria-label="Agent"]')!.click();
+      });
 
-    const firstAgent = await screen.findByRole("button", { name: "Claude Code" });
-    const lastAgent = await screen.findByRole("button", { name: "Hermes Agent" });
-    expect(firstAgent).toHaveClass("agent-master-item-revealing");
-    expect(firstAgent).toHaveStyle({ animationDelay: "0ms" });
-    expect(lastAgent).toHaveClass("agent-master-item-revealing");
-    expect(lastAgent).toHaveStyle({ animationDelay: "300ms" });
+      const firstAgent = screen.getByRole("button", { name: "Claude Code" });
+      const lastAgent = screen.getByRole("button", { name: "Hermes Agent" });
+      expect(firstAgent).toHaveClass("agent-master-item-revealing");
+      expect(firstAgent).toHaveStyle({ animationDelay: "0ms" });
+      expect(lastAgent).toHaveClass("agent-master-item-revealing");
+      expect(lastAgent).toHaveStyle({ animationDelay: "300ms" });
 
-    await waitFor(() => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
       expect(firstAgent).not.toHaveClass("agent-master-item-revealing");
       expect(lastAgent).not.toHaveClass("agent-master-item-revealing");
-    }, { timeout: 1_000 });
+    } finally {
+      view?.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it("publishes discovered Agents together after the background startup scan", async () => {
@@ -3524,7 +3536,7 @@ describe("desktop station navigation", () => {
     }));
   });
 
-  it("restores the encrypted baseline on 恢复官方配置并断开", async () => {
+  it("restores the encrypted pre-connection baseline after confirmation", async () => {
     const user = userEvent.setup();
     const connected = structuredClone(scannedClaude);
     connected.installations[0].managed = true;
@@ -3550,7 +3562,7 @@ describe("desktop station navigation", () => {
 
     render(<App />);
     await openAgent(user, "Claude Code");
-    await user.click(await screen.findByRole("button", { name: "恢复官方配置并断开" }));
+    await user.click(await screen.findByRole("button", { name: "恢复接入前配置并断开" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
       agentId: "claude-code",
       installationPath: "/opt/claude",

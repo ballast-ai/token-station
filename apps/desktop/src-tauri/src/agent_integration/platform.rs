@@ -3,7 +3,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::types::{
-    AgentDescriptor, ConfigFormat, DiscoverySource, EnvValueKind, Platform, ProbeRuntime,
+    AgentDescriptor, ConfigFormat, ConnectorRuntimePaths, DiscoverySource, EnvValueKind, Platform,
+    ProbeRuntime,
 };
 
 const ROOT_VARIABLES: &[&str] = &[
@@ -70,12 +71,32 @@ impl ScanEnvironment {
                 child_environment.insert(name.to_string(), value);
             }
         }
+        add_validated_user_roots(&mut child_environment, &variables, platform);
         Self {
             platform,
             variables,
             path_entries,
             present_environment,
             child_environment,
+        }
+    }
+}
+
+/// Restore only absolute user roots after `env_clear()`. Several Python CLIs,
+/// including Hermes on Windows, need these values to initialize pathlib or
+/// platformdirs before they can print help. Reject relative values so a probe
+/// cannot resolve configuration below Token Station's working directory.
+fn add_validated_user_roots(
+    child_environment: &mut BTreeMap<String, String>,
+    variables: &BTreeMap<String, String>,
+    platform: Platform,
+) {
+    for name in ROOT_VARIABLES {
+        if let Some(value) = variables
+            .get(*name)
+            .filter(|value| is_absolute_for(platform, value))
+        {
+            child_environment.insert((*name).to_string(), value.clone());
         }
     }
 }
@@ -99,19 +120,101 @@ pub(crate) struct ConfigResolution {
     pub inline_config_present: bool,
 }
 
+/// Resolve OpenClaw paths only from the environment captured for this scan.
+pub(crate) fn openclaw_runtime_paths(
+    environment: &ScanEnvironment,
+) -> Result<ConnectorRuntimePaths, String> {
+    let variable = |name: &str| -> Result<Option<&str>, String> {
+        match environment.variables.get(name) {
+            Some(value) if !value.trim().is_empty() => Ok(Some(value.trim())),
+            Some(_) => Err(format!("OpenClaw path variable {name} is invalid.")),
+            None if environment.present_environment.contains(name) => {
+                Err(format!("OpenClaw path variable {name} is invalid."))
+            }
+            None => Ok(None),
+        }
+    };
+    let absolute = |value: &str| -> Result<PathBuf, String> {
+        let normalized = normalize_separators(value);
+        if !is_absolute_for(environment.platform, &normalized)
+            || normalized.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err("OpenClaw runtime paths must be absolute without traversal.".into());
+        }
+        Ok(PathBuf::from(normalized))
+    };
+    let os_home =
+        || -> Result<PathBuf, String> {
+            let value = match variable("HOME")? {
+                Some(value) => Some(value),
+                None => variable("USERPROFILE")?,
+            };
+            absolute(value.ok_or(
+                "OpenClaw runtime home is unavailable. Rescan with a valid home directory.",
+            )?)
+        };
+    let expand = |value: &str, home: &Path| -> Result<PathBuf, String> {
+        let normalized = normalize_separators(value);
+        let path = if normalized == "~" {
+            home.to_path_buf()
+        } else if let Some(relative) = normalized.strip_prefix("~/") {
+            home.join(relative)
+        } else {
+            return absolute(&normalized);
+        };
+        absolute(
+            path.to_str()
+                .ok_or("OpenClaw runtime path must be Unicode.")?,
+        )
+    };
+    let effective_home = match variable("OPENCLAW_HOME")? {
+        Some(value) if value.starts_with('~') => expand(value, &os_home()?)?,
+        Some(value) => absolute(value)?,
+        None => os_home()?,
+    };
+    let state_directory = match variable("OPENCLAW_STATE_DIR")? {
+        Some(value) => expand(value, &effective_home)?,
+        None => {
+            let current = effective_home.join(".openclaw");
+            let legacy = effective_home.join(".clawdbot");
+            if !current
+                .try_exists()
+                .map_err(|_| "Cannot inspect the OpenClaw state directory.")?
+                && legacy
+                    .try_exists()
+                    .map_err(|_| "Cannot inspect the legacy OpenClaw state directory.")?
+            {
+                return Err("OpenClaw uses a legacy state directory. Set OPENCLAW_STATE_DIR explicitly and rescan.".into());
+            }
+            current
+        }
+    };
+    let primary_config_path = match variable("OPENCLAW_CONFIG_PATH")? {
+        Some(value) => expand(value, &effective_home)?,
+        None => state_directory.join("openclaw.json"),
+    };
+    Ok(ConnectorRuntimePaths {
+        primary_config_path,
+        state_directory,
+        effective_home,
+    })
+}
+
 pub(crate) fn executable_candidates(
     descriptor: &AgentDescriptor,
     environment: &ScanEnvironment,
 ) -> Vec<ExecutableCandidate> {
     let mut candidates = Vec::new();
     if descriptor.agent_id == "codex" && environment.platform == Platform::Windows {
-        candidates.extend(windows_store_codex_candidates().into_iter().map(|path| {
-            ExecutableCandidate {
-                path,
-                source: DiscoverySource::PackageManager,
-                path_order: None,
-            }
-        }));
+        candidates.extend(
+            windows_codex_cli_candidates(environment)
+                .into_iter()
+                .map(|path| ExecutableCandidate {
+                    path,
+                    source: DiscoverySource::PackageManager,
+                    path_order: None,
+                }),
+        );
     }
     if descriptor.agent_id == "workbuddy" && environment.platform == Platform::Macos {
         candidates.extend(
@@ -491,102 +594,59 @@ fn macos_python_user_candidates(
         .collect()
 }
 
-#[cfg(target_os = "windows")]
-struct WindowsRuntimeApartment;
+const MAX_CODEX_CLI_DIRECTORIES: usize = 64;
 
-#[cfg(target_os = "windows")]
-impl WindowsRuntimeApartment {
-    fn initialize_mta() -> Option<Self> {
-        use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
-
-        // SAFETY: a successful call, including S_FALSE, is balanced by this
-        // guard's Drop implementation on the same synchronous call stack.
-        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
-            .ok()
-            .map(|()| Self)
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for WindowsRuntimeApartment {
-    fn drop(&mut self) {
-        use windows::Win32::System::WinRT::RoUninitialize;
-
-        // SAFETY: the guard exists only after RoInitialize succeeded on this
-        // thread, and is dropped on the same stack before discovery returns.
-        unsafe { RoUninitialize() };
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn windows_store_codex_candidates() -> Vec<PathBuf> {
-    use windows::core::HSTRING;
-    use windows::Management::Deployment::PackageManager;
-
-    // A desktop process may already be running in an STA. In that case
-    // RoInitialize reports RPC_E_CHANGED_MODE, but WinRT remains usable on
-    // the initialized apartment, so discovery still attempts the read-only API.
-    let _apartment = WindowsRuntimeApartment::initialize_mta();
-    let Ok(manager) = PackageManager::new() else {
+fn windows_codex_cli_candidates(environment: &ScanEnvironment) -> Vec<PathBuf> {
+    let Some(local_app_data) = environment.variables.get("LOCALAPPDATA") else {
         return Vec::new();
     };
-    let Ok(packages) = manager.FindPackagesByUserSecurityId(&HSTRING::new()) else {
+    if !is_absolute_for(Platform::Windows, local_app_data) {
+        return Vec::new();
+    }
+    codex_cli_candidates(Path::new(local_app_data).join("OpenAI/Codex/bin"))
+}
+
+/// Codex desktop stores the runnable CLI below the user's app-data directory.
+/// The similarly named executable in the MSIX package resources is an
+/// access-controlled app resource and cannot be launched by Token Station.
+/// Keep the scan one level deep and return newest-first candidates. Discovery
+/// probes them in this order and keeps the first runnable CLI, so a partial
+/// desktop update cannot hide an older working installation.
+fn codex_cli_candidates(root: PathBuf) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
-
-    let mut candidates = Vec::new();
-    for package in packages {
-        let Ok(id) = package.Id() else {
-            continue;
-        };
-        let Ok(name) = id.Name() else {
-            continue;
-        };
-        if !is_codex_store_package_name(&name.to_string()) {
-            continue;
-        }
-        let Ok(location) = package.InstalledLocation() else {
-            continue;
-        };
-        let Ok(root) = location.Path() else {
-            continue;
-        };
-        candidates.extend(codex_store_relative_entries(PathBuf::from(
-            root.to_string(),
-        )));
-    }
+    let mut candidates = entries
+        .take(MAX_CODEX_CLI_DIRECTORIES)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let directory = entry.path();
+            let directory_metadata = std::fs::symlink_metadata(&directory).ok()?;
+            if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+                return None;
+            }
+            let executable = directory.join("codex.exe");
+            let metadata = std::fs::symlink_metadata(&executable).ok()?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return None;
+            }
+            let modified = metadata.modified().ok();
+            Some((modified, executable))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
     candidates
-}
-
-#[cfg(not(target_os = "windows"))]
-fn windows_store_codex_candidates() -> Vec<PathBuf> {
-    Vec::new()
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn is_codex_store_package_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name == "openai.codex" || name == "openai.chatgpt" || name.starts_with("openai.codex.")
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn codex_store_relative_entries(root: PathBuf) -> Vec<PathBuf> {
-    [
-        ["app", "resources", "codex.exe"].as_slice(),
-        ["resources", "codex.exe"].as_slice(),
-    ]
-    .into_iter()
-    .map(|parts| {
-        parts
-            .iter()
-            .fold(root.clone(), |path, part| path.join(part))
-    })
-    .collect()
+        .into_iter()
+        .map(|(_, executable)| executable)
+        .collect()
 }
 
 fn path_executable_names(name: &str, platform: Platform) -> Vec<String> {
     if platform == Platform::Windows && PathBuf::from(name).extension().is_none() {
-        ["exe", "com", "cmd", "bat", "ps1"]
+        // Discovery intentionally never executes bat/PowerShell shims. Do not
+        // manufacture permanently broken installation records for extensions
+        // rejected by executable_permission().
+        ["exe", "com", "cmd"]
             .into_iter()
             .map(|extension| format!("{name}.{extension}"))
             .collect()
@@ -624,6 +684,23 @@ pub(crate) fn config_candidates(
     environment: &ScanEnvironment,
     installation_path: &std::path::Path,
 ) -> ConfigResolution {
+    if descriptor.agent_id == "openclaw" && !descriptor.config_locations.is_empty() {
+        return match openclaw_runtime_paths(environment) {
+            Ok(paths) => ConfigResolution {
+                candidates: vec![ResolvedConfigCandidate {
+                    path: paths.primary_config_path,
+                    format: ConfigFormat::Json5,
+                }],
+                invalid_environment_names: Vec::new(),
+                inline_config_present: false,
+            },
+            Err(_) => ConfigResolution {
+                candidates: Vec::new(),
+                invalid_environment_names: vec!["OpenClaw runtime paths".into()],
+                inline_config_present: false,
+            },
+        };
+    }
     let mut candidates = Vec::new();
     let mut invalid_environment_names = Vec::new();
     let scoped_match = descriptor.config_locations.iter().any(|location| {
@@ -688,9 +765,15 @@ pub(crate) fn config_candidates(
         }
     }
 
+    if descriptor.agent_id == "opencode" {
+        add_opencode_jsonc_candidates(&mut candidates, environment);
+    }
     let mut seen = BTreeSet::new();
     candidates
         .retain(|candidate| seen.insert(path_identity(&candidate.path, environment.platform)));
+    if descriptor.agent_id == "opencode" {
+        prioritize_opencode_candidates(&mut candidates, environment);
+    }
     ConfigResolution {
         candidates,
         invalid_environment_names,
@@ -699,6 +782,110 @@ pub(crate) fn config_candidates(
                 .present_environment
                 .contains("OPENCODE_CONFIG_CONTENT"),
     }
+}
+
+fn add_opencode_jsonc_candidates(
+    candidates: &mut Vec<ResolvedConfigCandidate>,
+    environment: &ScanEnvironment,
+) {
+    let explicit_file = environment
+        .variables
+        .get("OPENCODE_CONFIG")
+        .filter(|path| is_absolute_for(environment.platform, path))
+        .map(|path| {
+            path_identity(
+                &PathBuf::from(normalize_separators(path)),
+                environment.platform,
+            )
+        });
+    let original = std::mem::take(candidates);
+    for candidate in original {
+        let is_default_json = candidate
+            .path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case("opencode.json"))
+            && explicit_file.as_deref()
+                != Some(path_identity(&candidate.path, environment.platform).as_str());
+        let jsonc = is_default_json.then(|| ResolvedConfigCandidate {
+            path: candidate.path.with_extension("jsonc"),
+            format: candidate.format,
+        });
+        candidates.push(candidate);
+        candidates.extend(jsonc);
+    }
+}
+
+fn prioritize_opencode_candidates(
+    candidates: &mut Vec<ResolvedConfigCandidate>,
+    environment: &ScanEnvironment,
+) {
+    // An explicit file is authoritative and is already the first Registry
+    // candidate. Do not let a different existing global file outrank it.
+    if environment.present_environment.contains("OPENCODE_CONFIG") {
+        return;
+    }
+
+    let rank = |candidate: &ResolvedConfigCandidate| {
+        let jsonc = candidate
+            .path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonc"));
+        match (candidate.path.is_file(), jsonc) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, false) => 2,
+            (false, true) => 3,
+        }
+    };
+
+    if let Some(directory) = environment.variables.get("OPENCODE_CONFIG_DIR") {
+        if is_absolute_for(environment.platform, directory) {
+            let directory = path_identity(
+                &PathBuf::from(normalize_separators(directory)),
+                environment.platform,
+            );
+            let mut scoped = Vec::new();
+            let mut defaults = Vec::new();
+            for candidate in candidates.drain(..) {
+                let parent = candidate
+                    .path
+                    .parent()
+                    .map(|path| path_identity(path, environment.platform));
+                if parent.as_deref() == Some(directory.as_str()) {
+                    scoped.push(candidate);
+                } else {
+                    defaults.push(candidate);
+                }
+            }
+            scoped.sort_by_key(&rank);
+            scoped.extend(defaults);
+            *candidates = scoped;
+            return;
+        }
+    }
+    let mut parent_order = BTreeMap::new();
+    for candidate in candidates.iter() {
+        let parent = candidate
+            .path
+            .parent()
+            .map(|path| path_identity(path, environment.platform))
+            .unwrap_or_default();
+        let next = parent_order.len();
+        parent_order.entry(parent).or_insert(next);
+    }
+    candidates.sort_by_key(|candidate| {
+        let parent = candidate
+            .path
+            .parent()
+            .map(|path| path_identity(path, environment.platform))
+            .unwrap_or_default();
+        (
+            parent_order.get(&parent).copied().unwrap_or(usize::MAX),
+            rank(candidate),
+        )
+    });
 }
 
 pub(crate) fn expand_template(template: &str, environment: &ScanEnvironment) -> Option<PathBuf> {
@@ -822,6 +1009,117 @@ mod tests {
     }
 
     #[test]
+    fn openclaw_paths_keep_config_state_and_home_overrides_independent() {
+        let mut environment = environment(Platform::Linux);
+        environment.variables = BTreeMap::from([
+            ("HOME".into(), "/os-home".into()),
+            ("OPENCLAW_HOME".into(), "/effective-home".into()),
+            ("OPENCLAW_STATE_DIR".into(), "/runtime-state".into()),
+            (
+                "OPENCLAW_CONFIG_PATH".into(),
+                "/config/selected.json".into(),
+            ),
+        ]);
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|entry| entry.agent_id == "openclaw")
+            .unwrap();
+        let paths = openclaw_runtime_paths(&environment).unwrap();
+        assert_eq!(
+            paths.primary_config_path,
+            Path::new("/config/selected.json")
+        );
+        assert_eq!(paths.state_directory, Path::new("/runtime-state"));
+        assert_eq!(paths.effective_home, Path::new("/effective-home"));
+        assert_eq!(
+            config_candidates(descriptor, &environment, Path::new("/bin/openclaw")).candidates[0]
+                .path,
+            paths.primary_config_path
+        );
+        environment.variables.remove("OPENCLAW_CONFIG_PATH");
+        assert_eq!(
+            openclaw_runtime_paths(&environment)
+                .unwrap()
+                .primary_config_path,
+            Path::new("/runtime-state/openclaw.json")
+        );
+        assert_eq!(
+            config_candidates(descriptor, &environment, Path::new("/bin/openclaw"))
+                .candidates
+                .len(),
+            1
+        );
+        environment
+            .variables
+            .insert("OPENCLAW_STATE_DIR".into(), "~/state".into());
+        assert_eq!(
+            openclaw_runtime_paths(&environment)
+                .unwrap()
+                .state_directory,
+            Path::new("/effective-home/state")
+        );
+    }
+
+    #[test]
+    fn openclaw_paths_use_userprofile_without_home_on_windows() {
+        let mut environment = environment(Platform::Windows);
+        environment.variables =
+            BTreeMap::from([("USERPROFILE".into(), "C:\\Users\\tester".into())]);
+        let paths = openclaw_runtime_paths(&environment).unwrap();
+        assert_eq!(paths.effective_home, Path::new("C:/Users/tester"));
+        assert_eq!(
+            paths.state_directory,
+            Path::new("C:/Users/tester/.openclaw")
+        );
+        environment
+            .variables
+            .insert("OPENCLAW_HOME".into(), "D:\\profile".into());
+        environment
+            .variables
+            .insert("OPENCLAW_STATE_DIR".into(), "~\\state".into());
+        assert_eq!(
+            openclaw_runtime_paths(&environment)
+                .unwrap()
+                .state_directory,
+            Path::new("D:/profile/state")
+        );
+    }
+
+    #[test]
+    fn openclaw_paths_reject_missing_invalid_and_legacy_context() {
+        let mut environment = environment(Platform::Linux);
+        environment.variables.clear();
+        assert!(openclaw_runtime_paths(&environment).is_err());
+        environment
+            .variables
+            .insert("HOME".into(), "/fixture-home".into());
+        for value in ["", "relative", "/state/../elsewhere"] {
+            environment
+                .variables
+                .insert("OPENCLAW_STATE_DIR".into(), value.into());
+            assert!(openclaw_runtime_paths(&environment).is_err());
+        }
+        environment.variables.remove("OPENCLAW_STATE_DIR");
+        environment
+            .present_environment
+            .insert("OPENCLAW_STATE_DIR".into());
+        assert!(openclaw_runtime_paths(&environment).is_err());
+        environment.present_environment.clear();
+        environment.platform = current_platform();
+        let root =
+            std::env::temp_dir().join(format!("openclaw-legacy-state-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".clawdbot")).unwrap();
+        environment
+            .variables
+            .insert("HOME".into(), root.to_str().unwrap().into());
+        let result = openclaw_runtime_paths(&environment);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.unwrap_err().contains("legacy state directory"));
+    }
+
+    #[test]
     fn discovery_platform_templates_expand_without_touching_the_filesystem() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/discovery/platform-paths.json"
@@ -894,6 +1192,70 @@ mod tests {
         assert!(paths.contains(&"C:/Tools/claude.exe".to_string()));
         assert!(paths.contains(&"C:/Tools/claude.cmd".to_string()));
         assert!(!paths.contains(&"C:/Tools/claude".to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_scan_passes_only_allowlisted_user_roots_to_windows_probes() {
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let context = ScanEnvironment::from_process(registry.descriptors());
+
+        for name in ["USERPROFILE", "LOCALAPPDATA"] {
+            let expected = context
+                .variables
+                .get(name)
+                .unwrap_or_else(|| panic!("Windows must expose {name}"));
+            assert_eq!(context.child_environment.get(name), Some(expected));
+        }
+        assert!(!context
+            .child_environment
+            .contains_key("TOKEN_STATION_API_KEY"));
+        assert!(!context.child_environment.contains_key("OPENAI_API_KEY"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opencode_existing_jsonc_outranks_json_but_json_remains_the_create_default() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-opencode-jsonc-{}",
+            std::process::id()
+        ));
+        let config_dir = root.join(".config/opencode");
+        let json = config_dir.join("opencode.json");
+        let jsonc = config_dir.join("opencode.jsonc");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "opencode")
+            .unwrap();
+        let mut context = environment(Platform::Windows);
+        context.variables.insert(
+            "USERPROFILE".to_string(),
+            root.to_string_lossy().into_owned(),
+        );
+
+        let missing = config_candidates(descriptor, &context, Path::new("C:/Tools/opencode.exe"));
+        assert_eq!(missing.candidates.first().unwrap().path, json);
+
+        std::fs::write(&jsonc, b"{ // existing\n}\n").unwrap();
+        let existing = config_candidates(descriptor, &context, Path::new("C:/Tools/opencode.exe"));
+        assert_eq!(existing.candidates.first().unwrap().path, jsonc);
+
+        std::fs::write(&json, b"{}\n").unwrap();
+        let both = config_candidates(descriptor, &context, Path::new("C:/Tools/opencode.exe"));
+        assert_eq!(both.candidates.first().unwrap().path, jsonc);
+
+        let xdg = root.join("xdg");
+        context.variables.insert(
+            "XDG_CONFIG_HOME".to_string(),
+            xdg.to_string_lossy().into_owned(),
+        );
+        let xdg_json = xdg.join("opencode/opencode.json");
+        let rooted = config_candidates(descriptor, &context, Path::new("C:/Tools/opencode.exe"));
+        assert_eq!(rooted.candidates.first().unwrap().path, xdg_json);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -972,19 +1334,47 @@ mod tests {
     }
 
     #[test]
-    fn codex_store_identity_and_relative_cli_entries_are_closed() {
-        assert!(is_codex_store_package_name("OpenAI.Codex"));
-        assert!(is_codex_store_package_name("OpenAI.Codex.Preview"));
-        assert!(is_codex_store_package_name("OpenAI.ChatGPT"));
-        assert!(!is_codex_store_package_name("ThirdParty.Codex"));
+    fn codex_desktop_scan_orders_bounded_user_clis_newest_first() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-codex-user-cli-{}",
+            std::process::id()
+        ));
+        let old = root.join("old/codex.exe");
+        let current = root.join("current/codex.exe");
+        let ignored = root.join("not-a-version/nested/codex.exe");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, b"current").unwrap();
+        std::fs::create_dir_all(ignored.parent().unwrap()).unwrap();
+        std::fs::write(&ignored, b"ignored").unwrap();
 
-        let paths = codex_store_relative_entries(PathBuf::from("C:/Program Files/WindowsApps/pkg"));
+        assert_eq!(codex_cli_candidates(root.clone()), vec![current, old]);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn probe_environment_accepts_only_absolute_user_roots() {
+        let variables = BTreeMap::from([
+            ("HOME".to_string(), "relative/home".to_string()),
+            ("XDG_CONFIG_HOME".to_string(), "/safe/config".to_string()),
+            ("LOCALAPPDATA".to_string(), "relative/appdata".to_string()),
+            ("USERPROFILE".to_string(), "C:\\Users\\tester".to_string()),
+        ]);
+
+        let mut unix_child = BTreeMap::new();
+        add_validated_user_roots(&mut unix_child, &variables, Platform::Linux);
         assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("C:/Program Files/WindowsApps/pkg/app/resources/codex.exe"),
-                PathBuf::from("C:/Program Files/WindowsApps/pkg/resources/codex.exe"),
-            ]
+            unix_child,
+            BTreeMap::from([("XDG_CONFIG_HOME".to_string(), "/safe/config".to_string())])
+        );
+
+        let mut windows_child = BTreeMap::new();
+        add_validated_user_roots(&mut windows_child, &variables, Platform::Windows);
+        assert_eq!(
+            windows_child,
+            BTreeMap::from([("USERPROFILE".to_string(), "C:\\Users\\tester".to_string())])
         );
     }
 
@@ -993,7 +1383,6 @@ mod tests {
     // Windows host's temp_dir is `C:\…`, so a `/`-rooted real directory cannot be
     // created there. `macos_npm_prefix` also only runs on the macOS platform, so
     // exercising it on a Windows host adds no coverage — run on non-Windows only.
-    #[cfg(not(target_os = "windows"))]
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn macos_node_agents_include_the_safe_npm_prefix_from_user_config() {

@@ -205,7 +205,11 @@ fn exact_model_pins_precede_classifier_selection() {
         router.route(&request, &[], &candidates())
     );
     request.model = "auto".to_owned();
-    assert!(router.accepts_classifier(&request, &[]));
+    assert!(!router.accepts_classifier(&request, &[]));
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("cheap")),
+        router.route(&request, &[], &candidates())
+    );
 }
 
 #[test]
@@ -749,16 +753,6 @@ fn honor_exact_fails_over_within_the_same_model_across_providers() {
     );
 }
 
-#[test]
-fn honor_exact_treats_auto_as_the_dynamic_routing_sentinel() {
-    let decision = exact_router()
-        .route(&ask_model("auto", "prove this"), &[], &candidates())
-        .expect("auto selects the configured route instead of a literal model");
-
-    assert_ne!(decision.chosen.model, "auto");
-    assert!(!decision.pool.is_empty());
-}
-
 // -- P1-4: RecoveryPolicy separates tier selection from failover --------------
 
 fn ordered_router(backup: &[&str]) -> Router {
@@ -1145,31 +1139,4 @@ fn quota_first_reports_unavailable_when_every_account_is_ejected() {
         .route_quota_first(&ask("hi"), &accounts, None)
         .expect_err("all ejected");
     assert!(matches!(error, NoRoute::Unavailable { .. }));
-}
-
-#[test]
-fn tool_and_output_schemas_contribute_to_context_input_but_not_conversation_difficulty() {
-    let mut request = ChatRequest::new("auto", vec![Message::text(Role::User, "hi")]);
-    request.tools.push(ToolDef {
-        name: "inspect".into(),
-        description: None,
-        parameters: serde_json::json!({}),
-    });
-    request.response_format = Some(ResponseFormat::JsonSchema {
-        json_schema: serde_json::json!({}),
-    });
-    let small = token_station_router_core::RequestFeatures::extract(&request, &[]);
-    request.tools[0].description = Some("tool instructions ".repeat(500));
-    request.tools[0].parameters =
-        serde_json::json!({"description": "parameter schema ".repeat(500)});
-    request.response_format = Some(ResponseFormat::JsonSchema {
-        json_schema: serde_json::json!({"description": "response schema ".repeat(500)}),
-    });
-    let large = token_station_router_core::RequestFeatures::extract(&request, &[]);
-    assert!(
-        large.estimated_input_tokens > 5_000,
-        "actual schema input must not fit a small context window"
-    );
-    assert!(large.estimated_input_tokens > small.estimated_input_tokens);
-    assert_eq!(large.conversation_tokens, small.conversation_tokens);
 }

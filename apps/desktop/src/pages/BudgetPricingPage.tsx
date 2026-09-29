@@ -51,7 +51,6 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
   const formKeyRef = useRef(formKey);
   formKeyRef.current = formKey;
   const writeInFlight = useRef(false);
-  const submittedFormKey = useRef("");
   const [writing, setWriting] = useState(false);
 
   const loadForm = useCallback((selected: string, statuses: BudgetStatus[]) => {
@@ -119,7 +118,6 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
     writeInFlight.current = true;
     setWriting(true);
     const submittedKey = formKeyRef.current;
-    submittedFormKey.current = submittedKey;
     try {
       const statuses = await setAgentBudget(agentId, limitMicros, warning, startMs, endMs, expiryDays);
       setBudgets(statuses);
@@ -141,7 +139,6 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
     writeInFlight.current = true;
     setWriting(true);
     const submittedKey = formKeyRef.current;
-    submittedFormKey.current = submittedKey;
     setBudgetErr("");
     try {
       const statuses = await removeAgentBudget(agentId);
@@ -185,7 +182,12 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
         <div className="budget-form">
           <div className="field-label">
             <span>Agent</span>
-            <Select value={agentId} onValueChange={(selected) => { const change = () => { setAgentId(selected); loadForm(selected, budgets); }; if (baseline === formKeyRef.current || (writing && submittedFormKey.current === formKeyRef.current)) change(); else confirmNavigation(change); }}>
+            <Select disabled={writing} value={agentId} onValueChange={(selected) => {
+              if (writeInFlight.current) return;
+              const change = () => { setAgentId(selected); loadForm(selected, budgets); };
+              if (baseline === formKeyRef.current) change();
+              else confirmNavigation(change);
+            }}>
               <SelectTrigger aria-label="Agent" className="w-full min-h-[34px]">
                 <SelectValue />
               </SelectTrigger>

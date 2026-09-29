@@ -1,6 +1,6 @@
 [package]
 name = "token-station-desktop"
-version = "2.0.0"
+version = "2.1.3"
 description = "token-station — 本地智能路由代理的桌面客户端"
 authors = ["token-station"]
 edition = "2021"
@@ -66,8 +66,7 @@ token-station-private-fs = { path = "../../../crates/private-fs" }
 tauri = { version = "2", default-features = false, features = ["test"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "=0.61.3", features = ["ApplicationModel", "Management_Deployment", "Storage_Search", "Win32_System_WinRT"] }
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 aes = "=0.8.4"

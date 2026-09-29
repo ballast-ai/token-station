@@ -3180,6 +3180,8 @@ mod tests {
         for (id, cache_read, short, long, observed) in [
             ("invalid-cache", 11, 0, 0, true),
             ("invalid-ttl", 0, 4, 3, true),
+            ("invalid-reasoning", 0, 0, 0, true),
+            ("invalid-historical-reasoning", 0, 0, 0, false),
             ("missing-observed-output", 0, 0, 0, true),
             ("incomplete-observation", 0, 0, 0, true),
             ("missing-historical-input", 0, 0, 0, false),
@@ -3195,7 +3197,7 @@ mod tests {
                 cache_write_tokens: 5,
                 cache_write_5m_tokens: short,
                 cache_write_1h_tokens: long,
-                ..Usage::default()
+                reasoning_tokens: if id.contains("reasoning") { 100 } else { 2 },
             });
             record.usage_observation =
                 observed.then_some(token_station_metrics::UsageObservation {
@@ -3206,7 +3208,7 @@ mod tests {
                     cache_write_tokens: Some(5),
                     cache_write_5m_tokens: Some(short),
                     cache_write_1h_tokens: Some(long),
-                    ..token_station_metrics::UsageObservation::default()
+                    reasoning_tokens: Some(if id.contains("reasoning") { 100 } else { 2 }),
                 });
             record.cost_kind = CostKind::Unknown;
             record.cost_micros = None;
@@ -3231,7 +3233,7 @@ mod tests {
         );
         let store = SqliteStore::open(&path).unwrap();
         let rows = store.read_recent(10).unwrap();
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 9);
         for row in rows {
             if row.request_id == "valid" {
                 assert_eq!(row.cost_kind, CostKind::Estimated);

@@ -145,19 +145,30 @@ describe("AgentRoutePage multi-install admission", () => {
     render(<AgentRoutePage {...props} />);
     expect(await screen.findByText("已接管 · 代理未运行")).toBeInTheDocument();
     expect(screen.queryByText("需修复")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "恢复官方配置并断开" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "恢复接入前配置并断开" })).toBeEnabled();
   });
 
-  it("labels normal SCX disconnection as restoring the pre-connection configuration", async () => {
-    vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "1");
+  it.each([
+    ["en", "Restore pre-connection configuration & disconnect", "Restore this Agent's managed fields to their pre-connection values, then disconnect. Unrelated fields are preserved."],
+    ["zh-CN", "恢复接入前配置并断开", "将此 Agent 的受管字段恢复为接入前的值，然后断开；其他字段保持不变。"],
+    ["zh-TW", "恢復連線前設定並中斷連線", "將此 Agent 的受管欄位恢復為連線前的值，然後中斷連線；其他欄位保持不變。"],
+    ["ja", "接続前の設定を復元して切断", "この Agent の管理フィールドを接続前の値に戻して切断します。他のフィールドは保持されます。"],
+  ])("describes saved configuration restoration in the standard App in %s", async (language, label, description) => {
+    window.localStorage.setItem("token-station-language", language);
+    vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "0");
     render(<AgentRoutePage {...connectionFixture(true)} pageMode="connection" />);
-    const disconnect = await screen.findByRole("button", { name: "恢复接入前配置并断开" });
+    const disconnect = await screen.findByRole("button", { name: label });
     expect(disconnect).toBeEnabled();
-    expect(disconnect).toHaveAttribute("title", "将此 Agent 的受管字段恢复为接入前的值，然后断开；其他字段保持不变。");
-    expect(screen.queryByRole("button", { name: "恢复官方配置并断开" })).not.toBeInTheDocument();
+    expect(disconnect).toHaveAttribute("title", description);
   });
 
-  it("explains the SCX client switch and keeps Grok Build changes behind the existing confirmation", async () => {
+  it.each([
+    ["en", "Preview & connect", "Confirm connection changes", "Confirm connection", "The original Token Station App stays installed."],
+    ["zh-CN", "预览并接入", "确认接入改动", "确认接入", "原 Token Station App 保留。"],
+    ["zh-TW", "預覽並連線", "確認連線變更", "確認連線", "原 Token Station App 保留。"],
+    ["ja", "プレビューして接続", "接続変更を確認", "接続を確認", "元の Token Station App は保持されます。"],
+  ])("omits isolated App notices while retaining connection confirmation in %s", async (language, previewName, dialogName, confirmName, oldNotice) => {
+    window.localStorage.setItem("token-station-language", language);
     vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "1");
     const props = connectionFixture();
     props.metadata = { agent_id: "grok-build", legacy_kind: null, display_name: "Grok Build", icon_key: "grok", admission: "supported" };
@@ -179,16 +190,17 @@ describe("AgentRoutePage multi-install admission", () => {
     } as never);
     const user = userEvent.setup();
     render(<AgentRoutePage {...props} serveRunning pageMode="connection" />);
-    expect(screen.getByText(/接入会将所选 Agent 切换到 SCX 实验网关/)).toHaveTextContent("断开时恢复接入前配置。原 Token Station App 保留。");
+    expect(document.body).not.toHaveTextContent(oldNotice);
+    expect(document.body).not.toHaveTextContent("127.0.0.1:18787");
     expect(applyAgentPlan).not.toHaveBeenCalled();
 
-    await user.click(await screen.findByRole("button", { name: "预览并接入" }));
-    const preview = await screen.findByRole("dialog", { name: "确认接入改动" });
+    await user.click(await screen.findByRole("button", { name: previewName }));
+    const preview = await screen.findByRole("dialog", { name: dialogName });
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(preview).toHaveTextContent('"http://127.0.0.1:18787/agents/grok-build/v1"');
-    expect(preview).toHaveTextContent("原 Token Station App 保留。");
+    expect(preview).not.toHaveTextContent(oldNotice);
     expect(applyAgentPlan).not.toHaveBeenCalled();
-    await user.click(within(preview).getByRole("button", { name: "确认接入" }));
+    await user.click(within(preview).getByRole("button", { name: confirmName }));
     await waitFor(() => expect(applyAgentPlan).toHaveBeenCalledExactlyOnceWith("scx-grok-connect", "scx-confirmation"));
   });
 
@@ -204,7 +216,7 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.queryByText(/SCX 实验网关/)).not.toBeInTheDocument();
   });
 
-  it("does not promise the normal SCX connection workflow for Cursor", async () => {
+  it("keeps Cursor on its separate official configuration workflow", async () => {
     vi.stubEnv("VITE_TOKEN_STATION_SCX_EXPERIMENT", "1");
     vi.mocked(getCursorProviderStatus).mockResolvedValue({ state: "connected", message: null });
     const props = connectionFixture();
@@ -1290,7 +1302,7 @@ describe("AgentRoutePage multi-install admission", () => {
       </ErrorToastProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "恢复官方配置并断开" }));
+    await user.click(screen.getByRole("button", { name: "恢复接入前配置并断开" }));
 
     const conflict = await screen.findByRole("alertdialog", { name: "配置文件已被修改" });
     expect(conflict).toHaveTextContent("env.ANTHROPIC_BASE_URL");
@@ -1311,7 +1323,7 @@ describe("AgentRoutePage multi-install admission", () => {
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
   });
 
-  it("恢复官方配置成功后的缓存刷新失败不反转恢复结果", async () => {
+  it("keeps a successful configuration restore when cache refresh fails", async () => {
     const user = userEvent.setup();
     const found = installation("/opt/homebrew/bin/claude", "2.1.211");
     found.managed = true;
@@ -1370,7 +1382,7 @@ describe("AgentRoutePage multi-install admission", () => {
       </ErrorToastProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "恢复官方配置并断开" }));
+    await user.click(screen.getByRole("button", { name: "恢复接入前配置并断开" }));
     const restorePreview = await screen.findByRole("dialog", { name: "确认恢复备份" });
     await user.click(within(restorePreview).getByRole("button", { name: "恢复备份并断开" }));
 
@@ -1654,7 +1666,7 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(screen.getByText("需修复")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "恢复官方配置并断开" }));
+    await user.click(screen.getByRole("button", { name: "恢复接入前配置并断开" }));
 
     await waitFor(() => expect(getAgentDrift).toHaveBeenCalledWith(
       "opencode",

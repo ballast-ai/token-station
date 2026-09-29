@@ -260,6 +260,9 @@ fn split_origin(url: &str) -> Result<(String, &str), EndpointError> {
     if authority.contains('@') {
         return Err(EndpointError::CarriesUserinfo);
     }
+    if authority.chars().any(char::is_whitespace) {
+        return Err(EndpointError::AuthorityCarriesWhitespace);
+    }
 
     Ok((format!("{scheme}{}", authority.to_ascii_lowercase()), rest))
 }
@@ -270,6 +273,7 @@ pub enum EndpointError {
     NotHttp,
     MissingHost,
     CarriesUserinfo,
+    AuthorityCarriesWhitespace,
     CarriesQueryOrFragment,
     AmbiguousPath,
 }
@@ -281,6 +285,9 @@ impl fmt::Display for EndpointError {
             Self::MissingHost => f.write_str("a provider endpoint must name a host"),
             Self::CarriesUserinfo => f.write_str(
                 "a provider endpoint must not carry userinfo; name the credential in `auth` and let the host inject it",
+            ),
+            Self::AuthorityCarriesWhitespace => f.write_str(
+                "a provider endpoint host must not contain whitespace; a stray space makes a loopback address parse as a remote host",
             ),
             Self::CarriesQueryOrFragment => f.write_str(
                 "a provider endpoint must not carry a query or fragment; that is where an API key gets pasted",
@@ -450,6 +457,29 @@ mod tests {
             ProviderEndpoint::try_new("https://user:sk-live-abc@api.openai.com/v1"),
             Err(EndpointError::CarriesUserinfo)
         );
+    }
+
+    #[test]
+    fn endpoint_rejects_whitespace_in_the_authority() {
+        // A stray space around the port makes the whole authority parse as a
+        // hostname, so a loopback address is classified as remote and the
+        // operator sees an unrelated HTTPS error. Refuse it at the source.
+        for raw in [
+            "http://127.0.0.1: 9443/v1",
+            "http://127.0.0.1 :9443/v1",
+            "http:// 127.0.0.1:9443/v1",
+            "https://api.example .com/v1",
+        ] {
+            assert_eq!(
+                ProviderEndpoint::try_new(raw),
+                Err(EndpointError::AuthorityCarriesWhitespace),
+                "{raw}"
+            );
+        }
+
+        // The same guard closes `permits`, so a whitespace-bearing descriptor
+        // can never be authorized against a well-formed endpoint.
+        assert!(!endpoint("http://127.0.0.1:9443/v1").permits("http://127.0.0.1: 9443/v1/models"));
     }
 
     #[test]

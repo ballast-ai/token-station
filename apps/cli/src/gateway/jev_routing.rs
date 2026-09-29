@@ -43,6 +43,8 @@ impl Gateway {
         ) && decision.decided_by == DecidedBy::Classifier
             && decision.pool == suggestion.tier.pool()
         {
+            decision.features.estimated_input_tokens =
+                attempt_machine::estimated_input_with_schemas(request, hints);
             retain_free_fallbacks(&mut decision, &self.free_upstreams);
             self.jev.finish(suggestion, true);
             Ok(decision)

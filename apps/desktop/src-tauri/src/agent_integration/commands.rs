@@ -311,6 +311,7 @@ impl ScanSnapshot {
 
 #[derive(Clone, Eq, PartialEq)]
 struct DiscoveryBinding {
+    runtime_paths: Option<super::types::ConnectorRuntimePaths>,
     agent_id: String,
     canonical_path: String,
     version_normalized: Option<String>,
@@ -321,6 +322,7 @@ struct DiscoveryBinding {
 impl From<&DiscoveryRecord> for DiscoveryBinding {
     fn from(value: &DiscoveryRecord) -> Self {
         Self {
+            runtime_paths: value.runtime_paths.clone(),
             agent_id: value.agent_id.clone(),
             canonical_path: value.canonical_path.clone(),
             version_normalized: value.version_normalized.clone(),
@@ -1548,6 +1550,7 @@ impl AgentCommandState {
                     Path::new(&owned.target_config_path),
                     &document,
                     &input,
+                    record.runtime_paths.as_ref(),
                 )
                 .is_ok()
             {
@@ -2947,7 +2950,7 @@ mod tests {
                 DocumentFormat::Json5,
                 "{ models: { providers: {} }, agents: { defaults: {} } }",
             ),
-            ("opencode-v1", DocumentFormat::Json, r#"{"provider":{}}"#),
+            ("opencode-v1", DocumentFormat::Json5, r#"{"provider":{}}"#),
             (
                 "workbuddy-v1",
                 DocumentFormat::Json,
@@ -3061,6 +3064,7 @@ mod tests {
 
     fn record(target: &Path, conflict: bool) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),
@@ -3844,7 +3848,7 @@ mod tests {
                 primary: LifecycleFileFixture {
                     path: root.join("home/.config/opencode/opencode.json"),
                     baseline: br#"{"provider":null,"keep":"opencode"}"#,
-                    format: DocumentFormat::Json,
+                    format: DocumentFormat::Json5,
                     marker: "opencode",
                 },
                 companions: Vec::new(),
@@ -3879,6 +3883,13 @@ mod tests {
     fn lifecycle_record(case: &LifecycleCase) -> DiscoveryRecord {
         let mut installation = record(&case.primary.path, false);
         installation.agent_id = case.agent_id.to_string();
+        if case.agent_id == "openclaw" {
+            installation.runtime_paths = Some(super::super::types::ConnectorRuntimePaths {
+                primary_config_path: case.primary.path.clone(),
+                state_directory: case.primary.path.parent().unwrap().to_path_buf(),
+                effective_home: case.primary.path.parent().unwrap().join("home"),
+            });
+        }
         installation.executable_path = case.installation_path.clone();
         installation.canonical_path = case.installation_path.clone();
         installation.version_raw = Some(case.version.to_string());
@@ -4788,6 +4799,7 @@ mod tests {
         assert_eq!(decode_token(&"af".repeat(32)).unwrap(), [0xaf; 32]);
 
         let targetless = DiscoveryRecord {
+            runtime_paths: None,
             config_candidates: Vec::new(),
             ..record(Path::new("/tmp/unused"), false)
         };
@@ -5746,6 +5758,90 @@ mod tests {
     }
 
     #[test]
+    fn openclaw_commands_bind_planning_and_connected_checks_to_runtime_paths() {
+        let root = scratch("openclaw-bound-paths");
+        let state = state("openclaw-bound-paths");
+        let mut case = non_codex_lifecycle_cases(&root)
+            .into_iter()
+            .find(|case| case.agent_id == "openclaw")
+            .unwrap();
+        case.primary.path = root.join("config/openclaw.json");
+        case.companions = vec![LifecycleFileFixture {
+            path: root.join("state/agents/main/agent/models.json"),
+            baseline: br#"{"providers":{"tokenstation":{"apiKey":"old-key","baseUrl":"http://old.invalid/v1","models":[{"id":"auto"}]}}}"#,
+            format: DocumentFormat::Json,
+            marker: "auto",
+        }];
+        seed_lifecycle_case(&case);
+        let mut installation = lifecycle_record(&case);
+        installation.runtime_paths.as_mut().unwrap().state_directory = root.join("state");
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog.clone(), vec![installation.clone()]);
+        let runtime = runtime("vk-bound-paths");
+        let plan = state
+            .plan_connection(
+                case.agent_id,
+                &case.installation_path,
+                Some(case.version),
+                "bound-paths",
+                &runtime,
+            )
+            .unwrap();
+        let mut changed_context = installation.clone();
+        changed_context
+            .runtime_paths
+            .as_mut()
+            .unwrap()
+            .state_directory = root.join("other-state");
+        install_scan(&state, catalog.clone(), vec![changed_context]);
+        let error = state
+            .apply_from_cached_scan(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "bound-paths",
+                &[PlanIntent::Connect],
+                Some(&runtime),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "discovery_changed_after_plan");
+        assert_eq!(
+            std::fs::read(&case.companions[0].path).unwrap(),
+            case.companions[0].baseline
+        );
+        install_scan(&state, catalog, vec![installation.clone()]);
+        apply_lifecycle_connection(&state, &case, &runtime, "bound-paths");
+        assert!(state
+            .installation_connected(&installation, &runtime)
+            .unwrap());
+        let connected_catalog = std::fs::read(&case.companions[0].path).unwrap();
+        std::fs::write(&case.companions[0].path, case.companions[0].baseline).unwrap();
+        assert!(!state
+            .installation_connected(&installation, &runtime)
+            .unwrap());
+        std::fs::write(&case.companions[0].path, connected_catalog).unwrap();
+        let disconnect = state
+            .plan_disconnect(case.agent_id, &case.installation_path, "bound-paths")
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &disconnect.plan.operation_id,
+                &disconnect.confirmation_token,
+                "bound-paths",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(&case.companions[0].path).unwrap()
+            )
+            .unwrap(),
+            serde_json::from_slice::<serde_json::Value>(case.companions[0].baseline).unwrap()
+        );
+        clean_lifecycle_case(&state, &root);
+    }
+
+    #[test]
     fn every_non_codex_connector_completes_the_production_command_lifecycle() {
         // Keep fixture roots compact: Claude Desktop's four-file layout plus
         // atomic-write suffixes otherwise crosses classic Windows MAX_PATH.
@@ -5861,7 +5957,7 @@ mod tests {
             .projection
             .files
             .iter()
-            .find(|file| file.target_config_path == case.companions[0].path.to_string_lossy())
+            .find(|file| file.target_config_path.ends_with(".credentials.yaml"))
             .expect("DeepSeek credentials companion must be present in the disconnect review");
         assert!(
             credential_projection

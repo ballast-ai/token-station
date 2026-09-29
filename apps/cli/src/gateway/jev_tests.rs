@@ -143,6 +143,7 @@ impl Fixture {
             agents: Vec::new(),
             skipped_agents: Vec::new(),
             home_router: None,
+            home_dynamic_router: None,
             agent_routers: std::sync::RwLock::new(BTreeMap::new()),
             supported_agent_ids: BTreeSet::new(),
             upstreams: BTreeMap::new(),
@@ -269,6 +270,52 @@ fn jev_valid_tier_uses_the_router_and_retains_stream_and_tool_requirements() {
 }
 
 #[test]
+fn jev_exact_auto_stays_local_and_the_host_dynamic_variant_can_classify() {
+    let fixture = Fixture::new(true);
+    let mut config = config();
+    config.honor_exact_model = true;
+    let (exact, dynamic) = router_with_dynamic_variant(config, "fixture").unwrap();
+    let request = request();
+    let mut candidates = candidates();
+    let mut literal_auto = candidates[0].clone();
+    literal_auto.target = target("auto");
+    literal_auto.capability.model = "auto".into();
+    candidates.push(literal_auto);
+    let baseline = exact.route(&request, &[], &candidates).unwrap();
+    assert_eq!(fixture.route(&exact, &request, &[], &candidates), baseline);
+    assert_eq!(baseline.chosen, target("auto"));
+    assert_eq!(fixture.endpoint.hits.load(Ordering::SeqCst), 0);
+    let decision = fixture.route(&dynamic, &request, &[], &candidates);
+    assert_eq!(decision.chosen, target("high"));
+    assert_eq!(decision.decided_by, DecidedBy::Classifier);
+    assert_eq!(fixture.endpoint.hits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn applied_cloud_classification_keeps_the_host_schema_receipt_estimate() {
+    let fixture = Fixture::new(true);
+    let router = Router::new(config()).unwrap();
+    let mut request = request();
+    request.tools.push(ToolDef {
+        name: "inspect".into(),
+        description: Some("Inspect a document".into()),
+        parameters: json!({"description":"schema ".repeat(2000)}),
+    });
+    request.response_format = Some(token_station_protocol::ResponseFormat::JsonSchema {
+        json_schema: json!({"description":"output ".repeat(1000)}),
+    });
+    let candidates = candidates();
+    let baseline = fixture
+        .gateway
+        .route_with_mode(&router, &request, &[], &candidates, "fixture")
+        .unwrap();
+    assert!(baseline.features.estimated_input_tokens > 1000);
+    let decision = fixture.route(&router, &request, &[], &candidates);
+    assert_eq!(decision.decided_by, DecidedBy::Classifier);
+    assert_eq!(decision.features, baseline.features);
+}
+
+#[test]
 fn jev_explicit_pins_rules_hints_and_non_tier_modes_have_no_egress() {
     let fixture = Fixture::new(true);
     for mode in ["pin", "rule", "hint", "direct", "quota"] {
@@ -366,7 +413,10 @@ fn jev_unusable_tiers_keep_the_complete_baseline() {
         }
         assert_eq!(
             fixture.route(&router, &request, &[], &candidates),
-            router.route(&request, &[], &candidates).unwrap(),
+            fixture
+                .gateway
+                .route_with_mode(&router, &request, &[], &candidates, "test")
+                .unwrap(),
             "{constraint}"
         );
     }

@@ -144,6 +144,11 @@ An explicitly pinned session profile remains a user override. Remove that pin if
 
 OpenClaw can retain a separate key in each agent's `models.json`.
 Token Station synchronizes existing tokenstation keys and URLs in these catalogs during connection.
+The scan resolves runtime catalogs from `OPENCLAW_STATE_DIR`, independently from `OPENCLAW_CONFIG_PATH`.
+Without a state override, it uses `.openclaw` under `OPENCLAW_HOME`, `HOME`, or `USERPROFILE`, in that order.
+Custom `agentDir` paths beginning with `~` use the same effective home.
+If only a legacy `.clawdbot` directory exists, set `OPENCLAW_STATE_DIR` explicitly and rescan.
+Invalid or missing runtime path context blocks connection. Rescan after changing these environment settings.
 It includes these fields in encrypted snapshots, revision checks, rollback, restore, and disconnect.
 It preserves other providers and model definitions. It does not create missing catalogs or edit the authentication database.
 

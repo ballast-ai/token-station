@@ -714,7 +714,7 @@
             "suffix": null
           },
           "platform_defaults": {},
-          "format": "json"
+          "format": "json5"
         },
         {
           "env_override": {
@@ -728,7 +728,7 @@
             "windows": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${USERPROFILE}/.config/opencode/opencode.json"],
             "wsl": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${HOME}/.config/opencode/opencode.json"]
           },
-          "format": "json"
+          "format": "json5"
         }
       ],
       "protocol_binding": {

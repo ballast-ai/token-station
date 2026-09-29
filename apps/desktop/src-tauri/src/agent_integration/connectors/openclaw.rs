@@ -10,7 +10,9 @@ use crate::agent_integration::config_codec::{
     render_document, semantic_json,
 };
 use crate::agent_integration::plan::read_config_source;
-use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
+use crate::agent_integration::types::{
+    ConfigPath, ConnectorRuntimePaths, PatchKind, PatchOperation,
+};
 
 const PROVIDER_PATH: &[&str] = &["models", "providers", "tokenstation"];
 const PRIMARY_PATH: &[&str] = &["agents", "defaults", "model", "primary"];
@@ -72,11 +74,17 @@ fn model_value(input: &ConnectInput<'_>) -> serde_json::Value {
 
 const MAX_AGENT_CATALOGS: usize = 128;
 
-fn existing_agent_directories(primary: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    let state_dir = primary
-        .parent()
-        .ok_or("OpenClaw configuration has no parent directory.")?;
-    let root = state_dir.join("agents");
+fn existing_agent_directories(
+    primary: &Path,
+    runtime_paths: &ConnectorRuntimePaths,
+) -> Result<BTreeSet<PathBuf>, String> {
+    if primary != runtime_paths.primary_config_path
+        || !runtime_paths.state_directory.is_absolute()
+        || !runtime_paths.effective_home.is_absolute()
+    {
+        return Err("OpenClaw runtime path context does not match the selected configuration. Rescan OpenClaw.".into());
+    }
+    let root = runtime_paths.state_directory.join("agents");
     let mut directories = BTreeSet::new();
     match std::fs::symlink_metadata(&root) {
         Ok(metadata) => {
@@ -124,14 +132,14 @@ fn existing_agent_directories(primary: &Path) -> Result<BTreeSet<PathBuf>, Strin
                 let value = value
                     .as_str()
                     .ok_or("OpenClaw agentDir must be a path string.")?;
-                let directory = if let Some(relative) = value.strip_prefix("~/") {
-                    PathBuf::from(
-                        std::env::var_os("HOME")
-                            .ok_or("Cannot resolve the OpenClaw agent home directory.")?,
-                    )
-                    .join(relative)
+                let value = value.trim();
+                let normalized = value.replace('\\', "/");
+                let directory = if normalized == "~" {
+                    runtime_paths.effective_home.clone()
+                } else if let Some(relative) = normalized.strip_prefix("~/") {
+                    runtime_paths.effective_home.join(relative)
                 } else {
-                    PathBuf::from(value)
+                    PathBuf::from(normalized)
                 };
                 if !directory.is_absolute()
                     || directory
@@ -271,14 +279,29 @@ impl Connector for OpenClawConnector {
 
     fn companion_projections(
         &self,
+        _primary_target: &Path,
+        _input: &ConnectInput<'_>,
+    ) -> Result<Vec<CompanionProjection>, String> {
+        Err(
+            "openclaw_runtime_context_missing: Rescan OpenClaw before reading runtime catalogs."
+                .into(),
+        )
+    }
+
+    fn companion_projections_with_context(
+        &self,
         primary_target: &Path,
         input: &ConnectInput<'_>,
+        runtime_paths: Option<&ConnectorRuntimePaths>,
     ) -> Result<Vec<CompanionProjection>, String> {
+        let runtime_paths = runtime_paths.ok_or(
+            "openclaw_runtime_context_missing: Rescan OpenClaw before reading runtime catalogs.",
+        )?;
         let token = input
             .token
             .ok_or("OpenClaw requires a local virtual key.")?;
         let mut projections = Vec::new();
-        for directory in existing_agent_directories(primary_target)? {
+        for directory in existing_agent_directories(primary_target, runtime_paths)? {
             match std::fs::symlink_metadata(&directory) {
                 Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -403,9 +426,12 @@ impl Connector for OpenClawConnector {
         primary_target: &Path,
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
+        runtime_paths: Option<&ConnectorRuntimePaths>,
     ) -> Result<(), String> {
         self.validate_projected(document, input)?;
-        for companion in self.companion_projections(primary_target, input)? {
+        for companion in
+            self.companion_projections_with_context(primary_target, input, runtime_paths)?
+        {
             let cached = parse_source_bytes(
                 Some(companion.source_bytes.as_slice()),
                 companion.format,
@@ -428,6 +454,108 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn runtime_catalogs_expand_custom_agent_dirs_with_the_captured_home() {
+        let root = std::env::temp_dir().join(format!(
+            "openclaw-custom-home-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let main = root.join("config/openclaw.json");
+        let runtime_paths = ConnectorRuntimePaths {
+            primary_config_path: main.clone(),
+            state_directory: root.join("state"),
+            effective_home: root.join("effective-home"),
+        };
+        let custom = runtime_paths.effective_home.join("custom/models.json");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(custom.parent().unwrap()).unwrap();
+        std::fs::write(
+            &main,
+            br#"{"agents":{"list":[{"id":"custom","agentDir":"~/custom"}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &custom,
+            br#"{"providers":{"tokenstation":{"apiKey":"old-key"}}}"#,
+        )
+        .unwrap();
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/v1",
+            token: Some("new-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let projections = CONNECTOR
+            .companion_projections_with_context(&main, &input, Some(&runtime_paths))
+            .unwrap();
+        assert_eq!(projections.len(), 1);
+        assert_eq!(projections[0].target_path, custom);
+        assert!(
+            CONNECTOR
+                .companion_projections_with_context(&main, &input, None)
+                .err()
+                .unwrap()
+                .contains("openclaw_runtime_context_missing")
+        );
+        assert!(CONNECTOR.companion_projections(&main, &input).is_err());
+        let mut different_target = runtime_paths;
+        different_target.primary_config_path = root.join("other.json");
+        assert!(
+            CONNECTOR
+                .companion_projections_with_context(&main, &input, Some(&different_target))
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_catalogs_use_captured_state_directory_instead_of_config_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-openclaw-paths-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let main = root.join("config/openclaw.json");
+        let runtime_paths = ConnectorRuntimePaths {
+            primary_config_path: main.clone(),
+            state_directory: root.join("state"),
+            effective_home: root.join("home"),
+        };
+        let catalog = runtime_paths
+            .state_directory
+            .join("agents/main/agent/models.json");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        std::fs::write(&main, b"{}").unwrap();
+        std::fs::write(
+            &catalog,
+            br#"{"providers":{"tokenstation":{"apiKey":"old","baseUrl":"http://old.invalid/v1"}}}"#,
+        )
+        .unwrap();
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/v1",
+            token: Some("current-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let projections = CONNECTOR
+            .companion_projections_with_context(&main, &input, Some(&runtime_paths))
+            .unwrap();
+        let actual_targets: Vec<_> = projections
+            .iter()
+            .map(|projection| projection.target_path.clone())
+            .collect();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(actual_targets, vec![catalog]);
+    }
+
+    #[test]
     fn cached_runtime_credentials_follow_the_connection_and_preserve_other_fields() {
         let root = std::env::temp_dir().join(format!(
             "token-station-openclaw-auth-{}-{}",
@@ -438,6 +566,11 @@ mod tests {
                 .as_nanos()
         ));
         let main = root.join("openclaw.json");
+        let runtime_paths = ConnectorRuntimePaths {
+            primary_config_path: main.clone(),
+            state_directory: root.clone(),
+            effective_home: root.join("home"),
+        };
         let models = root.join("agents/main/agent/models.json");
         let custom = root.join("custom-agent");
         std::fs::create_dir_all(models.parent().unwrap()).unwrap();
@@ -474,10 +607,12 @@ mod tests {
         );
         assert!(
             CONNECTOR
-                .validate_connected_configuration(&main, &connected, &input)
+                .validate_connected_configuration(&main, &connected, &input, Some(&runtime_paths))
                 .is_err()
         );
-        let projections = CONNECTOR.companion_projections(&main, &input).unwrap();
+        let projections = CONNECTOR
+            .companion_projections_with_context(&main, &input, Some(&runtime_paths))
+            .unwrap();
         assert_eq!(projections.len(), 2);
         for projection in projections {
             let after: serde_json::Value =
@@ -499,7 +634,10 @@ mod tests {
                 projection.source_bytes.as_slice()
             );
         }
-        for projection in CONNECTOR.companion_projections(&main, &input).unwrap() {
+        for projection in CONNECTOR
+            .companion_projections_with_context(&main, &input, Some(&runtime_paths))
+            .unwrap()
+        {
             std::fs::write(
                 &projection.target_path,
                 projection.projected_bytes.as_slice(),
@@ -508,19 +646,23 @@ mod tests {
         }
         assert!(
             CONNECTOR
-                .validate_connected_configuration(&main, &connected, &input)
+                .validate_connected_configuration(&main, &connected, &input, Some(&runtime_paths))
                 .is_ok()
         );
         std::fs::remove_file(&models).unwrap();
         std::fs::remove_file(custom.join("models.json")).unwrap();
         assert!(
             CONNECTOR
-                .companion_projections(&main, &input)
+                .companion_projections_with_context(&main, &input, Some(&runtime_paths))
                 .unwrap()
                 .is_empty()
         );
         std::fs::write(&models, b"{broken").unwrap();
-        assert!(CONNECTOR.companion_projections(&main, &input).is_err());
+        assert!(
+            CONNECTOR
+                .companion_projections_with_context(&main, &input, Some(&runtime_paths))
+                .is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

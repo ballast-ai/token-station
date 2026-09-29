@@ -30,6 +30,14 @@ If images fail, open **Routing**. When the same channel has a model with verifie
 The button names the destination. Clicking it applies that model to text and images, at that model's pricing.
 A request format error does not prove that the selected model lacks image support. Check the image format if switching is unnecessary.
 
+Open a model's management panel and select **Verify vision** to test that exact offering.
+The check sends one synthetic image challenge through the configured transport. It does not send your images or conversations.
+A correct answer marks the offering **Verified**. An explicit image refusal marks it **Unsupported**.
+Authentication failures, rate limits, malformed replies, and inconclusive answers preserve the existing capability state.
+The result and safe error details appear on the model row. Closing and reopening the panel preserves a running check and its feedback.
+Changed credentials or plugins invalidate an in-flight result. Saved capability changes apply to a running Gateway automatically.
+If you stop the Gateway, capability application does not start it again.
+
 ## Search requirements
 
 | Agent | Requirement or limit |

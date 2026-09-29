@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, Copy, Info } from "lucide-react";
 import type { AgentRouteView, AgentUiMetadataView } from "../api";
 import AgentCapabilityGuide from "./AgentCapabilityGuide";
@@ -114,19 +114,26 @@ export default function AgentModelGuide({ metadata, connected, route }: {
 }) {
   const { copy } = useLocalizedCopy();
   const { showError } = useErrorToast();
-  const [copiedAgent, setCopiedAgent] = useState<string | null>(null);
+  const [copiedResult, setCopiedResult] = useState<{ agentId: string; request: number } | null>(null);
+  const copyRequest = useRef(0);
+  const latestCopy = useRef(copy);
   const guide = modelGuide(metadata.agent_id, copy);
-  const copied = copiedAgent === metadata.agent_id;
+  const copied = copiedResult?.agentId === metadata.agent_id;
 
-  useEffect(() => {
-    setCopiedAgent(null);
+  useLayoutEffect(() => {
+    latestCopy.current = copy;
+  }, [copy]);
+
+  useLayoutEffect(() => {
+    setCopiedResult(null);
+    return () => { copyRequest.current += 1; };
   }, [metadata.agent_id]);
 
   useEffect(() => {
-    if (copiedAgent === null) return;
-    const timer = window.setTimeout(() => setCopiedAgent(null), 1600);
+    if (copiedResult === null) return;
+    const timer = window.setTimeout(() => setCopiedResult(null), 1600);
     return () => window.clearTimeout(timer);
-  }, [copiedAgent]);
+  }, [copiedResult]);
 
   if (!guide) return null;
   const name = metadata.display_name;
@@ -136,12 +143,15 @@ export default function AgentModelGuide({ metadata, connected, route }: {
 
   async function copyModel() {
     if (!guide?.model) return;
+    const request = ++copyRequest.current;
     try {
       await navigator.clipboard.writeText(guide.model);
-      setCopiedAgent(metadata.agent_id);
+      if (request !== copyRequest.current) return;
+      setCopiedResult({ agentId: metadata.agent_id, request });
     } catch {
-      setCopiedAgent(null);
-      showError(copy(
+      if (request !== copyRequest.current) return;
+      setCopiedResult(null);
+      showError(latestCopy.current(
         "Unable to copy the model name. Select and copy it manually.",
         "无法复制模型名称，请手动选中并复制。",
         "無法複製模型名稱，請手動選取並複製。",

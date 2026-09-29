@@ -358,7 +358,7 @@ impl AccountingTap {
     }
 }
 
-/// Require complete observed usage and consistent cache subsets before estimating.
+/// Require complete observed usage and consistent token subsets before estimating.
 /// Historical receipts without metadata retain their existing numeric semantics.
 pub(crate) fn can_estimate(usage: &Usage, observation: Option<UsageObservation>) -> bool {
     let mut usage = *usage;
@@ -380,6 +380,7 @@ pub(crate) fn can_estimate(usage: &Usage, observation: Option<UsageObservation>)
             .cache_write_5m_tokens
             .checked_add(usage.cache_write_1h_tokens)
             .is_some_and(|tiers| tiers <= usage.cache_write_tokens)
+        && usage.reasoning_tokens <= usage.output_tokens
 }
 
 #[cfg(test)]

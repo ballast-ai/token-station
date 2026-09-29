@@ -71,5 +71,43 @@
   "parallel_tool_calls": true,
   "responses_tool_strict": {
     "read_marker": false
-  }
+  },
+  "token_station_private_native_input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Read the marker."
+        },
+        {
+          "type": "input_image",
+          "image_url": "https://example.test/marker.png",
+          "detail": "low"
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_1",
+      "name": "read_marker",
+      "arguments": "{\"path\":\"marker.txt\"}"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Reading the marker."
+        }
+      ]
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_1",
+      "output": "M4_OK"
+    }
+  ]
 }

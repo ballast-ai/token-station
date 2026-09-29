@@ -32,7 +32,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("SemanticRoutingSwitch", () => {
-  it("hides the control and stops polling when the ordinary App reports unavailable", async () => {
+  it("hides the control and stops polling when the backend reports unavailable", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     vi.mocked(getSemanticStatus).mockResolvedValue(status({ available: false, enabled: false, mode: "off", state: "off" }));
     const view = render(<SemanticRoutingSwitch />);
@@ -41,6 +41,24 @@ describe("SemanticRoutingSwitch", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
     expect(getSemanticStatus).toHaveBeenCalledOnce();
     expect(setSemanticEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["en", "Local smart tiers", "First enable prepares a local runtime and downloads about 2.5 GB of model files. Install uv first. Classification then runs on this device."],
+    ["zh-CN", "本地智能分档", "首次开启会准备本地运行环境并下载约 2.5 GB 模型文件，请先安装 uv。准备完成后，分类在本机运行。"],
+    ["zh-TW", "本機智慧分檔", "首次啟用會準備本機執行環境並下載約 2.5 GB 模型檔案，請先安裝 uv。準備完成後，分類在本機執行。"],
+    ["ja", "ローカルスマート分層", "初回の有効化時にローカル実行環境を準備し、約 2.5 GB のモデルをダウンロードします。事前に uv をインストールしてください。準備後の分類はこのデバイスで実行します。"],
+  ])("explains first-use preparation without enabling classification in %s", async (language, label, description) => {
+    window.localStorage.setItem("token-station-language", language);
+    vi.mocked(getSemanticStatus).mockResolvedValue(status({ enabled: false, mode: "off", state: "off", model_ready: false }));
+    render(<SemanticRoutingSwitch />);
+    const control = await screen.findByRole("switch", { name: label });
+    expect(control).not.toBeChecked();
+    expect(control).toBeEnabled();
+    expect(screen.getByText(description)).toBeVisible();
+    expect(control).toHaveAccessibleDescription(expect.stringContaining(description));
+    expect(setSemanticEnabled).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("reflects saved intent while preparing and allows one pending Off request", async () => {

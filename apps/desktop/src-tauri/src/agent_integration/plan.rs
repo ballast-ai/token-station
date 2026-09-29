@@ -373,7 +373,11 @@ fn build_connection_or_refresh_plan(
         &operations,
         &connector.sensitive_paths(),
     );
-    let companion_raw = connector.companion_projections(target_path, input)?;
+    let companion_raw = connector.companion_projections_with_context(
+        target_path,
+        input,
+        discovery.runtime_paths.as_ref(),
+    )?;
     let mut companions = Vec::with_capacity(companion_raw.len());
     let mut related_config_paths = Vec::with_capacity(companion_raw.len());
     let mut companion_diff = Vec::new();
@@ -1539,6 +1543,7 @@ mod tests {
 
     fn discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),

@@ -286,7 +286,7 @@ impl SemanticController {
 
     /// Applies the saved startup preference once without replacing later choices.
     /// Missing assets are prepared in the background before the worker starts.
-    /// The experimental desktop host owns whether this policy is enabled.
+    /// The desktop host owns platform support and startup admission.
     ///
     /// # Errors
     /// Background preparation and worker failures are reported in status.
@@ -313,7 +313,7 @@ impl SemanticController {
         const INVALID: &str = "Local SCX settings are invalid. Classification remains off. Save a new switch setting to retry.";
         let metadata = match std::fs::symlink_metadata(&self.settings_path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(_) => return Err(READ_ERROR.into()),
         };
         if !metadata.is_file() || metadata.len() > 1024 {

@@ -153,9 +153,7 @@ impl Router {
     /// Those host modes can compile into a tiered core configuration.
     #[must_use]
     pub fn accepts_classifier(&self, request: &ChatRequest, hints: &[AgentHint]) -> bool {
-        if self.config.routing_mode != RoutingMode::Tiered
-            || (self.config.honor_exact_model && request.model != "auto")
-        {
+        if self.config.routing_mode != RoutingMode::Tiered || self.config.honor_exact_model {
             return false;
         }
         let features = RequestFeatures::extract(request, hints);
@@ -189,9 +187,8 @@ impl Router {
     ) -> Result<Decision, NoRoute> {
         let features = RequestFeatures::extract(request, hints);
 
-        // Exact-model Agents pin a concrete caller model. `auto` is the host's
-        // explicit dynamic-routing sentinel, not a literal upstream model.
-        if self.config.honor_exact_model && request.model != "auto" {
+        // Exact-model Agents pin the caller's model instead of tier-routing it.
+        if self.config.honor_exact_model {
             return self.route_exact(request, features, candidates);
         }
 

@@ -90,7 +90,7 @@ export default function SemanticRoutingSwitch({ overriddenByJev = false }: { ove
           checked={status.enabled}
           disabled={pending}
           aria-busy={pending}
-          aria-describedby={`${id}-note${message ? ` ${id}-state` : ""}`}
+          aria-describedby={`${id}-note${!status.model_ready ? ` ${id}-setup` : ""}${message ? ` ${id}-state` : ""}`}
           onCheckedChange={(enabled) => void changeEnabled(enabled)}
         />
         <label htmlFor={id}>{copy("Local smart tiers", "本地智能分档", "本機智慧分檔", "ローカルスマート分層")}</label>
@@ -100,6 +100,14 @@ export default function SemanticRoutingSwitch({ overriddenByJev = false }: { ove
           ? copy("Jev takes priority. This switch keeps your local preference. Jev failures use existing rules without local classification.", "Jev 优先，本地开关仅保留设置。Jev 失败时使用原有规则，不调用本地分档。", "Jev 優先，本機開關僅保留設定。Jev 失敗時使用原有規則，不呼叫本機分檔。", "Jev を優先します。このスイッチはローカル設定を保持します。Jev が失敗した場合、ローカル分類を呼ばずに既存のルールを使用します。")
           : copy("Off releases model memory and uses the original routing rules.", "关闭后释放模型内存，使用原有路由规则。", "關閉後釋放模型記憶體，使用原有規則。", "オフにするとモデルのメモリを解放し、既存のルールを使用します。")}
       </p>
+      {!status.model_ready && <p className="semantic-routing-switch-note" id={`${id}-setup`}>
+        {copy(
+          "First enable prepares a local runtime and downloads about 2.5 GB of model files. Install uv first. Classification then runs on this device.",
+          "首次开启会准备本地运行环境并下载约 2.5 GB 模型文件，请先安装 uv。准备完成后，分类在本机运行。",
+          "首次啟用會準備本機執行環境並下載約 2.5 GB 模型檔案，請先安裝 uv。準備完成後，分類在本機執行。",
+          "初回の有効化時にローカル実行環境を準備し、約 2.5 GB のモデルをダウンロードします。事前に uv をインストールしてください。準備後の分類はこのデバイスで実行します。",
+        )}
+      </p>}
       {message && <p className={`semantic-routing-switch-state${hasError ? " is-error" : ""}`} id={`${id}-state`} role={hasError ? "alert" : "status"}>{message}</p>}
     </div>
   );

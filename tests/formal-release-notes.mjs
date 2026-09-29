@@ -15,10 +15,10 @@ const currentVersion = JSON.parse(
   fs.readFileSync(path.join(root, "apps/desktop/package.json"), "utf8"),
 ).version;
 
-function check(name, contents) {
+function check(name, contents, version = "2.0.0") {
   const file = path.join(testDir, name);
   fs.writeFileSync(file, contents);
-  return spawnSync(process.execPath, [checker, "--version", "2.0.0", "--file", file], {
+  return spawnSync(process.execPath, [checker, "--version", version, "--file", file], {
     cwd: root,
     encoding: "utf8",
   });
@@ -40,9 +40,76 @@ try {
 
   const formal = check(
     "formal.md",
-    "# Token Station v2.0.0\n\nThis stable release contains signed packages for supported platforms.\n",
+    [
+      "# Token Station v2.0.0",
+      "",
+      "This stable release contains signed packages for supported platforms.",
+      "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.",
+      "",
+    ].join("\n"),
   );
   assert.equal(formal.status, 0, formal.stderr);
+
+  const missingWindowsWarning = check(
+    "missing-windows-warning.md",
+    "# Token Station v2.0.0\n\nThis stable release contains signed packages for supported platforms.\n",
+  );
+  assert.equal(missingWindowsWarning.status, 1);
+  assert.match(missingWindowsWarning.stderr, /Windows MSI/);
+
+  const missingV21Warning = check(
+    "v21-missing-warning.md",
+    "# Token Station v2.1.1\n\nThis stable release improves Agent routing and configuration recovery.\n",
+    "2.1.1",
+  );
+  assert.equal(missingV21Warning.status, 1, "v2.1.1 must disclose the unsigned MSI");
+  assert.match(missingV21Warning.stderr, /Windows MSI/);
+  const v21Warning = check(
+    "v21-warning.md",
+    "# Token Station v2.1.1\n\nThis stable release improves Agent routing.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
+    "2.1.1",
+  );
+  assert.equal(v21Warning.status, 0, v21Warning.stderr);
+
+  const missingV212Warning = check(
+    "v212-missing-warning.md",
+    "# Token Station v2.1.2\n\nThis stable release fixes image routing and Provider vision verification.\n",
+    "2.1.2",
+  );
+  assert.equal(missingV212Warning.status, 1, "v2.1.2 must disclose the unsigned MSI");
+  assert.match(missingV212Warning.stderr, /Windows MSI/);
+  const v212Warning = check(
+    "v212-warning.md",
+    "# Token Station v2.1.2\n\nThis stable release fixes image routing.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
+    "2.1.2",
+  );
+  assert.equal(v212Warning.status, 0, v212Warning.stderr);
+
+  const missingV213Warning = check(
+    "v213-missing-warning.md",
+    "# Token Station v2.1.3\n\nThis stable release restores the desktop launch animation.\n",
+    "2.1.3",
+  );
+  assert.equal(missingV213Warning.status, 1, "v2.1.3 must disclose the unsigned MSI");
+  assert.match(missingV213Warning.stderr, /Windows MSI/);
+  const v213Warning = check(
+    "v213-warning.md",
+    "# Token Station v2.1.3\n\nThis stable release restores the launch animation.\nThe Windows MSI is not Authenticode-signed and can show an unknown publisher warning.\n",
+    "2.1.3",
+  );
+  assert.equal(v213Warning.status, 0, v213Warning.stderr);
+
+  const laterVersionNotes = path.join(testDir, "later-version.md");
+  fs.writeFileSync(
+    laterVersionNotes,
+    "# Token Station v2.0.1\n\nThis stable release contains signed packages for supported platforms.\n",
+  );
+  const laterVersion = spawnSync(
+    process.execPath,
+    [checker, "--version", "2.0.1", "--file", laterVersionNotes],
+    { cwd: root, encoding: "utf8" },
+  );
+  assert.equal(laterVersion.status, 0, laterVersion.stderr);
 
   for (const [name, marker] of [
     ["preview.md", "This preview adds a new desktop package."],
@@ -51,14 +118,29 @@ try {
     ["unnotarized.md", "The macOS package is unnotarized."],
     ["chinese-preview.md", "\u8fd9是测试版。"],
   ]) {
-    const result = check(name, `# Token Station v2.0.0\n\n${marker}\n`);
+    const result = check(
+      name,
+      [
+        "# Token Station v2.0.0",
+        "",
+        "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.",
+        marker,
+        "",
+      ].join("\n"),
+    );
     assert.equal(result.status, 1, `${name} unexpectedly passed`);
     assert.match(result.stderr, /formal release notes check failed/);
   }
 
   const wrongVersion = check(
     "wrong-version.md",
-    "# Token Station v1.9.0\n\nThis stable release contains signed packages for supported platforms.\n",
+    [
+      "# Token Station v1.9.0",
+      "",
+      "This stable release contains signed packages for supported platforms.",
+      "The Windows MSI is not Authenticode-signed and can show an unknown publisher warning.",
+      "",
+    ].join("\n"),
   );
   assert.equal(wrongVersion.status, 1);
   assert.match(wrongVersion.stderr, /first heading/);

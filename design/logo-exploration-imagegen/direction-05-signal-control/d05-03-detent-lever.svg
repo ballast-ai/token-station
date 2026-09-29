@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <g id="mark">
-    <path fill="#182133" transform="rotate(-18 256 256)" d="M88 208h56v36h44v-36h28v48h48v-48h32v40h44v-40h84v96H88z"/>
-    <rect x="216" y="208" width="48" height="48" fill="#D89A2B" transform="rotate(-18 256 256)"/>
-  </g>
-</svg>

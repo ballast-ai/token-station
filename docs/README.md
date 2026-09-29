@@ -5,7 +5,7 @@
 - [Claude Code with OpenAI-compatible providers](guides/claude-code-openai-compatible-providers.md)
 - [Codex with DeepSeek](guides/codex-deepseek.md)
 - [Enterprise managed routing](guides/enterprise-managed-routing.md)
-- [Local SCX desktop experiment](guides/scx-desktop-experiment.md)
+- [Local SCX routing](guides/scx-desktop-experiment.md)
 - [Jev cloud routing](guides/jev-cloud-routing.md)
 - [Hermes Agent](guides/hermes-agent.md)
 - [OpenClaw](guides/openclaw.md)

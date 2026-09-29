@@ -292,6 +292,112 @@ impl MockUpstream {
         )
     }
 
+    fn start_response_then_hanging(
+        first_response: Vec<u8>,
+        response_prefix: &'static [u8],
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let port = listener.local_addr().expect("bound").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let response_started = Arc::new(AtomicBool::new(false));
+        let peer_closed = Arc::new(AtomicBool::new(false));
+        let hanging_stop = Arc::new(AtomicBool::new(false));
+        let record = Arc::clone(&seen);
+        let counter = Arc::clone(&hits);
+        let started = Arc::clone(&response_started);
+        let closed = Arc::clone(&peer_closed);
+        let stop = Arc::clone(&hanging_stop);
+        let hanging_worker = std::thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("retry listener becomes cancellable");
+            let accept_before_stop = |label: &str, deadline: Option<Instant>| {
+                loop {
+                    if stop.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => return Some(blocking_mock_stream(stream)),
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && deadline.is_none_or(|deadline| Instant::now() < deadline) =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            panic!("{label} did not arrive before the mock deadline");
+                        }
+                        Err(error) => panic!("{label} accept failed: {error}"),
+                    }
+                }
+            };
+            let Some(mut first) = accept_before_stop("first upstream request", None) else {
+                return;
+            };
+            record
+                .lock()
+                .expect("recorder")
+                .push(read_http_request(&mut first));
+            counter.fetch_add(1, Ordering::SeqCst);
+            first
+                .write_all(&first_response)
+                .expect("first response writes");
+            first.flush().expect("first response flushes");
+            drop(first);
+
+            let Some(mut second) = accept_before_stop(
+                "retry upstream request",
+                Some(Instant::now() + Duration::from_secs(5)),
+            ) else {
+                return;
+            };
+            record
+                .lock()
+                .expect("recorder")
+                .push(read_http_request(&mut second));
+            counter.fetch_add(1, Ordering::SeqCst);
+            second
+                .write_all(response_prefix)
+                .expect("retry response prefix writes");
+            second.flush().expect("retry response prefix flushes");
+            started.store(true, Ordering::SeqCst);
+            second
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("read timeout sets");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut byte = [0_u8; 1];
+            while !stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+                match second.read(&mut byte) {
+                    Ok(0) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+            let _ = second.shutdown(Shutdown::Both);
+        });
+        Self {
+            port,
+            seen,
+            hits,
+            response_started,
+            peer_closed,
+            hanging_stop: Some(hanging_stop),
+            hanging_worker: Some(hanging_worker),
+        }
+    }
+
     fn start_hanging_with_prefix(response_prefix: &'static [u8]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
         let port = listener.local_addr().expect("bound").port();
@@ -306,7 +412,20 @@ impl MockUpstream {
         let closed = Arc::clone(&peer_closed);
         let stop = Arc::clone(&hanging_stop);
         let hanging_worker = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("hanging upstream accepts");
+            listener.set_nonblocking(true).expect("cancellable accept");
+            let stream = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("hanging upstream accept failed: {error}"),
+                }
+            };
+            let mut stream = blocking_mock_stream(stream);
             record
                 .lock()
                 .expect("recorder")
@@ -381,6 +500,18 @@ impl MockUpstream {
             worker.join().expect("hanging upstream exits cleanly");
         }
     }
+}
+
+fn blocking_mock_stream(stream: TcpStream) -> TcpStream {
+    // macOS inherits nonblocking mode from the listener. A read timeout alone
+    // does not make accepted sockets wait for the request's first bytes.
+    stream
+        .set_nonblocking(false)
+        .expect("accepted mock stream becomes blocking");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("bounded mock request read");
+    stream
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Seen {
@@ -2276,7 +2407,9 @@ fn refused_redirect_keeps_its_response_head_in_the_http_trace() {
     );
 
     assert_eq!(status, 502);
-    settle();
+    // The receipt is persisted after the HTTP trace, whereas the client can
+    // receive the 502 before either write completes. Await that real boundary.
+    let _receipt = last_row(&proxy.data_dir);
     let directory = proxy
         .data_dir
         .join(token_station_cli::bodylog::BODY_DIR_NAME);
@@ -2310,14 +2443,15 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
     let proxy = start_proxy(&mock, &key);
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        let response = agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -2328,10 +2462,13 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
                 })
                 .to_string(),
             )
-            .expect("proxy sends stream headers");
-        let status = response.status().as_u16();
-        let _ = response.into_body().read_to_string();
-        status
+            .map(|response| {
+                let status = response.status().as_u16();
+                let _ = response.into_body().read_to_string();
+                status
+            })
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -2372,9 +2509,13 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_50
         mock.peer_closed(),
         "the cancelled worker closes the upstream socket"
     );
+    let status = result_rx
+        .recv_timeout(cleanup_deadline.saturating_duration_since(Instant::now()))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
     assert_eq!(
-        client.join().expect("client joins"),
-        503,
+        status, 503,
         "an uncommitted stream cancelled by server drain is explicitly retryable"
     );
 
@@ -2392,26 +2533,16 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let proxy = start_proxy(&mock, &key);
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                // `timeout_recv_response`, not `timeout_global`. The global
-                // clock starts inside `send`, so it also covers connecting and
-                // writing the request — and then keeps running while the main
-                // thread waits for arrival and decides to cancel. None of that
-                // is what this test claims. On a loaded 4-core runner sharing
-                // 128 parallel tests, that pre-cancel stretch is what expired,
-                // which is why the budget went 5s -> 15s -> 60s and still
-                // failed: each raise bought margin for the scheduler rather
-                // than for the proxy. This clock starts once the request is
-                // written and the client is waiting on the proxy, which is
-                // exactly the interval the claim is about, so 15s bounds a
-                // hang without re-proving the runner.
-                .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
+                // The test starts its completion deadline after cancellation.
+                .timeout_recv_response(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -2421,13 +2552,12 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the cancelled request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
-    // 10s, not 3s: a loaded runner can starve this thread before the client's
-    // request lands, and that delay no longer eats the client's budget.
+    // Bound arrival separately from completion after cancellation.
     let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while (mock.hits() == 0 || proxy.control.in_flight() == 0)
         && std::time::Instant::now() < arrival_deadline
@@ -2435,8 +2565,14 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(mock.hits(), 1);
+    assert_eq!(proxy.control.in_flight(), 1);
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the cancelled request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
     settle();
     let row = last_row(&proxy.data_dir);
     assert_eq!(row["status"], "Integer(503)");
@@ -6380,6 +6516,17 @@ fn a_failing_upstream_is_ejected_bypassed_probed_and_restored() {
     );
     assert_eq!(primary.hits(), 4, "the degraded primary took the probe");
 
+    // HTTP bytes arrive before the worker settles health. The fifth persisted
+    // receipt proves that the probe settled before the next route decision.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while request_count(&proxy.data_dir) < 5 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the successful probe must settle before checking restored health"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
     // The probe succeeded, so the primary is fully back: config order wins.
     let (status, _) = ask();
     assert_eq!(status, 200);
@@ -6632,14 +6779,15 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
     let proxy = start_south_header_auth_production_proxy(&mock, "synthetic-azure-drain-secret");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -6649,9 +6797,9 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained Header Auth request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -6672,7 +6820,12 @@ fn production_header_auth_drain_cancels_io_without_legacy_replay() {
     assert_eq!(seen[0].authorization, None);
 
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -7041,14 +7194,15 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     let proxy = start_south_production_proxy(&mock, "sk-south-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -7058,9 +7212,9 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained South request")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -7070,7 +7224,12 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     }
     assert_eq!(mock.hits(), 1, "South request reached the upstream once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -7109,14 +7268,15 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
     let proxy = start_south_streaming_production_proxy(&mock, "sk-south-stream-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/chat/completions"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .send(
@@ -7127,9 +7287,9 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
                 })
                 .to_string(),
             )
-            .expect("proxy answers the drained South stream")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -7139,7 +7299,12 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
     }
     assert_eq!(mock.hits(), 1, "South stream reached the upstream once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -7471,6 +7636,122 @@ fn south_stream_deadline_hides_host_private_policy_from_the_agent_renderer() {
 
 #[test]
 #[cfg(feature = "builtin-plugins")]
+fn south_image_authentication_never_retries_or_falls_back() {
+    assert_south_image_terminal_contract(false);
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn south_image_deadline_hides_private_policy_and_stops_fallback() {
+    assert_south_image_terminal_contract(true);
+}
+
+#[cfg(feature = "builtin-plugins")]
+fn assert_south_image_terminal_contract(deadline: bool) {
+    let refusal = json!({
+        "error": { "message": "Authentication required: this model does not support image attachments." }
+    });
+    let mock = if deadline {
+        MockUpstream::start_hanging()
+    } else {
+        MockUpstream::start_response_then_hanging(
+            http_json(401, &refusal.to_string()),
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        )
+    };
+    let fallback = ConnectionTrap::start(Some(http_json(
+        500,
+        &json!({ "error": { "message": "fallback must not run" } }).to_string(),
+    )));
+    let (config, data_dir) = south_image_terminal_config(&mock, &fallback);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    let gateway = Arc::new(
+        Gateway::new_with_provider_runtime(
+            &config,
+            Arc::new(token_station_metrics::NoopRecorder),
+            runtime.handle().clone(),
+        )
+        .expect("South marker gateway assembles"),
+    );
+    let replies = runtime.block_on(async {
+        let worker_gateway = Arc::clone(&gateway);
+        tokio::task::spawn_blocking(move || {
+            let ctx = token_station_cli::request_context::RequestContext::detached(
+                Duration::from_millis(1_400),
+                Duration::from_secs(1),
+            );
+            let mut replies = Vec::new();
+            worker_gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                json!({
+                    "model": "auto",
+                    "stream": true,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "Inspect the attachment." },
+                            { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
+                        ]
+                    }]
+                })
+                .to_string()
+                .as_bytes(),
+                &mut |reply| {
+                    replies.push(reply);
+                    true
+                },
+            );
+            replies
+        })
+        .await
+        .expect("blocking worker joins")
+    });
+
+    let Some(Reply::BeginJson(reply)) = replies.first() else {
+        panic!("expected a rendered terminal JSON error");
+    };
+    assert_eq!(
+        reply.status,
+        if deadline { 504 } else { 401 },
+        "unexpected error: {}",
+        reply.body
+    );
+    let rendered: Value = serde_json::from_str(&reply.body).expect("marker renderer returns JSON");
+    assert_eq!(rendered["saw_private_marker"], json!(false));
+    assert_eq!(
+        mock.hits(),
+        1,
+        "a terminal image error cannot replay through legacy or retry without media"
+    );
+    assert_eq!(
+        fallback.hits(),
+        0,
+        "the terminal error forbids a fallback upstream attempt"
+    );
+    let seen = mock.seen();
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["type"],
+        "image_url"
+    );
+    assert!(!seen[0].body.to_string().contains("Image omitted"));
+    drop(gateway);
+    drop(runtime);
+    mock.finish_hanging();
+    fallback.finish();
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
 #[allow(clippy::too_many_lines)] // The fixture owns both provider lifetimes and the deadline assertion.
 fn south_image_fallback_keeps_the_image_and_hides_deadline_policy() {
     let refusal = json!({
@@ -7545,7 +7826,7 @@ fn south_image_fallback_keeps_the_image_and_hides_deadline_policy() {
                     "messages": [{
                         "role": "user",
                         "content": [
-                            { "type": "text", "text": "Continue without the attachment." },
+                            { "type": "text", "text": "Inspect the attachment." },
                             { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
                         ]
                     }]
@@ -7595,6 +7876,46 @@ fn south_image_fallback_keeps_the_image_and_hides_deadline_policy() {
     drop(runtime);
     fallback.finish_hanging();
     std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[cfg(feature = "builtin-plugins")]
+fn south_image_terminal_config(
+    mock: &MockUpstream,
+    fallback: &ConnectionTrap,
+) -> (ClientConfig, PathBuf) {
+    let (config_path, data_dir) =
+        write_south_probe_config(mock, "sk-south-media-retry-marker", true);
+    token_station_cli::secrets::store_set(
+        &data_dir,
+        "mock_fallback",
+        "provider_api_key",
+        "sk-south-media-retry-fallback",
+    )
+    .expect("fallback test secret is stored");
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South marker config reads"))
+            .expect("South marker config is JSON");
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered_streaming");
+    config["upstreams"]["mock_primary"]["models"][0]["vision"] = json!(true);
+    config["upstreams"]["mock_fallback"] = json!({
+        "provider": "openai-compatible",
+        "base_url": fallback.http_url(),
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [ {
+            "model": "gpt-5.5",
+            "tool": true,
+            "vision": true,
+            "context_window": 400_000
+        } ]
+    });
+    config["router"]["pools"]["main"] = json!([
+        { "upstream": "mock_primary", "model": "gpt-5.5" },
+        { "upstream": "mock_fallback", "model": "gpt-5.5" }
+    ]);
+    config["plugins"]["agents"] = json!(["marker-agent"]);
+    config["plugins"]["allow_unsigned"] = json!(true);
+    let config: ClientConfig = serde_json::from_value(config).expect("South marker config parses");
+    (config, data_dir)
 }
 
 fn write_south_probe_config(
@@ -8870,24 +9191,25 @@ fn native_anthropic_south_stream_is_cancelled_by_server_drain_without_replay() {
     let proxy = start_native_anthropic_proxy_with_stored_secret(&mock, "sk-native-drain");
     let url = proxy.url.clone();
     let virtual_key = proxy.virtual_key.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
         let mut turn = native_server_tool_turn();
         turn["model"] = json!("claude-sonnet-4");
         turn["stream"] = json!(true);
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout_global(None)
                 .http_status_as_error(false)
                 .build(),
         );
-        agent
+        let result = agent
             .post(format!("{url}/v1/messages"))
             .header("authorization", &format!("Bearer {virtual_key}"))
             .header("anthropic-version", "2023-06-01")
             .send(&turn.to_string())
-            .expect("proxy answers the drained native stream")
-            .status()
-            .as_u16()
+            .map(|response| response.status().as_u16())
+            .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
     });
 
     let arrival_deadline = Instant::now() + Duration::from_secs(3);
@@ -8899,7 +9221,12 @@ fn native_anthropic_south_stream_is_cancelled_by_server_drain_without_replay() {
     assert!(mock.response_started(), "the native South read is active");
     assert_eq!(mock.hits(), 1, "the native stream reaches South once");
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 503);
+    let status = result_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the client must finish within three seconds after cancellation")
+        .expect("proxy answers the drained request");
+    client.join().expect("the completed client joins");
+    assert_eq!(status, 503);
 
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
@@ -9988,37 +10315,47 @@ fn quota_fallback_lease_tracks_actual_provider_and_releases_on_drain() {
     let backup = MockUpstream::start_hanging_buffered();
     let key = key_file("quota-actual-lease", "sk-quota-actual-lease");
     let proxy = start_quota_first_native_pair(&primary, &backup, &key);
-    std::thread::scope(|scope| {
+    let (started, snapshot, reply, settled) = std::thread::scope(|scope| {
         let request =
-            scope.spawn(|| post_messages(&proxy, &native_server_tool_turn(), &proxy.virtual_key));
+            scope.spawn(|| post_bounded_json(&proxy, "/v1/messages", &native_server_tool_turn()));
         let deadline = Instant::now() + Duration::from_secs(5);
         while !backup.response_started() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(backup.response_started());
+        let started = backup.response_started();
         let snapshot = proxy.gateway.quota_snapshot(quota_audit_now_ms());
-        let accounts = snapshot["accounts"].as_array().unwrap();
-        let account = |name| {
-            accounts
-                .iter()
-                .find(|account| account["upstream"] == name)
-                .unwrap()
-        };
-        assert_eq!(account("account_a")["inflight"], 0);
-        assert_eq!(account("account_b")["inflight"], 1);
+        // Always drain before an assertion can unwind into the scoped join.
+        // The HTTP deadline also bounds failure when startup is overloaded.
         proxy.control.cancel_in_flight();
-        let (status, _) = request.join().unwrap();
-        assert_eq!(status, 503);
-        assert!(
-            proxy.gateway.quota_snapshot(quota_audit_now_ms())["accounts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|account| account["inflight"] == 0)
-        );
+        let reply = request.join();
+        let settled = proxy.gateway.quota_snapshot(quota_audit_now_ms());
+        (started, snapshot, reply, settled)
     });
+    let hits = (primary.hits(), backup.hits());
     backup.finish_hanging();
     std::fs::remove_file(key).unwrap();
+    assert!(
+        started,
+        "backup never started; hits={hits:?}, quota={snapshot}"
+    );
+    let accounts = snapshot["accounts"].as_array().unwrap();
+    let account = |name| {
+        accounts
+            .iter()
+            .find(|account| account["upstream"] == name)
+            .unwrap()
+    };
+    assert_eq!(account("account_a")["inflight"], 0);
+    assert_eq!(account("account_b")["inflight"], 1);
+    let (status, body) = reply.expect("bounded request worker joins");
+    assert_eq!(status, 503, "drain must return retryable failure: {body}");
+    assert!(
+        settled["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| account["inflight"] == 0)
+    );
 }
 
 #[test]
@@ -10305,6 +10642,512 @@ fn native_image_requests_keep_bytes_and_report_explicit_channel_rejection() {
                 assert!(body.contains("image"), "{body}");
             }
             std::fs::remove_file(key).ok();
+        }
+    }
+}
+
+const VISION_REVIEW_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
+
+fn vision_review_image_request() -> Value {
+    json!({
+        "model": "auto",
+        "stream": false,
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "inspect this image"},
+            {"type": "input_image", "image_url": format!("data:image/png;base64,{VISION_REVIEW_PNG}")}
+        ]}]
+    })
+}
+
+fn post_bounded_json(proxy: &Proxy, path: &str, body: &Value) -> (u16, String) {
+    let client = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build(),
+    );
+    let response = client
+        .post(format!("{}{path}", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .send(&body.to_string())
+        .expect("vision review gateway must answer within ten seconds");
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().expect("body reads");
+    (status, body)
+}
+
+fn vision_review_chat_answer() -> Value {
+    json!({
+        "id": "chatcmpl-vision-review",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "VISION_OK"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 2, "total_tokens": 14}
+    })
+}
+
+fn vision_review_upstream(mock: &MockUpstream, key: &Path) -> Value {
+    json!({
+        "provider": "openai-compatible",
+        "base_url": mock.base_url(),
+        "auth": {"slot": "provider_api_key", "file": key},
+        "models": [{"model": "gpt-5.5", "vision": true, "tool": true,
+            "tool_state": "verified", "context_window": 400_000}]
+    })
+}
+
+fn vision_review_proxy(upstreams: &Value, router: &Value) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-vision-review-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": {"listen": "127.0.0.1:0"},
+        "data": {"dir": data_dir, "metrics": true},
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai-responses", "agent-anthropic"],
+            "providers": {"openai-compatible": "provider-openai-compatible-v2"}
+        },
+        "upstreams": upstreams,
+        "router": router
+    }))
+    .expect("vision review config parses");
+    config.validate().expect("vision review config is valid");
+    spawn_proxy(&config)
+}
+
+#[test]
+fn vision_review_mixed_native_and_chat_preserves_plain_image_on_selected_chat_route() {
+    let chat = MockUpstream::start(vec![vec![http_json(
+        200,
+        &vision_review_chat_answer().to_string(),
+    )]]);
+    let native = MockUpstream::start(Vec::new());
+    let key = key_file("vision-review-mixed", "sk-vision-review-fixture");
+    let mut native_config = vision_review_upstream(&native, &key);
+    native_config["api_dialect"] = json!("responses-native");
+    // The native offering is configured but outside the selected pool. Its
+    // presence must not change normalization or admission for the Chat route.
+    let proxy = vision_review_proxy(
+        &json!({"chat": vision_review_upstream(&chat, &key), "native": native_config}),
+        &json!({"version": 1, "pools": {
+            "main": [{"upstream": "chat", "model": "gpt-5.5"}],
+            "other": [{"upstream": "native", "model": "gpt-5.5"}]
+        }, "default_pool": "main"}),
+    );
+    let request = vision_review_image_request();
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status,
+        200,
+        "selected Chat image route must succeed; chat_hits={}, native_hits={}, body={body}",
+        chat.hits(),
+        native.hits()
+    );
+    assert_eq!(native.hits(), 0, "the unselected pool must remain unused");
+    let seen = chat.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["image_url"]["url"],
+        request["input"][0]["content"][1]["image_url"]
+    );
+}
+
+#[test]
+fn vision_review_anthropic_keyword_tier_reaches_vision_route_without_server_tools() {
+    let text_only = MockUpstream::start(Vec::new());
+    let vision = MockUpstream::start(vec![vec![http_json(
+        200,
+        &vision_review_chat_answer().to_string(),
+    )]]);
+    let key = key_file("vision-review-keyword", "sk-vision-review-fixture");
+    let mut text_config = vision_review_upstream(&text_only, &key);
+    text_config["models"][0]["vision"] = json!(false);
+    let proxy = vision_review_proxy(
+        &json!({"text_only": text_config, "vision": vision_review_upstream(&vision, &key)}),
+        &json!({"version": 1, "pools": {
+            "text": [{"upstream": "text_only", "model": "gpt-5.5"}],
+            "vision": [{"upstream": "vision", "model": "gpt-5.5"}]
+        }, "default_pool": "text", "rules": [
+            {"id": "inspect-vision", "when": {"keywords_any": ["inspect"]}, "route_to": "vision"}
+        ]}),
+    );
+    let request = json!({
+        "model": "auto", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "inspect this image"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": VISION_REVIEW_PNG}}
+        ]}]
+    });
+    let (status, body) = post_bounded_json(&proxy, "/v1/messages", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status,
+        200,
+        "keyword-selected vision route must succeed; text_hits={}, vision_hits={}, body={body}",
+        text_only.hits(),
+        vision.hits()
+    );
+    assert_eq!(text_only.hits(), 0);
+    let seen = vision.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["image_url"]["url"],
+        format!("data:image/png;base64,{VISION_REVIEW_PNG}")
+    );
+}
+
+#[test]
+fn vision_review_free_native_image_failure_never_uses_paid_fallback() {
+    let refusal = json!({"error": {"message": "free native service unavailable"}});
+    let free = MockUpstream::start(vec![vec![http_json(503, &refusal.to_string())]]);
+    let paid = MockUpstream::start(vec![vec![http_json(
+        200,
+        &json!({"id": "resp_paid", "object": "response", "status": "completed", "output": []})
+            .to_string(),
+    )]]);
+    let key = key_file("vision-review-free", "sk-vision-review-fixture");
+    let mut free_config = vision_review_upstream(&free, &key);
+    free_config["api_dialect"] = json!("responses-native");
+    free_config["access_tier"] = json!("free");
+    let mut paid_config = vision_review_upstream(&paid, &key);
+    paid_config["api_dialect"] = json!("responses-native");
+    paid_config["access_tier"] = json!("paid");
+    let proxy = vision_review_proxy(
+        &json!({"free": free_config, "paid": paid_config}),
+        &json!({"version": 1, "pools": {"main": [
+            {"upstream": "free", "model": "gpt-5.5"},
+            {"upstream": "paid", "model": "gpt-5.5"}
+        ]}, "default_pool": "main"}),
+    );
+    let request = vision_review_image_request();
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(free.hits(), 1, "the selected free upstream was attempted");
+    assert_eq!(
+        paid.hits(),
+        0,
+        "Tiered free routing must not incur a paid fallback; status={status}, body={body}"
+    );
+    assert_eq!(
+        status, 503,
+        "the free upstream failure must reach the caller: {body}"
+    );
+    assert_eq!(free.seen()[0].path, "/v1/responses");
+    assert_eq!(free.seen()[0].body["input"], request["input"]);
+}
+
+#[test]
+fn vision_review_native_image_response_allows_following_text_continuation() {
+    let answer = |id: &str| {
+        json!({
+            "id": id, "object": "response", "status": "completed", "model": "gpt-5.5",
+            "output": [{"type": "message", "id": "msg_vision", "role": "assistant", "status": "completed",
+                "content": [{"type": "output_text", "text": "VISION_OK", "annotations": []}]}],
+            "usage": {"input_tokens": 12, "output_tokens": 2, "total_tokens": 14}
+        })
+    };
+    let native = MockUpstream::start(vec![
+        vec![http_json(200, &answer("resp_native_image").to_string())],
+        vec![http_json(200, &answer("resp_native_followup").to_string())],
+    ]);
+    let key = key_file("vision-review-continuation", "sk-vision-review-fixture");
+    let proxy = start_native_responses_proxy_with_vision(&native, &key, true);
+    let (first_status, first_body) =
+        post_bounded_json(&proxy, "/v1/responses", &vision_review_image_request());
+    assert_eq!(first_status, 200, "initial image request: {first_body}");
+    let first: Value = serde_json::from_str(&first_body).expect("first response is JSON");
+    assert_eq!(native.seen()[0].path, "/v1/responses");
+    let followup = json!({
+        "model": "auto", "stream": false,
+        "previous_response_id": first["id"], "input": "Explain your previous answer."
+    });
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &followup);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status,
+        200,
+        "a returned native response ID must remain usable without another image; native_hits={}, body={body}",
+        native.hits()
+    );
+    let seen = native.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].path, "/v1/responses");
+    assert_vision_review_replayed_input(&seen[1].body, followup["input"].as_str().unwrap());
+}
+
+fn assert_vision_review_replayed_input(body: &Value, followup: &str) {
+    // Local continuation replay must remain self-contained if routing later
+    // selects another account. Do not send a foreign upstream response ID.
+    assert!(body.get("previous_response_id").is_none());
+    let replay = body["input"]
+        .as_array()
+        .expect("continuation replays complete input messages");
+    assert_eq!(replay.len(), 3);
+    assert_eq!(replay[0]["role"], "user");
+    assert_eq!(
+        replay[0]["content"][1]["image_url"],
+        format!("data:image/png;base64,{VISION_REVIEW_PNG}")
+    );
+    assert_eq!(replay[1]["role"], "assistant");
+    assert_eq!(message_text(&replay[1]["content"]), "VISION_OK");
+    assert_eq!(replay[2]["role"], "user");
+    assert_eq!(message_text(&replay[2]["content"]), followup);
+}
+
+#[test]
+fn vision_review_native_image_sse_allows_following_text_continuation() {
+    let answer = json!({
+        "id": "resp_native_image_sse", "object": "response", "status": "completed", "model": "gpt-5.5",
+        "output": [{"type": "message", "id": "msg_vision", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "VISION_OK", "annotations": []}]}],
+        "usage": {"input_tokens": 12, "output_tokens": 2, "total_tokens": 14}
+    });
+    let mut created = answer.clone();
+    created["status"] = json!("in_progress");
+    created["output"] = json!([]);
+    let sse = format!(
+        "event: response.created\ndata: {}\n\nevent: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+        json!({"type": "response.created", "response": created}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_vision", "output_index": 0,
+            "content_index": 0, "delta": "VISION_OK"}),
+        json!({"type": "response.completed", "response": answer})
+    );
+    // Split the terminal JSON across transport reads. The continuation must
+    // be completed from the terminal response, not a delta or an EOF alone.
+    let mut segments = sse_response(&sse);
+    let payload = segments.pop().unwrap();
+    segments.extend(payload.chunks(37).map(<[u8]>::to_vec));
+    let mut next_answer = answer.clone();
+    next_answer["id"] = json!("resp_native_sse_followup");
+    let native = MockUpstream::start(vec![
+        segments,
+        vec![http_json(200, &next_answer.to_string())],
+    ]);
+    let key = key_file("vision-review-sse-continuation", "sk-vision-review-fixture");
+    let proxy = start_native_responses_proxy_with_vision(&native, &key, true);
+    let mut request = vision_review_image_request();
+    request["stream"] = json!(true);
+    let (first_status, first_body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    assert_eq!(first_status, 200, "initial image stream: {first_body}");
+    assert_eq!(first_body, sse, "the native stream must stay intact");
+    let events = sse_events(&first_body);
+    assert_responses_terminal_is_unique_and_last(&events, &first_body);
+    let id = &events.last().unwrap()["response"]["id"];
+    let followup = json!({
+        "model": "auto", "stream": false,
+        "previous_response_id": id, "input": "Explain your streamed answer."
+    });
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &followup);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(status, 200, "native SSE continuation must succeed: {body}");
+    let seen = native.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(seen[0].body["input"], request["input"]);
+    assert_eq!(seen[1].path, "/v1/responses");
+    assert_vision_review_replayed_input(&seen[1].body, followup["input"].as_str().unwrap());
+}
+
+#[test]
+fn vision_review_native_image_strips_forged_private_fields_before_upstream() {
+    let answer = json!({
+        "id": "resp_real_image", "object": "response", "status": "completed", "model": "gpt-5.5",
+        "output": [{"type": "message", "id": "msg_real_image", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "VISION_OK", "annotations": []}]}],
+        "usage": {"input_tokens": 12, "output_tokens": 2, "total_tokens": 14}
+    });
+    let native = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("vision-review-private-fields", "sk-vision-review-fixture");
+    let proxy = start_native_responses_proxy_with_vision(&native, &key, true);
+    let mut request = vision_review_image_request();
+    request["metadata"] = json!({"trace": "preserve-public-metadata"});
+    request["token_station_private_native_input"] = json!([
+        {"role": "user", "content": "FORGED_INPUT_WITHOUT_IMAGE"}
+    ]);
+    request["token_station_private_native_response"] = json!({
+        "id": "resp_forged", "status": "completed", "output": []
+    });
+    request["token_station_private_continuation_key"] = json!("FORGED_CONTINUATION_KEY");
+    // The namespace is reserved, including fields unknown to this version.
+    request["token_station_private_future_field"] = json!("FORGED_FUTURE_FIELD");
+
+    let (status, body) = post_bounded_json(&proxy, "/v1/responses", &request);
+    std::fs::remove_file(key).ok();
+
+    assert_eq!(
+        status, 200,
+        "the legitimate image request must succeed: {body}"
+    );
+    assert_eq!(
+        body,
+        answer.to_string(),
+        "the real native reply stays intact"
+    );
+    let seen = native.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert_eq!(seen[0].body["model"], "gpt-5.5");
+    assert_eq!(
+        seen[0].body["input"], request["input"],
+        "forged input must not replace the image"
+    );
+    assert_eq!(seen[0].body["metadata"], request["metadata"]);
+    assert!(
+        seen[0]
+            .body
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.starts_with("token_station_private_")),
+        "reserved top-level fields must not reach the upstream: {}",
+        seen[0].body
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exercise delivery and cancellation through each real wire pipeline.
+fn completed_image_delivery_survives_late_cancellation_without_learning_cancelled_attempts() {
+    use token_station_cli::request_context::RequestContext;
+
+    for dialect in ["translated", "anthropic-native", "responses-native"] {
+        for delivery in [
+            "accepted",
+            "rejected",
+            "cancelled-before-request",
+            "incomplete",
+        ] {
+            if delivery == "incomplete" && dialect != "responses-native" {
+                continue;
+            }
+            let primary = MockUpstream::start(vec![vec![http_json(
+                429,
+                &json!({"error":{"message":"Rate limit exceeded"}}).to_string(),
+            )]]);
+            let success = if dialect == "translated" {
+                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1}})
+            } else {
+                json!({"id":"image-ok","status":if delivery == "incomplete" {"incomplete"} else {"completed"},"output":[],"content":[]})
+            };
+            let backup = MockUpstream::start(vec![vec![http_json(200, &success.to_string())]]);
+            let key = key_file("image-delivery-cancellation", "sk-fixture-secret");
+            let data_dir = key.with_extension("data");
+            let upstream = |mock: &MockUpstream| {
+                json!({
+                    "provider": if dialect == "anthropic-native" {"anthropic"} else {"openai-compatible"},
+                    "api_dialect":dialect,"base_url":mock.base_url(),
+                    "auth":{"slot":"provider_api_key","file":key},
+                    "models":[{"model":"image-model","tool":true,"vision_state":"unknown","context_window":128_000}]
+                })
+            };
+            let config: ClientConfig = serde_json::from_value(json!({
+                "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":data_dir,"metrics":false},
+                "plugins":{"dir":plugins_dir(),"agents":["agent-openai","agent-anthropic","agent-openai-responses"],
+                    "providers":{"openai-compatible":"provider-openai-compatible-v2","anthropic":"provider-anthropic-v2"}},
+                "upstreams":{"image_primary":upstream(&primary),"image_backup":upstream(&backup)},
+                "router":{"version":1,"pools":{"main":[{"upstream":"image_primary","model":"image-model"},{"upstream":"image_backup","model":"image-model"}]},"default_pool":"main"}
+            })).unwrap();
+            let proxy = spawn_proxy(&config);
+            let image = "data:image/png;base64,cGl4ZWxz";
+            let (path, request, field) = match dialect {
+                "anthropic-native" => (
+                    "/v1/messages",
+                    json!({"model":"auto","max_tokens":64,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"cGl4ZWxz"}}]}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}),
+                    "messages",
+                ),
+                "responses-native" => (
+                    "/v1/responses",
+                    json!({"model":"auto","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":image}]}],"tools":[{"type":"web_search"}]}),
+                    "input",
+                ),
+                _ => (
+                    "/v1/chat/completions",
+                    json!({"model":"auto","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":image}}]}]}),
+                    "messages",
+                ),
+            };
+            let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(5));
+            if delivery == "cancelled-before-request" {
+                ctx.cancel();
+            }
+            let mut first_status = None;
+            proxy.gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
+                "POST",
+                path,
+                &[],
+                &request.to_string().into_bytes(),
+                &mut |reply| {
+                    if let Reply::BeginJson(reply) = reply {
+                        first_status = Some(reply.status);
+                        // Mirrors worker_response dropping CancelOnDrop after accepting
+                        // a complete JSON reply, before the worker records evidence.
+                        ctx.cancel();
+                        return delivery != "rejected";
+                    }
+                    true
+                },
+            );
+            if delivery != "cancelled-before-request" {
+                assert_eq!(first_status, Some(200), "{dialect}/{delivery}");
+            }
+            let mut next_status = None;
+            proxy.gateway.chat(
+                "POST",
+                path,
+                &[],
+                &request.to_string().into_bytes(),
+                &mut |reply| {
+                    if let Reply::BeginJson(reply) = reply {
+                        next_status = Some(reply.status);
+                    }
+                    true
+                },
+            );
+            assert_eq!(next_status, Some(200), "{dialect}/{delivery}");
+            let expected_primary = if matches!(delivery, "accepted" | "cancelled-before-request") {
+                1
+            } else {
+                2
+            };
+            assert_eq!(
+                primary.hits(),
+                expected_primary,
+                "{dialect}/{delivery}: only accepted complete delivery establishes support"
+            );
+            assert_eq!(
+                backup.hits(),
+                if delivery == "cancelled-before-request" {
+                    1
+                } else {
+                    2
+                }
+            );
+            for seen in primary.seen().into_iter().chain(backup.seen()) {
+                assert_eq!(
+                    seen.body[field], request[field],
+                    "images must remain intact"
+                );
+            }
+            proxy.control.stop_accepting();
+            drop(proxy);
+            std::fs::remove_file(key).ok();
+            std::fs::remove_dir_all(data_dir).ok();
         }
     }
 }

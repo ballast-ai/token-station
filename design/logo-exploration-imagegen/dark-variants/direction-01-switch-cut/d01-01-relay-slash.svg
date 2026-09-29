@@ -1,7 +1,0 @@
-<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <g id="mark">
-    <polygon fill="#EEF2F8" points="82,382 148,420 304,150 238,112"/>
-    <polygon fill="#EEF2F8" points="266,388 332,426 430,256 364,218"/>
-    <path fill="#F04B2F" fill-rule="evenodd" d="M144 218H370V282H144ZM214 218H300V242H280V282H234V242H214Z"/>
-  </g>
-</svg>

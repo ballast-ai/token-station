@@ -121,6 +121,7 @@ fn gateway(data: &Path, controller: &Arc<SemanticController>) -> Gateway {
         agents: Vec::new(),
         skipped_agents: Vec::new(),
         home_router: None,
+        home_dynamic_router: None,
         agent_routers: std::sync::RwLock::new(BTreeMap::new()),
         supported_agent_ids: BTreeSet::new(),
         upstreams: BTreeMap::new(),
@@ -223,6 +224,59 @@ fn route_mode_applies_the_suggested_pool_with_classifier_attribution() {
     let status = fixture.controller.status();
     assert_eq!(status.observations[0].outcome, Outcome::Applied);
     assert!(status.observations[0].applied);
+}
+
+#[test]
+fn exact_auto_does_not_classify_but_the_host_dynamic_variant_does() {
+    let fixture = Fixture::new(Mode::Route);
+    let mut config = config();
+    config.honor_exact_model = true;
+    let (exact, dynamic) = router_with_dynamic_variant(config, "fixture").unwrap();
+    let request = request("Explain this function");
+    let mut candidates = candidates();
+    let mut literal_auto = candidates[0].clone();
+    literal_auto.target = target("auto");
+    literal_auto.capability.model = "auto".into();
+    candidates.push(literal_auto);
+    let baseline = exact.route(&request, &[], &candidates).unwrap();
+    assert_eq!(fixture.route(&exact, &request, &candidates), baseline);
+    assert_eq!(baseline.chosen, target("auto"));
+    assert_eq!(fixture.controller.status().counts.classified, 0);
+    assert_eq!(
+        fixture.controller.status().observations[0].outcome,
+        Outcome::Overridden
+    );
+    let decision = fixture.route(&dynamic, &request, &candidates);
+    assert_eq!(decision.chosen, target("high-model"));
+    assert_eq!(decision.decided_by, DecidedBy::Classifier);
+    assert_eq!(fixture.controller.status().counts.classified, 1);
+}
+
+#[test]
+fn applied_local_classification_keeps_the_host_schema_receipt_estimate() {
+    let fixture = Fixture::new(Mode::Route);
+    let router = Router::new(config()).unwrap();
+    let mut request = request("Explain this function");
+    request.tools.push(ToolDef {
+        name: "inspect".into(),
+        description: Some("Inspect a document".into()),
+        parameters: json!({"description":"schema ".repeat(2000)}),
+    });
+    request.response_format = Some(token_station_protocol::ResponseFormat::JsonSchema {
+        json_schema: json!({"description":"output ".repeat(1000)}),
+    });
+    let mut candidates = candidates();
+    for candidate in &mut candidates {
+        candidate.capability.json_schema = true;
+    }
+    let baseline = fixture
+        .gateway
+        .route_with_mode(&router, &request, &[], &candidates, "fixture")
+        .unwrap();
+    assert!(baseline.features.estimated_input_tokens > 1000);
+    let decision = fixture.route(&router, &request, &candidates);
+    assert_eq!(decision.decided_by, DecidedBy::Classifier);
+    assert_eq!(decision.features, baseline.features);
 }
 
 #[test]

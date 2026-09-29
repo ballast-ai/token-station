@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <g id="mark">
-    <path fill="#EEF2F8" d="M120 88h116v56h-60v76h56v48h-56v100h60v56H120l-32-32V120z"/>
-    <path fill="#55C7E8" d="M392 88H276v56h60v76h-56v48h56v100h-60v56h116l32-32V120z"/>
-  </g>
-</svg>

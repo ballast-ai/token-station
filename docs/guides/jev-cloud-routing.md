@@ -18,7 +18,7 @@ Remove the key to disable Jev and delete its saved credential.
 ## Routing behavior
 
 Explicit model choices, direct routes, quota routing, matching rules, and explicit harness mappings keep their existing precedence.
-Eligible requests use Jev before the local SCX classifier, when that experiment is installed.
+For eligible requests, enabled Jev takes priority over [local SCX routing](scx-desktop-experiment.md).
 If Jev fails, Token Station returns to its existing routing decision. It does not call SCX after a Jev failure.
 The generation model must still pass the existing capability, locality, health, and protocol checks.
 Native Anthropic and Responses text requests keep their original generation payload and protocol.

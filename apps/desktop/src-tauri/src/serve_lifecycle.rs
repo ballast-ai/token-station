@@ -554,7 +554,7 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
             runtime.handle().clone(),
         )
         .map(|gateway| {
-            let gateway = if crate::experimental::is_scx_experiment() {
+            let gateway = if crate::semantic_commands::supported_platform() {
                 gateway.with_semantic_routing(
                     token_station_cli::semantic::SemanticController::shared(&config.data.dir),
                 )

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none"><title>Token Station — D2 Scan Ring — Standard</title><desc>Bold T crossed by an ascending route, with segmented scan rings at both terminals.</desc>
+<defs>
+  <mask id="d2-route-clearance" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512" style="mask-type:luminance">
+    <rect width="512" height="512" fill="white"/>
+    <path d="M109 340 C201 331 277 169 391.5 162.5" fill="none" stroke="black" stroke-width="54" stroke-linecap="round"/><circle cx="109" cy="340" r="40" fill="black"/><circle cx="391.5" cy="162.5" r="40" fill="black"/>
+  </mask>
+  <mask id="d2-terminal-clearance" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512" style="mask-type:luminance">
+    <rect width="512" height="512" fill="white"/><circle cx="109" cy="340" r="40" fill="black"/><circle cx="391.5" cy="162.5" r="40" fill="black"/>
+  </mask>
+</defs>
+<g id="icon">
+  <g id="letter-t" fill="none" stroke="#121A20" stroke-linecap="round" mask="url(#d2-route-clearance)">
+    <path d="M124 137.5 H401.5" stroke-width="75"/>
+    <path d="M255.25 151.5 V352.5" stroke-width="88"/>
+  </g>
+  <path id="route" d="M109 340 C201 331 277 169 391.5 162.5" fill="none" stroke="#5857FA" stroke-width="38" stroke-linecap="round" mask="url(#d2-terminal-clearance)"/>
+  <g id="scan-rings" fill="none" stroke="#19B8AC" stroke-width="7.5" stroke-linecap="round"><path d="M116.0157 311.8614 A29 29 0 0 1 136.8766 347.9935"/><path d="M129.8609 360.1451 A29 29 0 0 1 88.1391 360.1451"/><path d="M81.1234 347.9935 A29 29 0 0 1 101.9843 311.8614"/><path d="M398.5157 134.3614 A29 29 0 0 1 419.3766 170.4935"/><path d="M412.3609 182.6451 A29 29 0 0 1 370.6391 182.6451"/><path d="M363.6234 170.4935 A29 29 0 0 1 384.4843 134.3614"/></g>
+</g>
+</svg>

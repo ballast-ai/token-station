@@ -367,15 +367,6 @@ pub fn run() {
             );
             experimental::validate_draft(&desktop_paths.config_file, &draft)
                 .map_err(std::io::Error::other)?;
-            if experimental::is_scx_experiment() {
-                let classifier = token_station_cli::semantic::SemanticController::shared(
-                    &desktop_paths.data_dir,
-                );
-                if let Err(error) = classifier.start_automatic_route() {
-                    eprintln!("SCX automatic startup failed: {error}");
-                }
-                app.manage(classifier);
-            }
             let mut inner = AppInner::new_with_saved(
                 desktop_paths.config_file.clone(),
                 draft,
@@ -403,6 +394,9 @@ pub fn run() {
                 eprintln!("历史未知成本回填失败：{error}");
             }
             let read_only = inner.load_error.is_some();
+            if let Some(classifier) = semantic_commands::start_controller(&inner) {
+                app.manage(classifier);
+            }
             app.manage(token_station_cli::jev::JevController::shared(
                 &inner.data_dir(),
             ));

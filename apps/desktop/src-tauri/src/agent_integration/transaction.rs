@@ -1786,6 +1786,7 @@ mod tests {
 
     fn discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),
@@ -1949,6 +1950,11 @@ mod tests {
 
     fn openclaw_discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: Some(super::super::types::ConnectorRuntimePaths {
+                primary_config_path: target.to_path_buf(),
+                state_directory: target.parent().unwrap().to_path_buf(),
+                effective_home: target.parent().unwrap().join("home"),
+            }),
             agent_id: "openclaw".to_string(),
             executable_path: "/opt/openclaw".to_string(),
             canonical_path: "/opt/openclaw".to_string(),
@@ -2006,6 +2012,7 @@ mod tests {
 
     fn hermes_discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
+            runtime_paths: None,
             agent_id: "nous-hermes-agent".to_string(),
             executable_path: "/opt/hermes".to_string(),
             canonical_path: "/opt/hermes".to_string(),
@@ -2705,7 +2712,14 @@ keep = true
         write_initial(&target, original_config);
         write_initial(&catalog, original_catalog);
         let plan = prepare_codex(&target, "vk-codex-catalog");
-        assert_eq!(plan.view.related_config_paths, [catalog.to_string_lossy()]);
+        assert_eq!(
+            plan.view
+                .related_config_paths
+                .iter()
+                .map(Path::new)
+                .collect::<Vec<_>>(),
+            [catalog.as_path()]
+        );
 
         let keys = Arc::new(TestKeys::available());
         let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());

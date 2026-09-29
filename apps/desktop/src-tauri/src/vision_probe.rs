@@ -273,47 +273,163 @@ fn probe_config(draft: &Value, name: &str, model: &str) -> Result<ClientConfig, 
     Ok(config)
 }
 
+// Diagnostic copies come from the same immutable snapshot injected into Gateway.
+struct ProbeCredentials {
+    values: Vec<Zeroizing<String>>,
+}
+
+impl ProbeCredentials {
+    fn capture(config: &ClientConfig, name: &str) -> Result<Self, String> {
+        let store = secrets::SecretStore::from_config(config, &config.data.dir);
+        Self::from_resolver(
+            config,
+            name,
+            |owner, slot| store.resolve(owner, slot),
+            |slot| store.resolve_egress(slot),
+        )
+    }
+
+    fn from_snapshot(
+        config: &ClientConfig,
+        name: &str,
+        snapshot: &secrets::SecretSnapshot,
+    ) -> Result<Self, String> {
+        Self::from_resolver(
+            config,
+            name,
+            |owner, slot| snapshot.resolve(owner, slot),
+            |slot| snapshot.resolve_egress(slot),
+        )
+    }
+
+    fn from_resolver(
+        config: &ClientConfig,
+        name: &str,
+        provider: impl FnOnce(&str, &str) -> Result<String, String>,
+        egress: impl FnOnce(&str) -> Result<String, String>,
+    ) -> Result<Self, String> {
+        let mut values = Vec::new();
+        if let Some(auth) = config.upstreams[name].auth.as_ref() {
+            values.push(Zeroizing::new(
+                provider(name, &auth.slot).map_err(|_| "Cannot read the Provider credential")?,
+            ));
+        }
+        if let Some(auth) = &config.egress.auth {
+            values.push(Zeroizing::new(
+                egress(&auth.credential.slot).map_err(|_| "Cannot read the egress credential")?,
+            ));
+        }
+        Ok(Self { values })
+    }
+
+    fn fingerprint(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for value in &self.values {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        hash.finalize().into()
+    }
+}
+
 fn credential_fingerprint(config: &ClientConfig, name: &str) -> Result<[u8; 32], String> {
-    let store = secrets::SecretStore::from_config(config, &config.data.dir);
-    let mut hash = Sha256::new();
-    if let Some(auth) = config
-        .upstreams
-        .get(name)
-        .and_then(|upstream| upstream.auth.as_ref())
-    {
-        let key = Zeroizing::new(
-            store
-                .resolve(name, &auth.slot)
-                .map_err(|_| "Cannot read the Provider credential")?,
-        );
-        hash.update(key.as_bytes());
+    Ok(ProbeCredentials::capture(config, name)?.fingerprint())
+}
+
+fn probe_plugin_identity(config: &ClientConfig) -> Result<[u8; 32], String> {
+    // The registry resolves the effective Provider and inbound packages. Its digest
+    // includes package bytes and trust receipts, not only their configured paths.
+    crate::model_test::model_test_plugin_identity_fingerprint(config)
+        .map_err(|_| "Cannot read the image check plugin identity".to_owned())
+}
+
+struct ProbeIdentity {
+    credentials: [u8; 32],
+    plugins: [u8; 32],
+}
+
+impl ProbeIdentity {
+    fn capture(config: &ClientConfig, credentials: &ProbeCredentials) -> Result<Self, String> {
+        Ok(Self {
+            credentials: credentials.fingerprint(),
+            plugins: probe_plugin_identity(config)?,
+        })
     }
-    if let Some(auth) = &config.egress.auth {
-        let key = Zeroizing::new(
-            store
-                .resolve_egress(&auth.credential.slot)
-                .map_err(|_| "Cannot read the egress credential")?,
-        );
-        hash.update(key.as_bytes());
+
+    fn save_evidence(
+        &self,
+        inner: &mut AppInner,
+        config: &ClientConfig,
+        name: &str,
+        model: &str,
+        expected: &ProviderDiscoveryTarget,
+        outcome: VisionOutcome,
+    ) -> Result<(), String> {
+        // Run under the configuration lock after the blocking task has returned.
+        // Provider epochs in save_evidence also detect application-managed key changes.
+        self.ensure_unchanged(config, name)?;
+        save_evidence(inner, name, model, expected, outcome)
     }
-    Ok(hash.finalize().into())
+
+    fn during<T>(
+        &self,
+        config: &ClientConfig,
+        name: &str,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.ensure_unchanged(config, name)?;
+        let result = operation()?;
+        self.ensure_unchanged(config, name)?;
+        Ok(result)
+    }
+
+    fn ensure_unchanged(&self, config: &ClientConfig, name: &str) -> Result<(), String> {
+        if self.credentials != credential_fingerprint(config, name)? {
+            return Err(
+                "The credential changed during verification. Run verification again.".into(),
+            );
+        }
+        if self.plugins != probe_plugin_identity(config)? {
+            return Err("The plugin changed during verification. Run verification again.".into());
+        }
+        Ok(())
+    }
 }
 
 fn run_probe(
     config: &ClientConfig,
     name: &str,
     runtime: tokio::runtime::Handle,
-) -> Result<VisionReport, String> {
-    let before = credential_fingerprint(config, name)?;
+) -> Result<(VisionReport, ProbeIdentity), String> {
+    run_probe_with_before_send(config, name, runtime, || {})
+}
+
+fn run_probe_with_before_send(
+    config: &ClientConfig,
+    name: &str,
+    runtime: tokio::runtime::Handle,
+    before_send: impl FnOnce(),
+) -> Result<(VisionReport, ProbeIdentity), String> {
+    // Retain these values until diagnostics have been redacted. A later read can
+    // refer to a rotated key, even when the post-request identity check passed.
+    let snapshot = secrets::SecretStore::snapshot_for_config(config, &config.data.dir)
+        .map_err(|_| "Cannot capture the image check credentials".to_owned())?;
+    let credentials = ProbeCredentials::from_snapshot(config, name, &snapshot)?;
+    let identity = ProbeIdentity::capture(config, &credentials)?;
     let mut random = [0; 9];
     getrandom::fill(&mut random).map_err(|_| "Cannot generate an image challenge")?;
     let challenge = challenge(random)?;
-    let gateway = Gateway::new_with_provider_runtime(
-        config,
-        Arc::new(token_station_cli::filelog::Recorders(Vec::new())),
-        runtime,
-    )
-    .map_err(|_| "Cannot start the image check. Check the Provider adapter and protocol.")?;
+    let gateway = identity.during(config, name, || {
+        Gateway::new_with_provider_runtime(
+            config,
+            Arc::new(token_station_cli::filelog::Recorders(Vec::new())),
+            runtime,
+        )
+        .map(|gateway| gateway.with_secret_snapshot(snapshot))
+        .map_err(|_| {
+            "Cannot start the image check. Check the Provider adapter and protocol.".to_owned()
+        })
+    })?;
     let prompt = "Identify the colors of this 3 by 3 grid. Read each row from left to right, top row first. Return exactly nine comma-separated lowercase color names. Use only red, green, blue, yellow. No explanation.";
     let (path, request) = if config.upstreams[name].api_dialect
         == token_station_cli::config::ApiDialect::ResponsesNative
@@ -338,6 +454,7 @@ fn run_probe(
     let context = RequestContext::detached(Duration::from_secs(60), Duration::from_secs(45));
     context.enable_error_diagnostics();
     let mut response = None;
+    before_send();
     gateway.chat_scoped_without_body_log(
         &context,
         None,
@@ -360,26 +477,33 @@ fn run_probe(
             true
         },
     );
-    if before != credential_fingerprint(config, name)? {
+    identity.ensure_unchanged(config, name)?;
+    let report = finish_probe(
+        config,
+        name,
+        &credentials,
+        response,
+        &context,
+        &challenge.expected,
+        || {},
+    )?;
+    Ok((report, identity))
+}
+
+fn finish_probe(
+    config: &ClientConfig,
+    name: &str,
+    credentials: &ProbeCredentials,
+    response: Option<(u16, String)>,
+    context: &RequestContext,
+    expected: &[&str],
+    after_credential_check: impl FnOnce(),
+) -> Result<VisionReport, String> {
+    if credentials.fingerprint() != credential_fingerprint(config, name)? {
         return Err("The credential changed during verification. Run verification again.".into());
     }
-    let store = secrets::SecretStore::from_config(config, &config.data.dir);
-    let mut credentials: Vec<Zeroizing<String>> = Vec::new();
-    if let Some(auth) = config.upstreams[name].auth.as_ref() {
-        credentials.push(Zeroizing::new(
-            store
-                .resolve(name, &auth.slot)
-                .map_err(|_| "Cannot read the Provider credential")?,
-        ));
-    }
-    if let Some(auth) = &config.egress.auth {
-        credentials.push(Zeroizing::new(
-            store
-                .resolve_egress(&auth.credential.slot)
-                .map_err(|_| "Cannot read the egress credential")?,
-        ));
-    }
-    let secrets: Vec<&str> = credentials.iter().map(|key| key.as_str()).collect();
+    after_credential_check();
+    let secrets: Vec<&str> = credentials.values.iter().map(|key| key.as_str()).collect();
     let mut report = response.map_or_else(
         || {
             VisionReport::new(
@@ -389,7 +513,7 @@ fn run_probe(
                 "",
             )
         },
-        |(status, body)| evaluate_with_secrets(status, &body, &challenge.expected, &secrets),
+        |(status, body)| evaluate_with_secrets(status, &body, expected, &secrets),
     );
     if report.outcome == VisionOutcome::Blocked {
         if let Some((status, body)) = context.take_error_diagnostic() {
@@ -505,8 +629,9 @@ pub(crate) async fn verify_provider_model_vision<R: Runtime>(
     };
     let task_name = name.clone();
     let runtime = tokio::runtime::Handle::current();
-    let report =
-        tauri::async_runtime::spawn_blocking(move || run_probe(&config, &task_name, runtime))
+    let task_config = config.clone();
+    let (report, identity) =
+        tauri::async_runtime::spawn_blocking(move || run_probe(&task_config, &task_name, runtime))
             .await
             .map_err(|_| "The image check stopped unexpectedly")??;
     {
@@ -522,7 +647,14 @@ pub(crate) async fn verify_provider_model_vision<R: Runtime>(
                     .into(),
             );
         }
-        save_evidence(&mut inner, &name, &model, &expected, report.outcome)?;
+        identity.save_evidence(
+            &mut inner,
+            &config,
+            &name,
+            &model,
+            &expected,
+            report.outcome,
+        )?;
     }
     let snapshot = if matches!(
         report.outcome,
@@ -541,6 +673,291 @@ pub(crate) async fn verify_provider_model_vision<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SecurityFixture {
+        root: PathBuf,
+        config: ClientConfig,
+    }
+
+    impl SecurityFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "ts-vision-security-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins-dist");
+            let plugins = root.join("plugins");
+            // Use unreserved names so bundled adapters cannot shadow these file fixtures.
+            for (source_package, package, wasm) in [
+                ("agent-openai", "vision-security-agent", "adapter.wasm"),
+                (
+                    "provider-openai-compatible-v2",
+                    "vision-security-provider",
+                    "component.wasm",
+                ),
+            ] {
+                let target = plugins.join(package);
+                std::fs::create_dir_all(&target).unwrap();
+                std::fs::copy(source.join(source_package).join(wasm), target.join(wasm)).unwrap();
+                let mut manifest: Value = serde_json::from_slice(
+                    &std::fs::read(source.join(source_package).join("manifest.json")).unwrap(),
+                )
+                .unwrap();
+                manifest["name"] = json!(package);
+                if wasm == "component.wasm" {
+                    manifest["providers"] = json!(["vision-security-fixture"]);
+                }
+                std::fs::write(
+                    target.join("manifest.json"),
+                    serde_json::to_vec(&manifest).unwrap(),
+                )
+                .unwrap();
+            }
+            std::fs::write(root.join("credential"), "oldCredentialM4x9").unwrap();
+            let mut draft = template(&root.join("data"), &plugins);
+            draft["plugins"]["providers"] =
+                json!({"vision-security-fixture": "vision-security-provider"});
+            draft["upstreams"]["p"] = json!({
+                "provider": "vision-security-fixture", "base_url": "https://example.test/v1",
+                "auth": { "slot": "provider_api_key", "file": root.join("credential") },
+                "models": [{"model": "m", "vision_state": "unknown"}]
+            });
+            let mut config = probe_config(&draft, "p", "m").unwrap();
+            config.plugins.agents = vec!["vision-security-agent".to_owned()];
+            Self { root, config }
+        }
+
+        fn replace_plugin_bytes(&self, package: &str, artifact: &str) {
+            let path = self.config.plugins.dir.join(package).join(artifact);
+            let mut bytes = std::fs::read(&path).unwrap();
+            // Append a valid Wasm custom section while retaining the exact file path.
+            bytes.extend_from_slice(b"\0\x02\x01x");
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        fn assert_evidence_rejected(&self, identity: &ProbeIdentity, reason: &str) {
+            let mut draft = serde_json::to_value(&self.config).unwrap();
+            draft["upstreams"]["p"]["models"][0]["vision"] = json!(false);
+            draft["upstreams"]["p"]["models"][0]["vision_state"] = json!("unknown");
+            let mut inner = AppInner::new(self.root.join("config.json"), draft, None);
+            let expected = begin_provider_discovery_target(&mut inner, "p");
+            let error = identity
+                .save_evidence(
+                    &mut inner,
+                    &self.config,
+                    "p",
+                    "m",
+                    &expected,
+                    VisionOutcome::Verified,
+                )
+                .unwrap_err();
+            assert!(error.contains(reason));
+            assert_eq!(
+                inner.draft["upstreams"]["p"]["models"][0]["vision_state"],
+                "unknown"
+            );
+            assert!(inner.draft["upstreams"]["p"]["models"][0]
+                .get(SOURCE)
+                .is_none());
+        }
+
+        fn rotate_credential(&self) {
+            std::fs::write(self.root.join("credential"), "newCredentialV7z2").unwrap();
+        }
+    }
+
+    impl Drop for SecurityFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn security_rotation_after_validation_does_not_leak_request_credential() {
+        let fixture = SecurityFixture::new();
+        let credentials = ProbeCredentials::capture(&fixture.config, "p").unwrap();
+        let context = RequestContext::detached(Duration::from_secs(60), Duration::from_secs(45));
+        let report = finish_probe(
+            &fixture.config,
+            "p",
+            &credentials,
+            Some((
+                400,
+                json!({"error": {"message": "Rejected oldCredentialM4x9"}}).to_string(),
+            )),
+            &context,
+            &[],
+            || fixture.rotate_credential(),
+        )
+        .unwrap();
+        assert!(
+            !report.detail.contains("oldCredentialM4x9"),
+            "Request credential escaped redaction"
+        );
+        assert!(report.detail.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn security_same_path_plugin_change_rejects_probe_evidence() {
+        let fixture = SecurityFixture::new();
+        let credentials = ProbeCredentials::capture(&fixture.config, "p").unwrap();
+        let identity = ProbeIdentity::capture(&fixture.config, &credentials).unwrap();
+        identity.ensure_unchanged(&fixture.config, "p").unwrap();
+        fixture.replace_plugin_bytes("vision-security-provider", "component.wasm");
+        fixture.assert_evidence_rejected(&identity, "plugin changed");
+    }
+
+    #[test]
+    fn security_redaction_does_not_reread_a_removed_credential() {
+        let fixture = SecurityFixture::new();
+        let credentials = ProbeCredentials::capture(&fixture.config, "p").unwrap();
+        let report = finish_probe(
+            &fixture.config,
+            "p",
+            &credentials,
+            Some((
+                400,
+                json!({"error": {"message": "Rejected oldCredentialM4x9"}}).to_string(),
+            )),
+            &RequestContext::detached(Duration::from_secs(60), Duration::from_secs(45)),
+            &[],
+            || {
+                fixture.rotate_credential();
+                // Deleting the source also proves redaction does not read it again.
+                std::fs::remove_file(fixture.root.join("credential")).unwrap();
+            },
+        )
+        .unwrap();
+        assert_eq!(report.detail, "Rejected [REDACTED]");
+    }
+
+    #[test]
+    fn security_credential_rotation_before_persist_rejects_evidence() {
+        let fixture = SecurityFixture::new();
+        let credentials = ProbeCredentials::capture(&fixture.config, "p").unwrap();
+        let identity = ProbeIdentity::capture(&fixture.config, &credentials).unwrap();
+        fixture.rotate_credential();
+        fixture.assert_evidence_rejected(&identity, "credential changed");
+    }
+
+    #[test]
+    fn security_plugin_change_during_gateway_preparation_rejects_evidence() {
+        let fixture = SecurityFixture::new();
+        let credentials = ProbeCredentials::capture(&fixture.config, "p").unwrap();
+        let identity = ProbeIdentity::capture(&fixture.config, &credentials).unwrap();
+        let result = identity.during(&fixture.config, "p", || {
+            fixture.replace_plugin_bytes("vision-security-agent", "adapter.wasm");
+            Ok(())
+        });
+        assert!(result.unwrap_err().contains("plugin changed"));
+    }
+
+    fn verify_wire_aba_uses_snapshot(responses: bool) {
+        use std::io::{Read, Write};
+        let mut fixture = SecurityFixture::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let plugins = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins-dist");
+        let mut draft = template(&fixture.root.join("data"), &plugins);
+        draft["upstreams"]["p"] = json!({
+            "provider": "openai-compatible", "base_url": format!("http://{address}/v1"),
+            "auth": {"slot": "provider_api_key", "file": fixture.root.join("credential")},
+            "models": [{"model": "m", "vision_state": "unknown"}]
+        });
+        if responses {
+            draft["upstreams"]["p"]["api_dialect"] = json!("responses-native");
+        }
+        fixture.config = probe_config(&draft, "p", "m").unwrap();
+        let credential_path = fixture.root.join("credential");
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => panic!("Probe did not reach the loopback fixture"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let auth = loop {
+                let mut chunk = [0; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0 && bytes.len() + read <= 65536);
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let head = std::str::from_utf8(&bytes[..end]).unwrap();
+                    let len = head
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + len {
+                        let request: Value =
+                            serde_json::from_slice(&bytes[end + 4..end + 4 + len]).unwrap();
+                        assert!(request.to_string().contains("data:image/png;base64,"));
+                        break head
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("authorization").then(|| {
+                                    value.trim().strip_prefix("Bearer ").unwrap().to_owned()
+                                })
+                            })
+                            .unwrap();
+                    }
+                }
+            };
+            // Restore A before the reply, so the probe's post-request checks see A.
+            std::fs::write(credential_path, "oldCredentialM4x9").unwrap();
+            let body = json!({"error": {"message": format!("Rejected {auth}")}}).to_string();
+            write!(stream, "HTTP/1.1 401 Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            auth == "oldCredentialM4x9"
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result =
+            run_probe_with_before_send(&fixture.config, "p", runtime.handle().clone(), || {
+                fixture.rotate_credential();
+            });
+        let sent_snapshot = server.join().unwrap();
+        let (report, identity) = result.unwrap();
+        identity.ensure_unchanged(&fixture.config, "p").unwrap();
+        assert!(
+            sent_snapshot,
+            "Wire request used rotated B instead of captured A"
+        );
+        assert_eq!(report.outcome, VisionOutcome::Blocked);
+        assert!(report.detail.contains("[REDACTED]"));
+        assert!(!report.detail.contains("oldCredentialM4x9"));
+        assert!(!report.detail.contains("newCredentialV7z2"));
+    }
+
+    #[test]
+    fn security_wire_chat_aba_sends_only_the_captured_credential() {
+        verify_wire_aba_uses_snapshot(false);
+    }
+
+    #[test]
+    fn security_wire_responses_aba_sends_only_the_captured_credential() {
+        verify_wire_aba_uses_snapshot(true);
+    }
 
     #[test]
     fn blocked_verification_retains_status_and_reason() {

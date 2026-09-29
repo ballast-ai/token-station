@@ -3,6 +3,7 @@ import { previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import { providerDisplayName } from "../providerPresentation";
 import ProviderModelManager from "./ProviderModelManager";
+import { useVisionVerificationTasks } from "./useVisionVerificationTasks";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { ProviderIcon } from "../brandIcons";
@@ -44,6 +45,7 @@ export default function ProviderList({
   onPurgeDeleted = async () => false,
   onStateChange,
 }: ProviderListProps) {
+  const visionTasks = useVisionVerificationTasks(providers, onStateChange);
   const { copy, language } = useLocalizedCopy();
   const { showError } = useErrorToast();
   const confirmNavigation = useDraftNavigation();
@@ -261,6 +263,7 @@ export default function ProviderList({
                   serveRunning={serveRunning}
                   disabled={busy}
                   onSaved={onStateChange}
+                  visionTasks={visionTasks}
                 />
               )}
             </div>

@@ -56,8 +56,8 @@ fn classifier_input_survives_upstream_failure_and_no_route_without_crossing_requ
     };
     for (model, diagnostic) in [
         ("absent-model", Some(skipped)),
-        ("auto", Some(reduced)),
-        ("auto", None),
+        ("fixture-model", Some(reduced)),
+        ("fixture-model", None),
     ] {
         let context = RequestContext::detached(Duration::from_secs(5), Duration::from_secs(2));
         if let Some(diagnostic) = diagnostic {
@@ -84,6 +84,7 @@ fn classifier_input_survives_upstream_failure_and_no_route_without_crossing_requ
         } else {
             assert_eq!(row.status, 401);
             assert_eq!(row.attempts, 1);
+            assert_eq!(row.decision.as_ref().unwrap().model, "fixture-model");
         }
         assert!(
             !serde_json::to_string(row)
