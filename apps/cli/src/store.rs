@@ -519,6 +519,12 @@ const MIGRATIONS: &[Migration] = &[
             reason TEXT CHECK (reason IS NULL OR reason IN ('byte_limit', 'token_limit'))
         );",
     },
+    Migration {
+        to: 17,
+        sql: "ALTER TABLE decisions ADD COLUMN task_tokens INTEGER;
+              ALTER TABLE decisions ADD COLUMN task_code_block_count INTEGER;
+              ALTER TABLE decisions ADD COLUMN task_message_count INTEGER;",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -608,6 +614,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     fallbacks INTEGER NOT NULL,
     est_input_tokens INTEGER NOT NULL,
     conversation_tokens INTEGER NOT NULL DEFAULT 0,
+    task_tokens INTEGER,
+    task_code_block_count INTEGER,
+    task_message_count INTEGER,
     message_count INTEGER NOT NULL,
     tool_count INTEGER NOT NULL,
     has_images INTEGER NOT NULL,
@@ -1289,6 +1298,7 @@ fn insert_decision(
         "INSERT INTO decisions (
             request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
             hint_value, heuristic_score, heuristic_threshold, fallbacks,
+            task_tokens, task_code_block_count, task_message_count,
             est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
             requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
             reasoning_marker_count, technical_term_count, simple_indicator_count,
@@ -1299,6 +1309,7 @@ fn insert_decision(
          ) VALUES (
             :request_id, :upstream, :model, :pool, :decision_kind, :rule_id, :hint_kind,
             :hint_value, :heuristic_score, :heuristic_threshold, :fallbacks,
+            :task_tokens, :task_code_block_count, :task_message_count,
             :est_input_tokens, :conversation_tokens, :message_count, :tool_count, :has_images,
             :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
             :reasoning_marker_count, :technical_term_count, :simple_indicator_count,
@@ -1321,6 +1332,9 @@ fn insert_decision(
             ":fallbacks": decision.fallbacks,
             ":est_input_tokens": features.estimated_input_tokens,
             ":conversation_tokens": features.conversation_tokens,
+            ":task_tokens": features.task_tokens,
+            ":task_code_block_count": features.task_code_block_count,
+            ":task_message_count": features.task_message_count,
             ":message_count": features.message_count,
             ":tool_count": features.tool_count,
             ":has_images": features.has_images,
@@ -1798,7 +1812,8 @@ fn read_decision(
                     code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
                     question_count, system_format_hint,
                     quota_reset_ms, quota_remaining_permille, quota_headroom_permille,
-                    quota_pressured, quota_exhausted
+                    quota_pressured, quota_exhausted,
+                    task_tokens, task_code_block_count, task_message_count
                FROM decisions WHERE request_id = ?1",
             [request_id],
             |row| {
@@ -1835,6 +1850,9 @@ fn read_decision(
                     features: RequestFeatures {
                         estimated_input_tokens: row.get(10)?,
                         conversation_tokens: row.get(11)?,
+                        task_tokens: row.get(33)?,
+                        task_code_block_count: row.get(34)?,
+                        task_message_count: row.get(35)?,
                         message_count: row.get(12)?,
                         tool_count: row.get(13)?,
                         has_images: row.get(14)?,
@@ -2273,6 +2291,41 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    #[test]
+    fn task_scope_survives_storage_and_v16_rows_keep_unknown_scope() {
+        let path = scratch("task-scope-v17");
+        std::fs::remove_file(&path).ok();
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            let old = receipt("old-task", 1);
+            store.record(&old);
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute_batch(
+                    "ALTER TABLE decisions DROP COLUMN task_tokens;
+                ALTER TABLE decisions DROP COLUMN task_code_block_count;
+                ALTER TABLE decisions DROP COLUMN task_message_count;
+                PRAGMA user_version = 16;",
+                )
+                .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let old = store.read_recent(5).unwrap();
+        assert_eq!(old[0].decision.as_ref().unwrap().features.task_tokens, None);
+        let mut current = receipt("new-task", 2);
+        let features = &mut current.decision.as_mut().unwrap().features;
+        features.task_tokens = Some(7);
+        features.task_code_block_count = Some(0);
+        features.task_message_count = Some(1);
+        store.record(&current);
+        let rows = store.read_recent(5).unwrap();
+        assert_eq!(rows[0].decision, current.decision);
+        assert!(path.with_extension("v16.bak").exists());
+        drop(store);
+        std::fs::remove_file(path.with_extension("v16.bak")).ok();
+        std::fs::remove_file(path).ok();
+    }
+
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("ts-store-{}-{name}.sqlite", std::process::id()))
     }
@@ -2452,6 +2505,15 @@ mod tests {
             connection
                 .pragma_update(None, "user_version", 14)
                 .expect("stamps v14");
+            // Temporarily provide new writer columns, then remove them before
+            // migration. The on-disk fixture remains an exact v14 schema.
+            connection
+                .execute_batch(
+                    "ALTER TABLE decisions ADD COLUMN task_tokens INTEGER;
+                ALTER TABLE decisions ADD COLUMN task_code_block_count INTEGER;
+                ALTER TABLE decisions ADD COLUMN task_message_count INTEGER;",
+                )
+                .unwrap();
             let store = SqliteStore {
                 connection: std::sync::Mutex::new(connection),
             };
@@ -2472,6 +2534,16 @@ mod tests {
                 matched_band_at_least: 22,
             };
             store.record(&heuristic);
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "ALTER TABLE decisions DROP COLUMN task_tokens;
+                 ALTER TABLE decisions DROP COLUMN task_code_block_count;
+                 ALTER TABLE decisions DROP COLUMN task_message_count;",
+                )
+                .unwrap();
             // The current reader requires the new diagnostic table. Build its
             // expected view separately while leaving the v14 fixture untouched.
             let reference_path = scratch("migrate-v14-reference");

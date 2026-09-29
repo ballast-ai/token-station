@@ -59,7 +59,8 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v14: adds allowlisted usage observations.
 /// - v15: admits the content-free classifier decision reason.
 /// - v16: records request-scoped classifier input handling without content.
-pub const SCHEMA_VERSION: u32 = 16;
+/// - v17: preserves optional task-scoped heuristic counts for replay.
+pub const SCHEMA_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -30,10 +30,16 @@ pub struct RequestFeatures {
     /// Estimated tokens of the CONVERSATION only (non-system messages). Agents
     /// (OpenCode/Claude Code) ship a fixed multi-thousand-token system prompt
     /// every turn; counting it as difficulty pins every request to the top tier.
-    /// Difficulty scoring uses this so a trivial greeting stays trivial regardless
-    /// of the agent's scaffolding.
+    /// Kept for diagnostics and legacy feature replay.
     #[serde(default)]
     pub conversation_tokens: u32,
+    /// Difficulty scope. Absent in legacy records and requests without a user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_code_block_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_message_count: Option<u32>,
     pub message_count: u32,
     pub tool_count: u32,
     pub has_images: bool,
@@ -44,8 +50,8 @@ pub struct RequestFeatures {
     pub hint_count: u32,
     /// Dims 2–10 of the ported V1 complexity heuristic (V2-P2-3): hit counts
     /// against the crate's fixed bilingual vocabulary (`lexicon`), scanned
-    /// over the LAST user message only — V1's scope, kept so conversation
-    /// history cannot inflate the score. Counts, never text.
+    /// over the current user task, resolving exact continuation-only messages
+    /// to the nearest substantive user task. Counts, never text.
     #[serde(default)]
     pub reasoning_marker_count: u32,
     #[serde(default)]
@@ -82,8 +88,7 @@ impl RequestFeatures {
         let mut has_images = false;
 
         for message in &request.messages {
-            // The system prompt is fixed Agent scaffolding. Include it only in estimated_input_tokens for context
-            // context-window fitting), not conversation_tokens used for difficulty scoring.
+            // Preserve full input size for admission, independently from task difficulty.
             let is_conversation = message.role != Role::System;
             let mut add = |tokens: u32| {
                 estimated_input_tokens = estimated_input_tokens.saturating_add(tokens);
@@ -120,12 +125,24 @@ impl RequestFeatures {
             }
         }
 
-        let user_text = last_user_text(request).to_lowercase();
+        let (task_text, continued) = task_text(request);
+        // Only narrow, explicit operations can discard history cost. Unknown
+        // tasks keep conservative legacy scoring rather than guessing low.
+        let scoped = task_text
+            .as_deref()
+            .filter(|text| continued || is_narrow_task(text));
+        let task_tokens = scoped.map(estimate_tokens);
+        let task_code_block_count = scoped.map(|text| count_fences(text) / 2);
+        let task_message_count = scoped.map(|_| 1);
+        let user_text = task_text.unwrap_or_default().to_lowercase();
         let system_text = system_text(request).to_lowercase();
 
         Self {
             estimated_input_tokens,
             conversation_tokens,
+            task_tokens,
+            task_code_block_count,
+            task_message_count,
             message_count: truncate(request.messages.len()),
             tool_count: truncate(request.tools.len()),
             has_images,
@@ -151,29 +168,104 @@ impl RequestFeatures {
     }
 }
 
-/// The text of the LAST user message — the request being asked now, which is
-/// what V1 scored. Parts are concatenated; non-text parts contribute nothing.
-fn last_user_text(request: &ChatRequest) -> String {
+/// Select one user task. An exact continuation can reuse the preceding task,
+/// but a phrase embedded in a new instruction must not cross that boundary.
+fn task_text(request: &ChatRequest) -> (Option<String>, bool) {
+    let mut latest = None;
     for message in request.messages.iter().rev() {
         if message.role != Role::User {
             continue;
         }
-        return match message.content.as_ref() {
+        let text = match message.content.as_ref() {
             Some(Content::Text(text)) => text.clone(),
-            Some(Content::Parts(parts)) => {
-                let mut text = String::new();
-                for part in parts {
-                    if let ContentPart::Text { text: t } = part {
-                        text.push_str(t);
-                        text.push(' ');
-                    }
-                }
-                text
-            }
+            Some(Content::Parts(parts)) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
             None => String::new(),
         };
+        if !is_continuation(&text) {
+            return (Some(text), latest.is_some());
+        }
+        latest.get_or_insert(text);
     }
-    String::new()
+    (latest, false)
+}
+
+fn is_continuation(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_end_matches(['.', '!', '。', '！'])
+        .trim()
+        .to_lowercase();
+    matches!(
+        normalized.as_str(),
+        "continue"
+            | "please continue"
+            | "continue please"
+            | "go on"
+            | "resume"
+            | "继续"
+            | "请继续"
+            | "接着"
+            | "继续吧"
+    )
+}
+
+/// Recognize bounded output operations, not a general intent classifier.
+/// Reasoning and multi-step signals veto history removal. False negatives keep
+/// the previous conservative score. No model label is used as a routing rule.
+fn is_narrow_task(text: &str) -> bool {
+    let text = text.trim().to_lowercase();
+    if lexicon::count_matches(&text, lexicon::REASONING_MARKERS) > 0
+        || lexicon::count_matches(&text, lexicon::MATH_TERMS) > 0
+        || multi_step_signal(&text) > 0
+    {
+        return false;
+    }
+    let prefix = [
+        "only return ",
+        "return only ",
+        "only output ",
+        "only state ",
+        "translate just ",
+        "只返回",
+        "只输出",
+        "仅输出",
+        "直接告诉我",
+        "仅用一句话复述",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix));
+    // Restrict to extraction/formatting objects. A short-output request can
+    // still require difficult design, so output brevity alone is insufficient.
+    prefix
+        && [
+            "title",
+            "count",
+            "total",
+            "number",
+            "names",
+            "json",
+            "phrase",
+            "value",
+            "标题",
+            "编号",
+            "数值",
+            "净额",
+            "错误率",
+            "件数",
+            "参数",
+            "数量",
+            "名称",
+            "how many",
+        ]
+        .iter()
+        .any(|object| lexicon::has_phrase(&text, object))
 }
 
 /// All system-role text, concatenated (V1 dim 10 scans instructions only).

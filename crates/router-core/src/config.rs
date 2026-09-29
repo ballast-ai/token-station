@@ -309,10 +309,11 @@ impl Heuristic {
     #[must_use]
     pub fn score(&self, features: &RequestFeatures) -> u32 {
         let weights = &self.weights;
-        // Score difficulty from conversation content without the system prompt. Fixed Agent scaffolding can contain thousands of system tokens
-        // prompt), or every request receives a high-tier score. See the conversation_tokens comment.
+        // Scope new requests to their current user task. Old serialized features
+        // have no task counts and retain their original replay score.
         let mut score = features
-            .conversation_tokens
+            .task_tokens
+            .unwrap_or(features.conversation_tokens)
             .saturating_div(weights.tokens_per_point.max(1));
 
         // Note: advertised tool_count(request.tools.len()) is fixed for each agent.
@@ -321,12 +322,14 @@ impl Heuristic {
         // Route requests to models that support tool calls. See route.rs. Keep per_tool weights but exclude them from scoring.
         score = score.saturating_add(
             features
-                .code_block_count
+                .task_code_block_count
+                .unwrap_or(features.code_block_count)
                 .saturating_mul(weights.per_code_block),
         );
         score = score.saturating_add(
             features
-                .message_count
+                .task_message_count
+                .unwrap_or(features.message_count)
                 .saturating_sub(1)
                 .saturating_mul(weights.per_extra_turn),
         );
