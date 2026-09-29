@@ -681,7 +681,7 @@ impl Gateway {
                     u64::try_from(ctx.remaining().as_millis()).unwrap_or(u64::MAX),
                 ),
             };
-            record.attempts = budget.attempts;
+            record.attempts = record.attempts.saturating_add(1);
             record_actual_attempt_target(record, decision, target);
             let attempt_clock = Instant::now();
             let mut upstream_http_status = None;
@@ -1221,6 +1221,7 @@ mod cancelled_settlement_tests {
             body_log: None,
             semantic: None,
             jev: crate::jev::JevController::shared(&config.data.dir),
+            search: crate::search::SearchController::shared(&config.data.dir),
         }
     }
 
@@ -1881,6 +1882,7 @@ mod schema_estimate_tests {
             body_log: None,
             semantic: None,
             jev: crate::jev::JevController::shared(&config.data.dir),
+            search: crate::search::SearchController::shared(&config.data.dir),
         }
     }
 

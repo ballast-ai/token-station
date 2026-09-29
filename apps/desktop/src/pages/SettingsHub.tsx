@@ -44,9 +44,11 @@ import { usePageTransition } from "../components/use-page-transition";
 import About from "./About";
 import { DraftNavigationBoundary, useDraftNavigation } from "../components/DraftNavigation";
 import Settings from "./Settings";
+import SearchSettingsPanel from "./SearchSettingsPanel";
 import RequestLogsPage from "./RequestLogsPage";
 
 type SettingsSection =
+  | "search"
   | "general"
   | "api-key"
   | "agent-visibility"
@@ -113,6 +115,16 @@ const SECTIONS: Array<{
     traditionalDescription: "路由結果與本機回執",
     japaneseDescription: "ルーティング結果とローカルレシート",
     icon: ScrollText,
+  },
+  {
+    id: "search",
+    label: "settings.general",
+    description: "settings.generalHint",
+    englishLabel: "Web search",
+    chineseLabel: "联网搜索",
+    englishDescription: "Local browser search preview",
+    chineseDescription: "后台浏览器搜索 · 试用",
+    icon: Monitor,
   },
   {
     id: "general",
@@ -599,6 +611,7 @@ function SettingsHubContent({
             onVisibilityChange={onAgentVisibilityChange}
           />
         )}
+        {section === "search" && <SearchSettingsPanel />}
         {section === "appearance" && <AppearancePanel />}
         {section === "request-logs" && (
           <section className="settings-request-logs">

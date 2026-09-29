@@ -167,6 +167,7 @@ impl Fixture {
             body_log: None,
             semantic: None,
             jev: Arc::clone(&controller),
+            search: crate::search::SearchController::shared(&config.data.dir),
         };
         Self {
             data,

@@ -37,6 +37,7 @@ pub mod quota_lease;
 pub mod quota_ledger;
 pub mod quota_tracker;
 pub mod request_context;
+pub mod search;
 pub mod secrets;
 pub mod semantic;
 pub mod server;

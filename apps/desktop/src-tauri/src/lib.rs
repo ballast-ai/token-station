@@ -36,6 +36,7 @@ mod provider_commands;
 mod provider_discovery;
 mod recovery_commands;
 mod routing_commands;
+mod search_commands;
 mod self_test;
 mod semantic_commands;
 mod serve_supervisor;
@@ -496,6 +497,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            search_commands::get_search_status,
+            search_commands::save_search_settings,
+            search_commands::test_browser_search,
             jev_commands::get_jev_status,
             jev_commands::save_jev_key,
             jev_commands::clear_jev_key,

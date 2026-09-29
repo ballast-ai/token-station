@@ -437,7 +437,11 @@ fn sse(event: &str, body: &Value) -> String {
     format!("event: {event}\ndata: {body}\n\n")
 }
 
-fn emit_message(message: &Value, stream: bool, emit: &mut dyn FnMut(Reply) -> bool) -> bool {
+pub(super) fn emit_message(
+    message: &Value,
+    stream: bool,
+    emit: &mut dyn FnMut(Reply) -> bool,
+) -> bool {
     if !stream {
         return emit(Reply::BeginJson(JsonReply {
             status: 200,

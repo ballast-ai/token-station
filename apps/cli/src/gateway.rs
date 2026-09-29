@@ -27,6 +27,7 @@ mod classifier_input_tests;
 mod jev_routing;
 #[cfg(test)]
 mod jev_tests;
+mod local_search;
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
 #[cfg(test)]
@@ -1727,6 +1728,7 @@ pub struct Gateway {
     body_log: Option<Arc<BodyLog>>,
     semantic: Option<Arc<crate::semantic::SemanticController>>,
     jev: Arc<crate::jev::JevController>,
+    search: Arc<crate::search::SearchController>,
 }
 
 /// An Agent router that has already passed every fallible construction step.
@@ -2257,6 +2259,7 @@ impl Gateway {
             body_log: None,
             semantic: None,
             jev: crate::jev::JevController::shared(&config.data.dir),
+            search: crate::search::SearchController::shared(&config.data.dir),
         })
     }
 
@@ -3804,6 +3807,7 @@ impl Gateway {
     /// The pipeline. Returns `Err` only before anything was emitted, so the
     /// caller can still shape a whole error response.
     #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
+    #[allow(clippy::too_many_lines)]
     fn chat_inner(
         &self,
         ctx: &RequestContext,
@@ -3817,6 +3821,20 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        if let Some(served) = self.try_local_search(
+            ctx,
+            agent,
+            router,
+            method,
+            path,
+            headers,
+            body,
+            routing_model,
+            emit,
+            record,
+        )? {
+            return Ok(served);
+        }
         if agent.protocol == "anthropic-messages"
             && let Some(served) = self.try_web_search(
                 ctx,
