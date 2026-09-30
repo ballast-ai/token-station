@@ -31,10 +31,10 @@ use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
-    build_disconnect_plan, build_metadata_refresh_plan, build_metadata_refresh_plan_with_baseline,
-    build_snapshot_restore_plan, companion_document_format, generate_operation_id,
-    read_config_source, ConfigSource, PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED,
-    OWNED_VALUES_CHANGED,
+    build_disconnect_plan, build_forced_disconnect_plan, build_metadata_refresh_plan,
+    build_metadata_refresh_plan_with_baseline, build_snapshot_restore_plan,
+    companion_document_format, generate_operation_id, read_config_source, ConfigSource,
+    PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED, OWNED_VALUES_CHANGED,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
@@ -1682,6 +1682,16 @@ impl AgentCommandState {
         installation_path: &str,
         session_label: &str,
     ) -> Result<ConfigPlanView, AgentCommandError> {
+        self.plan_disconnect_with_owned_drift(agent_id, installation_path, session_label, false)
+    }
+
+    fn plan_disconnect_with_owned_drift(
+        &self,
+        agent_id: &str,
+        installation_path: &str,
+        session_label: &str,
+        allow_owned_drift: bool,
+    ) -> Result<ConfigPlanView, AgentCommandError> {
         validate_session_label(session_label)?;
         let (record, decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
@@ -1705,7 +1715,12 @@ impl AgentCommandState {
         let target = Path::new(&ownership.target_config_path);
         let current = read_config_source(target).map_err(AgentCommandError::internal)?;
         let key = self.keys.load().map_err(AgentCommandError::internal)?;
-        let mut prepared = build_disconnect_plan(
+        let planner = if allow_owned_drift {
+            build_forced_disconnect_plan
+        } else {
+            build_disconnect_plan
+        };
+        let mut prepared = planner(
             connector,
             &record,
             &decision,
@@ -2858,6 +2873,19 @@ pub(crate) fn plan_agent_disconnect(
 ) -> Result<ConfigPlanView, AgentCommandError> {
     state.refresh_scan()?;
     state.plan_disconnect(&agent_id, &installation_path, window.label())
+}
+
+/// Plan baseline restoration after the user explicitly confirms managed-field drift.
+/// The issued one-shot plan binds the current full revisions of every target file.
+#[tauri::command(async)]
+pub(crate) fn plan_agent_forced_disconnect(
+    state: State<'_, AgentCommandState>,
+    window: WebviewWindow,
+    agent_id: String,
+    installation_path: String,
+) -> Result<ConfigPlanView, AgentCommandError> {
+    state.refresh_scan()?;
+    state.plan_disconnect_with_owned_drift(&agent_id, &installation_path, window.label(), true)
 }
 
 /// Force-disconnect fallback: remove managed fields and ownership when a lost key blocks normal snapshot restoration.
@@ -6558,6 +6586,109 @@ mod tests {
         );
         clean_lifecycle_case(&experiment, &root);
         clean_lifecycle_case(&stable, &root);
+    }
+
+    #[test]
+    fn forced_disconnect_command_keeps_session_token_and_one_shot_guards() {
+        let state = state("forced-disconnect-command");
+        let root = scratch("forced-disconnect-command-target");
+        let target = root.join("settings.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&target, br#"{"unowned":"original"}"#).unwrap();
+        install_scan(
+            &state,
+            CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            vec![record(&target, false)],
+        );
+        let runtime = runtime("synthetic-forced-command-key");
+        let connection = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &runtime,
+            )
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&runtime),
+            )
+            .unwrap();
+        let mut edited: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        edited["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("manually-edited-key");
+        edited["unowned"] = json!("keep-user-edit");
+        std::fs::write(&target, serde_json::to_vec(&edited).unwrap()).unwrap();
+        assert_eq!(
+            state
+                .plan_disconnect("claude-code", "/opt/claude", "main")
+                .err()
+                .unwrap()
+                .code,
+            OWNED_VALUES_CHANGED
+        );
+        let forced = state
+            .plan_disconnect_with_owned_drift("claude-code", "/opt/claude", "main", true)
+            .unwrap();
+        assert!(!serde_json::to_string(&forced)
+            .unwrap()
+            .contains("allow_owned_drift"));
+        let before = std::fs::read(&target).unwrap();
+        let wrong_session = state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &forced.confirmation_token,
+                "other-window",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(wrong_session.code, "operation_session_or_intent_mismatch");
+        let wrong_token = state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &"00".repeat(CONFIRMATION_TOKEN_BYTES),
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(wrong_token.code, "confirmation_token_mismatch");
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &forced.confirmation_token,
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(restored["unowned"], "keep-user-edit");
+        assert!(restored["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(state
+            .ownership
+            .list_agent_installation("claude-code", "/opt/claude")
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &forced.confirmation_token,
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(state.paths.snapshot_root.parent().unwrap()).unwrap();
     }
 
     #[test]

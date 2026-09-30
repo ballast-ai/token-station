@@ -634,7 +634,7 @@ impl Gateway {
             );
             record.status = error.http_status;
             record.error_code = Some(error.code);
-            self.settle(record, &target, StreamOutcome::FailedBeforeOutput);
+            self.settle(ctx, record, &target, StreamOutcome::FailedBeforeOutput);
             return Err(error);
         }
         let message = serde_json::from_str::<Value>(&answer.body)
@@ -652,7 +652,7 @@ impl Gateway {
                 // The upstream already consumed tokens even when wire conversion fails.
                 record.status = error.http_status;
                 record.error_code = Some(error.code);
-                self.settle(record, &target, StreamOutcome::FailedBeforeOutput);
+                self.settle(ctx, record, &target, StreamOutcome::FailedBeforeOutput);
                 record_conversion(
                     record,
                     ConversionStage::OutboundRender,

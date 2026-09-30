@@ -919,6 +919,7 @@ impl Gateway {
         );
         Self::finish_attempt_accounting(ctx, record, &result);
         self.settle_attempt_quota(target, unix_millis(), record, &result);
+        ctx.aggregate_host_attempt(record, *upstream_http_status, target, &self.pricing);
         result
     }
 
@@ -1392,7 +1393,7 @@ mod cancelled_settlement_tests {
         );
         gateway.settle_quota("conversation", &record, &result);
         let (served, outcome) = result.unwrap();
-        gateway.settle(&mut record, &served, outcome);
+        gateway.settle(&ctx, &mut record, &served, outcome);
 
         let quota = gateway.quota.lock().unwrap();
         let snapshots = quota.snapshot(&["a".to_owned(), "b".to_owned()], 1_000);
@@ -1417,7 +1418,7 @@ mod cancelled_settlement_tests {
         let result = Gateway::cancel_before_attempt(&ctx, &pending, &mut |_| true, &record);
         gateway.settle_quota("unstarted", &record, &result);
         let (served, outcome) = result.unwrap();
-        gateway.settle(&mut record, &served, outcome);
+        gateway.settle(&ctx, &mut record, &served, outcome);
         let quota = gateway.quota.lock().unwrap();
         assert_eq!(
             quota.snapshot(&["b".to_owned()], 1_000)[0].windows[0].used,

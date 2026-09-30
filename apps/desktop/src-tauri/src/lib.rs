@@ -79,7 +79,8 @@ use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, discard_agent_plan, force_forget_agent,
     get_agent_backup_directory, get_agent_drift, get_cached_agent_views, list_agent_registry,
     list_agent_snapshots, open_agent_backup_directory, plan_agent_connection,
-    plan_agent_disconnect, plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
+    plan_agent_disconnect, plan_agent_forced_disconnect, plan_snapshot_restore, runtime_from_app,
+    scan_agents, AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
@@ -573,6 +574,7 @@ pub fn run() {
             apply_agent_plan,
             discard_agent_plan,
             plan_agent_disconnect,
+            plan_agent_forced_disconnect,
             force_forget_agent,
             list_agent_snapshots,
             get_agent_drift,

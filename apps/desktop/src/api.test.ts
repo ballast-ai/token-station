@@ -44,6 +44,7 @@ import {
   listenDesktopUpdateProgress,
   planAgentConnection,
   planAgentDisconnect,
+  planAgentForcedDisconnect,
   planSnapshotRestore,
   mountAgentProfile,
   previewProviderRemoval,
@@ -215,6 +216,12 @@ describe("structured Agent IPC", () => {
       () => discardAgentPlan("operation", "confirmation"),
       "discard_agent_plan",
       { operationId: "operation", confirmationToken: "confirmation" },
+    ],
+    [
+      "plan explicitly confirmed forced disconnect",
+      () => planAgentForcedDisconnect("codex", "/opt/codex"),
+      "plan_agent_forced_disconnect",
+      { agentId: "codex", installationPath: "/opt/codex" },
     ],
     [
       "plan disconnect",

@@ -618,7 +618,11 @@ impl<'a> TransactionEngine<'a> {
             } else {
                 false
             };
-            if !matches_record && !matches_projection && !matches_legacy_widening {
+            if !plan.allows_owned_drift()
+                && !matches_record
+                && !matches_projection
+                && !matches_legacy_widening
+            {
                 return Err(failure(
                     plan,
                     TransactionStage::Ownership,
@@ -679,7 +683,10 @@ impl<'a> TransactionEngine<'a> {
                                 "companion_ownership_check_failed",
                             )
                         })?;
-                if observed != owned.owned_value_macs && observed != projected {
+                if !plan.allows_owned_drift()
+                    && observed != owned.owned_value_macs
+                    && observed != projected
+                {
                     return Err(failure(
                         plan,
                         TransactionStage::Ownership,
@@ -1476,8 +1483,8 @@ mod tests {
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
     use crate::agent_integration::plan::{
-        build_connection_plan, build_disconnect_plan, build_metadata_refresh_plan,
-        build_snapshot_restore_plan, read_config_source, ConfigSource,
+        build_connection_plan, build_disconnect_plan, build_forced_disconnect_plan,
+        build_metadata_refresh_plan, build_snapshot_restore_plan, read_config_source, ConfigSource,
     };
     use crate::agent_integration::snapshot::{
         DecryptedSnapshot, FileSnapshotStore, MasterKeyStore, SnapshotCreateResult,
@@ -2687,6 +2694,157 @@ mod tests {
         assert_eq!(disconnected["unowned"], "keep");
         assert!(ownership.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn forced_disconnect_restores_owned_drift_and_preserves_unowned_edits() {
+        for late_change in ["none", "target", "companion", "expired"] {
+            let root = scratch(&format!("forced-disconnect-{late_change}"));
+            let target = root.join(".codex/config.toml");
+            let catalog = root.join(".codex/model-catalogs/tokenstation.json");
+            write_initial(
+                &target,
+                b"model = \"original-model\"\n[user]\nkeep = true\n",
+            );
+            write_initial(
+                &catalog,
+                br#"{"schema":"original","models":[{"slug":"original-model"}]}"#,
+            );
+            let connect = prepare_codex(&target, "synthetic-forced-key");
+            let keys = Arc::new(TestKeys::available());
+            let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+            let ownership = FileOwnershipStore::new(root.join("ownership"));
+            let engine = TransactionEngine::new(
+                &snapshots,
+                &ownership,
+                keys.as_ref(),
+                &FsAtomicConfigWriter,
+                &ParseOnlyVerifier,
+                &TEST_CLOCK,
+            );
+            engine
+                .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+                .unwrap();
+            let key = OwnershipKey {
+                agent_id: "codex".to_owned(),
+                installation_path: "/opt/codex".to_owned(),
+                target_config_path: target.to_string_lossy().into_owned(),
+            };
+            let owned = ownership.load(&key).unwrap().unwrap();
+            let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
+            let source = ConfigSource {
+                existed: baseline.record.original_existed,
+                exact_bytes: baseline.exact_bytes,
+                original_permissions: baseline.record.original_permissions,
+                original_owner: baseline.record.original_owner.clone(),
+            };
+            let mut edited = std::fs::read_to_string(&target)
+                .unwrap()
+                .parse::<toml_edit::Document>()
+                .unwrap();
+            edited["model"] = toml_edit::value("manually-edited-model");
+            edited["user"]["keep"] = toml_edit::value(false);
+            std::fs::write(&target, edited.to_string()).unwrap();
+            let mut edited_catalog: Value =
+                serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+            edited_catalog["models"] = serde_json::json!([{"slug":"manually-edited-catalog"}]);
+            edited_catalog["schema"] = serde_json::json!("unowned-user-edit");
+            std::fs::write(&catalog, serde_json::to_vec(&edited_catalog).unwrap()).unwrap();
+            let current = read_config_source(&target).unwrap();
+            assert_eq!(
+                build_disconnect_plan(
+                    &CodexConnector,
+                    &codex_discovery(&target),
+                    &codex_verified(),
+                    &target,
+                    &current,
+                    &owned,
+                    &baseline.record,
+                    &source,
+                    &keys.load().unwrap(),
+                    1,
+                    None,
+                    1_003,
+                    "a1".repeat(16),
+                )
+                .err()
+                .unwrap(),
+                OWNED_VALUES_CHANGED
+            );
+            let mut forced = build_forced_disconnect_plan(
+                &CodexConnector,
+                &codex_discovery(&target),
+                &codex_verified(),
+                &target,
+                &current,
+                &owned,
+                &baseline.record,
+                &source,
+                &keys.load().unwrap(),
+                1,
+                None,
+                1_003,
+                "a2".repeat(16),
+            )
+            .expect("explicit forced plan must accept existing owned drift");
+            crate::agent_integration::plan::attach_disconnect_companions(
+                &mut forced,
+                &CodexConnector,
+                &owned,
+                &snapshots,
+                &keys.load().unwrap(),
+            )
+            .expect("explicit forced plan must accept existing companion drift");
+            if late_change == "target" {
+                std::fs::write(&target, "model = \"edited-after-confirmation\"\n").unwrap();
+            } else if late_change == "companion" {
+                std::fs::write(&catalog, br#"{"models":[],"late":"keep"}"#).unwrap();
+            }
+            let target_before = std::fs::read(&target).unwrap();
+            let companion_before = std::fs::read(&catalog).unwrap();
+            let now = if late_change == "expired" {
+                forced.view.expires_at_ms + 1
+            } else {
+                1_004
+            };
+            let outcome = engine.apply_disconnect(
+                &forced,
+                &confirmation_at(&forced, 1_003),
+                &admission(),
+                now,
+            );
+            if late_change == "none" {
+                outcome.expect("forced restore must commit the full file set");
+                let restored = std::fs::read_to_string(&target)
+                    .unwrap()
+                    .parse::<toml_edit::Document>()
+                    .unwrap();
+                assert_eq!(restored["model"].as_str(), Some("original-model"));
+                assert_eq!(restored["user"]["keep"].as_bool(), Some(false));
+                let restored: Value =
+                    serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+                assert_eq!(restored["models"][0]["slug"], "original-model");
+                assert_eq!(restored["schema"], "unowned-user-edit");
+                assert!(ownership.load(&key).unwrap().is_none());
+                assert!(engine
+                    .apply_disconnect(
+                        &forced,
+                        &confirmation_at(&forced, 1_003),
+                        &admission(),
+                        1_005
+                    )
+                    .is_err());
+            } else {
+                assert!(
+                    outcome.is_err(),
+                    "late change or expiry must reject before writing"
+                );
+                assert_eq!(std::fs::read(&target).unwrap(), target_before);
+                assert_eq!(std::fs::read(&catalog).unwrap(), companion_before);
+                assert!(ownership.load(&key).unwrap().is_some());
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub struct RequestContext {
     http_trace: Mutex<Option<HttpTraceCapture>>,
     tool_aliases: Mutex<BTreeMap<String, String>>,
     accounting: Mutex<crate::accounting::AccountingTap>,
+    host_loop_accounting: Mutex<Option<crate::accounting::Aggregate>>,
     error_diagnostic: Mutex<Option<ErrorDiagnosticCapture>>,
     classifier_input: Mutex<Option<token_station_metrics::ClassifierInputDiagnostic>>,
 }
@@ -132,6 +133,34 @@ impl HttpTraceCapture {
 }
 
 impl RequestContext {
+    pub(crate) fn begin_host_loop_accounting(&self) {
+        *self.host_loop_accounting.lock().unwrap() = Some(crate::accounting::Aggregate::default());
+    }
+
+    pub(crate) fn aggregate_host_attempt(
+        &self,
+        record: &token_station_metrics::RequestRecord,
+        status: Option<u16>,
+        target: &token_station_router_core::UpstreamModel,
+        pricing: &crate::pricing::PriceTable,
+    ) {
+        if let Some(aggregate) = self.host_loop_accounting.lock().unwrap().as_mut() {
+            aggregate.absorb(record, status, target, pricing);
+        }
+    }
+
+    /// True means the host loop already priced each attempt against its own model.
+    pub(crate) fn apply_host_loop_accounting(
+        &self,
+        record: &mut token_station_metrics::RequestRecord,
+    ) -> bool {
+        if let Some(aggregate) = self.host_loop_accounting.lock().unwrap().as_ref() {
+            aggregate.apply(record);
+            true
+        } else {
+            false
+        }
+    }
     pub(crate) fn tool_alias_scope(&self, aliases: BTreeMap<String, String>) -> ToolAliasScope<'_> {
         *self.tool_aliases.lock().unwrap() = aliases;
         ToolAliasScope(self)
@@ -161,6 +190,7 @@ impl RequestContext {
             error_diagnostic: Mutex::new(None),
             classifier_input: Mutex::new(None),
             accounting: Mutex::new(crate::accounting::AccountingTap::default()),
+            host_loop_accounting: Mutex::new(None),
         }
     }
 

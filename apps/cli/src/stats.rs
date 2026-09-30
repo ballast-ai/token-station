@@ -128,13 +128,13 @@ pub fn parse_since(spec: &str) -> Result<Option<u64>, String> {
         return Ok(None);
     }
     let refused = || format!("`{spec}` is not a window; use all, <N>h or <N>d");
-    let (number, unit) = spec.split_at(spec.len().saturating_sub(1));
+    let (number, multiplier) = spec
+        .strip_suffix('h')
+        .map(|number| (number, 1))
+        .or_else(|| spec.strip_suffix('d').map(|number| (number, 24)))
+        .ok_or_else(refused)?;
     let count: u64 = number.parse().map_err(|_| refused())?;
-    let hours = match unit {
-        "h" => count,
-        "d" => count.saturating_mul(24),
-        _ => return Err(refused()),
-    };
+    let hours = count.saturating_mul(multiplier);
     Ok(Some(hours.saturating_mul(60 * 60 * 1000)))
 }
 
@@ -204,6 +204,81 @@ pub fn collect_filtered(
     {
         return Err("stats range end_ms must be after start_ms".to_string());
     }
+    let connection = open_stats_connection(db_path)?;
+    let rows = select_rows(&connection, start_ms, end_ms, filter)?;
+
+    let total = aggregate(rows.iter());
+    let groups = match group_by {
+        None => Vec::new(),
+        Some(by) => {
+            let mut buckets: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
+            for row in &rows {
+                buckets.entry(row.key(by)).or_default().push(row);
+            }
+            buckets
+                .into_iter()
+                .map(|(key, rows)| (key, aggregate(rows.into_iter())))
+                .collect()
+        }
+    };
+
+    Ok(Report { total, groups })
+}
+
+/// Constant-memory spending totals for one Agent and one budget period.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BudgetSpend {
+    pub cost_micros: Option<i64>,
+    pub unpriced_requests: u64,
+}
+
+/// Read spending without retaining latencies or imposing the percentile row limit.
+///
+/// # Errors
+/// Rejects invalid periods, unreadable stores, and incompatible schemas.
+pub fn collect_budget_spend(
+    db_path: &Path,
+    agent_id: &str,
+    start_ms: Option<u64>,
+    end_ms: Option<u64>,
+) -> Result<BudgetSpend, String> {
+    if start_ms
+        .zip(end_ms)
+        .is_some_and(|(start, end)| start >= end)
+    {
+        return Err("stats range end_ms must be after start_ms".to_owned());
+    }
+    let connection = open_stats_connection(db_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT cost_micros FROM requests
+         WHERE agent_id = ?1 AND started_at_ms >= ?2
+           AND (?3 IS NULL OR started_at_ms < ?3)",
+        )
+        .map_err(|error| format!("budget query: {error}"))?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![
+                agent_id,
+                i64::try_from(start_ms.unwrap_or(0)).unwrap_or(i64::MAX),
+                end_ms.map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+            ],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(|error| format!("budget query: {error}"))?;
+    let mut total = BudgetSpend::default();
+    for row in rows {
+        match row.map_err(|error| format!("budget query: {error}"))? {
+            Some(cost) => {
+                total.cost_micros = Some(total.cost_micros.unwrap_or(0).saturating_add(cost));
+            }
+            None => total.unpriced_requests = total.unpriced_requests.saturating_add(1),
+        }
+    }
+    Ok(total)
+}
+
+fn open_stats_connection(db_path: &Path) -> Result<Connection, String> {
     if !db_path.exists() {
         return Err(format!(
             "no metrics store at `{}` — it is created when `serve` first runs with data.metrics \
@@ -227,24 +302,7 @@ pub fn collect_filtered(
         ));
     }
 
-    let rows = select_rows(&connection, start_ms, end_ms, filter)?;
-
-    let total = aggregate(rows.iter());
-    let groups = match group_by {
-        None => Vec::new(),
-        Some(by) => {
-            let mut buckets: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
-            for row in &rows {
-                buckets.entry(row.key(by)).or_default().push(row);
-            }
-            buckets
-                .into_iter()
-                .map(|(key, rows)| (key, aggregate(rows.into_iter())))
-                .collect()
-        }
-    };
-
-    Ok(Report { total, groups })
+    Ok(connection)
 }
 
 /// Reads the receipts in `[start_ms, end_ms)` that pass `filter`, with the
@@ -641,6 +699,56 @@ mod tests {
     use std::path::PathBuf;
     use token_station_metrics::{RecordedDecidedBy, Recorder, RequestRecord, RoutingRecord};
     use token_station_router_core::RequestFeatures;
+
+    #[test]
+    fn malformed_unicode_windows_return_errors_without_panicking() {
+        for input in ["1天", "小时", "💥", "1é", "24小时", "\0"] {
+            assert!(parse_since(input).is_err(), "invalid window: {input:?}");
+        }
+        assert_eq!(parse_since("0h"), Ok(Some(0)));
+        assert_eq!(parse_since("all"), Ok(None));
+    }
+
+    #[test]
+    fn budget_spending_preserves_unknown_zero_and_saturating_costs() {
+        let path =
+            std::env::temp_dir().join(format!("ts-budget-spend-{}.sqlite", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).unwrap();
+        let empty = super::collect_budget_spend(&path, "codex", None, None).unwrap();
+        assert_eq!(empty, super::BudgetSpend::default());
+        for cost in [Some(0), None, Some(i64::MAX), Some(1)] {
+            let mut receipt = record(100, 1, 200, Some("provider"), None);
+            receipt.agent_id = Some("codex".into());
+            receipt.cost_micros = cost;
+            receipt.cost_kind = if cost.is_some() {
+                token_station_metrics::CostKind::Actual
+            } else {
+                token_station_metrics::CostKind::Unknown
+            };
+            store.record(&receipt);
+        }
+        let spend = super::collect_budget_spend(&path, "codex", Some(100), Some(101)).unwrap();
+        assert_eq!(spend.cost_micros, Some(i64::MAX));
+        assert_eq!(spend.unpriced_requests, 1);
+        let historical = super::collect_filtered(
+            &path,
+            Some(100),
+            Some(101),
+            None,
+            StatsFilter {
+                agent_id: Some("codex"),
+                ..StatsFilter::default()
+            },
+        )
+        .unwrap()
+        .total;
+        assert_eq!(spend.cost_micros, historical.cost_micros);
+        assert_eq!(spend.unpriced_requests, historical.unpriced_requests);
+        assert!(super::collect_budget_spend(&path, "codex", Some(101), Some(100)).is_err());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
 
     fn record(
         started_at_ms: u64,

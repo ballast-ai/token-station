@@ -1015,7 +1015,9 @@ impl SqliteStore {
             let batch_len = candidates.len();
             for (id, upstream, model, mut usage, observation) in candidates {
                 last_id = id;
-                if !crate::accounting::can_estimate(&usage, observation) {
+                if observation.is_some_and(|value| value.cost_requires_attempt_pricing)
+                    || !crate::accounting::can_estimate(&usage, observation)
+                {
                     continue;
                 }
                 if let Some(observation) = observation {
@@ -3274,6 +3276,7 @@ mod tests {
             record.usage_observation =
                 observed.then_some(token_station_metrics::UsageObservation {
                     incomplete: id == "incomplete-observation",
+                    cost_requires_attempt_pricing: false,
                     input_tokens: Some(10),
                     output_tokens: (id != "missing-observed-output").then_some(2),
                     cache_read_tokens: Some(cache_read),

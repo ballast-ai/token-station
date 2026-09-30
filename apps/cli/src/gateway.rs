@@ -3548,7 +3548,7 @@ impl Gateway {
                     &mut capturing_emit,
                     &mut record,
                 ) {
-                    Ok((served, outcome)) => self.settle(&mut record, &served, outcome),
+                    Ok((served, outcome)) => self.settle(ctx, &mut record, &served, outcome),
                     Err(refusal) => {
                         // Failed before any upstream served — a whole error response
                         // the client can still receive; no upstream health verdict.
@@ -3580,6 +3580,7 @@ impl Gateway {
             }
         }
 
+        ctx.apply_host_loop_accounting(&mut record);
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         // Snapshot request input handling even when routing or every attempt failed.
         // Attempt accounting is reset between upstreams and cannot own this value.
@@ -3965,13 +3966,21 @@ impl Gateway {
     /// written. Only [`StreamOutcome::Complete`] settles as success; every other
     /// outcome records a truthful failure (or a client cancel that is nobody's
     /// fault). Nothing outside this function may set `record.status = 200`.
-    fn settle(&self, record: &mut RequestRecord, served: &UpstreamModel, outcome: StreamOutcome) {
+    fn settle(
+        &self,
+        ctx: &RequestContext,
+        record: &mut RequestRecord,
+        served: &UpstreamModel,
+        outcome: StreamOutcome,
+    ) {
         let (upstream, model) = (&served.upstream, served.model.as_str());
 
         // Price the exchange once, here, and pin the table version onto the
         // record so a later price change never re-values it. An unpriced model
         // leaves cost unknown (None), never a claimed-free zero.
-        settle_estimated_cost(&self.pricing, record, served);
+        if !ctx.apply_host_loop_accounting(record) {
+            settle_estimated_cost(&self.pricing, record, served);
+        }
         match outcome {
             StreamOutcome::Complete => {
                 record.status = 200;

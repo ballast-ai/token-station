@@ -1,5 +1,8 @@
 //! Content-free accounting observations from provider response envelopes.
 
+mod aggregate;
+pub(crate) use aggregate::Aggregate;
+
 use serde_json::{Value, value::RawValue};
 use token_station_metrics::{CostKind, RequestRecord, UsageObservation};
 use token_station_protocol::Usage;
@@ -95,6 +98,7 @@ fn observe(body: &Value) -> UsageObservation {
         });
     UsageObservation {
         incomplete,
+        cost_requires_attempt_pricing: false,
         input_tokens: input,
         output_tokens: output,
         cache_read_tokens: cache_read,

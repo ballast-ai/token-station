@@ -16,6 +16,7 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
+  planAgentForcedDisconnect,
   restartAgentHarnessRoutes,
   restartAgentRoute,
   restoreCursorProvider,
@@ -38,6 +39,7 @@ vi.mock("../api", () => ({
   openAgentBackupDirectory: vi.fn(),
   planAgentConnection: vi.fn(),
   planAgentDisconnect: vi.fn(),
+  planAgentForcedDisconnect: vi.fn(),
   restartAgentHarnessRoutes: vi.fn(),
   restartAgentRoute: vi.fn(),
   restoreCursorProvider: vi.fn(),
@@ -104,6 +106,7 @@ describe("AgentRoutePage multi-install admission", () => {
       message: null,
     });
     vi.mocked(planAgentConnection).mockReset().mockReturnValue(new Promise(() => undefined));
+    vi.mocked(planAgentForcedDisconnect).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(planAgentDisconnect).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(forceForgetAgent).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(getAgentBackupDirectory).mockReset().mockResolvedValue("/Users/x/Library/Application Support/com.tokenstation.desktop/agent-integration/snapshots");
@@ -1258,7 +1261,7 @@ describe("AgentRoutePage multi-install admission", () => {
       truncated: false,
       message: "外部修改触及 Token Station 受管字段",
     }]);
-    vi.mocked(planAgentDisconnect).mockResolvedValueOnce({
+    vi.mocked(planAgentForcedDisconnect).mockResolvedValueOnce({
       operation_id: "restore-operation",
       confirmation_token: "restore-confirmation",
       target_config_path: "/Users/x/.claude/settings.json",
@@ -1314,11 +1317,12 @@ describe("AgentRoutePage multi-install admission", () => {
 
     await user.click(within(conflict).getByRole("button", { name: "强制恢复备份" }));
 
-    await waitFor(() => expect(planAgentDisconnect).toHaveBeenCalledWith(
+    await waitFor(() => expect(planAgentForcedDisconnect).toHaveBeenCalledWith(
       "claude-code",
       found.discovery.canonical_path,
     ));
     expect(applyAgentPlan).toHaveBeenCalledWith("restore-operation", "restore-confirmation");
+    expect(planAgentDisconnect).not.toHaveBeenCalled();
     expect(forceForgetAgent).not.toHaveBeenCalled();
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
   });

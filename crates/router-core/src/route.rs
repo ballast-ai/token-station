@@ -272,6 +272,7 @@ impl Router {
                     .find(|candidate| candidate.target == *account)
             })
             .collect();
+        let pool = self.apply_locality(pool, QUOTA_POOL)?;
 
         // Capability gate first: correctness, not quality. Report the first
         // unmet requirement if nothing can serve, matching tiered routing.
@@ -322,7 +323,12 @@ impl Router {
 
         // Best first (a `QuotaRank` compares greater when preferred). Ranks
         // embed the insertion index, so the order is total and deterministic.
-        ranked.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
+        ranked.sort_by_key(|(candidate, rank)| {
+            (
+                self.config.local_only && !candidate.local,
+                std::cmp::Reverse(*rank),
+            )
+        });
 
         let targets: Vec<&UpstreamModel> = ranked
             .iter()
@@ -390,6 +396,7 @@ impl Router {
                 reason: UnmetRequirement::ExactModelUnavailable,
             });
         }
+        let named = self.apply_locality(named, &request.model)?;
 
         let capable: Vec<&Candidate> = named
             .iter()
@@ -418,7 +425,9 @@ impl Router {
             });
         }
 
-        usable.sort_by_key(|candidate| candidate.health);
+        usable.sort_by_key(|candidate| {
+            (self.config.local_only && !candidate.local, candidate.health)
+        });
 
         let targets: Vec<&UpstreamModel> =
             usable.iter().map(|candidate| &candidate.target).collect();
@@ -433,6 +442,25 @@ impl Router {
             features,
             pool: request.model.clone(),
         })
+    }
+
+    /// Filter before capability and availability checks so cloud candidates
+    /// cannot make a strict local route or its backup targets appear usable.
+    fn apply_locality<'a>(
+        &self,
+        mut candidates: Vec<&'a Candidate>,
+        pool: &str,
+    ) -> Result<Vec<&'a Candidate>, NoRoute> {
+        if self.config.local_only && !self.config.allow_cloud_fallback && !candidates.is_empty() {
+            candidates.retain(|candidate| candidate.local);
+            if candidates.is_empty() {
+                return Err(NoRoute::Unsatisfiable {
+                    pool: pool.to_owned(),
+                    reason: UnmetRequirement::LocalOnly,
+                });
+            }
+        }
+        Ok(candidates)
     }
 
     /// Rules precede hints. Both take precedence over host classification.

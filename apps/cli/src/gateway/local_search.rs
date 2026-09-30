@@ -201,22 +201,60 @@ fn calls(answer: &Value, anthropic: bool) -> Vec<Value> {
         .collect()
 }
 
-fn add_usage(sum: &mut token_station_protocol::Usage, usage: token_station_protocol::Usage) {
-    sum.input_tokens = sum.input_tokens.saturating_add(usage.input_tokens);
-    sum.output_tokens = sum.output_tokens.saturating_add(usage.output_tokens);
-    sum.cache_read_tokens = sum
+/// Preserve required protocol numbers as known subtotals. The extra marker
+/// distinguishes partial accounting without inventing usage for missing rounds.
+fn write_loop_usage(answer: &mut Value, anthropic: bool, record: &RequestRecord, searches: u64) {
+    let usage = record.usage.unwrap_or_default();
+    let observation = record.usage_observation.unwrap_or_default();
+    let cache_read = observation
         .cache_read_tokens
-        .saturating_add(usage.cache_read_tokens);
-    sum.cache_write_tokens = sum
+        .or_else(|| (usage.cache_read_tokens > 0).then_some(usage.cache_read_tokens));
+    let cache_write = observation
         .cache_write_tokens
-        .saturating_add(usage.cache_write_tokens);
-    sum.cache_write_5m_tokens = sum
-        .cache_write_5m_tokens
-        .saturating_add(usage.cache_write_5m_tokens);
-    sum.cache_write_1h_tokens = sum
-        .cache_write_1h_tokens
-        .saturating_add(usage.cache_write_1h_tokens);
-    sum.reasoning_tokens = sum.reasoning_tokens.saturating_add(usage.reasoning_tokens);
+        .or_else(|| (usage.cache_write_tokens > 0).then_some(usage.cache_write_tokens));
+    let reasoning = observation
+        .reasoning_tokens
+        .or_else(|| (usage.reasoning_tokens > 0).then_some(usage.reasoning_tokens));
+    let partial_details = (cache_read.is_some() && observation.cache_read_tokens.is_none())
+        || (cache_write.is_some() && observation.cache_write_tokens.is_none())
+        || (reasoning.is_some() && observation.reasoning_tokens.is_none());
+    let input = if anthropic {
+        usage
+            .input_tokens
+            .saturating_sub(usage.cache_read_tokens)
+            .saturating_sub(usage.cache_write_tokens)
+    } else {
+        usage.input_tokens
+    };
+    let mut wire = json!({"input_tokens":input,"output_tokens":usage.output_tokens});
+    if observation.incomplete
+        || partial_details
+        || observation.input_tokens.is_none()
+        || observation.output_tokens.is_none()
+    {
+        wire["token_station_incomplete"] = json!(true);
+    }
+    if anthropic {
+        if let Some(tokens) = cache_read {
+            wire["cache_read_input_tokens"] = json!(tokens);
+        }
+        if let Some(tokens) = cache_write {
+            wire["cache_creation_input_tokens"] = json!(tokens);
+        }
+        wire["server_tool_use"] = json!({"web_search_requests":searches});
+    } else {
+        wire["total_tokens"] = json!(usage.total());
+        if let Some(tokens) = cache_read {
+            wire["input_tokens_details"]["cached_tokens"] = json!(tokens);
+        }
+        if let Some(tokens) = cache_write {
+            wire["input_tokens_details"]["cache_write_tokens"] = json!(tokens);
+        }
+        if let Some(tokens) = reasoning {
+            wire["output_tokens_details"]["reasoning_tokens"] = json!(tokens);
+        }
+    }
+    answer["usage"] = wire;
 }
 
 /// Alias after normalization, including names flattened from Responses namespaces.
@@ -400,7 +438,7 @@ impl Gateway {
         let stream = original["stream"].as_bool().unwrap_or(false);
         let mut decision: Option<Decision> = None;
         let mut search_items = Vec::new();
-        let mut total_usage = token_station_protocol::Usage::default();
+        ctx.begin_host_loop_accounting();
         let mut count = 0_u64;
         for round in 0..=MAX_SEARCHES {
             if ctx.is_cancelled() {
@@ -486,9 +524,6 @@ impl Gateway {
                 })
             {
                 // Retry an equivalent wire choice once, before any browser work or client output.
-                if let Some(usage) = record.usage {
-                    add_usage(&mut total_usage, usage);
-                }
                 record.usage = None;
                 request.tool_choice = named_choice;
                 let mut retry_selected = selected.clone();
@@ -513,10 +548,7 @@ impl Gateway {
                     record,
                 );
             }
-            if let Some(usage) = record.usage {
-                add_usage(&mut total_usage, usage);
-            }
-            record.usage = Some(total_usage);
+            ctx.apply_host_loop_accounting(record);
             let (target, outcome) = result?;
             if outcome != StreamOutcome::Complete {
                 return Err(ErrorEnvelope::new(
@@ -645,26 +677,8 @@ impl Gateway {
                     .ok_or_else(|| invalid("The model response has no output."))?;
                 search_items.append(output);
                 *output = search_items;
-                answer["usage"]["input_tokens"] = json!(total_usage.input_tokens);
-                answer["usage"]["output_tokens"] = json!(total_usage.output_tokens);
-                if anthropic {
-                    answer["usage"]["cache_read_input_tokens"] =
-                        json!(total_usage.cache_read_tokens);
-                    answer["usage"]["cache_creation_input_tokens"] =
-                        json!(total_usage.cache_write_tokens);
-                    answer["usage"]["server_tool_use"] = json!({"web_search_requests":count});
-                } else {
-                    answer["usage"]["total_tokens"] = json!(total_usage.total());
-                    answer["usage"]["input_tokens_details"]["cached_tokens"] =
-                        json!(total_usage.cache_read_tokens);
-                    answer["usage"]["input_tokens_details"]["cache_write_tokens"] =
-                        json!(total_usage.cache_write_tokens);
-                    answer["usage"]["output_tokens_details"]["reasoning_tokens"] =
-                        json!(total_usage.reasoning_tokens);
-                }
+                write_loop_usage(&mut answer, anthropic, record, count);
                 record.stream = stream;
-                // Reprice the full host loop after each attempt has settled its quota separately.
-                settle_estimated_cost(&self.pricing, record, &target);
                 let accepted = if anthropic {
                     super::web_search::emit_message(&answer, stream, emit)
                 } else {
@@ -844,6 +858,102 @@ fn emit_responses(answer: &Value, stream: bool, emit: &mut dyn FnMut(Reply) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn aggregate_usage_keeps_protocol_cache_semantics_in_json_and_streams() {
+        let mut record = RequestRecord::begin(0, "anthropic-messages");
+        record.usage = Some(token_station_protocol::Usage {
+            input_tokens: 30,
+            output_tokens: 8,
+            cache_read_tokens: 6,
+            cache_write_tokens: 4,
+            ..token_station_protocol::Usage::default()
+        });
+        record.usage_observation = Some(token_station_metrics::UsageObservation {
+            input_tokens: Some(30),
+            output_tokens: Some(8),
+            cache_read_tokens: Some(6),
+            cache_write_tokens: Some(4),
+            ..token_station_metrics::UsageObservation::default()
+        });
+        for anthropic in [true, false] {
+            let mut answer = json!({"id":"answer","type":"message","role":"assistant", "model":"model", "status":"completed","stop_reason":"end_turn", "content":[],"output":[]});
+            write_loop_usage(&mut answer, anthropic, &record, 1);
+            assert_eq!(
+                answer["usage"]["input_tokens"],
+                if anthropic { 20 } else { 30 }
+            );
+            assert!(answer["usage"].get("token_station_incomplete").is_none());
+            record.usage_observation.as_mut().unwrap().incomplete = true;
+            write_loop_usage(&mut answer, anthropic, &record, 1);
+            assert_eq!(answer["usage"]["token_station_incomplete"], true);
+            for stream in [false, true] {
+                let mut messages = Vec::new();
+                let mut emit = |reply| {
+                    match reply {
+                        Reply::BeginJson(reply) => {
+                            messages.push(serde_json::from_str::<Value>(&reply.body).unwrap());
+                        }
+                        Reply::Chunk(chunk) => {
+                            for line in chunk.lines().filter_map(|line| line.strip_prefix("data: "))
+                            {
+                                messages.push(serde_json::from_str::<Value>(line).unwrap());
+                            }
+                        }
+                        Reply::BeginStream => {}
+                    }
+                    true
+                };
+                assert!(if anthropic {
+                    super::super::web_search::emit_message(&answer, stream, &mut emit)
+                } else {
+                    emit_responses(&answer, stream, &mut emit)
+                });
+                let terminal = messages
+                    .iter()
+                    .rev()
+                    .find(|message| !anthropic || !stream || message["type"] == "message_delta")
+                    .unwrap();
+                let usage = if !anthropic && stream {
+                    &terminal["response"]["usage"]
+                } else {
+                    &terminal["usage"]
+                };
+                assert_eq!(usage["output_tokens"], 8);
+                assert_eq!(usage["token_station_incomplete"], true);
+                assert_eq!(usage["input_tokens"], if anthropic { 20 } else { 30 });
+            }
+            record.usage_observation.as_mut().unwrap().incomplete = false;
+        }
+    }
+
+    #[test]
+    fn partial_cache_observations_keep_known_subtotals_on_the_wire() {
+        let mut record = RequestRecord::begin(0, "anthropic-messages");
+        record.usage = Some(token_station_protocol::Usage {
+            input_tokens: 30,
+            output_tokens: 8,
+            cache_read_tokens: 10,
+            ..token_station_protocol::Usage::default()
+        });
+        record.usage_observation = Some(token_station_metrics::UsageObservation {
+            input_tokens: Some(30),
+            output_tokens: Some(8),
+            ..token_station_metrics::UsageObservation::default()
+        });
+        for anthropic in [true, false] {
+            let mut answer = json!({});
+            write_loop_usage(&mut answer, anthropic, &record, 1);
+            assert_eq!(answer["usage"]["token_station_incomplete"], true);
+            if anthropic {
+                assert_eq!(answer["usage"]["input_tokens"], 20);
+                assert_eq!(answer["usage"]["cache_read_input_tokens"], 10);
+            } else {
+                assert_eq!(answer["usage"]["input_tokens"], 30);
+                assert_eq!(answer["usage"]["input_tokens_details"]["cached_tokens"], 10);
+            }
+        }
+    }
+
     #[test]
     fn maps_hosted_search_without_changing_client_tools() {
         let body = json!({"input":"Search", "tools":[{"type":"web_search"},{"type":"function","name":"edit","parameters":{}}],"tool_choice":{"type":"web_search"}});
@@ -1030,6 +1140,16 @@ mod loop_tests {
     }
 
     #[test]
+    fn partially_reported_cache_usage_survives_search_protocols_and_persistence() {
+        run_scenario("partial_cache");
+    }
+
+    #[test]
+    fn missing_round_usage_remains_unknown_after_search_and_persistence() {
+        run_scenario("missing_usage");
+    }
+
+    #[test]
     fn exhausted_search_budget_keeps_valid_tool_history() {
         run_scenario("limit");
     }
@@ -1208,7 +1328,7 @@ mod loop_tests {
                         message =
                             json!({"role":"assistant","content":"Invented news without search"});
                     }
-                    let body = if provider == "anthropic" {
+                    let mut body = if provider == "anthropic" {
                         let mut content = Vec::new();
                         if let Some(text) = message["content"].as_str() {
                             content.push(json!({"type":"text","text":text}));
@@ -1219,7 +1339,18 @@ mod loop_tests {
                         json!({"id":format!("msg_{round}"),"type":"message","role":"assistant","model":"test-model","content":content,"stop_reason":if message["tool_calls"].is_array() {"tool_use"} else {"end_turn"},"usage":{"input_tokens":10,"output_tokens":5}})
                     } else {
                         json!({"id":format!("chat_{round}"),"model":"test-model","choices":[{"index":0,"message":message,"finish_reason":if message["tool_calls"].is_array() {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}})
-                    }.to_string();
+                    };
+                    if scenario == "partial_cache" && round == 0 {
+                        if provider == "anthropic" {
+                            body["usage"]["cache_read_input_tokens"] = json!(3);
+                        } else {
+                            body["usage"]["prompt_tokens_details"]["cached_tokens"] = json!(3);
+                        }
+                    }
+                    if scenario == "missing_usage" && round == 0 {
+                        body.as_object_mut().unwrap().remove("usage");
+                    }
+                    let body = body.to_string();
                     write!(connection,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
                 }
             });
@@ -1227,6 +1358,7 @@ mod loop_tests {
                 "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":root},
                 "plugins":{"dir":Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins-dist"),"allow_unsigned":true,"agents":[if anthropic {"agent-anthropic"} else {"agent-openai-responses"}],"providers":{"openai-compatible":"provider-openai-compatible-v2","anthropic":"provider-anthropic-v2"}},
                 "upstreams":{"mock":{"provider":provider,"base_url":endpoint,"auth":{"slot":"provider_api_key","file":key},"models":[{"model":"test-model","tool":true,"tool_state":"verified","context_window":100_000}]}},
+                "pricing":{"version":77,"models":{"mock/test-model":{"input_per_mtok":1_000_000,"output_per_mtok":1_000_000}}},
                 "router":{"version":1,"pools":{"main":[{"upstream":"mock","model":"test-model"}]},"default_pool":"main"}
             })).unwrap();
             let recorder = Arc::new(Records::default());
@@ -1336,12 +1468,16 @@ mod loop_tests {
             } else {
                 2
             };
-            let billed_rounds = if scenario == "choice_retry" {
+            let billed_rounds = if matches!(scenario, "choice_retry" | "missing_usage") {
                 rounds - 1
             } else {
                 rounds
             };
-            assert_eq!(output["usage"]["input_tokens"], billed_rounds * 10);
+            let canonical_input = billed_rounds * 10
+                + usize::from(scenario == "partial_cache" && provider == "anthropic") * 3;
+            let wire_input =
+                canonical_input - usize::from(scenario == "partial_cache" && anthropic) * 3;
+            assert_eq!(output["usage"]["input_tokens"], wire_input);
             assert_eq!(output["usage"]["output_tokens"], billed_rounds * 5);
             let requests = seen.lock().unwrap();
             assert_eq!(requests.len(), rounds);
@@ -1423,8 +1559,53 @@ mod loop_tests {
             assert_eq!(receipts.last().unwrap().attempts as usize, rounds);
             assert_eq!(
                 usize::try_from(receipts.last().unwrap().usage.unwrap().input_tokens).unwrap(),
-                billed_rounds * 10
+                canonical_input
             );
+            if matches!(scenario, "ordinary" | "missing_usage" | "partial_cache") {
+                let database = root.join("accounting-regression.sqlite");
+                let store = crate::store::SqliteStore::open(&database).unwrap();
+                store.record(receipts.last().unwrap());
+                let restored = crate::store::recent_receipts(&database, 1).unwrap();
+                let statistics = crate::stats::collect(&database, None, None).unwrap();
+                if scenario == "ordinary" {
+                    assert_eq!(restored[0].usage.unwrap().input_tokens, 20);
+                    assert_eq!(restored[0].usage.unwrap().output_tokens, 10);
+                    assert_eq!(restored[0].cost_micros, Some(30));
+                    assert_eq!(restored[0].cost_kind, CostKind::Estimated);
+                    assert_eq!(statistics.total.input_tokens, 20);
+                    assert_eq!(statistics.total.output_tokens, 10);
+                    assert_eq!(statistics.total.cost_micros, Some(30));
+                    assert!(output["usage"].get("token_station_incomplete").is_none());
+                } else if scenario == "partial_cache" {
+                    assert_eq!(
+                        restored[0].usage.unwrap().input_tokens,
+                        u64::try_from(canonical_input).unwrap()
+                    );
+                    assert_eq!(restored[0].usage.unwrap().cache_read_tokens, 3);
+                    assert_eq!(
+                        statistics.total.input_tokens,
+                        u64::try_from(canonical_input).unwrap()
+                    );
+                    assert_eq!(statistics.total.cache_read_tokens, 3);
+                    assert_eq!(output["usage"]["token_station_incomplete"], true);
+                    let cache = if anthropic {
+                        &output["usage"]["cache_read_input_tokens"]
+                    } else {
+                        &output["usage"]["input_tokens_details"]["cached_tokens"]
+                    };
+                    assert_eq!(cache, 3);
+                } else {
+                    let observation = restored[0].usage_observation.unwrap();
+                    assert!(observation.incomplete);
+                    assert_eq!(observation.input_tokens, None);
+                    assert_eq!(observation.output_tokens, None);
+                    assert_eq!(restored[0].cost_micros, None);
+                    assert_eq!(restored[0].cost_kind, CostKind::Unknown);
+                    assert_eq!(statistics.total.unpriced_requests, 1);
+                    assert_eq!(statistics.total.incomplete_usage_requests, 1);
+                    assert_eq!(output["usage"]["token_station_incomplete"], true);
+                }
+            }
             let attempt_ordinals: Vec<_> = receipts
                 .last()
                 .unwrap()

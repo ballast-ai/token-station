@@ -101,6 +101,10 @@ pub struct UsageObservation {
     /// True when parsing or the attempt did not produce a complete observation.
     #[serde(default)]
     pub incomplete: bool,
+    /// This aggregate cannot be repriced from its final model and total tokens.
+    /// Earlier attempts used other prices or reported an actual charge.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cost_requires_attempt_pricing: bool,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
@@ -114,6 +118,7 @@ impl UsageObservation {
     /// Merge snapshots field by field. An explicitly reported zero is a value.
     pub fn absorb(&mut self, later: Self) {
         self.incomplete |= later.incomplete;
+        self.cost_requires_attempt_pricing |= later.cost_requires_attempt_pricing;
         macro_rules! keep {
             ($($field:ident),+ $(,)?) => {$(
                 if later.$field.is_some() { self.$field = later.$field; }

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Production core fixes and the approved SCX classifier entry point share this reviewed tree.
-readonly frozen_router_tree="1f1f3b0f2f8e480cabf8acd972fc8f86a1b5be1e"
+# Reviewed core routing, classifier, and locality fixes share this pinned tree.
+readonly frozen_router_tree="ffdb0d1992902394982acc139b9373052468b266"
 readonly workspace_packages=(
   token-station-cli
   token-station-conformance

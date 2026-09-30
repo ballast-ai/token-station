@@ -1417,6 +1417,10 @@ export const discardAgentPlan = (
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 
+/** Plan snapshot-backed restoration after explicit confirmation of managed drift. */
+export const planAgentForcedDisconnect = (agentId: AgentId, installationPath: string) =>
+  invoke<ConfigPlanView>("plan_agent_forced_disconnect", { agentId, installationPath });
+
 /**
  * Restore official configuration and disconnect by removing TS-managed fields
  * according to ownership records, returning the Agent to its official defaults,

@@ -23,6 +23,7 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
+  planAgentForcedDisconnect,
   restartAgentHarnessRoutes,
   restartAgentRoute,
   restoreCursorProvider,
@@ -747,7 +748,7 @@ export default function AgentRoutePage({
     if (!installation || busy) return;
     setBusy(true);
     try {
-      const plan = await planAgentDisconnect(
+      const plan = await (applyImmediately ? planAgentForcedDisconnect : planAgentDisconnect)(
         metadata.agent_id,
         installation.discovery.canonical_path,
       );

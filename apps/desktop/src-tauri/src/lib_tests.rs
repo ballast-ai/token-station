@@ -7319,6 +7319,60 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
 }
 
 #[test]
+fn agent_budget_reads_large_histories_with_exact_agent_and_period_boundaries() {
+    let root = scratch_home("agent-budget-large-history");
+    let mut draft = gateway_template_for_test(&root);
+    draft["agent_budgets"] = json!({
+        "codex": {"limit_micros": 1_000_000, "warning_percent": 80, "period_start_ms": 100, "period_end_ms": 200, "expiry_warning_days": 7}
+    });
+    let data_dir = PathBuf::from(draft["data"]["dir"].as_str().unwrap());
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let db = data_dir.join("metrics.sqlite");
+    drop(SqliteStore::open(&db).unwrap());
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100001)
+        INSERT INTO requests(request_id, started_at_ms, latency_ms, protocol, requested_model, stream, status, attempts, agent_id, cost_kind, cost_micros)
+        SELECT 'other-' || n, 150, 1, 'openai', 'm', 0, 200, 1, 'claude-code', 'actual', 100 FROM seq;
+        INSERT INTO requests(request_id, started_at_ms, latency_ms, protocol, requested_model, stream, status, attempts, agent_id, cost_kind, cost_micros) VALUES
+        ('before', 99, 1, 'openai', 'm', 0, 200, 1, 'codex', 'actual', 1000),
+        ('start', 100, 1, 'openai', 'm', 0, 200, 1, 'codex', 'actual', 123),
+        ('inside', 150, 1, 'openai', 'm', 0, 200, 1, 'codex', 'estimated', 456),
+        ('unknown', 150, 1, 'openai', 'm', 0, 200, 1, 'codex', 'unknown', NULL),
+        ('end', 200, 1, 'openai', 'm', 0, 200, 1, 'codex', 'actual', 1000);").unwrap();
+    drop(connection);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None
+    )))));
+    let statuses =
+        get_agent_budgets(app.state()).expect("other Agents cannot exhaust a budget query");
+    assert_eq!(statuses[0].used_micros, 579);
+    assert_eq!(statuses[0].unpriced_requests, 1);
+    assert!(!statuses[0].routing_affected);
+    let statuses = set_agent_budget(
+        app.state(),
+        "claude-code".into(),
+        20_000_000,
+        80,
+        Some(100),
+        Some(200),
+        7,
+    )
+    .expect("the target Agent itself can have more than 100,000 receipts");
+    assert_eq!(
+        statuses
+            .iter()
+            .find(|status| status.agent_id == "claude-code")
+            .unwrap()
+            .used_micros,
+        10_000_100
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn agent_budget_commands_persist_display_only_thresholds_and_report_zero_without_a_store() {
     let root = scratch_home("agent-budget-commands");
     let inner = AppInner::new(

@@ -1140,3 +1140,198 @@ fn quota_first_reports_unavailable_when_every_account_is_ejected() {
         .expect_err("all ejected");
     assert!(matches!(error, NoRoute::Unavailable { .. }));
 }
+
+fn locality_route(
+    quota: bool,
+    local_only: bool,
+    cloud_fallback: bool,
+    candidates: &[Candidate],
+    request: &ChatRequest,
+) -> Result<token_station_router_core::Decision, NoRoute> {
+    let router = Router::new(RouterConfig {
+        honor_exact_model: !quota,
+        routing_mode: if quota {
+            RoutingMode::QuotaFirst
+        } else {
+            RoutingMode::Tiered
+        },
+        local_only,
+        allow_cloud_fallback: cloud_fallback,
+        quota_accounts: candidates
+            .iter()
+            .map(|candidate| candidate.target.clone())
+            .collect(),
+        ..config()
+    })
+    .expect("valid locality configuration");
+    if quota {
+        router.route_quota_first(request, candidates, None)
+    } else {
+        router.route(request, &[], candidates)
+    }
+}
+
+#[test]
+fn exact_and_quota_strict_locality_reject_cloud_only_candidates() {
+    let cloud = quota_candidate("cloud", QuotaState::default());
+    for quota in [false, true] {
+        assert!(
+            matches!(
+                locality_route(
+                    quota,
+                    true,
+                    false,
+                    std::slice::from_ref(&cloud),
+                    &ask_model("shared-model", "hello")
+                ),
+                Err(NoRoute::Unsatisfiable {
+                    reason: UnmetRequirement::LocalOnly,
+                    ..
+                })
+            ),
+            "quota={quota}"
+        );
+    }
+}
+
+#[test]
+fn exact_and_quota_strict_locality_excludes_cloud_fallbacks() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate("local", QuotaState::default()).local(true),
+        quota_candidate("local_backup", QuotaState::default()).local(true),
+    ];
+    for quota in [false, true] {
+        let decision = locality_route(
+            quota,
+            true,
+            false,
+            &candidates,
+            &ask_model("shared-model", "hello"),
+        )
+        .unwrap();
+        assert_eq!(decision.chosen, candidates[1].target, "quota={quota}");
+        assert_eq!(decision.fallbacks, vec![candidates[2].target.clone()]);
+    }
+}
+
+#[test]
+fn exact_and_quota_authorized_cloud_fallback_follows_usable_locals() {
+    let mut local = quota_candidate("local", QuotaState::default()).local(true);
+    local.health = Health::Degraded;
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate("cloud_backup", QuotaState::default()),
+        local,
+        quota_candidate("local_backup", QuotaState::default()).local(true),
+    ];
+    for quota in [false, true] {
+        let decision = locality_route(
+            quota,
+            true,
+            true,
+            &candidates,
+            &ask_model("shared-model", "hello"),
+        )
+        .unwrap();
+        let ordered: Vec<_> = std::iter::once(decision.chosen)
+            .chain(decision.fallbacks)
+            .collect();
+        let expected_local = if quota {
+            vec![candidates[2].target.clone(), candidates[3].target.clone()]
+        } else {
+            vec![candidates[3].target.clone(), candidates[2].target.clone()]
+        };
+        assert_eq!(ordered[..2], expected_local, "quota={quota}");
+        assert_eq!(
+            ordered[2..],
+            [candidates[0].target.clone(), candidates[1].target.clone()]
+        );
+    }
+}
+
+#[test]
+fn exact_and_quota_locality_preserves_capability_and_health_refusals() {
+    for quota in [false, true] {
+        for incapable in [false, true] {
+            let mut local = quota_candidate("local", QuotaState::default()).local(true);
+            let mut request = ask_model("shared-model", "hello");
+            if incapable {
+                local.capability.tool = false;
+                local.capability.tool_state = Some(CapabilityState::Unsupported);
+                request.tools.push(tool());
+            } else {
+                local.health = Health::Unavailable;
+            }
+            let candidates = vec![quota_candidate("cloud", QuotaState::default()), local];
+            assert!(locality_route(quota, true, false, &candidates, &request).is_err());
+            let decision = locality_route(quota, true, true, &candidates, &request).unwrap();
+            assert_eq!(decision.chosen, candidates[0].target);
+            assert!(decision.fallbacks.is_empty());
+        }
+    }
+}
+
+#[test]
+fn exact_and_quota_locality_off_keeps_original_priority() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate("local", QuotaState::default()).local(true),
+    ];
+    for quota in [false, true] {
+        let decision = locality_route(
+            quota,
+            false,
+            false,
+            &candidates,
+            &ask_model("shared-model", "hello"),
+        )
+        .unwrap();
+        assert_eq!(decision.chosen, candidates[0].target);
+        assert_eq!(decision.fallbacks, vec![candidates[1].target.clone()]);
+    }
+}
+
+#[test]
+fn exact_locality_does_not_substitute_a_different_local_model() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        Candidate::new(
+            target("local", "other-model"),
+            capable(200_000),
+            Health::Healthy,
+        )
+        .local(true),
+    ];
+    let request = ask_model("shared-model", "hello");
+    assert!(locality_route(false, true, false, &candidates, &request).is_err());
+    assert_eq!(
+        locality_route(false, true, true, &candidates, &request)
+            .unwrap()
+            .chosen,
+        candidates[0].target
+    );
+}
+
+#[test]
+fn quota_locality_does_not_revive_an_exhausted_local_account() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate(
+            "local",
+            QuotaState {
+                exhausted: true,
+                ..QuotaState::default()
+            },
+        )
+        .local(true),
+    ];
+    let request = ask_model("shared-model", "hello");
+    assert!(matches!(
+        locality_route(true, true, false, &candidates, &request),
+        Err(NoRoute::Unavailable { .. })
+    ));
+    let decision = locality_route(true, true, true, &candidates, &request).unwrap();
+    assert_eq!(decision.chosen, candidates[0].target);
+    assert!(decision.fallbacks.is_empty());
+}
