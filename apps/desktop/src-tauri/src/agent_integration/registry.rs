@@ -1046,6 +1046,8 @@ mod tests {
 
         let registry = AgentRegistry::builtin().unwrap();
         let expected = [
+            ("codex", "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"),
+            ("codex", "/Applications/ChatGPT.app/Contents/Resources/codex"),
             ("claude-code", "${HOME}/.npm-global/bin/claude"),
             ("gemini-cli", "${HOME}/Library/pnpm/gemini"),
             ("opencode", "${HOME}/.opencode/bin/opencode"),

@@ -127,7 +127,12 @@
       "admission": "supported",
       "executable_candidates": ["codex"],
       "known_install_locations": {
-        "macos": ["/Applications/ChatGPT.app/Contents/Resources/codex"],
+        "macos": [
+          "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+          "${HOME}/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+          "/Applications/ChatGPT.app/Contents/Resources/codex",
+          "${HOME}/Applications/ChatGPT.app/Contents/Resources/codex"
+        ],
         "linux": [
           "${HOME}/.local/bin/codex",
           "${HOME}/.cargo/bin/codex",
