@@ -857,7 +857,8 @@ fn custom_tool_parameters() -> Value {
 /// `responses_custom_tool_description`.
 fn custom_tool_description(tool: &Value) -> String {
     format!(
-        "{CUSTOM_TOOL_PRESERVED_METADATA_HEADING}\n```json\n{}\n```",
+        "{}\n\nThis is a custom tool. Pass its raw input as the input string. Do not put an additional JSON object inside that string unless the tool explicitly requests JSON. Follow the execution environment and input syntax described above.\n\n{CUSTOM_TOOL_PRESERVED_METADATA_HEADING}\n```json\n{}\n```",
+        tool["description"].as_str().unwrap_or(""),
         serde_json::to_string(tool).unwrap_or_default()
     )
 }

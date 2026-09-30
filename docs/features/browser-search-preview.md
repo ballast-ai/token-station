@@ -59,3 +59,13 @@ The switch in Token Station does not rewrite an active client configuration.
 There is no paid search API fallback in this preview. Model token charges still apply.
 There is no automatic MCP installation. These remain separate future capabilities.
 Disable the preview to restore the previous search behavior without removing model configuration.
+
+### Search evidence and custom tools
+
+Search-only requests require a browser call unless the client explicitly disables tools.
+If the model omits a required search, the gateway returns an error instead of an unsupported answer.
+Search-only responses contain retrieved titles, URLs, snippets, and structured errors instead of an inner model summary.
+These snippets do not verify publication dates, relevance, or the full article.
+General Agent requests with multiple tools retain their tool selection behavior.
+Custom tool instructions remain readable before their preserved JSON metadata.
+The gateway does not execute or repair model-generated client code.

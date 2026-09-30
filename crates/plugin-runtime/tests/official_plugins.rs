@@ -558,6 +558,8 @@ fn responses_custom_tool_round_trips() {
         .description
         .as_deref()
         .unwrap_or_default();
+    assert!(description.starts_with("run code\n"));
+    assert!(description.contains("additional JSON object"));
     assert!(description.contains("Original tool definition:"));
     assert!(description.contains("\"name\":\"code_exec\""));
 

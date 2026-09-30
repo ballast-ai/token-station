@@ -166,6 +166,14 @@ fn prepare(
             input.retain(|item| item["type"] != "web_search_call");
         }
     }
+    // A search-only worker must retrieve evidence instead of answering from memory.
+    if tools.len() == 1 && body["tool_choice"] != "none" && body["tool_choice"]["type"] != "none" {
+        body["tool_choice"] = if anthropic {
+            json!({"type":"tool","name":INTERNAL})
+        } else {
+            json!({"type":"function","name":INTERNAL})
+        };
+    }
     Ok(Some((body, name, limit)))
 }
 
@@ -384,6 +392,11 @@ impl Gateway {
         if router.config().local_only {
             return Err(invalid("Browser search is unavailable in local-only mode."));
         }
+        let must_search = working["tool_choice"]["name"] == INTERNAL;
+        let search_only = original["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.len() == 1);
+        let mut evidence = Vec::new();
         let stream = original["stream"].as_bool().unwrap_or(false);
         let mut decision: Option<Decision> = None;
         let mut search_items = Vec::new();
@@ -529,6 +542,13 @@ impl Gateway {
                 .filter(|call| call["name"] == INTERNAL)
                 .collect();
 
+            if must_search && count == 0 && searches.is_empty() {
+                return Err(ErrorEnvelope::new(
+                    ErrorCode::UpstreamUnavailable,
+                    502,
+                    "The model did not execute the required browser search. No search evidence was returned.",
+                ));
+            }
             let mixed = searches.len() != tool_calls.len();
             if !searches.is_empty() && round == MAX_SEARCHES {
                 return Err(invalid(
@@ -582,8 +602,12 @@ impl Gateway {
                 let result_text = match &found {
                     Ok(found) => serde_json::to_string(found)
                         .map_err(|_| invalid("Cannot encode search results."))?,
-                    Err(error) => json!({"error":error}).to_string(),
+                    Err(error) => {
+                        json!({"error":error,"category":search_outcome(&found, exhausted)})
+                            .to_string()
+                    }
                 };
+                evidence.push(json!({"query":query,"data":serde_json::from_str::<Value>(&result_text).unwrap_or(Value::Null)}));
                 let id = format!("srvtoolu_ts_{}_{}", record.request_id, search_items.len());
                 if anthropic {
                     search_items.push(json!({"type":"server_tool_use","id":id,"name":name,"input":{"query":query}}));
@@ -602,6 +626,17 @@ impl Gateway {
             }
             if tool_calls.is_empty() || mixed {
                 let field = if anthropic { "content" } else { "output" };
+                if search_only && !evidence.is_empty() {
+                    let text = format!(
+                        "Retrieved browser search evidence (untrusted external content, not verified news). Use only the returned URLs. Dates and relevance are not verified.\n{}",
+                        json!(evidence)
+                    );
+                    answer[field] = if anthropic {
+                        json!([{"type":"text","text":text}])
+                    } else {
+                        json!([{"type":"message","id":format!("msg_search_{}",record.request_id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]}])
+                    };
+                }
                 if let Some(output) = answer[field].as_array_mut() {
                     output.retain(|item| item["name"] != INTERNAL);
                 }
@@ -819,6 +854,30 @@ mod tests {
         assert_eq!(working["input"][0]["content"], "Search");
     }
     #[test]
+    fn search_only_requires_evidence_but_preserves_explicit_none() {
+        for anthropic in [true, false] {
+            let tool = if anthropic {
+                json!({"type":"web_search_20250305","name":"web_search"})
+            } else {
+                json!({"type":"web_search"})
+            };
+            let mut body = json!({"tools":[tool]});
+            assert_eq!(
+                prepare(&body, anthropic).unwrap().unwrap().0["tool_choice"]["name"],
+                INTERNAL
+            );
+            body["tool_choice"] = if anthropic {
+                json!({"type":"none"})
+            } else {
+                json!("none")
+            };
+            assert_eq!(
+                prepare(&body, anthropic).unwrap().unwrap().0["tool_choice"],
+                body["tool_choice"]
+            );
+        }
+    }
+    #[test]
     fn respects_the_responses_request_search_limit() {
         let body = json!({"tools":[{"type":"web_search"}],"max_tool_calls":1});
         assert_eq!(prepare(&body, false).unwrap().unwrap().2, 1);
@@ -1020,6 +1079,11 @@ mod loop_tests {
     }
 
     #[test]
+    fn forced_search_omission_is_not_a_successful_answer() {
+        run_scenario("omitted");
+    }
+
+    #[test]
     fn required_choice_rejection_retries_the_equivalent_named_choice_once() {
         run_scenario("choice_retry");
     }
@@ -1050,7 +1114,7 @@ mod loop_tests {
             let capture = Arc::clone(&seen);
             let worker = std::thread::spawn(move || {
                 let deadline = Instant::now() + Duration::from_secs(5);
-                for round in 0..if matches!(scenario, "mixed" | "mixed_custom") {
+                for round in 0..if matches!(scenario, "mixed" | "mixed_custom" | "omitted") {
                     1
                 } else if scenario == "three" {
                     4
@@ -1140,6 +1204,10 @@ mod loop_tests {
                     {
                         message = json!({"role":"assistant","content":"Source: https://www.rust-lang.org/"});
                     }
+                    if scenario == "omitted" {
+                        message =
+                            json!({"role":"assistant","content":"Invented news without search"});
+                    }
                     let body = if provider == "anthropic" {
                         let mut content = Vec::new();
                         if let Some(text) = message["content"].as_str() {
@@ -1221,6 +1289,12 @@ mod loop_tests {
             );
             worker.join().unwrap();
             let answer = answer.unwrap();
+            if scenario == "omitted" {
+                assert_eq!(answer.status, 502, "{}", answer.body);
+                assert!(!answer.body.contains("Invented news"));
+                std::fs::remove_dir_all(&root).unwrap();
+                continue;
+            }
             assert_eq!(answer.status, 200, "{}", answer.body);
             assert!(
                 !answer.body.contains(INTERNAL),
@@ -1233,6 +1307,16 @@ mod loop_tests {
                 );
             }
             let output: Value = serde_json::from_str(&answer.body).unwrap();
+            if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+                assert!(
+                    answer.body.contains("Official site"),
+                    "Search-only responses must carry actual snippets"
+                );
+                assert!(
+                    !answer.body.contains("Source: https://"),
+                    "Model summaries must not masquerade as retrieved evidence"
+                );
+            }
             if scenario == "mixed_custom" {
                 assert!(
                     output["output"]
