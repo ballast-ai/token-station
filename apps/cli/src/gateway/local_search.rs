@@ -162,9 +162,6 @@ fn prepare(
         if let Some(input) = body["input"].as_str() {
             body["input"] = json!([{"role":"user","content":input}]);
         }
-        if let Some(input) = body["input"].as_array_mut() {
-            input.retain(|item| item["type"] != "web_search_call");
-        }
     }
     // A search-only worker must retrieve evidence instead of answering from memory.
     if tools.len() == 1 && body["tool_choice"] != "none" && body["tool_choice"]["type"] != "none" {
@@ -963,6 +960,19 @@ mod tests {
         assert_eq!(working["tool_choice"]["name"], INTERNAL);
         assert_eq!(working["input"][0]["content"], "Search");
     }
+    #[test]
+    fn search_preparation_preserves_historical_search_records() {
+        let history = json!({"type":"web_search_call","id":"ws_previous","status":"completed",
+            "action":{"type":"search","query":"Rust","sources":[{"url":"https://www.rust-lang.org/"}]}});
+        let body = json!({"input":[history,{"role":"user","content":"Continue"}],
+            "tools":[{"type":"web_search"}]});
+        let (working, _, _) = prepare(&body, false).unwrap().unwrap();
+        assert_eq!(working["input"], body["input"]);
+        let mut compact = body;
+        compact["tools"] = json!([]);
+        assert!(prepare(&compact, false).unwrap().is_none());
+    }
+
     #[test]
     fn search_only_requires_evidence_but_preserves_explicit_none() {
         for anthropic in [true, false] {

@@ -3483,6 +3483,61 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
 }
 
 #[test]
+fn search_history_compacts_and_continues_without_executable_search() {
+    let answer = json!({"id":"chatcmpl-search-summary","model":"gpt-5.5",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"Search summary"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":20,"completion_tokens":3}});
+    let mock = MockUpstream::start_with_validator(
+        vec![
+            vec![http_json(200, &answer.to_string())],
+            vec![http_json(200, &answer.to_string())],
+        ],
+        Some(reject_tool_options_without_tools),
+    );
+    let key = key_file("responses-search-compaction", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let history = json!({"type":"web_search_call","id":"ws_previous","status":"completed",
+        "action":{"type":"search","query":"Rust documentation","sources":[{"type":"url","url":"https://www.rust-lang.org/","title":"Rust"}]}});
+    let (status, _, body) = send_responses(
+        &proxy,
+        &json!({
+            "model":"auto", "input":[responses_input_message("Find Rust documentation"), history,
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust documentation is available."}]},
+                responses_input_message("Summarize this conversation")],
+            "tools":[], "tool_choice":"auto", "parallel_tool_calls":false, "store":false
+        }),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    let messages = seen[0].body["messages"].as_array().unwrap();
+    let historical = messages
+        .iter()
+        .find(|message| message_text(&message["content"]).contains("ws_previous"))
+        .unwrap();
+    assert_eq!(historical["role"], "assistant");
+    assert!(message_text(&historical["content"]).contains(&history.to_string()));
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.get("tool_calls").is_none())
+    );
+    assert!(seen[0].body.get("tools").is_none());
+    let summary: Value = serde_json::from_str(&body).unwrap();
+    let (status, _, body) = send_responses(
+        &proxy,
+        &json!({
+            "model":"auto", "input":[responses_input_message(summary["output"].to_string()),
+                responses_input_message("Continue from this summary")], "store":false
+        }),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 2);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn oversized_responses_history_reaches_upstream_without_optional_continuation_state() {
     let compaction_answer = json!({
         "id": "chatcmpl-oversized-history",

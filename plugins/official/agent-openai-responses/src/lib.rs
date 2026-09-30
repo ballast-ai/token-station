@@ -739,6 +739,12 @@ fn input_messages(input: &Value) -> Result<Vec<Message>, String> {
                     Some("local_shell_call") => local_shell_call_item(item),
                     Some("local_shell_call_output") => local_shell_output_item(item),
                     Some("reasoning") => reasoning_item(item),
+                    // Hosted search output is historical data, not a client tool invocation.
+                    // Keep it readable even when compaction declares no executable tools.
+                    Some("web_search_call") => Ok(Message::text(
+                        Role::Assistant,
+                        format!("Previous web search record (historical data): {item}"),
+                    )),
                     Some(kind) => Err(capability(format!(
                         "unsupported Responses input item {kind}"
                     ))),
@@ -3469,6 +3475,60 @@ mod tests {
             metadata["responses_disabled_provider_tools"][0]["type"],
             json!("web_search")
         );
+    }
+
+    #[test]
+    fn search_history_survives_compaction_without_executable_tools() {
+        for tools in [
+            None,
+            Some(json!([])),
+            Some(json!([{
+                "type":"function", "name":"read_file", "parameters":{"type":"object"}
+            }])),
+        ] {
+            for action in [
+                json!({"type":"search", "query":"Rust", "sources":[{"type":"url","url":"https://www.rust-lang.org/","title":"Rust"}]}),
+                json!({"type":"open_page", "url":"https://www.rust-lang.org/"}),
+                json!({"type":"find", "url":"https://www.rust-lang.org/", "pattern":"Rust"}),
+            ] {
+                for status in ["completed", "failed"] {
+                    let history = json!({"type":"web_search_call", "id":"ws_history", "status":status, "action":action});
+                    let mut body = json!({"model":"auto", "input":[
+                        {"role":"user","content":"Find Rust documentation"},
+                        history,
+                        {"role":"assistant","content":"See the Rust documentation."},
+                        {"role":"user","content":"Summarize the conversation"}
+                    ]});
+                    if let Some(tools) = &tools {
+                        body["tools"] = tools.clone();
+                        body["tool_choice"] = json!("auto");
+                    }
+                    let request: ChatRequest = serde_json::from_str(
+                        &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(body))
+                            .expect("search history must remain readable during compaction"),
+                    )
+                    .unwrap();
+                    assert!(request
+                        .messages
+                        .iter()
+                        .all(|message| message.tool_calls.is_empty()));
+                    assert_eq!(
+                        request.tools.len(),
+                        tools.as_ref().and_then(Value::as_array).map_or(0, Vec::len)
+                    );
+                    let message = &request.messages[1];
+                    assert_eq!(message.role, Role::Assistant);
+                    let text = serde_json::to_string(&message.content).unwrap();
+                    assert!(text.contains("Previous web search record"));
+                    // Verify every history field survives as data in the text projection.
+                    let expected = history.to_string();
+                    match &message.content {
+                        Some(Content::Text(text)) => assert!(text.contains(&expected)),
+                        other => panic!("expected readable historical text, got {other:?}"),
+                    }
+                }
+            }
+        }
     }
 
     #[test]
