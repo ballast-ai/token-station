@@ -6,7 +6,7 @@ import SearchSettingsPanel from "./SearchSettingsPanel";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("../components/LanguageProvider", () => ({ useLanguage: () => ({ copy: (en: string) => en }) }));
-const status = { settings: { enabled: false, engine: "bing" }, chrome_available: true, busy: false };
+const status = { settings: { enabled: false, mode: "auto", engine: "bing" }, chrome_available: true, busy: false };
 
 describe("browser search preview", () => {
   beforeEach(() => vi.mocked(invoke).mockReset());
@@ -35,7 +35,7 @@ describe("browser search preview", () => {
     render(<SearchSettingsPanel />);
     await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
     fireEvent.click(screen.getByRole("switch"));
-    expect(invoke).toHaveBeenCalledWith("save_search_settings", { settings: { enabled: true, engine: "bing" } });
+    expect(invoke).toHaveBeenCalledWith("save_search_settings", { settings: { enabled: true, mode: "auto", engine: "bing" } });
     expect(screen.getByRole("switch")).not.toBeChecked();
     expect(screen.queryByText(/Gateway search verified/)).not.toBeInTheDocument();
     finish({ status: { ...status, settings: { ...status.settings, enabled: true } }, verified: true, managed_codex_updated: 0 });
@@ -56,6 +56,20 @@ describe("browser search preview", () => {
     render(<SearchSettingsPanel />);
     await waitFor(() => expect(screen.getByRole("switch")).toBeChecked());
     fireEvent.click(screen.getByRole("switch"));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_search_settings", { settings: { enabled: false, engine: "bing" } }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_search_settings", { settings: { enabled: false, mode: "auto", engine: "bing" } }));
   });
+  it("permits native search without Chrome", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ ...status, chrome_available: false, settings: { ...status.settings, mode: "native" } });
+    render(<SearchSettingsPanel />);
+    await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+    expect(screen.getByRole("combobox", { name: "Search mode" })).toBeInTheDocument();
+  });
+  it("saves the selected mode before activation", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(status).mockResolvedValueOnce({ status: { ...status, settings: { ...status.settings, mode: "native" } }, verified: false, managed_codex_updated: 0 });
+    render(<SearchSettingsPanel />);
+    const selector = await screen.findByRole("combobox", { name: "Search mode" });
+    fireEvent.change(selector, { target: { value: "native" } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_search_settings", { settings: { enabled: false, mode: "native", engine: "bing" } }));
+  });
+
 });

@@ -30,6 +30,9 @@ mod jev_tests;
 mod local_search;
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
+mod search_policy;
+#[cfg(test)]
+mod search_policy_tests;
 #[cfg(test)]
 mod semantic_tests;
 mod web_search;
@@ -1729,6 +1732,7 @@ pub struct Gateway {
     semantic: Option<Arc<crate::semantic::SemanticController>>,
     jev: Arc<crate::jev::JevController>,
     search: Arc<crate::search::SearchController>,
+    search_policy_cache: std::sync::Mutex<search_policy::Cache>,
 }
 
 /// An Agent router that has already passed every fallible construction step.
@@ -2260,6 +2264,7 @@ impl Gateway {
             semantic: None,
             jev: crate::jev::JevController::shared(&config.data.dir),
             search: crate::search::SearchController::shared(&config.data.dir),
+            search_policy_cache: std::sync::Mutex::new(search_policy::Cache::default()),
         })
     }
 
@@ -3822,7 +3827,7 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
-        if let Some(served) = self.try_local_search(
+        if let Some(served) = self.try_search_policy(
             ctx,
             agent,
             router,

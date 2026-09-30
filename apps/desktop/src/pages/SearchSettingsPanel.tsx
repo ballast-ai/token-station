@@ -9,9 +9,10 @@ import { Switch } from "../components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
 type Engine = "bing" | "duckduckgo";
-interface Settings { enabled: boolean; engine: Engine }
+type Mode = "auto" | "native" | "local";
+interface Settings { enabled: boolean; mode: Mode; engine: Engine }
 interface Status { settings: Settings; chrome_available: boolean; busy: boolean }
-interface Activation { status: Status; verified: boolean; managed_codex_updated: number }
+interface Activation { status: Status; verified: boolean; managed_codex_updated: number; execution?: "native" | "local" }
 interface Result { results: Array<{title: string; url: string; snippet: string}>; elapsed_ms: number }
 
 export default function SearchSettingsPanel() {
@@ -23,7 +24,7 @@ export default function SearchSettingsPanel() {
   const [activation, setActivation] = useState<Activation | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => { let active = true; invoke<Status>("get_search_status").then(value => { if (active) setStatus(value); }).catch(reason => { if (active) setError(String(reason)); }); return () => { active = false; }; }, []);
+  useEffect(() => { let active = true; invoke<Status>("get_search_status").then(value => { if (active) setStatus({ ...value, settings: { ...value.settings, mode: value.settings.mode ?? "auto" } }); }).catch(reason => { if (active) setError(String(reason)); }); return () => { active = false; }; }, []);
   const save = async (settings: Settings) => {
     setBusy(true); setError(""); setActivation(null); setResult(null);
     try { const value = await invoke<Activation>("save_search_settings", { settings }); setStatus(value.status); setActivation(value); }
@@ -37,23 +38,33 @@ export default function SearchSettingsPanel() {
     finally { setBusy(false); }
   };
   return <Card>
-    <CardHeader><CardTitle>{copy("Browser search · Preview", "浏览器搜索 · 试用")}</CardTitle></CardHeader>
+    <CardHeader><CardTitle>{copy("Web search · Preview", "联网搜索 · 试用")}</CardTitle></CardHeader>
     <CardContent className="space-y-6">
-      <p className="text-sm text-muted-foreground">{copy("Use a separate headless Chrome to search. No visible windows, personal tabs, or search API charges. Model tokens still apply.", "使用独立的后台 Chrome 搜索，不弹出窗口、不操作个人标签页，不产生搜索 API 费用。模型 Token 仍正常计费。")}</p>
+      <p className="text-sm text-muted-foreground">{copy("Auto prefers the provider’s native search. Local Chrome supplements explicit unsupported-search failures. Native provider charges and model tokens still apply.", "自动模式优先使用上游原生搜索，明确不支持时由本地 Chrome 补充。本地搜索无额外搜索 API 费用；原生服务费用及模型 Token 按上游计费。")}</p>
+      <div className="space-y-2">
+        <label htmlFor="search-mode" className="text-sm font-medium">{copy("Search mode", "搜索模式")}</label>
+        <select id="search-mode" className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={status?.settings.mode ?? "auto"} disabled={!status || busy} onChange={event => { if (status) void save({ ...status.settings, mode: event.target.value as Mode }); }}>
+          <option value="auto">{copy("Auto · Native first", "自动 · 原生优先")}</option>
+          <option value="native">{copy("Native only", "仅原生搜索")}</option>
+          <option value="local">{copy("Local browser only", "仅本地浏览器")}</option>
+        </select>
+        <p className="text-xs text-muted-foreground">{copy("Auto uses local search only for explicit capability refusals. Authentication, quota, network errors, and empty results do not trigger a retry.", "自动模式仅在明确不支持原生搜索时使用本地搜索。鉴权、额度、网络故障及空结果不会触发补充搜索。")}</p>
+      </div>
       <div className="flex items-center justify-between gap-4">
-        <label htmlFor="browser-search-enabled" className="text-sm font-medium">{copy("Handle native web search", "接管原生联网搜索")}</label>
-        <Switch id="browser-search-enabled" checked={status?.settings.enabled ?? false} disabled={!status || busy || (!status.chrome_available && !status.settings.enabled)} onCheckedChange={enabled => { if (status) void save({ ...status.settings, enabled }); }} />
+        <label htmlFor="browser-search-enabled" className="text-sm font-medium">{copy("Enable web search", "启用联网搜索")}</label>
+        <Switch id="browser-search-enabled" checked={status?.settings.enabled ?? false} disabled={!status || busy || (!status.chrome_available && status.settings.mode === "local" && !status.settings.enabled)} onCheckedChange={enabled => { if (status) void save({ ...status.settings, enabled }); }} />
       </div>
       <p className="text-sm text-muted-foreground">{copy("Enabling runs a real search through the Codex model route (up to 120 seconds). It uses model tokens. Failed verification restores your previous settings.", "开启时会通过 Codex 模型路由执行一次真实搜索（最长约 120 秒），消耗少量模型 Token。验证失败会恢复原设置。")}</p>
-      {status?.settings.enabled && <Button disabled={busy || !status.chrome_available} onClick={() => void save(status.settings)}>{copy("Verify again", "重新验证")}</Button>}
+      {status?.settings.enabled && <Button disabled={busy || (status.settings.mode === "local" && !status.chrome_available)} onClick={() => void save(status.settings)}>{copy("Verify again", "重新验证")}</Button>}
       <div role="status" aria-live="polite" className="text-sm space-y-2">
         {busy && <p>{copy("Checking… Keep this panel open.", "正在检查，请保持此页面打开…")}</p>}
         {activation?.verified ? <><p>{copy("Gateway search verified in the last check. Verify again after changing the model or network.", "上次检查的 Codex 路由已通过真实搜索验证。更换模型或网络后请重新验证。")}</p>
+          {activation.execution && <p>{activation.execution === "native" ? copy("Last check used native search.", "上次验证使用：原生搜索。") : copy("Last check used local browser search.", "上次验证使用：本地浏览器搜索。")}</p>}
           <p>{activation.managed_codex_updated > 0 ? copy("Managed Codex search configuration updated. Start a new session in Codex.", "已同步受管 Codex 的搜索配置，请在 Codex 中新建会话。") : copy("Connect Codex on the Agents page to use this route. Unmanaged configuration was not changed.", "请在 Agent 页面接入 Codex 后使用此路由。未接入的客户端配置不会被改动。")}</p></>
           : <p>{copy("This panel has not verified the current model route yet. Browser tests alone do not verify model compatibility.", "此页面尚未验证当前模型路由。仅浏览器测试成功不代表模型适配通过。")}</p>}
       </div>
       <div className="space-y-2">
-        <label id="search-engine-label" className="text-sm font-medium">{copy("Search engine", "搜索引擎")}</label>
+        <label id="search-engine-label" className="text-sm font-medium">{copy("Local search engine", "本地搜索引擎")}</label>
         <Select value={status?.settings.engine ?? "bing"} disabled={!status || busy} onValueChange={engine => { if (status) void save({ ...status.settings, engine: engine as Engine }); }}>
           <SelectTrigger aria-labelledby="search-engine-label"><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="bing">Bing</SelectItem><SelectItem value="duckduckgo">DuckDuckGo</SelectItem></SelectContent>
@@ -75,8 +86,8 @@ export default function SearchSettingsPanel() {
           </div>)}
         </>}
       </div>
-      <p className="text-xs text-muted-foreground">{copy("Preview: up to 3 searches per request and 5 snippets per search. Domain filters, geographic targeting, cached-only search, and page reading are not supported. CAPTCHA is reported as an error. Chrome uses the system network settings.", "试用范围：每个请求最多搜索 3 次，每次最多返回 5 条摘要。不支持域名过滤、地理定位、仅缓存搜索和正文读取。验证码会明确报错。Chrome 使用系统网络设置。")}</p>
-      <p className="text-xs text-muted-foreground">{copy("Managed Codex uses live search when enabled and disables it when off. If the proxy is stopped, configuration sync waits until it restarts. Changing models or networks requires a new check. Claude Code and page fetching need separate validation.", "已接入的 Codex 会随开关启用或关闭联网搜索。代理停止时，配置将在代理重启后同步。更换模型或网络后请重新验证。Claude Code 和网页正文读取需要单独验证。")}</p>
+      <p className="text-xs text-muted-foreground">{copy("Local preview: up to 3 searches per request and 5 snippets per search. Domain filters, geographic targeting, cached-only search, and page reading are not supported. CAPTCHA is reported as an error. Chrome uses the system network settings.", "本地补充范围：每个请求最多搜索 3 次，每次最多返回 5 条摘要。不支持域名过滤、地理定位、仅缓存搜索和正文读取。验证码会明确报错。Chrome 使用系统网络设置。")}</p>
+      <p className="text-xs text-muted-foreground">{copy("Managed Codex uses live search in all enabled modes and disables it when off. If the proxy is stopped, configuration sync waits until it restarts. Changing models or networks requires a new check. Claude Code and page fetching need separate validation.", "已接入的 Codex 在三种启用模式下均发送联网搜索请求，关闭总开关则禁用。代理停止时，配置将在代理重启后同步。更换模型或网络后请重新验证。Claude Code 和网页正文读取需要单独验证。")}</p>
     </CardContent>
   </Card>;
 }

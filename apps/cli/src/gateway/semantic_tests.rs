@@ -146,6 +146,7 @@ fn gateway(data: &Path, controller: &Arc<SemanticController>) -> Gateway {
         semantic: None,
         jev: crate::jev::JevController::shared(&config.data.dir),
         search: crate::search::SearchController::shared(&config.data.dir),
+        search_policy_cache: std::sync::Mutex::new(super::search_policy::Cache::default()),
     }
     .with_semantic_routing(Arc::clone(controller))
 }

@@ -168,6 +168,7 @@ impl Fixture {
             semantic: None,
             jev: Arc::clone(&controller),
             search: crate::search::SearchController::shared(&config.data.dir),
+            search_policy_cache: std::sync::Mutex::new(super::search_policy::Cache::default()),
         };
         Self {
             data,

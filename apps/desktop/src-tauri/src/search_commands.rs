@@ -7,7 +7,9 @@ use std::io::Read;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Manager, State};
-use token_station_cli::search::{SearchController, SearchResponse, SearchSettings, SearchStatus};
+use token_station_cli::search::{
+    SearchController, SearchMode, SearchResponse, SearchSettings, SearchStatus,
+};
 
 static SETTINGS_OPERATION: Mutex<()> = Mutex::new(());
 
@@ -16,6 +18,7 @@ pub(crate) struct SearchActivation {
     status: SearchStatus,
     verified: bool,
     managed_codex_updated: usize,
+    execution: Option<&'static str>,
 }
 
 #[tauri::command]
@@ -48,7 +51,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
     let previous = controller.settings();
     let previous_runtime = runtime_from_app(&state);
     if settings.enabled {
-        if !controller.status().chrome_available {
+        if settings.mode == SearchMode::Local && !controller.status().chrome_available {
             return Err("Install Google Chrome. Then verify search again.".into());
         }
         previous_runtime
@@ -56,6 +59,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
             .map_err(|error| error.message.clone())?;
     }
     controller.save(settings.clone())?;
+    let mut execution = None;
     let result = (|| {
         let runtime = match runtime_from_app(&state) {
             Ok(runtime) => runtime,
@@ -63,7 +67,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
             Err(error) => return Err(error.message),
         };
         if settings.enabled {
-            verify_gateway_search(&runtime)?;
+            execution = Some(verify_gateway_search(&runtime)?);
             let current = runtime_from_app(&state).map_err(|error| error.message)?;
             if current.fingerprint() != runtime.fingerprint() {
                 return Err("The proxy changed during verification. Try again.".into());
@@ -78,6 +82,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
             status: controller.status(),
             verified: settings.enabled,
             managed_codex_updated: count,
+            execution,
         }),
         Err(error) => {
             controller.save(previous).map_err(|_| {
@@ -92,7 +97,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
     }
 }
 
-fn verify_gateway_search(runtime: &AgentProxyRuntime) -> Result<(), String> {
+fn verify_gateway_search(runtime: &AgentProxyRuntime) -> Result<&'static str, String> {
     let origin = runtime.gateway_origin().map_err(|error| error.message)?;
     let url = reqwest::Url::parse(&origin).map_err(|_| "Invalid local proxy address.")?;
     if url.scheme() != "http"
@@ -111,7 +116,8 @@ fn verify_gateway_search(runtime: &AgentProxyRuntime) -> Result<(), String> {
     let body = json!({
         "model":"auto", "stream":false, "max_output_tokens":1024, "max_tool_calls":1,
         "input":"Search the web for Python official documentation. Use the search tool once. Return the retrieved sources.",
-        "tools":[{"type":"web_search"}], "tool_choice":"required"
+        "tools":[{"type":"web_search"}], "tool_choice":"required",
+        "include":["web_search_call.action.sources"]
     });
     let response = http.post(&format!("{origin}/agents/codex/v1/responses"))
         .header("authorization", &format!("Bearer {}", runtime.virtual_key()))
@@ -131,7 +137,16 @@ fn verify_gateway_search(runtime: &AgentProxyRuntime) -> Result<(), String> {
         .map_err(|_| "Cannot read the search verification response.")?;
     let document: Value = serde_json::from_slice(&bytes)
         .map_err(|_| "The proxy returned an invalid search response.")?;
-    validate_search_evidence(&document)
+    validate_search_evidence(&document)?;
+    let local = document["output"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["type"] == "web_search_call"
+                && item["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("srvtoolu_ts_"))
+        })
+    });
+    Ok(if local { "local" } else { "native" })
 }
 
 fn validate_search_evidence(document: &Value) -> Result<(), String> {

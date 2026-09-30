@@ -398,7 +398,7 @@ fn anthropic_request_declares_server_tool(body: &Value) -> bool {
 /// to hash, but it has the same first two turns, so the key is derivable without
 /// normalising the body — which is precisely what the native path exists to
 /// avoid doing.
-fn native_quota_session_key(body: &Value) -> String {
+pub(super) fn native_quota_session_key(body: &Value) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for message in body
@@ -1021,7 +1021,7 @@ impl Gateway {
     /// dropped. `SafeHeaders::try_new` additionally rejects any credential or
     /// host-owned header fail-closed, so the client's own auth can never ride
     /// upstream even if this list regressed.
-    fn curate_passthrough_headers(
+    pub(super) fn curate_passthrough_headers(
         raw_headers: &[(String, String)],
     ) -> Result<SafeHeaders, ErrorEnvelope> {
         const FORWARD: [&str; 4] = [

@@ -1,75 +1,88 @@
-# Browser search preview
+# Web search preview
 
 Open **Settings > Web search** in the desktop App.
-Install Google Chrome before using this preview.
-Select Bing or DuckDuckGo. Enter a query. Select **Test search**.
-The test sends the query to the search engine. It does not call a model.
+Select a search mode. Enable **Enable web search**.
 
-Enable **Handle native web search** to execute supported hosted search requests through the local browser.
-Enabling runs a real search through the current Codex model route. This uses model tokens.
-Verification can take up to 120 seconds. Keep the proxy running. Failed verification restores the previous search settings.
-The switch is off by default. Disable it to stop browser interception.
-Preferences are stored in `search-settings.json` under the Token Station data directory.
-Model routing and provider credentials do not change.
+## Search modes
 
-## Supported behavior
+- **Auto · Native first**: preserve native search when the selected provider route supports its protocol.
+  Use local browser search when that route cannot represent hosted search, or explicitly rejects the hosted tool type.
+- **Native only**: use upstream search. Return unsupported-search errors without starting Chrome.
+- **Local browser only**: handle supported hosted search through a separate headless Chrome.
 
-- Anthropic Messages direct hosted search and OpenAI Responses live web search.
-- Function-capable models on the existing provider route.
-- Up to three search attempts per request and five snippets per search.
-- Shared tool handling for function-capable models. No model-name overrides.
-- Long or incompatible client function names use internal short aliases. Returned calls keep the original client names.
-- Parallel search calls use the same request budget. Excess calls receive tool errors.
-- Mixed search and client tool calls return completed search records and the original client calls.
-- Browser failures return tool errors. The model can explain the failure or use available results.
-- A separate headless Chrome profile. No visible window or personal browser tabs.
-- A single active browser search per process. Concurrent searches receive a busy error.
-- Bounded execution, cancellation, and cleanup of the owned browser process group on Unix.
-- Search snippets and source links. No full-page reading.
+Native paths cover Responses to Responses, Messages to Messages, and direct Messages search to Responses.
+The reverse Responses-to-Messages hosted-search bridge is not implemented. Auto uses local search on that route.
+Auto is the default, including settings saved by older versions.
+The master switch is off by default. Disabled gateways keep their existing native search path.
+Managed Codex configurations use live web search in all enabled modes and disable it when the switch is off.
 
-When the budget is exhausted, search history becomes labeled text before the search declaration is removed.
-This avoids invalid historical tool references on strict providers. Other client tools remain available.
-The request log includes `browser_searches` with operation order, elapsed time, and a fixed outcome code.
-These records contain no query, page content, or raw browser error. They are not yet shown in the request-history UI.
+Auto does not retry authentication, balance, quota, network, or ambiguous server failures through the browser.
+An empty native result does not trigger fallback.
+No browser retry starts after successful client output or cancellation.
+Fallback stays on the selected model offering. It does not switch to another provider.
+Local execution rejects unsupported constraints instead of silently removing them.
 
-A single-tool forced choice can use one equivalent-format retry after an explicit initial HTTP 400 refusal.
-The retry stays on the same model and preserves forced tool use. Both attempts appear in the request log.
+Explicit native tool refusals are cached in memory for ten minutes.
+The cache separates model offerings, client protocols, and tool declarations.
+Saving settings or selecting **Verify again** clears observations. Reconstructing the gateway also clears them.
+No model-name or provider-brand blacklist decides search support.
 
-The preview buffers model rounds. It returns protocol events after the model completes.
-Domain filters, location constraints, cached-only search, and dynamic code-execution search are not supported.
-Unsupported constraints produce an error before search execution.
-Local-only routes cannot use browser search.
-Chrome uses the system network settings. It does not inherit Token Station's model-provider proxy settings.
-CAPTCHA and unsupported page layouts produce errors. The preview does not bypass verification.
+## Activation and verification
 
-## Web page reading
+Enabling or changing an enabled mode runs a real search through the current Codex model route.
+Verification uses model tokens and can take up to 120 seconds. Keep the proxy running.
+Failed verification restores the previous settings.
+Native mode does not require Chrome. Auto can verify native search without Chrome.
+Install Google Chrome to use the local fallback.
 
-This feature returns snippets. It does not replace Claude Code WebFetch or read full pages.
-Client domain checks, tool permissions, website restrictions, and model transport failures remain separate failure paths.
-A successful model response does not prove a successful search. Check the hosted tool result and browser search outcome.
+The panel reports whether the last successful check used native search or local browser search.
+A successful check applies only to that request. Verify again after changing the route or network.
+Claude Code and full-page fetching require separate verification.
 
-## Codex
-
-Codex must declare live web search for the gateway to receive it.
-Managed Codex configurations use `web_search = "live"` when interception is enabled and `"disabled"` when it is off.
 The update uses existing ownership, drift detection, snapshots, and disconnect restoration.
 Unmanaged configurations remain unchanged. Connect Codex on the Agents page, then start a new Codex session.
 When the proxy is stopped, disabling saves the preference. Client synchronization waits for the next proxy start.
-Select **Verify again** after changing the route or network. A successful check applies only to that test.
-Browser-only testing does not certify model compatibility. Claude Code and full-page fetching require separate verification.
+Preferences are stored in search-settings.json under the Token Station data directory.
+Model routes and provider credentials do not change.
+
+## Browser diagnostics and limits
+
+Select Bing or DuckDuckGo. Enter a query. Select **Test search**.
+This browser-only test works while search is disabled. It does not call a model or certify model compatibility.
+
+Local browser search supports:
+
+- Anthropic Messages direct hosted search and OpenAI Responses live web search.
+- Function-capable models on the selected provider route.
+- Up to three search attempts per request and five snippets per search.
+- Internal short aliases for incompatible client function names. Returned calls retain their original names.
+- Parallel search calls within the request budget. Excess calls receive tool errors.
+- Mixed search and client calls. Client tools remain client-owned.
+- A temporary isolated Chrome profile, without personal cookies, tabs, or extensions.
+- One active browser search per process. Concurrent requests receive a busy error.
+- Bounded execution, cancellation, and owned process cleanup.
+
+Local search returns titles, source links, and snippets. It does not read full pages or replace WebFetch.
+Dates, relevance, and article contents are not verified by a returned snippet.
+Search-only requests require evidence unless the client explicitly disables tools.
+General Agent requests with multiple tools retain their tool selection.
+The gateway does not execute or repair model-generated client code.
+
+The local loop buffers model rounds before returning protocol events.
+Domain filters, location constraints, cached-only search, and dynamic code-execution search remain unsupported locally.
+Compatible native paths retain their upstream capabilities and streaming behavior.
+Local-only routing policy forbids browser search.
+Chrome uses system network settings, not the model-provider proxy settings.
+CAPTCHA and unsupported page layouts produce errors. The preview does not bypass verification.
+
+The request log includes search_execution and content-free browser_searches outcomes.
+Execution values distinguish native, forced local, protocol fallback, explicit rejection, and cached rejection.
+These fields contain no search query, page content, or raw provider error.
 
 ## Cost and rollback
 
-There is no paid search API fallback in this preview. Model token charges still apply.
-There is no automatic MCP installation. These remain separate future capabilities.
-Disable the preview to restore the previous search behavior without removing model configuration.
-
-### Search evidence and custom tools
-
-Search-only requests require a browser call unless the client explicitly disables tools.
-If the model omits a required search, the gateway returns an error instead of an unsupported answer.
-Search-only responses contain retrieved titles, URLs, snippets, and structured errors instead of an inner model summary.
-These snippets do not verify publication dates, relevance, or the full article.
-General Agent requests with multiple tools retain their tool selection behavior.
-Custom tool instructions remain readable before their preserved JSON metadata.
-The gateway does not execute or repair model-generated client code.
+Local browser search adds no search API charge. Model token charges still apply.
+Native search can incur the upstream provider's search charges.
+No paid search fallback or MCP installation is added.
+Select Local mode to restore the earlier browser-only behavior.
+Disable the master switch to stop local interception and disable managed Codex search.

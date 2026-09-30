@@ -49,7 +49,7 @@ fn text_content(value: &Value) -> Result<String, ErrorEnvelope> {
 // The direct search subrequest is text-only. Reject other content instead of
 // silently discarding images, documents, thinking signatures, or tool history.
 #[allow(clippy::too_many_lines)]
-fn to_responses(body: &Value) -> Result<(Value, String), ErrorEnvelope> {
+pub(super) fn to_responses(body: &Value) -> Result<(Value, String), ErrorEnvelope> {
     let tools = body["tools"]
         .as_array()
         .ok_or_else(|| unsupported("Web Search tools are missing"))?;
@@ -240,7 +240,7 @@ fn sources(values: &Value) -> Vec<Value> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn from_responses(
+pub(super) fn from_responses(
     body: &Value,
     name: &str,
     model: &str,

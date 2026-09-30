@@ -35,12 +35,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preferences_migrate_to_native_first_and_modes_persist() {
+        let root = temporary_dir().unwrap();
+        std::fs::write(
+            root.0.join("search-settings.json"),
+            r#"{"enabled":true,"engine":"bing"}"#,
+        )
+        .unwrap();
+        let controller = SearchController::shared(&root.0);
+        assert_eq!(controller.settings().mode, SearchMode::Auto);
+        for mode in [SearchMode::Native, SearchMode::Local, SearchMode::Auto] {
+            let revision = controller.revision();
+            controller
+                .save(SearchSettings {
+                    mode,
+                    ..controller.settings()
+                })
+                .unwrap();
+            assert!(controller.revision() > revision);
+            let saved: SearchSettings = serde_json::from_slice(
+                &std::fs::read(root.0.join("search-settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved.mode, mode);
+        }
+    }
+
+    #[test]
     fn preview_defaults_off_and_persists_without_changing_routes() {
         let root = temporary_dir().unwrap();
         let controller = SearchController::shared(&root.0);
         assert!(!controller.settings().enabled);
         let settings = SearchSettings {
             enabled: true,
+            mode: SearchMode::Local,
             engine: Engine::Duckduckgo,
         };
         controller.save(settings.clone()).unwrap();
@@ -85,6 +113,7 @@ mod tests {
             controller
                 .save(SearchSettings {
                     enabled: false,
+                    mode: SearchMode::Local,
                     engine: Engine::Duckduckgo,
                 })
                 .unwrap();
@@ -102,7 +131,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use url::{Host, Url};
@@ -118,10 +147,21 @@ pub enum Engine {
     Duckduckgo,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    #[default]
+    Auto,
+    Native,
+    Local,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchSettings {
     pub enabled: bool,
+    #[serde(default)]
+    pub mode: SearchMode,
     pub engine: Engine,
 }
 
@@ -151,6 +191,7 @@ pub struct SearchController {
     data_dir: PathBuf,
     settings: Mutex<SearchSettings>,
     busy: AtomicBool,
+    revision: AtomicU64,
     #[cfg(test)]
     pub(crate) fixture: Mutex<Option<Result<Vec<SearchResult>, String>>>,
 }
@@ -181,6 +222,7 @@ impl SearchController {
             data_dir: data_dir.to_path_buf(),
             settings: Mutex::new(settings),
             busy: AtomicBool::new(false),
+            revision: AtomicU64::new(0),
             #[cfg(test)]
             fixture: Mutex::new(None),
         });
@@ -194,6 +236,11 @@ impl SearchController {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 
     #[must_use]
@@ -221,6 +268,7 @@ impl SearchController {
         )
         .map_err(|_| "Cannot save search settings.")?;
         *current = settings;
+        self.revision.fetch_add(1, Ordering::Release);
         drop(current);
         Ok(self.status())
     }

@@ -714,7 +714,7 @@ impl Gateway {
         }
     }
 
-    fn curate_responses_headers(
+    pub(super) fn curate_responses_headers(
         raw_headers: &[(String, String)],
     ) -> Result<SafeHeaders, ErrorEnvelope> {
         const FORWARD: [&str; 4] = [

@@ -8,7 +8,7 @@ const MAX_SEARCHES: u64 = 3;
 fn invalid(message: &str) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorCode::Capability, 400, message)
 }
-fn hosted(tool: &Value, anthropic: bool) -> bool {
+pub(super) fn hosted(tool: &Value, anthropic: bool) -> bool {
     tool["type"].as_str().is_some_and(|kind| {
         if anthropic {
             kind.starts_with("web_search_")
@@ -407,9 +407,10 @@ impl Gateway {
         routing_model: Option<&str>,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
+        initial_decision: Option<Decision>,
     ) -> Result<Option<(UpstreamModel, StreamOutcome)>, ErrorEnvelope> {
-        if !self.search.settings().enabled
-            || body.len() > MAX_INBOUND_BODY
+        // The policy owns the request's settings snapshot. Disabling affects future requests.
+        if body.len() > MAX_INBOUND_BODY
             || !matches!(
                 agent.protocol.as_str(),
                 "anthropic-messages" | "openai-responses"
@@ -433,10 +434,11 @@ impl Gateway {
             .is_some_and(|tools| tools.len() == 1);
         let mut evidence = Vec::new();
         let stream = original["stream"].as_bool().unwrap_or(false);
-        let mut decision: Option<Decision> = None;
+        let mut decision = initial_decision;
         let mut search_items = Vec::new();
         ctx.begin_host_loop_accounting();
         let mut count = 0_u64;
+        let first_attempt = record.attempts;
         for round in 0..=MAX_SEARCHES {
             if ctx.is_cancelled() {
                 return Err(ErrorEnvelope::new(
@@ -508,7 +510,7 @@ impl Gateway {
             );
             if round == 0
                 && count == 0
-                && record.attempts == 1
+                && record.attempts == first_attempt + 1
                 && named_choice.is_some()
                 && reply.is_none()
                 && !ctx.is_cancelled()
@@ -1377,6 +1379,7 @@ mod loop_tests {
                 .search
                 .save(crate::search::SearchSettings {
                     enabled: true,
+                    mode: crate::search::SearchMode::Local,
                     engine: crate::search::Engine::Bing,
                 })
                 .unwrap();

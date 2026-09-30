@@ -364,7 +364,7 @@ impl Connector for CodexConnector {
         };
         format!(
             "Codex now uses the Responses API at {} (~/.codex/config.toml and the Token Station model catalog are backed up; {}; web search is {}). Quit and reopen Codex to load Token Station Auto.",
-            input.base_url, metadata, if input.browser_search_enabled { "live through Token Station browser search" } else { "disabled" }
+            input.base_url, metadata, if input.browser_search_enabled { "live through Token Station search policy" } else { "disabled" }
         )
     }
 }

@@ -134,7 +134,10 @@ impl HttpTraceCapture {
 
 impl RequestContext {
     pub(crate) fn begin_host_loop_accounting(&self) {
-        *self.host_loop_accounting.lock().unwrap() = Some(crate::accounting::Aggregate::default());
+        self.host_loop_accounting
+            .lock()
+            .unwrap()
+            .get_or_insert_with(crate::accounting::Aggregate::default);
     }
 
     pub(crate) fn aggregate_host_attempt(
