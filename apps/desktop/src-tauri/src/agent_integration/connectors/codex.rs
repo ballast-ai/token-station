@@ -140,7 +140,7 @@ impl Connector for CodexConnector {
             replace(&["model"], json!("auto")),
             replace(&["model_provider"], json!("tokenstation")),
             replace(MODEL_CATALOG_JSON, json!(MODEL_CATALOG_RELATIVE_PATH)),
-            replace(&["web_search"], json!("disabled")),
+            replace(&["web_search"], json!(if input.browser_search_enabled { "live" } else { "disabled" })),
             replace(
                 &["model_providers", "tokenstation", "base_url"],
                 json!(input.base_url),
@@ -320,6 +320,7 @@ impl Connector for CodexConnector {
         let owns_metadata = owned_paths.contains(&path(&["model_context_window"]))
             && owned_paths.contains(&path(&["model_auto_compact_token_limit"]));
         let validation_input = ConnectInput {
+            browser_search_enabled: input.browser_search_enabled,
             base_url: input.base_url,
             token: input.token,
             adapter_ready: input.adapter_ready,
@@ -362,8 +363,8 @@ impl Connector for CodexConnector {
             "route limits are unknown, so the existing top-level context settings were preserved"
         };
         format!(
-            "Codex now uses the Responses API at {} (~/.codex/config.toml and the Token Station model catalog are backed up; {}; hosted web search is disabled because dynamic translated routes cannot execute it). Quit and reopen Codex to load Token Station Auto.",
-            input.base_url, metadata
+            "Codex now uses the Responses API at {} (~/.codex/config.toml and the Token Station model catalog are backed up; {}; web search is {}). Quit and reopen Codex to load Token Station Auto.",
+            input.base_url, metadata, if input.browser_search_enabled { "live through Token Station browser search" } else { "disabled" }
         )
     }
 }
@@ -396,7 +397,7 @@ fn same_top_level_toml_field(
 fn validate_codex_projection(
     document: &ConfigDocument,
     input: &ConnectInput<'_>,
-    require_web_search_disabled: bool,
+    require_web_search: bool,
 ) -> Result<(), String> {
     CodexConnector.validate_source(document)?;
     let ConfigDocument::Toml(document) = document else {
@@ -415,8 +416,8 @@ fn validate_codex_projection(
             .get("model_catalog_json")
             .and_then(toml_edit::Item::as_str)
             == Some(MODEL_CATALOG_RELATIVE_PATH)
-        && (!require_web_search_disabled
-            || root.get("web_search").and_then(toml_edit::Item::as_str) == Some("disabled"))
+        && (!require_web_search
+            || root.get("web_search").and_then(toml_edit::Item::as_str) == Some(if input.browser_search_enabled { "live" } else { "disabled" }))
         && provider.get("base_url").and_then(toml_edit::Item::as_str) == Some(input.base_url);
     if !valid {
         return Err("Codex 写入前复验失败".to_string());
@@ -609,6 +610,7 @@ mod tests {
     #[test]
     fn codex_connection_embeds_the_sensitive_local_virtual_key_for_gui_clients() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -640,6 +642,7 @@ mod tests {
     #[test]
     fn codex_connection_disables_hosted_web_search_for_dynamic_routes() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -668,8 +671,29 @@ mod tests {
     }
 
     #[test]
+    fn codex_enabled_browser_search_projects_live_and_validates() {
+        let input = ConnectInput {
+            browser_search_enabled: true,
+            base_url: "http://127.0.0.1:18787/agents/codex/v1",
+            token: Some("local-test-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut document = parse_source_bytes(None, DocumentFormat::Toml, "Codex").unwrap();
+        apply_patch(&mut document, &CodexConnector.connect_patch(&input).unwrap()).unwrap();
+        assert_eq!(semantic_json(&document).unwrap()["web_search"], "live");
+        CodexConnector.validate_projected(&document, &input).unwrap();
+        let disabled = ConnectInput { browser_search_enabled: false, ..input };
+        let operations = CodexConnector.refresh_patch_for_document(&document, &disabled, &CodexConnector.owned_paths()).unwrap();
+        apply_patch(&mut document, &operations).unwrap();
+        assert_eq!(semantic_json(&document).unwrap()["web_search"], "disabled");
+        CodexConnector.validate_projected(&document, &disabled).unwrap();
+    }
+
+    #[test]
     fn codex_legacy_refresh_claims_unchanged_web_search_from_baseline() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -716,6 +740,7 @@ mod tests {
     #[test]
     fn codex_legacy_refresh_rejects_web_search_changed_after_connection() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -753,6 +778,7 @@ mod tests {
     #[test]
     fn codex_legacy_refresh_rejects_web_search_deleted_after_connection() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -798,6 +824,7 @@ mod tests {
     #[test]
     fn codex_legacy_refresh_rejects_web_search_decoration_changed_after_connection() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -847,6 +874,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -885,6 +913,7 @@ mod tests {
     #[test]
     fn codex_auto_accepts_images_even_without_upstream_metadata() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("fixture-key"), adapter_ready: true, model_metadata: None,
         };
@@ -895,6 +924,7 @@ mod tests {
     #[test]
     fn codex_connection_requires_reopening_codex_to_reload_the_catalog() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -910,6 +940,7 @@ mod tests {
     #[test]
     fn codex_catalog_uses_a_practical_compatibility_window_without_route_metadata() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -930,6 +961,7 @@ mod tests {
     #[test]
     fn codex_projection_validation_requires_the_managed_catalog_pointer() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1004,6 +1036,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,

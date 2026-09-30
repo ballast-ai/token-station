@@ -483,6 +483,7 @@ mod tests {
         )
         .unwrap();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("new-key"),
             adapter_ready: true,
@@ -539,6 +540,7 @@ mod tests {
         )
         .unwrap();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("current-key"),
             adapter_ready: true,
@@ -589,6 +591,7 @@ mod tests {
             std::fs::write(target, serde_json::to_vec(&before).unwrap()).unwrap();
         }
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/openclaw/v1",
             token: Some("current-key"),
             adapter_ready: true,

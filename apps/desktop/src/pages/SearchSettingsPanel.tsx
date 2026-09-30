@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 type Engine = "bing" | "duckduckgo";
 interface Settings { enabled: boolean; engine: Engine }
 interface Status { settings: Settings; chrome_available: boolean; busy: boolean }
+interface Activation { status: Status; verified: boolean; managed_codex_updated: number }
 interface Result { results: Array<{title: string; url: string; snippet: string}>; elapsed_ms: number }
 
 export default function SearchSettingsPanel() {
@@ -19,12 +20,13 @@ export default function SearchSettingsPanel() {
   const [status, setStatus] = useState<Status | null>(null);
   const [query, setQuery] = useState("Python official documentation");
   const [result, setResult] = useState<Result | null>(null);
+  const [activation, setActivation] = useState<Activation | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => { let active = true; invoke<Status>("get_search_status").then(value => { if (active) setStatus(value); }).catch(reason => { if (active) setError(String(reason)); }); return () => { active = false; }; }, []);
   const save = async (settings: Settings) => {
-    setBusy(true); setError("");
-    try { setStatus(await invoke<Status>("save_search_settings", { settings })); }
+    setBusy(true); setError(""); setActivation(null); setResult(null);
+    try { const value = await invoke<Activation>("save_search_settings", { settings }); setStatus(value.status); setActivation(value); }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
@@ -42,7 +44,14 @@ export default function SearchSettingsPanel() {
         <label htmlFor="browser-search-enabled" className="text-sm font-medium">{copy("Handle native web search", "接管原生联网搜索")}</label>
         <Switch id="browser-search-enabled" checked={status?.settings.enabled ?? false} disabled={!status || busy || (!status.chrome_available && !status.settings.enabled)} onCheckedChange={enabled => { if (status) void save({ ...status.settings, enabled }); }} />
       </div>
-      <p className="text-sm text-muted-foreground">{copy("Off restores the existing search path. Changes apply to new requests. The preview buffers model rounds before returning results.", "关闭即可恢复原有搜索路径，对新请求生效。试用版会等待模型和搜索完成，再返回结果。")}</p>
+      <p className="text-sm text-muted-foreground">{copy("Enabling runs a real search through the Codex model route (up to 120 seconds). It uses model tokens. Failed verification restores your previous settings.", "开启时会通过 Codex 模型路由执行一次真实搜索（最长约 120 秒），消耗少量模型 Token。验证失败会恢复原设置。")}</p>
+      {status?.settings.enabled && <Button disabled={busy || !status.chrome_available} onClick={() => void save(status.settings)}>{copy("Verify again", "重新验证")}</Button>}
+      <div role="status" aria-live="polite" className="text-sm space-y-2">
+        {busy && <p>{copy("Checking… Keep this panel open.", "正在检查，请保持此页面打开…")}</p>}
+        {activation?.verified ? <><p>{copy("Gateway search verified in the last check. Verify again after changing the model or network.", "上次检查的 Codex 路由已通过真实搜索验证。更换模型或网络后请重新验证。")}</p>
+          <p>{activation.managed_codex_updated > 0 ? copy("Managed Codex search configuration updated. Start a new session in Codex.", "已同步受管 Codex 的搜索配置，请在 Codex 中新建会话。") : copy("Connect Codex on the Agents page to use this route. Unmanaged configuration was not changed.", "请在 Agent 页面接入 Codex 后使用此路由。未接入的客户端配置不会被改动。")}</p></>
+          : <p>{copy("This panel has not verified the current model route yet. Browser tests alone do not verify model compatibility.", "此页面尚未验证当前模型路由。仅浏览器测试成功不代表模型适配通过。")}</p>}
+      </div>
       <div className="space-y-2">
         <label id="search-engine-label" className="text-sm font-medium">{copy("Search engine", "搜索引擎")}</label>
         <Select value={status?.settings.engine ?? "bing"} disabled={!status || busy} onValueChange={engine => { if (status) void save({ ...status.settings, engine: engine as Engine }); }}>
@@ -67,7 +76,7 @@ export default function SearchSettingsPanel() {
         </>}
       </div>
       <p className="text-xs text-muted-foreground">{copy("Preview: up to 3 searches per request and 5 snippets per search. Domain filters, geographic targeting, cached-only search, and page reading are not supported. CAPTCHA is reported as an error. Chrome uses the system network settings.", "试用范围：每个请求最多搜索 3 次，每次最多返回 5 条摘要。不支持域名过滤、地理定位、仅缓存搜索和正文读取。验证码会明确报错。Chrome 使用系统网络设置。")}</p>
-      <p className="text-xs text-muted-foreground">{copy("For Codex, enable live web search in the client. Token Station does not change your active client configuration here.", "Codex 需要在客户端启用实时联网搜索。这一开关不会修改你正在使用的客户端配置。")}</p>
+      <p className="text-xs text-muted-foreground">{copy("Managed Codex uses live search when enabled and disables it when off. If the proxy is stopped, configuration sync waits until it restarts. Changing models or networks requires a new check. Claude Code and page fetching need separate validation.", "已接入的 Codex 会随开关启用或关闭联网搜索。代理停止时，配置将在代理重启后同步。更换模型或网络后请重新验证。Claude Code 和网页正文读取需要单独验证。")}</p>
     </CardContent>
   </Card>;
 }

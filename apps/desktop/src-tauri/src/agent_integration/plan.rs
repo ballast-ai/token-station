@@ -1725,6 +1725,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
@@ -1780,6 +1781,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some("fixture-null-reverse-secret"),
                 adapter_ready: true,
@@ -1824,6 +1826,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("fixture-codex-virtual-key"),
                 adapter_ready: true,
@@ -1870,6 +1873,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/codex/v1",
                 token: Some("fixture-codex-virtual-key"),
                 adapter_ready: true,
@@ -1967,6 +1971,7 @@ mod tests {
             &source,
             &baseline,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/claude-code",
                 token: Some("fixture-claude-virtual-key"),
                 adapter_ready: true,
@@ -2091,6 +2096,7 @@ model_auto_compact_token_limit = 48000
             &source,
             &baseline,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/codex/v1",
                 token: Some("fixture-codex-virtual-key"),
                 adapter_ready: true,
@@ -2155,6 +2161,7 @@ model_auto_compact_token_limit = 48000
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some("hidden"),
                 adapter_ready: true,
@@ -2182,6 +2189,7 @@ model_auto_compact_token_limit = 48000
                 target,
                 &source,
                 &ConnectInput {
+                    browser_search_enabled: false,
                     base_url: "http://127.0.0.1:8787",
                     token: Some("hidden"),
                     adapter_ready: true,
@@ -2206,6 +2214,7 @@ model_auto_compact_token_limit = 48000
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some("hidden"),
                 adapter_ready: true,

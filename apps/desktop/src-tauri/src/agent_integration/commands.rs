@@ -355,6 +355,8 @@ struct CommandSession {
 
 #[derive(Clone)]
 pub struct AgentProxyRuntime {
+    running_revision: u64,
+    pub(crate) browser_search_enabled: bool,
     instance_id: String,
     connector_base_urls: BTreeMap<String, String>,
     connector_adapter_ready: BTreeMap<String, bool>,
@@ -391,6 +393,8 @@ impl AgentProxyRuntime {
             connector_adapter_ready.insert(capability.connector_id.to_string(), ready);
         }
         Self {
+            browser_search_enabled: false,
+            running_revision: 0,
             instance_id,
             connector_base_urls,
             connector_adapter_ready,
@@ -422,9 +426,11 @@ impl AgentProxyRuntime {
         Ok(origin)
     }
 
-    fn fingerprint(&self) -> [u8; 32] {
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"token-station-agent-proxy-binding-v1\0");
+        hash.update([u8::from(self.browser_search_enabled)]);
+        hash.update(self.running_revision.to_le_bytes());
         hash_field(&mut hash, self.instance_id.as_bytes());
         for (connector_id, base_url) in &self.connector_base_urls {
             hash_field(&mut hash, connector_id.as_bytes());
@@ -458,6 +464,7 @@ impl AgentProxyRuntime {
             AgentCommandError::boundary("unsupported_connector", "Connector 缺少运行时 URL 投影")
         })?;
         Ok(ConnectInput {
+            browser_search_enabled: self.browser_search_enabled,
             base_url,
             token: connector
                 .capabilities()
@@ -1072,6 +1079,7 @@ fn validate_force_forget_reconnect(
         cost: None,
     };
     let input = ConnectInput {
+        browser_search_enabled: false,
         base_url: RECONNECT_BASE_URL,
         token: Some(RECONNECT_TOKEN),
         adapter_ready: true,
@@ -2758,7 +2766,7 @@ pub(crate) fn runtime_from_app(
             "Agent 接入需要稳定的本地虚拟 Key；请先在设置中开启本地鉴权并重启代理",
         )
     })?;
-    Ok(AgentProxyRuntime::new(
+    let mut runtime = AgentProxyRuntime::new(
         serve.instance_id.ok_or_else(|| {
             AgentCommandError::boundary("proxy_not_running", "代理运行实例身份不可用")
         })?,
@@ -2767,7 +2775,13 @@ pub(crate) fn runtime_from_app(
         adapter_readiness,
         model_metadata,
         connection_issues,
-    ))
+    );
+    runtime.running_revision = serving.running_revision();
+    runtime.browser_search_enabled =
+        token_station_cli::search::SearchController::shared(&inner.data_dir())
+            .settings()
+            .enabled;
+    Ok(runtime)
 }
 
 #[tauri::command]
@@ -3154,6 +3168,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
@@ -4846,6 +4861,23 @@ mod tests {
         assert_eq!(boundary.code, "write_failed");
         assert_eq!(boundary.stage, Some(TransactionStage::TargetWrite));
         assert_eq!(boundary.recovery, Some(RecoveryStatus::RepairRequired));
+    }
+
+    #[test]
+    fn search_setting_and_route_revision_invalidate_connection_plans() {
+        let mut runtime = runtime("vk-search-fixture");
+        let initial = runtime.fingerprint();
+        runtime.browser_search_enabled = true;
+        assert_ne!(initial, runtime.fingerprint());
+        assert!(
+            runtime
+                .input_for("codex-v1")
+                .unwrap()
+                .browser_search_enabled
+        );
+        let enabled = runtime.fingerprint();
+        runtime.running_revision += 1;
+        assert_ne!(enabled, runtime.fingerprint());
     }
 
     #[test]

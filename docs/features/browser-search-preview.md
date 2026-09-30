@@ -6,7 +6,9 @@ Select Bing or DuckDuckGo. Enter a query. Select **Test search**.
 The test sends the query to the search engine. It does not call a model.
 
 Enable **Handle native web search** to execute supported hosted search requests through the local browser.
-The switch is off by default. Disable it to restore the existing native provider path.
+Enabling runs a real search through the current Codex model route. This uses model tokens.
+Verification can take up to 120 seconds. Keep the proxy running. Failed verification restores the previous search settings.
+The switch is off by default. Disable it to stop browser interception.
 Preferences are stored in `search-settings.json` under the Token Station data directory.
 Model routing and provider credentials do not change.
 
@@ -49,10 +51,12 @@ A successful model response does not prove a successful search. Check the hosted
 ## Codex
 
 Codex must declare live web search for the gateway to receive it.
-The existing Token Station connector can set `web_search = "disabled"` in the Codex configuration.
-For a temporary trial, launch Codex with `codex -c 'web_search="live"'`.
-Keep the Token Station provider selected. This command does not persist the search override.
-The switch in Token Station does not rewrite an active client configuration.
+Managed Codex configurations use `web_search = "live"` when interception is enabled and `"disabled"` when it is off.
+The update uses existing ownership, drift detection, snapshots, and disconnect restoration.
+Unmanaged configurations remain unchanged. Connect Codex on the Agents page, then start a new Codex session.
+When the proxy is stopped, disabling saves the preference. Client synchronization waits for the next proxy start.
+Select **Verify again** after changing the route or network. A successful check applies only to that test.
+Browser-only testing does not certify model compatibility. Claude Code and full-page fetching require separate verification.
 
 ## Cost and rollback
 

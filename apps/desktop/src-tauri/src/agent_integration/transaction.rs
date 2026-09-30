@@ -1874,6 +1874,7 @@ mod tests {
             target,
             &read_config_source(target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/gemini-cli",
                 token: Some(secret),
                 adapter_ready: true,
@@ -1895,6 +1896,7 @@ mod tests {
             target,
             &read_config_source(target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/claude-desktop",
                 token: Some(secret),
                 adapter_ready: true,
@@ -1942,6 +1944,7 @@ mod tests {
             target,
             &read_config_source(target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/codex/v1",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2067,6 +2070,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2089,6 +2093,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2121,6 +2126,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2415,6 +2421,7 @@ mod tests {
             &target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-refresh"),
                 adapter_ready: true,
@@ -2487,6 +2494,7 @@ mod tests {
             &target,
             &current,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-refresh"),
                 adapter_ready: true,
@@ -2591,6 +2599,7 @@ mod tests {
             &target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-sibling"),
                 adapter_ready: true,
@@ -4135,6 +4144,7 @@ keep = true
             &target,
             &read_config_source(&target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-openclaw-secret"),
                 adapter_ready: true,
@@ -4814,6 +4824,7 @@ keep = true
             cost: None,
         };
         let connect_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("managed-key"),
             adapter_ready: true,
@@ -4941,6 +4952,7 @@ keep = true
             cost: None,
         };
         let connect_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("managed-key"),
             adapter_ready: true,

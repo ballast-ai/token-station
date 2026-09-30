@@ -29,8 +29,30 @@ describe("browser search preview", () => {
     fireEvent.click(button);
     expect(await screen.findByRole("alert")).toHaveTextContent("human verification");
   });
+  it("requires a gateway check before claiming search is ready", async () => {
+    let finish!: (value: unknown) => void;
+    vi.mocked(invoke).mockResolvedValueOnce(status).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    render(<SearchSettingsPanel />);
+    await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch"));
+    expect(invoke).toHaveBeenCalledWith("save_search_settings", { settings: { enabled: true, engine: "bing" } });
+    expect(screen.getByRole("switch")).not.toBeChecked();
+    expect(screen.queryByText(/Gateway search verified/)).not.toBeInTheDocument();
+    finish({ status: { ...status, settings: { ...status.settings, enabled: true } }, verified: true, managed_codex_updated: 0 });
+    expect(await screen.findByText(/Gateway search verified/)).toBeInTheDocument();
+    expect(screen.getByRole("switch")).toBeChecked();
+    expect(screen.getByText(/Connect Codex on the Agents page/)).toBeInTheDocument();
+  });
+  it("keeps search off when activation fails", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(status).mockRejectedValueOnce("The model did not complete a search.");
+    render(<SearchSettingsPanel />);
+    await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("did not complete");
+    expect(screen.getByRole("switch")).not.toBeChecked();
+  });
   it("can disable interception even after Chrome was removed", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce({ ...status, chrome_available: false, settings: { ...status.settings, enabled: true } }).mockResolvedValueOnce(status);
+    vi.mocked(invoke).mockResolvedValueOnce({ ...status, chrome_available: false, settings: { ...status.settings, enabled: true } }).mockResolvedValueOnce({ status, verified: false, managed_codex_updated: 0 });
     render(<SearchSettingsPanel />);
     await waitFor(() => expect(screen.getByRole("switch")).toBeChecked());
     fireEvent.click(screen.getByRole("switch"));
