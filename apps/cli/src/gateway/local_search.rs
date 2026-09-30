@@ -459,6 +459,11 @@ impl Gateway {
                 model.clone_into(&mut request.model);
             }
             request.stream = false;
+            // The host verifies mandatory search evidence below. Thinking providers can
+            // reject both required and named choices, so let them select the sole tool.
+            if search_only && must_search {
+                request.tool_choice = Some(token_station_protocol::ToolChoice::Auto);
+            }
             let mut named_choice = None;
             // Required is equivalent to a named choice when exactly one tool is available.
             if request.tools.len() == 1
@@ -1216,8 +1221,8 @@ mod loop_tests {
     }
 
     #[test]
-    fn required_choice_rejection_retries_the_equivalent_named_choice_once() {
-        run_scenario("choice_retry");
+    fn thinking_provider_accepts_search_only_auto_with_mandatory_evidence() {
+        run_scenario("thinking_auto");
     }
 
     fn run_scenario(scenario: &'static str) {
@@ -1250,8 +1255,6 @@ mod loop_tests {
                     1
                 } else if scenario == "three" {
                     4
-                } else if scenario == "choice_retry" {
-                    3
                 } else {
                     2
                 } {
@@ -1303,17 +1306,17 @@ mod loop_tests {
                         })
                         .unwrap_or("edit")
                         .to_owned();
+                    let automatic = if provider == "anthropic" {
+                        captured["tool_choice"]["type"] == "auto"
+                    } else {
+                        captured["tool_choice"] == "auto"
+                    };
                     capture.lock().unwrap().push(captured);
-                    if scenario == "choice_retry" && round == 0 {
-                        let body = json!({"type":"error","error":{"type":"invalid_request_error","message":"Unsupported tool_choice"}}).to_string();
+                    if scenario == "thinking_auto" && round == 0 && !automatic {
+                        let body = json!({"error":{"message":"Thinking mode does not support this tool_choice"}}).to_string();
                         write!(connection,"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
                         continue;
                     }
-                    let round = if scenario == "choice_retry" {
-                        round - 1
-                    } else {
-                        round
-                    };
                     let mut message = if round == 0 || scenario == "three" && round < 3 {
                         json!({"role":"assistant","content":null,"tool_calls":[{"id":"call_search","type":"function","function":{"name":INTERNAL,"arguments":"{\"query\":\"Rust documentation\"}"}}]})
                     } else {
@@ -1331,7 +1334,7 @@ mod loop_tests {
                             extra["id"] = json!("call_extra");
                             message["tool_calls"].as_array_mut().unwrap().push(extra);
                         }
-                    } else if matches!(scenario, "limit" | "parallel" | "choice_retry")
+                    } else if matches!(scenario, "limit" | "parallel" | "thinking_auto")
                         || scenario == "three" && round == 3
                     {
                         message = json!({"role":"assistant","content":"Source: https://www.rust-lang.org/"});
@@ -1397,7 +1400,7 @@ mod loop_tests {
             } else {
                 json!({"model":"auto","input":"Find Rust","tools":[{"type":"web_search"},{"type":"function","name":"edit","parameters":{"type":"object","properties":{}}}],"tool_choice":{"type":"web_search"}})
             };
-            if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+            if matches!(scenario, "limit" | "parallel" | "three" | "thinking_auto") {
                 if anthropic {
                     body["tools"][0]["max_uses"] = json!(if scenario == "three" { 3 } else { 1 });
                 } else {
@@ -1445,14 +1448,14 @@ mod loop_tests {
                 !answer.body.contains(INTERNAL),
                 "Internal tool must stay inside the host"
             );
-            if !matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+            if !matches!(scenario, "limit" | "parallel" | "three" | "thinking_auto") {
                 assert!(
                     answer.body.contains("call_edit"),
                     "Client tool must remain client-owned"
                 );
             }
             let output: Value = serde_json::from_str(&answer.body).unwrap();
-            if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+            if matches!(scenario, "limit" | "parallel" | "three" | "thinking_auto") {
                 assert!(
                     answer.body.contains("Official site"),
                     "Search-only responses must carry actual snippets"
@@ -1476,12 +1479,10 @@ mod loop_tests {
                 1
             } else if scenario == "three" {
                 4
-            } else if scenario == "choice_retry" {
-                3
             } else {
                 2
             };
-            let billed_rounds = if matches!(scenario, "choice_retry" | "missing_usage") {
+            let billed_rounds = if scenario == "missing_usage" {
                 rounds - 1
             } else {
                 rounds
@@ -1494,25 +1495,15 @@ mod loop_tests {
             assert_eq!(output["usage"]["output_tokens"], billed_rounds * 5);
             let requests = seen.lock().unwrap();
             assert_eq!(requests.len(), rounds);
-            if scenario == "choice_retry" {
-                assert_eq!(
-                    requests[1]["tool_choice"],
-                    if provider == "anthropic" {
-                        json!({"type":"tool","name":INTERNAL})
-                    } else {
-                        json!({"type":"function","function":{"name":INTERNAL}})
-                    }
-                );
-            }
-            if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+            if matches!(scenario, "limit" | "parallel" | "three" | "thinking_auto") {
                 assert_eq!(
                     requests[0]["tool_choice"],
                     if provider == "anthropic" {
-                        json!({"type":"any"})
+                        json!({"type":"auto"})
                     } else {
-                        json!("required")
+                        json!("auto")
                     },
-                    "A single forced tool has an equivalent portable required choice"
+                    "The host enforces search evidence without forcing provider tool choice"
                 );
             }
             if matches!(scenario, "long_name" | "namespace") {
@@ -1554,7 +1545,7 @@ mod loop_tests {
                     })
                 );
                 assert_eq!(requests[0]["model"], requests[1]["model"]);
-                if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+                if matches!(scenario, "limit" | "parallel" | "three" | "thinking_auto") {
                     let final_request = requests.last().unwrap();
                     assert!(
                         !final_request["messages"]
