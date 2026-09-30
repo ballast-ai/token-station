@@ -785,7 +785,7 @@ impl Gateway {
             let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
             let attempt = attempt_receipt_for_result(
                 target,
-                budget.attempts,
+                record.attempts,
                 latency_ms,
                 upstream_http_status,
                 provider_call_engine,

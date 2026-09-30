@@ -329,6 +329,7 @@ impl Gateway {
                     Some(error.code),
                 );
             })?;
+        ctx.restore_tool_aliases(&mut chat_response);
         chat_response.usage =
             canonical_provider_usage(upstream.config.provider.as_str(), chat_response.usage);
         record_conversion(

@@ -606,6 +606,29 @@ pub struct ConversionRecord {
     pub reason_detail: Option<ConversionReasonDetail>,
 }
 
+/// Content-free browser search outcomes. Never store a query or page content here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserSearchOutcome {
+    Succeeded,
+    InvalidArguments,
+    LimitExceeded,
+    Busy,
+    Timeout,
+    VerificationRequired,
+    NoResults,
+    BrowserUnavailable,
+    BrowserFailure,
+}
+
+/// A single bounded host search operation in the request log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSearchRecord {
+    pub ordinal: u32,
+    pub elapsed_ms: u64,
+    pub outcome: BrowserSearchOutcome,
+}
+
 /// Everything one request leaves behind. One per request, exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestRecord {
@@ -661,6 +684,9 @@ pub struct RequestRecord {
     /// Ordered, content-free conversion stage outcomes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversion_reports: Vec<ConversionRecord>,
+    /// Browser operations, including recoverable failures. Available in the request log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browser_searches: Vec<BrowserSearchRecord>,
     /// Content-free classifier input handling. Missing historical data is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifier_input: Option<ClassifierInputDiagnostic>,
@@ -708,6 +734,7 @@ impl RequestRecord {
             decision: None,
             attempt_records: Vec::new(),
             conversion_reports: Vec::new(),
+            browser_searches: Vec::new(),
             classifier_input: None,
             usage: None,
             usage_observation: None,

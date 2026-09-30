@@ -27,9 +27,18 @@ pub struct RequestContext {
     per_attempt_timeout: Duration,
     upstream_response_limit: Option<u64>,
     http_trace: Mutex<Option<HttpTraceCapture>>,
+    tool_aliases: Mutex<BTreeMap<String, String>>,
     accounting: Mutex<crate::accounting::AccountingTap>,
     error_diagnostic: Mutex<Option<ErrorDiagnosticCapture>>,
     classifier_input: Mutex<Option<token_station_metrics::ClassifierInputDiagnostic>>,
+}
+
+/// A buffered host-tool round owns this mapping. It never enters provider extensions.
+pub(crate) struct ToolAliasScope<'a>(&'a RequestContext);
+impl Drop for ToolAliasScope<'_> {
+    fn drop(&mut self) {
+        self.0.tool_aliases.lock().unwrap().clear();
+    }
 }
 
 const MAX_HTTP_TRACE_BODY_BYTES: usize = 1024 * 1024;
@@ -123,6 +132,22 @@ impl HttpTraceCapture {
 }
 
 impl RequestContext {
+    pub(crate) fn tool_alias_scope(&self, aliases: BTreeMap<String, String>) -> ToolAliasScope<'_> {
+        *self.tool_aliases.lock().unwrap() = aliases;
+        ToolAliasScope(self)
+    }
+
+    pub(crate) fn restore_tool_aliases(&self, response: &mut token_station_protocol::ChatResponse) {
+        let aliases = self.tool_aliases.lock().unwrap();
+        for choice in &mut response.choices {
+            for call in &mut choice.message.tool_calls {
+                if let Some(name) = aliases.get(&call.name) {
+                    call.name.clone_from(name);
+                }
+            }
+        }
+    }
+
     /// Build a request-scoped context under a server's drain token.
     #[must_use]
     pub fn new(drain: &CancelToken, total: Duration, per_attempt: Duration) -> Self {
@@ -132,6 +157,7 @@ impl RequestContext {
             per_attempt_timeout: per_attempt,
             upstream_response_limit: None,
             http_trace: Mutex::new(None),
+            tool_aliases: Mutex::new(BTreeMap::new()),
             error_diagnostic: Mutex::new(None),
             classifier_input: Mutex::new(None),
             accounting: Mutex::new(crate::accounting::AccountingTap::default()),
@@ -567,6 +593,30 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
     use token_station_protocol::{Auth, HttpMethod, HttpRequestDescriptor, SafeHeaders, SecretRef};
+
+    #[test]
+    fn tool_aliases_are_round_scoped_and_do_not_change_arguments_or_other_requests() {
+        let first = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let second = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let original: token_station_protocol::ChatResponse = serde_json::from_value(json!({"id":"response","model":"test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_a","name":"alias","arguments":"alias"}]}}]})).unwrap();
+        {
+            let _scope =
+                first.tool_alias_scope(BTreeMap::from([("alias".into(), "client_tool".into())]));
+            let mut response = original.clone();
+            first.restore_tool_aliases(&mut response);
+            assert_eq!(
+                response.choices[0].message.tool_calls[0].name,
+                "client_tool"
+            );
+            assert_eq!(response.choices[0].message.tool_calls[0].arguments, "alias");
+            let mut untouched = original.clone();
+            second.restore_tool_aliases(&mut untouched);
+            assert_eq!(untouched, original);
+        }
+        let mut response = original.clone();
+        first.restore_tool_aliases(&mut response);
+        assert_eq!(response, original);
+    }
 
     #[test]
     fn error_diagnostics_are_opt_in_bounded_and_exclude_success() {

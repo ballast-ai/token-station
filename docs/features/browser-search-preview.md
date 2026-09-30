@@ -14,11 +14,24 @@ Model routing and provider credentials do not change.
 
 - Anthropic Messages direct hosted search and OpenAI Responses live web search.
 - Function-capable models on the existing provider route.
-- Up to three searches per request and five snippets per search.
+- Up to three search attempts per request and five snippets per search.
+- Shared tool handling for function-capable models. No model-name overrides.
+- Long or incompatible client function names use internal short aliases. Returned calls keep the original client names.
+- Parallel search calls use the same request budget. Excess calls receive tool errors.
+- Mixed search and client tool calls return completed search records and the original client calls.
+- Browser failures return tool errors. The model can explain the failure or use available results.
 - A separate headless Chrome profile. No visible window or personal browser tabs.
 - A single active browser search per process. Concurrent searches receive a busy error.
 - Bounded execution, cancellation, and cleanup of the owned browser process group on Unix.
 - Search snippets and source links. No full-page reading.
+
+When the budget is exhausted, search history becomes labeled text before the search declaration is removed.
+This avoids invalid historical tool references on strict providers. Other client tools remain available.
+The request log includes `browser_searches` with operation order, elapsed time, and a fixed outcome code.
+These records contain no query, page content, or raw browser error. They are not yet shown in the request-history UI.
+
+A single-tool forced choice can use one equivalent-format retry after an explicit initial HTTP 400 refusal.
+The retry stays on the same model and preserves forced tool use. Both attempts appear in the request log.
 
 The preview buffers model rounds. It returns protocol events after the model completes.
 Domain filters, location constraints, cached-only search, and dynamic code-execution search are not supported.
@@ -26,6 +39,12 @@ Unsupported constraints produce an error before search execution.
 Local-only routes cannot use browser search.
 Chrome uses the system network settings. It does not inherit Token Station's model-provider proxy settings.
 CAPTCHA and unsupported page layouts produce errors. The preview does not bypass verification.
+
+## Web page reading
+
+This feature returns snippets. It does not replace Claude Code WebFetch or read full pages.
+Client domain checks, tool permissions, website restrictions, and model transport failures remain separate failure paths.
+A successful model response does not prove a successful search. Check the hosted tool result and browser search outcome.
 
 ## Codex
 

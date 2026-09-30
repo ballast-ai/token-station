@@ -175,12 +175,19 @@ fn calls(answer: &Value, anthropic: bool) -> Vec<Value> {
         .into_iter()
         .flatten()
         .filter(|item| {
-            item["type"]
-                == if anthropic {
-                    "tool_use"
-                } else {
-                    "function_call"
-                }
+            if anthropic {
+                item["type"] == "tool_use"
+            } else {
+                matches!(
+                    item["type"].as_str(),
+                    Some(
+                        "function_call"
+                            | "custom_tool_call"
+                            | "tool_search_call"
+                            | "local_shell_call"
+                    )
+                )
+            }
         })
         .cloned()
         .collect()
@@ -202,6 +209,145 @@ fn add_usage(sum: &mut token_station_protocol::Usage, usage: token_station_proto
         .cache_write_1h_tokens
         .saturating_add(usage.cache_write_1h_tokens);
     sum.reasoning_tokens = sum.reasoning_tokens.saturating_add(usage.reasoning_tokens);
+}
+
+/// Alias after normalization, including names flattened from Responses namespaces.
+fn alias_client_tools(request: &mut ChatRequest) -> std::collections::BTreeMap<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut occupied: std::collections::BTreeSet<String> =
+        request.tools.iter().map(|tool| tool.name.clone()).collect();
+    let originals = occupied.clone();
+    let mut forward = std::collections::BTreeMap::new();
+    for name in originals {
+        if name.len() <= 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            continue;
+        }
+        let digest = format!("{:x}", Sha256::digest(name.as_bytes()));
+        let base = format!("ts_alias_{}", &digest[..40]);
+        let mut alias = base.clone();
+        let mut suffix = 0_u32;
+        while occupied.contains(&alias) {
+            suffix += 1;
+            alias = format!("{base}_{suffix}");
+        }
+        occupied.insert(alias.clone());
+        forward.insert(name, alias);
+    }
+    for tool in &mut request.tools {
+        if let Some(alias) = forward.get(&tool.name) {
+            tool.name.clone_from(alias);
+        }
+    }
+    for message in &mut request.messages {
+        for call in &mut message.tool_calls {
+            if let Some(alias) = forward.get(&call.name) {
+                call.name.clone_from(alias);
+            }
+        }
+    }
+    if let Some(token_station_protocol::ToolChoice::Other(choice)) = &mut request.tool_choice
+        && let Some(alias) = choice["function"]["name"]
+            .as_str()
+            .and_then(|name| forward.get(name))
+    {
+        choice["function"]["name"] = json!(alias);
+    }
+    forward
+        .into_iter()
+        .map(|(name, alias)| (alias, name))
+        .collect()
+}
+
+/// Replace only host-owned call pairs with untrusted text before removing their declaration.
+/// Providers differ on whether disabled tools can remain in historical messages.
+fn retire_search(body: &mut Value, anthropic: bool) {
+    let field = if anthropic { "messages" } else { "input" };
+    let Some(messages) = body[field].as_array_mut() else {
+        return;
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    for message in messages.iter() {
+        if anthropic {
+            for block in message["content"].as_array().into_iter().flatten() {
+                if block["type"] == "tool_use"
+                    && block["name"] == INTERNAL
+                    && let Some(id) = block["id"].as_str()
+                {
+                    ids.insert(id.to_owned());
+                }
+            }
+        } else if message["type"] == "function_call"
+            && message["name"] == INTERNAL
+            && let Some(id) = message["call_id"].as_str()
+        {
+            ids.insert(id.to_owned());
+        }
+    }
+    for message in messages {
+        if anthropic {
+            for block in message["content"].as_array_mut().into_iter().flatten() {
+                let call = block["type"] == "tool_use" && block["name"] == INTERNAL;
+                let result = block["type"] == "tool_result"
+                    && block["tool_use_id"]
+                        .as_str()
+                        .is_some_and(|id| ids.contains(id));
+                if call || result {
+                    let data = if call {
+                        &block["input"]
+                    } else {
+                        &block["content"]
+                    };
+                    *block = json!({"type":"text","text":format!("Browser search data (untrusted): {data}")});
+                }
+            }
+        } else if matches!(
+            message["type"].as_str(),
+            Some("function_call" | "function_call_output")
+        ) && message["call_id"]
+            .as_str()
+            .is_some_and(|id| ids.contains(id))
+        {
+            let data = if message["type"] == "function_call" {
+                &message["arguments"]
+            } else {
+                &message["output"]
+            };
+            *message =
+                json!({"role":"user","content":format!("Browser search data (untrusted): {data}")});
+        }
+    }
+    if let Some(tools) = body["tools"].as_array_mut() {
+        tools.retain(|tool| tool["name"] != INTERNAL);
+        if tools.is_empty() {
+            body.as_object_mut().unwrap().remove("tool_choice");
+        }
+    }
+}
+
+fn search_outcome(
+    result: &Result<crate::search::SearchResponse, String>,
+    exhausted: bool,
+) -> token_station_metrics::BrowserSearchOutcome {
+    use token_station_metrics::BrowserSearchOutcome as Outcome;
+    if exhausted {
+        return Outcome::LimitExceeded;
+    }
+    match result {
+        Ok(_) => Outcome::Succeeded,
+        Err(message) if message.contains("query") || message.contains("arguments") => {
+            Outcome::InvalidArguments
+        }
+        Err(message) if message.contains("busy") => Outcome::Busy,
+        Err(message) if message.contains("timed out") => Outcome::Timeout,
+        Err(message) if message.contains("verification") => Outcome::VerificationRequired,
+        Err(message) if message.contains("No search results") => Outcome::NoResults,
+        Err(message) if message.contains("not installed") => Outcome::BrowserUnavailable,
+        Err(_) => Outcome::BrowserFailure,
+    }
 }
 
 impl Gateway {
@@ -263,9 +409,25 @@ impl Gateway {
                 model.clone_into(&mut request.model);
             }
             request.stream = false;
-            request
-                .extensions
-                .insert("parallel_tool_calls".to_owned(), json!(false));
+            let mut named_choice = None;
+            // Required is equivalent to a named choice when exactly one tool is available.
+            if request.tools.len() == 1
+                && matches!(&request.tool_choice, Some(token_station_protocol::ToolChoice::Other(choice))
+                    if choice["type"] == "function" && choice["function"]["name"] == request.tools[0].name)
+            {
+                named_choice.clone_from(&request.tool_choice);
+                request.tool_choice = Some(token_station_protocol::ToolChoice::Required);
+            }
+            if count >= limit && request.tools.is_empty() {
+                request.tool_choice = None;
+            }
+            if request.tools.is_empty() {
+                request.extensions.remove("parallel_tool_calls");
+            } else {
+                request
+                    .extensions
+                    .insert("parallel_tool_calls".to_owned(), json!(false));
+            }
             let (now, session) = Self::quota_preamble(router, || quota_session_key(&request));
             let candidates = self.candidates(Instant::now(), now);
             let selected = if let Some(selected) = &decision {
@@ -274,9 +436,10 @@ impl Gateway {
                 self.route_with_semantics(ctx, router, &request, &hints, &candidates, &session)
                     .map_err(|error| route_error(&error))?
             };
+            let _tool_alias_scope = ctx.tool_alias_scope(alias_client_tools(&mut request));
             let mut reply = None;
             record.usage = None;
-            let result = self.execute_routed_attempt(
+            let mut result = self.execute_routed_attempt(
                 ctx,
                 agent,
                 &AttemptPayload::Canonical(&request),
@@ -295,6 +458,48 @@ impl Gateway {
                 },
                 record,
             );
+            if round == 0
+                && count == 0
+                && record.attempts == 1
+                && named_choice.is_some()
+                && reply.is_none()
+                && !ctx.is_cancelled()
+                && result.as_ref().is_err_and(|error| {
+                    error.code == ErrorCode::InvalidRequest && error.http_status == 400
+                })
+                && record.routing.as_ref().is_some_and(|route| {
+                    route.upstream == selected.chosen.upstream.as_str()
+                        && route.model == selected.chosen.model
+                })
+            {
+                // Retry an equivalent wire choice once, before any browser work or client output.
+                if let Some(usage) = record.usage {
+                    add_usage(&mut total_usage, usage);
+                }
+                record.usage = None;
+                request.tool_choice = named_choice;
+                let mut retry_selected = selected.clone();
+                retry_selected.fallbacks.clear();
+                result = self.execute_routed_attempt(
+                    ctx,
+                    agent,
+                    &AttemptPayload::Canonical(&request),
+                    &inbound_tools,
+                    &retry_selected,
+                    &candidates,
+                    now,
+                    &session,
+                    &mut |item| {
+                        if let Reply::BeginJson(json) = item {
+                            reply = Some(json);
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                    record,
+                );
+            }
             if let Some(usage) = record.usage {
                 add_usage(&mut total_usage, usage);
             }
@@ -323,8 +528,83 @@ impl Gateway {
                 .iter()
                 .filter(|call| call["name"] == INTERNAL)
                 .collect();
-            if searches.is_empty() {
+
+            let mixed = searches.len() != tool_calls.len();
+            if !searches.is_empty() && round == MAX_SEARCHES {
+                return Err(invalid(
+                    "The model ignored the disabled search tool. Retry the request.",
+                ));
+            }
+            let mut results = Vec::new();
+            for call in searches {
+                let args = if anthropic {
+                    Ok(call["input"].clone())
+                } else {
+                    serde_json::from_str(call["arguments"].as_str().unwrap_or(""))
+                        .map_err(|_| "The model returned invalid search arguments.".to_owned())
+                };
+                let query = args
+                    .as_ref()
+                    .ok()
+                    .and_then(|args| args["query"].as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let exhausted = count >= limit;
+                let search_started = Instant::now();
+                let found = if exhausted {
+                    Err("The search limit was reached. Answer from available results.".to_owned())
+                } else {
+                    count += 1;
+                    args.and_then(|args| {
+                        let query = args["query"]
+                            .as_str()
+                            .ok_or("The search query must be a string.")?;
+                        self.search.search(query, &|| ctx.is_cancelled())
+                    })
+                };
+                if ctx.is_cancelled() {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCode::Timeout,
+                        504,
+                        "Search request was cancelled.",
+                    ));
+                }
+                record
+                    .browser_searches
+                    .push(token_station_metrics::BrowserSearchRecord {
+                        ordinal: u32::try_from(record.browser_searches.len() + 1)
+                            .unwrap_or(u32::MAX),
+                        elapsed_ms: u64::try_from(search_started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                        outcome: search_outcome(&found, exhausted),
+                    });
+                let failed = found.is_err();
+                let result_text = match &found {
+                    Ok(found) => serde_json::to_string(found)
+                        .map_err(|_| invalid("Cannot encode search results."))?,
+                    Err(error) => json!({"error":error}).to_string(),
+                };
+                let id = format!("srvtoolu_ts_{}_{}", record.request_id, search_items.len());
+                if anthropic {
+                    search_items.push(json!({"type":"server_tool_use","id":id,"name":name,"input":{"query":query}}));
+                    let content = match &found {
+                        Ok(found) => json!(found.results.iter().map(|result| json!({"type":"web_search_result","url":result.url,"title":result.title,"encrypted_content":""})).collect::<Vec<_>>()),
+                        Err(_) => json!({"type":"web_search_tool_result_error","error_code":if exhausted {"max_uses_exceeded"} else {"unavailable"}}),
+                    };
+                    search_items.push(
+                        json!({"type":"web_search_tool_result","tool_use_id":id,"content":content}),
+                    );
+                    results.push(json!({"type":"tool_result","tool_use_id":call["id"],"content":result_text,"is_error":failed}));
+                } else {
+                    search_items.push(json!({"type":"web_search_call","id":id,"status":if failed {"failed"} else {"completed"},"action":{"type":"search","query":query,"sources":found.as_ref().map(|found| found.results.iter().map(|result| json!({"type":"url","url":result.url,"title":result.title})).collect::<Vec<_>>()).unwrap_or_default()}}));
+                    results.push(json!({"type":"function_call_output","call_id":call["call_id"],"output":result_text}));
+                }
+            }
+            if tool_calls.is_empty() || mixed {
                 let field = if anthropic { "content" } else { "output" };
+                if let Some(output) = answer[field].as_array_mut() {
+                    output.retain(|item| item["name"] != INTERNAL);
+                }
                 let output = answer[field]
                     .as_array_mut()
                     .ok_or_else(|| invalid("The model response has no output."))?;
@@ -364,46 +644,6 @@ impl Gateway {
                     },
                 )));
             }
-            if searches.len() != tool_calls.len() {
-                return Err(invalid(
-                    "The model combined browser search with client tools. Retry with parallel tool calls disabled.",
-                ));
-            }
-            if round == MAX_SEARCHES || count + searches.len() as u64 > limit {
-                return Err(invalid(
-                    "The browser search limit was reached. Narrow the request or disable the preview.",
-                ));
-            }
-            let mut results = Vec::new();
-            for call in searches {
-                count += 1;
-                let args = if anthropic {
-                    call["input"].clone()
-                } else {
-                    serde_json::from_str(call["arguments"].as_str().unwrap_or(""))
-                        .map_err(|_| invalid("The model returned invalid search arguments."))?
-                };
-                let query = args["query"]
-                    .as_str()
-                    .ok_or_else(|| invalid("The model did not provide a search query."))?;
-                let found =
-                    self.search
-                        .search(query, &|| ctx.is_cancelled())
-                        .map_err(|message| {
-                            ErrorEnvelope::new(ErrorCode::UpstreamUnavailable, 502, message)
-                        })?;
-                let result_text = serde_json::to_string(&found)
-                    .map_err(|_| invalid("Cannot encode search results."))?;
-                let id = format!("srvtoolu_ts_{}_{}", record.request_id, count);
-                if anthropic {
-                    search_items.push(json!({"type":"server_tool_use","id":id,"name":name,"input":{"query":query}}));
-                    search_items.push(json!({"type":"web_search_tool_result","tool_use_id":id,"content":found.results.iter().map(|result| json!({"type":"web_search_result","url":result.url,"title":result.title,"encrypted_content":""})).collect::<Vec<_>>()}));
-                    results.push(json!({"type":"tool_result","tool_use_id":call["id"],"content":result_text}));
-                } else {
-                    search_items.push(json!({"type":"web_search_call","id":id,"status":"completed","action":{"type":"search","query":query,"sources":found.results.iter().map(|result| json!({"type":"url","url":result.url,"title":result.title})).collect::<Vec<_>>()}}));
-                    results.push(json!({"type":"function_call_output","call_id":call["call_id"],"output":result_text}));
-                }
-            }
             if anthropic {
                 let messages = working["messages"]
                     .as_array_mut()
@@ -419,10 +659,8 @@ impl Gateway {
                 input.extend(results);
                 working["tool_choice"] = json!("auto");
             }
-            if count >= limit
-                && let Some(tools) = working["tools"].as_array_mut()
-            {
-                tools.retain(|tool| tool["name"] != INTERNAL);
+            if count >= limit {
+                retire_search(&mut working, anthropic);
             }
             let mut pinned = selected;
             pinned.chosen = target;
@@ -471,6 +709,9 @@ fn emit_responses(answer: &Value, stream: bool, emit: &mut dyn FnMut(Reply) -> b
         if item["type"] == "function_call" {
             pending["arguments"] = json!("");
         }
+        if item["type"] == "custom_tool_call" {
+            pending["input"] = json!("");
+        }
         pending["status"] = json!("in_progress");
         if !event(
             "response.output_item.added",
@@ -512,6 +753,7 @@ fn emit_responses(answer: &Value, stream: bool, emit: &mut dyn FnMut(Reply) -> b
             }
         }
         if item["type"] == "web_search_call"
+            && item["status"] == "completed"
             && !event(
                 "response.web_search_call.completed",
                 json!({"item_id":item["id"],"output_index":index}),
@@ -534,6 +776,20 @@ fn emit_responses(answer: &Value, stream: bool, emit: &mut dyn FnMut(Reply) -> b
             )
         {
             return false;
+        }
+        if item["type"] == "custom_tool_call" {
+            if !event(
+                "response.custom_tool_call_input.delta",
+                json!({"item_id":item["id"],"output_index":index,"delta":item["input"]}),
+            ) {
+                return false;
+            }
+            if !event(
+                "response.custom_tool_call_input.done",
+                json!({"item_id":item["id"],"output_index":index,"input":item["input"]}),
+            ) {
+                return false;
+            }
         }
         if !event(
             "response.output_item.done",
@@ -592,6 +848,92 @@ mod tests {
         }
     }
     #[test]
+    fn aliases_preserve_history_choice_arguments_and_avoid_collisions() {
+        let long = "mcp__".to_owned() + &"x".repeat(80);
+        let mut request: ChatRequest = serde_json::from_value(json!({"model":"test","tools":[{"name":long,"parameters":{}}],"tool_choice":{"type":"function","function":{"name":long}},"messages":[{"role":"assistant","tool_calls":[{"id":"call_a","name":long,"arguments":"unchanged"}]}]})).unwrap();
+        let original = request.clone();
+        let aliases = alias_client_tools(&mut request);
+        let alias = request.tools[0].name.clone();
+        assert!(alias.len() <= 64);
+        assert_eq!(
+            serde_json::to_value(&request.tool_choice).unwrap()["function"]["name"],
+            alias
+        );
+        assert_eq!(alias_client_tools(&mut original.clone()), aliases);
+        assert_eq!(request.messages[0].tool_calls[0].name, alias);
+        assert_eq!(request.messages[0].tool_calls[0].arguments, "unchanged");
+        let mut collision = original;
+        collision.tools.push(token_station_protocol::ToolDef {
+            name: alias.clone(),
+            description: None,
+            parameters: json!({}),
+        });
+        let mapped = alias_client_tools(&mut collision);
+        assert_ne!(collision.tools[0].name, alias);
+        assert_eq!(collision.tools[1].name, alias);
+        assert_eq!(mapped.len(), 1);
+    }
+
+    #[test]
+    fn custom_tool_stream_preserves_the_input_event_family() {
+        let answer = json!({"status":"completed","output":[{"id":"custom_1","call_id":"call_1","type":"custom_tool_call","name":"edit","input":"patch"}]});
+        let mut chunks = String::new();
+        assert!(emit_responses(&answer, true, &mut |reply| {
+            if let Reply::Chunk(chunk) = reply {
+                chunks.push_str(&chunk);
+            }
+            true
+        }));
+        assert!(chunks.contains("response.custom_tool_call_input.delta"));
+        assert!(chunks.contains("response.custom_tool_call_input.done"));
+        assert!(!chunks.contains("response.function_call_arguments"));
+    }
+
+    #[test]
+    fn failed_search_does_not_emit_a_success_event() {
+        let answer = json!({"status":"completed","output":[{"id":"ws_1","type":"web_search_call","status":"failed"}]});
+        let mut chunks = String::new();
+        assert!(emit_responses(&answer, true, &mut |reply| {
+            if let Reply::Chunk(chunk) = reply {
+                chunks.push_str(&chunk);
+            }
+            true
+        }));
+        assert!(!chunks.contains("response.web_search_call.completed"));
+        assert!(chunks.contains("response.completed"));
+        assert!(chunks.contains("\"status\":\"failed\""));
+    }
+
+    #[test]
+    fn retiring_search_preserves_client_tool_history_and_declarations() {
+        for anthropic in [true, false] {
+            let mut body = if anthropic {
+                json!({"tools":[{"name":INTERNAL},{"name":"edit"}],"messages":[
+                    {"role":"assistant","content":[{"type":"tool_use","id":"search","name":INTERNAL,"input":{"query":"rust"}},{"type":"tool_use","id":"edit","name":"edit","input":{}}]},
+                    {"role":"user","content":[{"type":"tool_result","tool_use_id":"search","content":"source"},{"type":"tool_result","tool_use_id":"edit","content":"saved"}]}]})
+            } else {
+                json!({"tools":[{"name":INTERNAL},{"name":"edit"}],"input":[
+                    {"type":"function_call","name":INTERNAL,"call_id":"search","arguments":"{}"},
+                    {"type":"function_call_output","call_id":"search","output":"source"},
+                    {"type":"function_call","name":"edit","call_id":"edit","arguments":"{}"},
+                    {"type":"function_call_output","call_id":"edit","output":"saved"}]})
+            };
+            retire_search(&mut body, anthropic);
+            assert_eq!(body["tools"], json!([{"name":"edit"}]));
+            assert!(body.to_string().contains("source"));
+            assert!(body.to_string().contains("saved"));
+            let items = &body[if anthropic { "messages" } else { "input" }];
+            if anthropic {
+                assert_eq!(items[0]["content"][1]["type"], "tool_use");
+                assert_eq!(items[1]["content"][1]["type"], "tool_result");
+            } else {
+                assert_eq!(items[2]["type"], "function_call");
+                assert_eq!(items[3]["type"], "function_call_output");
+            }
+        }
+    }
+
+    #[test]
     fn completed_stream_contains_search_sources_and_text() {
         let answer = json!({"id":"resp_a","status":"completed","output":[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"query":"rust","sources":[]}},{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"Result","annotations":[]}]}]});
         let mut chunks = String::new();
@@ -624,11 +966,80 @@ mod loop_tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn hosted_search_runs_two_model_rounds_and_preserves_client_tools_and_usage() {
+        run_scenario("ordinary");
+    }
+
+    #[test]
+    fn exhausted_search_budget_keeps_valid_tool_history() {
+        run_scenario("limit");
+    }
+
+    #[test]
+    fn mixed_search_and_client_calls_return_to_the_client() {
+        run_scenario("mixed");
+    }
+
+    #[test]
+    fn invalid_search_arguments_are_recoverable_tool_results() {
+        run_scenario("invalid");
+    }
+
+    #[test]
+    fn parallel_searches_respect_the_budget_without_aborting() {
+        run_scenario("parallel");
+    }
+
+    #[test]
+    fn three_search_rounds_finish_without_dangling_tool_calls() {
+        run_scenario("three");
+    }
+
+    #[test]
+    fn browser_failure_is_reported_without_aborting_the_answer() {
+        run_scenario("browser_failure");
+    }
+
+    #[test]
+    fn long_client_tool_names_round_trip_through_strict_providers() {
+        run_scenario("long_name");
+    }
+
+    #[test]
+    fn namespaced_client_tools_are_aliased_after_flattening_and_restored() {
+        for provider in ["openai-compatible", "anthropic"] {
+            run_provider_scenario("namespace", provider);
+        }
+    }
+
+    #[test]
+    fn mixed_custom_client_tools_remain_client_owned() {
+        for provider in ["openai-compatible", "anthropic"] {
+            run_provider_scenario("mixed_custom", provider);
+        }
+    }
+
+    #[test]
+    fn required_choice_rejection_retries_the_equivalent_named_choice_once() {
+        run_scenario("choice_retry");
+    }
+
+    fn run_scenario(scenario: &'static str) {
+        for provider in ["openai-compatible", "anthropic"] {
+            run_provider_scenario(scenario, provider);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_provider_scenario(scenario: &'static str, provider: &'static str) {
         for anthropic in [true, false] {
-            let root = std::env::temp_dir()
-                .join(format!("ts-search-loop-{}-{anthropic}", std::process::id()));
+            if matches!(scenario, "namespace" | "mixed_custom") && anthropic {
+                continue;
+            }
+            let root = std::env::temp_dir().join(format!(
+                "ts-search-loop-{}-{anthropic}-{scenario}-{provider}",
+                std::process::id()
+            ));
             std::fs::create_dir_all(&root).unwrap();
             let key = root.join("key");
             std::fs::write(&key, "test-key").unwrap();
@@ -638,8 +1049,16 @@ mod loop_tests {
             let seen = Arc::new(Mutex::new(Vec::new()));
             let capture = Arc::clone(&seen);
             let worker = std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_mins(1);
-                for round in 0..2 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                for round in 0..if matches!(scenario, "mixed" | "mixed_custom") {
+                    1
+                } else if scenario == "three" {
+                    4
+                } else if scenario == "choice_retry" {
+                    3
+                } else {
+                    2
+                } {
                     let mut connection = loop {
                         match listener.accept() {
                             Ok((connection, _)) => break connection,
@@ -673,23 +1092,73 @@ mod loop_tests {
                         .unwrap();
                     let mut body = vec![0; length];
                     connection.read_exact(&mut body).unwrap();
-                    capture
-                        .lock()
-                        .unwrap()
-                        .push(serde_json::from_slice::<Value>(&body).unwrap());
-                    let message = if round == 0 {
+                    let captured: Value = serde_json::from_slice(&body).unwrap();
+                    let client_name = captured["tools"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find_map(|tool| {
+                            let name = if provider == "anthropic" {
+                                &tool["name"]
+                            } else {
+                                &tool["function"]["name"]
+                            };
+                            name.as_str().filter(|name| *name != INTERNAL)
+                        })
+                        .unwrap_or("edit")
+                        .to_owned();
+                    capture.lock().unwrap().push(captured);
+                    if scenario == "choice_retry" && round == 0 {
+                        let body = json!({"type":"error","error":{"type":"invalid_request_error","message":"Unsupported tool_choice"}}).to_string();
+                        write!(connection,"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                        continue;
+                    }
+                    let round = if scenario == "choice_retry" {
+                        round - 1
+                    } else {
+                        round
+                    };
+                    let mut message = if round == 0 || scenario == "three" && round < 3 {
                         json!({"role":"assistant","content":null,"tool_calls":[{"id":"call_search","type":"function","function":{"name":INTERNAL,"arguments":"{\"query\":\"Rust documentation\"}"}}]})
                     } else {
-                        json!({"role":"assistant","content":"Source: https://www.rust-lang.org/","tool_calls":[{"id":"call_edit","type":"function","function":{"name":"edit","arguments":"{}"}}]})
+                        json!({"role":"assistant","content":"Source: https://www.rust-lang.org/","tool_calls":[{"id":"call_edit","type":"function","function":{"name":client_name,"arguments":"{}"}}]})
                     };
-                    let body = json!({"id":format!("chat_{round}"),"model":"test-model","choices":[{"index":0,"message":message,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}).to_string();
+                    if round == 0 {
+                        if scenario == "invalid" {
+                            message["tool_calls"][0]["function"]["arguments"] = json!("{}");
+                        }
+                        if matches!(scenario, "mixed" | "mixed_custom") {
+                            message["tool_calls"].as_array_mut().unwrap().push(json!({"id":"call_edit","type":"function","function":{"name":"edit","arguments":"{}"}}));
+                        }
+                        if scenario == "parallel" {
+                            let mut extra = message["tool_calls"][0].clone();
+                            extra["id"] = json!("call_extra");
+                            message["tool_calls"].as_array_mut().unwrap().push(extra);
+                        }
+                    } else if matches!(scenario, "limit" | "parallel" | "choice_retry")
+                        || scenario == "three" && round == 3
+                    {
+                        message = json!({"role":"assistant","content":"Source: https://www.rust-lang.org/"});
+                    }
+                    let body = if provider == "anthropic" {
+                        let mut content = Vec::new();
+                        if let Some(text) = message["content"].as_str() {
+                            content.push(json!({"type":"text","text":text}));
+                        }
+                        for call in message["tool_calls"].as_array().into_iter().flatten() {
+                            content.push(json!({"type":"tool_use","id":call["id"],"name":call["function"]["name"],"input":serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap()}));
+                        }
+                        json!({"id":format!("msg_{round}"),"type":"message","role":"assistant","model":"test-model","content":content,"stop_reason":if message["tool_calls"].is_array() {"tool_use"} else {"end_turn"},"usage":{"input_tokens":10,"output_tokens":5}})
+                    } else {
+                        json!({"id":format!("chat_{round}"),"model":"test-model","choices":[{"index":0,"message":message,"finish_reason":if message["tool_calls"].is_array() {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}})
+                    }.to_string();
                     write!(connection,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
                 }
             });
             let config: ClientConfig = serde_json::from_value(json!({
                 "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":root},
-                "plugins":{"dir":Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins-dist"),"allow_unsigned":true,"agents":[if anthropic {"agent-anthropic"} else {"agent-openai-responses"}],"providers":{"openai-compatible":"provider-openai-compatible-v2"}},
-                "upstreams":{"mock":{"provider":"openai-compatible","base_url":endpoint,"auth":{"slot":"provider_api_key","file":key},"models":[{"model":"test-model","tool":true,"tool_state":"verified","context_window":100_000}]}},
+                "plugins":{"dir":Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins-dist"),"allow_unsigned":true,"agents":[if anthropic {"agent-anthropic"} else {"agent-openai-responses"}],"providers":{"openai-compatible":"provider-openai-compatible-v2","anthropic":"provider-anthropic-v2"}},
+                "upstreams":{"mock":{"provider":provider,"base_url":endpoint,"auth":{"slot":"provider_api_key","file":key},"models":[{"model":"test-model","tool":true,"tool_state":"verified","context_window":100_000}]}},
                 "router":{"version":1,"pools":{"main":[{"upstream":"mock","model":"test-model"}]},"default_pool":"main"}
             })).unwrap();
             let recorder = Arc::new(Records::default());
@@ -701,16 +1170,38 @@ mod loop_tests {
                     engine: crate::search::Engine::Bing,
                 })
                 .unwrap();
-            *gateway.search.fixture.lock().unwrap() = Some(vec![crate::search::SearchResult {
+            *gateway.search.fixture.lock().unwrap() = Some(Ok(vec![crate::search::SearchResult {
                 title: "Rust".into(),
                 url: "https://www.rust-lang.org/".into(),
                 snippet: "Official site".into(),
-            }]);
-            let body = if anthropic {
+            }]));
+            if scenario == "browser_failure" {
+                *gateway.search.fixture.lock().unwrap() =
+                    Some(Err("Browser search timed out.".into()));
+            }
+            let mut body = if anthropic {
                 json!({"model":"auto","max_tokens":100,"messages":[{"role":"user","content":"Find Rust"}],"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"edit","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"tool","name":"web_search"}})
             } else {
                 json!({"model":"auto","input":"Find Rust","tools":[{"type":"web_search"},{"type":"function","name":"edit","parameters":{"type":"object","properties":{}}}],"tool_choice":{"type":"web_search"}})
             };
+            if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+                if anthropic {
+                    body["tools"][0]["max_uses"] = json!(if scenario == "three" { 3 } else { 1 });
+                } else {
+                    body["max_tool_calls"] = json!(if scenario == "three" { 3 } else { 1 });
+                }
+                body["tools"].as_array_mut().unwrap().truncate(1);
+            }
+            if scenario == "long_name" {
+                body["tools"][1]["name"] =
+                    json!("mcp__service__".to_owned() + &"long_".repeat(15) + "edit");
+            }
+            if scenario == "namespace" {
+                body["tools"][1] = json!({"type":"namespace","name":"mcp_namespace","tools":[{"type":"function","name":"long_".repeat(11) + "edit","parameters":{"type":"object","properties":{}}}]});
+            }
+            if scenario == "mixed_custom" {
+                body["tools"][1] = json!({"type":"custom","name":"edit","format":{"type":"text"}});
+            }
             let mut answer = None;
             gateway.chat(
                 "POST",
@@ -735,24 +1226,159 @@ mod loop_tests {
                 !answer.body.contains(INTERNAL),
                 "Internal tool must stay inside the host"
             );
-            assert!(
-                answer.body.contains("call_edit"),
-                "Client tool must remain client-owned"
-            );
+            if !matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+                assert!(
+                    answer.body.contains("call_edit"),
+                    "Client tool must remain client-owned"
+                );
+            }
             let output: Value = serde_json::from_str(&answer.body).unwrap();
-            assert_eq!(output["usage"]["input_tokens"], 20);
-            assert_eq!(output["usage"]["output_tokens"], 10);
+            if scenario == "mixed_custom" {
+                assert!(
+                    output["output"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["type"] == "custom_tool_call"
+                            && item["call_id"] == "call_edit")
+                );
+            }
+            let rounds = if matches!(scenario, "mixed" | "mixed_custom") {
+                1
+            } else if scenario == "three" {
+                4
+            } else if scenario == "choice_retry" {
+                3
+            } else {
+                2
+            };
+            let billed_rounds = if scenario == "choice_retry" {
+                rounds - 1
+            } else {
+                rounds
+            };
+            assert_eq!(output["usage"]["input_tokens"], billed_rounds * 10);
+            assert_eq!(output["usage"]["output_tokens"], billed_rounds * 5);
             let requests = seen.lock().unwrap();
-            assert_eq!(requests.len(), 2);
-            assert!(
-                requests[1]["messages"]
-                    .to_string()
-                    .contains("Official site")
-            );
-            assert_eq!(requests[0]["model"], requests[1]["model"]);
+            assert_eq!(requests.len(), rounds);
+            if scenario == "choice_retry" {
+                assert_eq!(
+                    requests[1]["tool_choice"],
+                    if provider == "anthropic" {
+                        json!({"type":"tool","name":INTERNAL})
+                    } else {
+                        json!({"type":"function","function":{"name":INTERNAL}})
+                    }
+                );
+            }
+            if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+                assert_eq!(
+                    requests[0]["tool_choice"],
+                    if provider == "anthropic" {
+                        json!({"type":"any"})
+                    } else {
+                        json!("required")
+                    },
+                    "A single forced tool has an equivalent portable required choice"
+                );
+            }
+            if matches!(scenario, "long_name" | "namespace") {
+                for request in requests.iter() {
+                    for tool in request["tools"].as_array().into_iter().flatten() {
+                        let name = if provider == "anthropic" {
+                            &tool["name"]
+                        } else {
+                            &tool["function"]["name"]
+                        };
+                        assert!(
+                            name.as_str().unwrap().len() <= 64,
+                            "Strict providers reject long tool names"
+                        );
+                    }
+                }
+                assert!(
+                    answer
+                        .body
+                        .contains(body["tools"][1]["name"].as_str().unwrap()),
+                    "Client tool names must be restored"
+                );
+                if scenario == "namespace" {
+                    assert!(
+                        answer
+                            .body
+                            .contains(body["tools"][1]["tools"][0]["name"].as_str().unwrap())
+                    );
+                    assert!(answer.body.contains("namespace"));
+                }
+            }
+            if rounds > 1 {
+                let history = requests.last().unwrap()["messages"].to_string();
+                assert!(
+                    history.contains(if matches!(scenario, "invalid" | "browser_failure") {
+                        "error"
+                    } else {
+                        "Official site"
+                    })
+                );
+                assert_eq!(requests[0]["model"], requests[1]["model"]);
+                if matches!(scenario, "limit" | "parallel" | "three" | "choice_retry") {
+                    let final_request = requests.last().unwrap();
+                    assert!(
+                        !final_request["messages"]
+                            .to_string()
+                            .contains("call_search"),
+                        "Retired searches must not leave dangling tool calls"
+                    );
+                    assert!(
+                        final_request["tools"].is_null() || final_request["tools"] == json!([])
+                    );
+                    assert!(final_request["tool_choice"].is_null());
+                }
+            }
             let receipts = recorder.0.lock().unwrap();
-            assert_eq!(receipts.last().unwrap().attempts, 2);
-            assert_eq!(receipts.last().unwrap().usage.unwrap().input_tokens, 20);
+            assert_eq!(receipts.last().unwrap().attempts as usize, rounds);
+            assert_eq!(
+                usize::try_from(receipts.last().unwrap().usage.unwrap().input_tokens).unwrap(),
+                billed_rounds * 10
+            );
+            let attempt_ordinals: Vec<_> = receipts
+                .last()
+                .unwrap()
+                .attempt_records
+                .iter()
+                .map(|attempt| attempt.ordinal)
+                .collect();
+            assert_eq!(
+                attempt_ordinals,
+                (1..=u32::try_from(rounds).unwrap()).collect::<Vec<_>>()
+            );
+            let searches = &receipts.last().unwrap().browser_searches;
+            assert_eq!(
+                searches.len(),
+                if scenario == "parallel" {
+                    2
+                } else if scenario == "three" {
+                    3
+                } else {
+                    1
+                }
+            );
+            assert_eq!(
+                searches[0].outcome,
+                if scenario == "invalid" {
+                    token_station_metrics::BrowserSearchOutcome::InvalidArguments
+                } else if scenario == "browser_failure" {
+                    token_station_metrics::BrowserSearchOutcome::Timeout
+                } else {
+                    token_station_metrics::BrowserSearchOutcome::Succeeded
+                }
+            );
+            if scenario == "parallel" {
+                assert_eq!(
+                    searches[1].outcome,
+                    token_station_metrics::BrowserSearchOutcome::LimitExceeded
+                );
+            }
             drop(gateway);
             std::fs::remove_dir_all(root).unwrap();
         }

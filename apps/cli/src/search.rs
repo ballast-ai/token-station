@@ -152,7 +152,7 @@ pub struct SearchController {
     settings: Mutex<SearchSettings>,
     busy: AtomicBool,
     #[cfg(test)]
-    pub(crate) fixture: Mutex<Option<Vec<SearchResult>>>,
+    pub(crate) fixture: Mutex<Option<Result<Vec<SearchResult>, String>>>,
 }
 
 struct Permit<'a>(&'a AtomicBool);
@@ -255,7 +255,7 @@ impl SearchController {
             .clone()
         {
             return Ok(SearchResponse {
-                results,
+                results: results?,
                 source: "fixture",
                 content_type: "search_snippets",
                 elapsed_ms: 0,
