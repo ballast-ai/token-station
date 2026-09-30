@@ -165,7 +165,7 @@ impl Gateway {
             .ok_or_else(|| {
                 ErrorEnvelope::new(ErrorCode::Internal, 500, "Search route is unavailable.")
             })?
-            .dialect;
+            .search_dialect();
         let native = dialect == ApiDialect::ResponsesNative
             || anthropic && dialect == ApiDialect::AnthropicNative;
         if !native {
@@ -205,12 +205,13 @@ impl Gateway {
             &candidates,
             decision,
             dialect,
+            true,
         );
         // Keep native recovery within its wire protocol. Local fallback is pinned separately.
         decision.fallbacks.retain(|target| {
             self.upstreams
                 .get(target.upstream.as_str())
-                .is_some_and(|upstream| upstream.dialect == dialect)
+                .is_some_and(|upstream| upstream.search_dialect() == dialect)
         });
         let cache_key = |target: &UpstreamModel| {
             format!(

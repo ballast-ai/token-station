@@ -27,6 +27,36 @@ The cache separates model offerings, client protocols, and tool declarations.
 Saving settings or selecting **Verify again** clears observations. Reconstructing the gateway also clears them.
 No model-name or provider-brand blacklist decides search support.
 
+## Native search endpoints
+
+Native search can use a separate endpoint without changing ordinary Chat Completions requests.
+Official API roots automatically select these transports:
+
+| Ordinary API origin | Native search transport | Credential header |
+| --- | --- | --- |
+| `https://api.deepseek.com` | `/anthropic/v1/messages` | `Authorization: Bearer` |
+| `https://api.anthropic.com` | `/v1/messages` | `x-api-key` |
+| `https://api.openai.com` | `/v1/responses` | `Authorization: Bearer` |
+
+Defaults apply only to the origin root or `/v1`. Custom paths require an explicit profile.
+DeepSeek's Anthropic endpoint supports Claude Code WebSearch. Its Responses endpoint does not provide the same search capability.
+Support still depends on the selected model and account. A reseller does not inherit native search from its model names.
+
+For another compatible provider, add `native_search` to its upstream configuration:
+
+```json
+"native_search": {
+  "api_dialect": "anthropic-native",
+  "base_url": "https://provider.example/anthropic/v1",
+  "auth": "bearer"
+}
+```
+
+Use `responses-native` for a Responses endpoint. Use `x-api-key` when its Messages endpoint requires that header.
+The endpoint must share the ordinary upstream's origin. The profile reuses the same credential slot and selected model.
+Explicit profiles override defaults. Existing explicit `api_dialect` configurations remain supported and disable automatic endpoint selection.
+Changing search transport does not change ordinary inference, provider selection, or pricing configuration.
+
 ## Activation and verification
 
 Enabling or changing an enabled mode runs a real search through the current Codex model route.

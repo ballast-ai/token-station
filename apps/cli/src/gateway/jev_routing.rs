@@ -66,6 +66,7 @@ impl Gateway {
         candidates: &[Candidate],
         baseline: Decision,
         dialect: ApiDialect,
+        search: bool,
     ) -> Decision {
         if !self.jev.is_enabled() {
             return baseline;
@@ -92,7 +93,13 @@ impl Gateway {
             .filter(|candidate| {
                 self.upstreams
                     .get(candidate.target.upstream.as_str())
-                    .is_some_and(|upstream| upstream.dialect == dialect)
+                    .is_some_and(|upstream| {
+                        (if search {
+                            upstream.search_dialect()
+                        } else {
+                            upstream.dialect
+                        }) == dialect
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();

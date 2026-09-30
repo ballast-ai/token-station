@@ -541,6 +541,7 @@ impl Gateway {
             &candidates,
             decision,
             ApiDialect::AnthropicNative,
+            false,
         );
         let vision_state = candidates
             .iter()
@@ -653,6 +654,8 @@ impl Gateway {
                     format!("upstream `{}` vanished from configuration", target.upstream),
                 )
             })?;
+        let transport = upstream.search_transport(body, ApiDialect::AnthropicNative);
+        let upstream = transport.as_ref();
 
         // Verbatim body, except the caller's model is remapped to the routed one.
         let mut forwarded = body.clone();
@@ -666,9 +669,7 @@ impl Gateway {
         );
         descriptor.headers = headers.clone();
         descriptor.body = Some(forwarded);
-        descriptor.auth = upstream.config.auth.clone().map(|secret| {
-            Auth::header("x-api-key", secret).expect("x-api-key is a credential header")
-        });
+        descriptor.auth = upstream.native_auth(ApiDialect::AnthropicNative);
 
         // The same exfiltration gate as build_provider_request: the URL must sit
         // inside base_url and the credential slot must match, checked before the

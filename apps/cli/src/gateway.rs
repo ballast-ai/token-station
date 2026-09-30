@@ -1098,6 +1098,7 @@ fn quota_session_key(request: &ChatRequest) -> String {
 }
 
 /// One configured upstream, resolved and ready to serve.
+#[derive(Clone)]
 struct Upstream {
     config: ProviderConfig,
     auth_config: Option<AuthConfig>,
@@ -1112,7 +1113,59 @@ struct Upstream {
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
+    native_search: Option<crate::native_search::NativeSearchTransport>,
     provider_call: ConfiguredProviderCallEngine,
+}
+
+impl Upstream {
+    fn search_dialect(&self) -> ApiDialect {
+        self.native_search
+            .as_ref()
+            .map_or(self.dialect, |profile| profile.api_dialect)
+    }
+
+    /// Borrow the ordinary transport unless a hosted search uses a separate profile.
+    fn search_transport(&self, body: &Value, dialect: ApiDialect) -> std::borrow::Cow<'_, Self> {
+        let hosted = body["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| local_search::hosted(tool, dialect == ApiDialect::AnthropicNative))
+        });
+        if let Some(profile) = &self.native_search
+            && hosted
+            && profile.api_dialect == dialect
+        {
+            let mut transport = self.clone();
+            transport.config.base_url = profile.base_url.clone();
+            transport.dialect = dialect;
+            return std::borrow::Cow::Owned(transport);
+        }
+        std::borrow::Cow::Borrowed(self)
+    }
+
+    fn native_auth(&self, dialect: ApiDialect) -> Option<Auth> {
+        use crate::native_search::NativeSearchAuth;
+        let auth = self
+            .native_search
+            .as_ref()
+            .filter(|profile| {
+                profile.api_dialect == dialect && profile.base_url == self.config.base_url
+            })
+            .map_or(
+                if dialect == ApiDialect::AnthropicNative {
+                    NativeSearchAuth::XApiKey
+                } else {
+                    NativeSearchAuth::Bearer
+                },
+                |profile| profile.auth,
+            );
+        self.config.auth.clone().map(|secret| match auth {
+            NativeSearchAuth::Bearer => Auth::bearer(secret),
+            NativeSearchAuth::XApiKey => {
+                Auth::header("x-api-key", secret).expect("valid credential header")
+            }
+        })
+    }
 }
 
 /// Server-owned asynchronous capability borrowed by the synchronous gateway.
@@ -1248,6 +1301,7 @@ fn assemble_upstreams(
                 auth_arms,
                 plugin,
                 dialect: entry.api_dialect,
+                native_search: crate::native_search::resolve(entry),
                 provider_call: entry.provider_call,
             },
         );

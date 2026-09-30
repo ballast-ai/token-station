@@ -139,11 +139,39 @@ fn anthropic_native_search_and_rejection_use_the_same_offering() {
     );
 }
 
-#[allow(
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::fn_params_excessive_bools
-)]
+#[test]
+fn separate_native_search_profile_preserves_regular_transport() {
+    for native_anthropic in [false, true] {
+        exercise_profile(
+            "auto",
+            200,
+            "",
+            true,
+            1,
+            false,
+            native_anthropic,
+            false,
+            false,
+            false,
+            true,
+        );
+        exercise_profile(
+            "auto",
+            400,
+            "Tool type 'web_search' is not supported",
+            true,
+            1,
+            false,
+            native_anthropic,
+            false,
+            false,
+            false,
+            true,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn exercise_transport(
     mode: &str,
     status: u16,
@@ -156,7 +184,40 @@ fn exercise_transport(
     truncated: bool,
     cancel: bool,
 ) {
-    let root = std::env::temp_dir().join(format!("ts-policy-{}-{mode}-{status}-{anthropic}-{requests}-{constrained}-{native_anthropic}-{stream}-{truncated}-{cancel}", std::process::id()));
+    exercise_profile(
+        mode,
+        status,
+        error,
+        anthropic,
+        requests,
+        constrained,
+        native_anthropic,
+        stream,
+        truncated,
+        cancel,
+        false,
+    );
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools
+)]
+fn exercise_profile(
+    mode: &str,
+    status: u16,
+    error: &str,
+    anthropic: bool,
+    requests: usize,
+    constrained: bool,
+    native_anthropic: bool,
+    stream: bool,
+    truncated: bool,
+    cancel: bool,
+    profile: bool,
+) {
+    let root = std::env::temp_dir().join(format!("ts-policy-{}-{mode}-{status}-{anthropic}-{requests}-{constrained}-{native_anthropic}-{stream}-{truncated}-{cancel}-{profile}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let key = root.join("key");
     std::fs::write(&key, "test-key").unwrap();
@@ -204,7 +265,10 @@ fn exercise_transport(
                         .is_some_and(|kind| kind.starts_with("web_search"))
                 })
             });
-            captured.lock().unwrap().push((native, body.clone()));
+            captured
+                .lock()
+                .unwrap()
+                .push((native, body.clone(), head.clone()));
             let (code, mut reply) = if native && status != 200 {
                 (
                     status,
@@ -232,7 +296,7 @@ fn exercise_transport(
                     json!({"id":"chat_local","model":"test-model","choices":[{"index":0,"message":message,"finish_reason":if tool_result {"stop"} else {"tool_calls"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}),
                 )
             };
-            if native_anthropic && code == 200 {
+            if native_anthropic && code == 200 && (native || !profile) {
                 let content = if native {
                     json!([{"type":"server_tool_use","id":"srv_native","name":"web_search","input":{"query":"Rust"}},{"type":"web_search_tool_result","tool_use_id":"srv_native","content":[{"type":"web_search_result","url":"https://www.rust-lang.org/","title":"Rust","encrypted_content":"opaque"}]},{"type":"text","text":"Native evidence"}])
                 } else if let Some(calls) = reply["choices"][0]["message"]["tool_calls"].as_array()
@@ -262,12 +326,18 @@ fn exercise_transport(
             write!(connection,"HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len()).unwrap();
         }
     });
-    let config: ClientConfig = serde_json::from_value(json!({
+    let mut config_value = json!({
         "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":root},
         "plugins":{"dir":Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins-dist"),"allow_unsigned":true,"agents":[if anthropic {"agent-anthropic"} else {"agent-openai-responses"}],"providers":{"openai-compatible":"provider-openai-compatible-v2","anthropic":"provider-anthropic-v2"}},
         "upstreams":{"mock":{"provider":if native_anthropic {"anthropic"} else {"openai-compatible"},"api_dialect":if native_anthropic {"anthropic-native"} else {"responses-native"},"base_url":endpoint,"auth":{"slot":"provider_api_key","file":key},"models":[{"model":"test-model","tool":true,"tool_state":"verified","context_window":100_000}]}},
         "router":{"version":1,"pools":{"main":[{"upstream":"mock","model":"test-model"}]},"default_pool":"main"}
-    })).unwrap();
+    });
+    if profile {
+        config_value["upstreams"]["mock"]["provider"] = json!("openai-compatible");
+        config_value["upstreams"]["mock"]["api_dialect"] = json!("translated");
+        config_value["upstreams"]["mock"]["native_search"] = json!({"api_dialect":if native_anthropic {"anthropic-native"} else {"responses-native"},"base_url":format!("{endpoint}/search"),"auth":"bearer"});
+    }
+    let config: ClientConfig = serde_json::from_value(config_value).unwrap();
     let recorder = Arc::new(Records::default());
     let gateway = Gateway::new(&config, recorder.clone()).unwrap();
     let settings =
@@ -322,6 +392,24 @@ fn exercise_transport(
             && (error == "Tool type 'web_search' is not supported"
                 || error.contains("only client functions"));
     let seen = seen.lock().unwrap();
+    if profile {
+        for (native, _, head) in seen.iter() {
+            let expected = if *native {
+                if native_anthropic {
+                    "/v1/search/messages"
+                } else {
+                    "/v1/search/responses"
+                }
+            } else {
+                "/v1/chat/completions"
+            };
+            assert!(head.starts_with(&format!("POST {expected} ")), "{head}");
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("authorization: bearer test-key")
+            );
+        }
+    }
     let records = recorder.0.lock().unwrap();
     assert_eq!(records.len(), requests);
     if stream {
@@ -376,7 +464,7 @@ fn exercise_transport(
             }
         }
     }
-    let native_count = seen.iter().filter(|(native, _)| *native).count();
+    let native_count = seen.iter().filter(|(native, _, _)| *native).count();
     assert_eq!(
         native_count,
         if mode == "local" {
@@ -390,7 +478,10 @@ fn exercise_transport(
     if !local {
         assert_eq!(seen.len(), requests);
     }
-    assert!(seen.iter().all(|(_, body)| body["model"] == "test-model"));
+    assert!(
+        seen.iter()
+            .all(|(_, body, _)| body["model"] == "test-model")
+    );
     drop(seen);
     drop(records);
     std::fs::remove_dir_all(root).unwrap();

@@ -28,6 +28,7 @@ pub mod filelog;
 pub mod gateway;
 pub mod jev;
 pub mod manage;
+pub mod native_search;
 pub mod plugins;
 pub mod pricing;
 mod private_fs;

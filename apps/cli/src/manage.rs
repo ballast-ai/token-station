@@ -111,6 +111,7 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             // `upstream add` creates a Canonical-IR (translated) upstream;
             // anthropic-native passthrough is opted into by editing the config.
             api_dialect: crate::config::ApiDialect::default(),
+            native_search: None,
             provider_call: crate::config::ProviderCallEngine::default(),
             models,
             // Quota plans are declared by the desktop app's quota-mode picker,

@@ -680,6 +680,9 @@ pub struct UpstreamConfig {
     /// `…/anthropic/v1/messages`.
     #[serde(default, skip_serializing_if = "ApiDialect::is_default")]
     pub api_dialect: ApiDialect,
+    /// Optional search-only endpoint. It must share the ordinary endpoint origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_search: Option<crate::native_search::NativeSearchTransport>,
     /// The HTTP engine for eligible provider calls; South by default. Calls
     /// the South slice cannot carry fall back to the legacy path before
     /// credentials or network I/O begin, and the receipt names the reason.
@@ -1289,6 +1292,9 @@ impl ClientConfig {
                 .map_err(|error| error.to_string())?;
             validate_local_identity(name, upstream)?;
             validate_api_dialect(name, upstream)?;
+            if let Some(profile) = &upstream.native_search {
+                profile.validate(upstream)?;
+            }
             if !upstream.base_url.uses_https() && !upstream.base_url.is_loopback() {
                 return Err(format!(
                     "upstream `{name}` must use HTTPS unless its endpoint is loopback"

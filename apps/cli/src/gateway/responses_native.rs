@@ -209,6 +209,7 @@ impl Gateway {
             &candidates,
             decision,
             ApiDialect::ResponsesNative,
+            false,
         );
         decision.fallbacks.retain(|target| {
             self.upstreams
@@ -420,6 +421,8 @@ impl Gateway {
                     format!("upstream `{}` vanished from configuration", target.upstream),
                 )
             })?;
+        let transport = upstream.search_transport(body, ApiDialect::ResponsesNative);
+        let upstream = transport.as_ref();
         if upstream.dialect != ApiDialect::ResponsesNative {
             return Err(ErrorEnvelope::new(
                 ErrorCode::Capability,
@@ -438,7 +441,7 @@ impl Gateway {
         );
         descriptor.headers = headers.clone();
         descriptor.body = Some(forwarded);
-        descriptor.auth = upstream.config.auth.clone().map(Auth::bearer);
+        descriptor.auth = upstream.native_auth(ApiDialect::ResponsesNative);
 
         if let Err(refusal) = upstream.config.authorize(&descriptor) {
             let error = ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string());
