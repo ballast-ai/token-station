@@ -239,6 +239,49 @@ fn model_capability_expresses_what_the_router_filters_on() {
 // -- 0.5.0 (kernel B7b) -------------------------------------------------------
 
 #[test]
+fn typed_component_values_stay_off_the_wire_when_empty() {
+    let config: ProviderConfig = serde_json::from_str(PROVIDER_CONFIG).expect("valid config");
+    assert!(config.declared.is_empty());
+    assert!(
+        serde_json::to_value(&config)
+            .expect("serializable config")
+            .get("declared")
+            .is_none()
+    );
+
+    let request: ChatRequest = serde_json::from_str(CHAT_REQUEST).expect("valid request");
+    assert!(request.host_values.is_empty());
+    assert!(
+        serde_json::to_value(&request)
+            .expect("serializable request")
+            .get("host_values")
+            .is_none()
+    );
+}
+
+#[test]
+fn typed_component_values_round_trip_as_typed_fields_not_extensions() {
+    let mut config: Value = serde_json::from_str(PROVIDER_CONFIG).expect("fixture is JSON");
+    config["declared"] =
+        serde_json::json!({"profile_arn": "arn:aws:codewhisperer:us-east-1:1:profile/x"});
+    let parsed: ProviderConfig = assert_exact_round_trip(&config.to_string());
+    assert_eq!(
+        parsed.declared.get("profile_arn").map(String::as_str),
+        Some("arn:aws:codewhisperer:us-east-1:1:profile/x")
+    );
+    assert!(!parsed.extensions.contains_key("declared"));
+
+    let mut request: Value = serde_json::from_str(CHAT_REQUEST).expect("fixture is JSON");
+    request["host_values"] = serde_json::json!({"attempt_id": "att_01"});
+    let parsed: ChatRequest = assert_exact_round_trip(&request.to_string());
+    assert_eq!(
+        parsed.host_values.get("attempt_id").map(String::as_str),
+        Some("att_01")
+    );
+    assert!(!parsed.extensions.contains_key("host_values"));
+}
+
+#[test]
 fn a_descriptor_can_name_a_declared_header_or_the_combined_arm() {
     let mut descriptor: Value = serde_json::from_str(PROVIDER_REQUEST).expect("fixture is JSON");
     for (auth, expected) in [

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -212,6 +214,19 @@ pub struct ChatRequest {
     pub sampling: Sampling,
     #[serde(default)]
     pub stream: bool,
+    /// Per-request values the host mints for the provider adapter, such as a
+    /// request attempt id (0.5.0).
+    ///
+    /// This is the typed channel for those values. The `extensions` fence is
+    /// unchanged: an adapter still must not act on an [`Extensions`] key.
+    ///
+    /// - Only the host writes this map. A host clears it on every request an
+    ///   agent adapter normalizes, so a client cannot supply a host value.
+    /// - A provider adapter may read only keys its package declares. The host
+    ///   passes only declared keys and validates every value first.
+    /// - A secret never travels here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_values: BTreeMap<String, String>,
     #[serde(default, flatten)]
     pub extensions: Extensions,
 }
@@ -227,6 +242,7 @@ impl ChatRequest {
             tool_choice: None,
             sampling: Sampling::default(),
             stream: false,
+            host_values: BTreeMap::new(),
             extensions: Extensions::new(),
         }
     }

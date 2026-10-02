@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -332,6 +333,20 @@ pub struct ProviderConfig {
     /// [`ModelCapability`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelCapability>,
+    /// Non-secret per-provider values whose keys the adapter's package declares,
+    /// such as a credential attribute or a configuration key the adapter reads
+    /// (0.5.0).
+    ///
+    /// This is the typed channel for those values. The `extensions` fence is
+    /// unchanged: an adapter still must not act on an [`Extensions`] key.
+    ///
+    /// - An adapter may read only keys its package declares.
+    /// - The host passes only declared keys, validates every value first, and
+    ///   drops any client-supplied key that collides with a host-owned name.
+    /// - A secret never travels here. [`ProviderConfig::auth`] and
+    ///   [`crate::Auth`] stay the only credential channel.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub declared: BTreeMap<String, String>,
     #[serde(default, flatten)]
     pub extensions: Extensions,
 }
@@ -344,6 +359,7 @@ impl ProviderConfig {
             base_url,
             auth: None,
             models: Vec::new(),
+            declared: BTreeMap::new(),
             extensions: Extensions::new(),
         }
     }
