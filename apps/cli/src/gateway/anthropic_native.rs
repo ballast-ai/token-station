@@ -25,6 +25,7 @@ fn anthropic_wire_usage(usage: &serde_json::Value) -> Option<Usage> {
             input_tokens: field("input_tokens").unwrap_or(0),
             output_tokens: field("output_tokens").unwrap_or(0),
             cache_read_tokens: field("cache_read_input_tokens").unwrap_or(0),
+            explicit_cache_read_tokens: 0,
             cache_write_tokens: field("cache_creation_input_tokens").unwrap_or(0),
             cache_write_5m_tokens: tier("ephemeral_5m_input_tokens"),
             cache_write_1h_tokens: tier("ephemeral_1h_input_tokens"),

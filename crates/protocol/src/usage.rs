@@ -12,6 +12,13 @@ fn is_zero(n: &u64) -> bool {
 /// Providers report usage under many names; a `provider-adapter` maps them onto
 /// these fields so cost estimation and the local metrics store see one shape.
 /// Fields default to zero because most providers report only a subset.
+///
+/// The fields partition as follows ([`Usage::is_partitioned`] checks it):
+///
+/// - `cache_read_tokens + cache_write_tokens <= input_tokens`;
+/// - `cache_write_5m_tokens + cache_write_1h_tokens <= cache_write_tokens`;
+/// - `explicit_cache_read_tokens <= cache_read_tokens`;
+/// - `reasoning_tokens <= output_tokens`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
@@ -19,8 +26,18 @@ pub struct Usage {
     #[serde(default)]
     pub output_tokens: u64,
     /// Prompt tokens served from a provider-side cache, usually billed cheaper.
+    ///
+    /// This is the **total** of every cache read, implicit and explicit.
+    /// [`Self::explicit_cache_read_tokens`] carries the explicit part.
     #[serde(default)]
     pub cache_read_tokens: u64,
+    /// Subset of [`Self::cache_read_tokens`] served from a cache the caller
+    /// created explicitly. Some providers price these reads apart from implicit
+    /// cache hits (Bailian, for example). Zero when the provider does not make
+    /// the distinction. Zero is not serialized, so the wire shape of other
+    /// providers is unchanged (0.5.0).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub explicit_cache_read_tokens: u64,
     /// Prompt tokens written into a provider-side cache, sometimes billed extra.
     ///
     /// When the provider splits cache writes into TTL tiers (Anthropic's
@@ -60,6 +77,25 @@ impl Usage {
         self.input_tokens.saturating_add(self.output_tokens)
     }
 
+    /// Whether every subset field fits inside the field it is a subset of, as
+    /// listed on [`Usage`].
+    ///
+    /// Advisory. The kernel never refuses a report; an admitting layer decides
+    /// what a report that does not partition means. Sums saturate, so malformed
+    /// counts near `u64::MAX` fail the check instead of wrapping.
+    #[must_use]
+    pub const fn is_partitioned(self) -> bool {
+        self.cache_read_tokens
+            .saturating_add(self.cache_write_tokens)
+            <= self.input_tokens
+            && self
+                .cache_write_5m_tokens
+                .saturating_add(self.cache_write_1h_tokens)
+                <= self.cache_write_tokens
+            && self.explicit_cache_read_tokens <= self.cache_read_tokens
+            && self.reasoning_tokens <= self.output_tokens
+    }
+
     /// Fold a later usage report into this one, field-wise, with
     /// last-nonzero-wins semantics.
     ///
@@ -78,6 +114,10 @@ impl Usage {
         keep(&mut self.input_tokens, later.input_tokens);
         keep(&mut self.output_tokens, later.output_tokens);
         keep(&mut self.cache_read_tokens, later.cache_read_tokens);
+        keep(
+            &mut self.explicit_cache_read_tokens,
+            later.explicit_cache_read_tokens,
+        );
         keep(&mut self.cache_write_tokens, later.cache_write_tokens);
         keep(&mut self.cache_write_5m_tokens, later.cache_write_5m_tokens);
         keep(&mut self.cache_write_1h_tokens, later.cache_write_1h_tokens);
@@ -139,6 +179,77 @@ mod tests {
     }
 
     #[test]
+    fn explicit_cache_reads_stay_off_the_wire_at_zero() {
+        let implicit = Usage {
+            input_tokens: 100,
+            cache_read_tokens: 40,
+            ..Usage::default()
+        };
+        let encoded = serde_json::to_value(implicit).expect("serializable usage");
+        assert!(encoded.get("explicit_cache_read_tokens").is_none());
+        assert_eq!(
+            serde_json::from_value::<Usage>(encoded).expect("valid usage"),
+            implicit
+        );
+
+        let explicit: Usage = serde_json::from_str(
+            r#"{"input_tokens":100,"cache_read_tokens":40,"explicit_cache_read_tokens":30}"#,
+        )
+        .expect("valid usage");
+        assert_eq!(explicit.explicit_cache_read_tokens, 30);
+        assert_eq!(
+            serde_json::to_value(explicit).expect("serializable usage")["explicit_cache_read_tokens"],
+            serde_json::json!(30)
+        );
+        assert_eq!(explicit.total(), 100, "a subset never adds to the total");
+    }
+
+    #[test]
+    fn partition_holds_only_when_every_subset_fits() {
+        let whole = Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 60,
+            explicit_cache_read_tokens: 60,
+            cache_write_tokens: 40,
+            cache_write_5m_tokens: 10,
+            cache_write_1h_tokens: 30,
+            reasoning_tokens: 20,
+        };
+        assert!(whole.is_partitioned());
+        assert!(Usage::default().is_partitioned());
+
+        for broken in [
+            Usage {
+                explicit_cache_read_tokens: 61,
+                ..whole
+            },
+            Usage {
+                cache_read_tokens: 61,
+                ..whole
+            },
+            Usage {
+                cache_write_1h_tokens: 31,
+                ..whole
+            },
+            Usage {
+                reasoning_tokens: 21,
+                ..whole
+            },
+            Usage {
+                cache_read_tokens: u64::MAX,
+                explicit_cache_read_tokens: 0,
+                cache_write_tokens: 1,
+                cache_write_5m_tokens: 0,
+                cache_write_1h_tokens: 0,
+                ..whole
+            },
+        ] {
+            assert!(!broken.is_partitioned(), "{broken:?}");
+        }
+    }
+
+    #[test]
     fn absorb_is_last_nonzero_wins_per_field() {
         // Anthropic streaming reports usage twice: message_start carries input
         // buckets, and the final message_delta carries output counts. Absorbing
@@ -150,6 +261,7 @@ mod tests {
             cache_write_5m_tokens: 100,
             cache_write_1h_tokens: 200,
             cache_read_tokens: 500,
+            explicit_cache_read_tokens: 300,
             output_tokens: 1,
             ..Usage::default()
         });
@@ -162,6 +274,10 @@ mod tests {
         assert_eq!(acc.cache_write_5m_tokens, 100);
         assert_eq!(acc.cache_write_1h_tokens, 200);
         assert_eq!(acc.cache_read_tokens, 500);
+        assert_eq!(
+            acc.explicit_cache_read_tokens, 300,
+            "a later zero keeps the explicit part"
+        );
         assert_eq!(acc.output_tokens, 400, "后报非零覆盖前报占位值");
         assert_eq!(acc.cache_write_tokens, 300, "后报零不得抹掉前报非零");
     }
