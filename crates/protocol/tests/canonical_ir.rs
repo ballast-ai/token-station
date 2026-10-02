@@ -235,3 +235,32 @@ fn model_capability_expresses_what_the_router_filters_on() {
     assert_eq!(capability.context_window, 400_000);
     assert!(capability.supported_parameters.contains("temperature"));
 }
+
+// -- 0.5.0 (kernel B7b) -------------------------------------------------------
+
+#[test]
+fn a_descriptor_can_name_a_declared_header_or_the_combined_arm() {
+    let mut descriptor: Value = serde_json::from_str(PROVIDER_REQUEST).expect("fixture is JSON");
+    for (auth, expected) in [
+        (
+            serde_json::json!({"scheme": "header", "name": "x-acme-key", "secret": "provider_api_key"}),
+            Auth::header(
+                "x-acme-key",
+                token_station_protocol::SecretRef::new("provider_api_key"),
+            )
+            .expect("valid"),
+        ),
+        (
+            serde_json::json!({"scheme": "bearer_and_header", "name": "x-goog-api-key", "secret": "provider_api_key"}),
+            Auth::bearer_and_header(
+                "x-goog-api-key",
+                token_station_protocol::SecretRef::new("provider_api_key"),
+            )
+            .expect("valid"),
+        ),
+    ] {
+        descriptor["auth"] = auth;
+        let parsed: HttpRequestDescriptor = assert_exact_round_trip(&descriptor.to_string());
+        assert_eq!(parsed.auth, Some(expected));
+    }
+}

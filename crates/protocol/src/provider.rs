@@ -313,7 +313,8 @@ impl Error for EndpointError {}
 /// Neither half can go wrong quietly. [`ProviderConfig::authorize`] rejects a
 /// descriptor addressed outside [`ProviderConfig::base_url`] or naming a slot
 /// this upstream does not have, and [`crate::Auth::header`] rejects a header name
-/// the host's redaction does not cover.
+/// that cannot carry a credential. Which admitted names a package may use is the
+/// admitting layer's decision (see [`crate::Auth::header`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// One of the providers the adapter's manifest declares, e.g.

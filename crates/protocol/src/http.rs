@@ -5,7 +5,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Extensions, is_credential_header};
+use crate::{
+    Extensions, MAX_AUTH_HEADER_NAME_BYTES, NEVER_CREDENTIAL_HEADERS, is_credential_header,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -85,10 +87,21 @@ impl fmt::Display for SecretBoundaryError {
 
 impl Error for SecretBoundaryError {}
 
-/// A plugin chose a header the host's redaction does not cover.
+/// A plugin chose a header that cannot carry a credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthPlacementError {
     header: String,
+    reason: AuthPlacementReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthPlacementReason {
+    /// Not a lowercase RFC 9110 token of at most [`MAX_AUTH_HEADER_NAME_BYTES`] bytes.
+    Invalid,
+    /// On [`NEVER_CREDENTIAL_HEADERS`].
+    NeverCredential,
+    /// The combined arm already writes `authorization`.
+    BearerCollision,
 }
 
 impl AuthPlacementError {
@@ -100,11 +113,23 @@ impl AuthPlacementError {
 
 impl fmt::Display for AuthPlacementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "header `{}` is not a credential header, so nothing downstream would redact the value the host writes into it",
-            self.header
-        )
+        match self.reason {
+            AuthPlacementReason::Invalid => write!(
+                f,
+                "header `{}` is not a lowercase HTTP field name of at most {MAX_AUTH_HEADER_NAME_BYTES} bytes",
+                self.header
+            ),
+            AuthPlacementReason::NeverCredential => write!(
+                f,
+                "header `{}` controls HTTP framing, routing or content and cannot carry a credential",
+                self.header
+            ),
+            AuthPlacementReason::BearerCollision => write!(
+                f,
+                "header `{}` already carries the bearer token of a combined credential",
+                self.header
+            ),
+        }
     }
 }
 
@@ -119,6 +144,10 @@ enum AuthWire {
         secret: SecretRef,
     },
     Header {
+        name: String,
+        secret: SecretRef,
+    },
+    BearerAndHeader {
         name: String,
         secret: SecretRef,
     },
@@ -151,8 +180,14 @@ pub enum Auth {
     /// `Authorization: Bearer <secret>`. OpenAI and most compatible upstreams.
     Bearer { secret: SecretRef },
     /// `<name>: <secret>`, e.g. `x-api-key` for Anthropic, `x-goog-api-key` for
-    /// Gemini. `name` must be a credential header.
+    /// Gemini. [`Auth::header`] states which names are admitted.
     Header { name: String, secret: SecretRef },
+    /// The same credential twice: `Authorization: Bearer <secret>` and
+    /// `<name>: <secret>`. Gemini's OpenAI-compatible surface requires both.
+    ///
+    /// `name` is checked as for [`Auth::Header`], and it must not be
+    /// `authorization`, which the bearer half already writes (0.5.0).
+    BearerAndHeader { name: String, secret: SecretRef },
     /// The host exchanges `secret` for an access token and presents it as a
     /// bearer token.
     ///
@@ -173,18 +208,45 @@ impl Auth {
 
     /// Names the header the host writes the credential into.
     ///
+    /// The kernel checks only that the name *can* carry a credential. It admits
+    /// any name in [`crate::CREDENTIAL_HEADERS`] in any case, kept as written, as
+    /// 0.4.0 did. Since 0.5.0 it also admits any lowercase RFC 9110 token of at
+    /// most [`crate::MAX_AUTH_HEADER_NAME_BYTES`] bytes that is not on
+    /// [`crate::NEVER_CREDENTIAL_HEADERS`].
+    ///
+    /// Which names a package may *use* is decided by the admitting layer: south's
+    /// descriptor admission checks the name against the package's declared secret
+    /// headers. A host that presents a credential in a declared name must redact
+    /// that name as well as [`crate::CREDENTIAL_HEADERS`], its default set.
+    ///
     /// # Errors
     ///
-    /// Returns [`AuthPlacementError`] unless `name` is a credential header.
-    /// [`SafeHeaders`] refuses those names to a plugin and [`crate::HeaderDigest`]
-    /// strips their values, so a name outside that catalog would be one the host
-    /// injects a secret into and nothing afterwards knows to hide.
+    /// Returns [`AuthPlacementError`] when the name is malformed, too long, not
+    /// lowercase outside the catalog, or on the never-credential list.
     pub fn header(name: impl Into<String>, secret: SecretRef) -> Result<Self, AuthPlacementError> {
-        let name = name.into();
-        if !is_credential_header(&name) {
-            return Err(AuthPlacementError { header: name });
-        }
+        let name = admit_auth_header(name.into())?;
         Ok(Self::Header { name, secret })
+    }
+
+    /// Names the header that carries the credential besides
+    /// `Authorization: Bearer`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthPlacementError`] for every name [`Auth::header`] refuses,
+    /// and for `authorization` in any case.
+    pub fn bearer_and_header(
+        name: impl Into<String>,
+        secret: SecretRef,
+    ) -> Result<Self, AuthPlacementError> {
+        let name = admit_auth_header(name.into())?;
+        if name.eq_ignore_ascii_case("authorization") {
+            return Err(AuthPlacementError {
+                header: name,
+                reason: AuthPlacementReason::BearerCollision,
+            });
+        }
+        Ok(Self::BearerAndHeader { name, secret })
     }
 
     #[must_use]
@@ -199,9 +261,10 @@ impl Auth {
     #[must_use]
     pub fn secret(&self) -> &SecretRef {
         match self {
-            Self::Bearer { secret } | Self::Header { secret, .. } | Self::OAuth { secret, .. } => {
-                secret
-            }
+            Self::Bearer { secret }
+            | Self::Header { secret, .. }
+            | Self::BearerAndHeader { secret, .. }
+            | Self::OAuth { secret, .. } => secret,
         }
     }
 }
@@ -213,6 +276,7 @@ impl TryFrom<AuthWire> for Auth {
         Ok(match wire {
             AuthWire::Bearer { secret } => Self::Bearer { secret },
             AuthWire::Header { name, secret } => Self::header(name, secret)?,
+            AuthWire::BearerAndHeader { name, secret } => Self::bearer_and_header(name, secret)?,
             AuthWire::Oauth { secret, scopes } => Self::OAuth { secret, scopes },
         })
     }
@@ -223,9 +287,36 @@ impl From<Auth> for AuthWire {
         match auth {
             Auth::Bearer { secret } => Self::Bearer { secret },
             Auth::Header { name, secret } => Self::Header { name, secret },
+            Auth::BearerAndHeader { name, secret } => Self::BearerAndHeader { name, secret },
             Auth::OAuth { secret, scopes } => Self::Oauth { secret, scopes },
         }
     }
+}
+
+/// The kernel's check on a credential header name; see [`Auth::header`].
+fn admit_auth_header(name: String) -> Result<String, AuthPlacementError> {
+    if is_credential_header(&name) {
+        return Ok(name);
+    }
+    let reason = if name.is_empty()
+        || name.len() > MAX_AUTH_HEADER_NAME_BYTES
+        || !name.bytes().all(is_lowercase_tchar)
+    {
+        AuthPlacementReason::Invalid
+    } else if NEVER_CREDENTIAL_HEADERS.contains(&name.as_str()) {
+        AuthPlacementReason::NeverCredential
+    } else {
+        return Ok(name);
+    };
+    Err(AuthPlacementError {
+        header: name,
+        reason,
+    })
+}
+
+/// `tchar` from RFC 9110 section 5.6.2, without upper-case letters.
+fn is_lowercase_tchar(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 /// Outbound headers a `provider-adapter` is allowed to set.
@@ -395,14 +486,69 @@ mod tests {
     use super::{Auth, HttpMethod, HttpRequestDescriptor, SafeHeaders, SecretRef};
 
     #[test]
-    fn auth_header_must_be_one_the_host_redacts() {
+    fn auth_header_admits_a_package_declared_name() {
         let anthropic = Auth::header("x-api-key", SecretRef::new("provider_api_key"))
             .expect("a credential header is where a credential goes");
         assert_eq!(anthropic.secret().as_str(), "provider_api_key");
 
-        let error = Auth::header("x-trace-id", SecretRef::new("provider_api_key"))
-            .expect_err("a header nothing redacts must be refused");
-        assert_eq!(error.header(), "x-trace-id");
+        // The admitting layer, not the kernel, decides whether a package may
+        // use this name. The kernel only checks that it can carry a credential.
+        let declared = Auth::header("x-acme-key", SecretRef::new("provider_api_key"))
+            .expect("a valid lowercase name outside the never-credential list");
+        assert_eq!(
+            declared,
+            Auth::Header {
+                name: "x-acme-key".to_owned(),
+                secret: SecretRef::new("provider_api_key"),
+            }
+        );
+        let longest = "k".repeat(crate::MAX_AUTH_HEADER_NAME_BYTES);
+        assert!(Auth::header(longest, SecretRef::new("provider_api_key")).is_ok());
+    }
+
+    #[test]
+    fn auth_header_refuses_invalid_and_never_credential_names() {
+        let too_long = "k".repeat(crate::MAX_AUTH_HEADER_NAME_BYTES + 1);
+        let invalid = [
+            "",
+            "X-Acme-Key",
+            "x acme key",
+            "x-acme-key:",
+            "x/acme",
+            "x-acme-k\u{e9}y",
+            too_long.as_str(),
+        ];
+        for name in invalid {
+            let error = Auth::header(name, SecretRef::new("provider_api_key"))
+                .expect_err("a malformed name must be refused");
+            assert_eq!(error.header(), name);
+            assert!(error.to_string().contains("lowercase HTTP field name"));
+        }
+        for name in crate::NEVER_CREDENTIAL_HEADERS {
+            let error = Auth::header(*name, SecretRef::new("provider_api_key"))
+                .expect_err("a framing, routing or content header must be refused");
+            assert!(error.to_string().contains("cannot carry a credential"));
+        }
+    }
+
+    #[test]
+    fn auth_header_keeps_every_0_4_0_catalog_name_as_written() {
+        for name in crate::CREDENTIAL_HEADERS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .chain(["X-Api-Key".to_owned(), "Authorization".to_owned()])
+        {
+            let wire = format!(r#"{{"scheme":"header","name":"{name}","secret":"k"}}"#);
+            let decoded: Auth = serde_json::from_str(&wire).expect("a 0.4.0 shape still decodes");
+            assert_eq!(
+                decoded,
+                Auth::Header {
+                    name: name.clone(),
+                    secret: SecretRef::new("k"),
+                }
+            );
+            assert_eq!(serde_json::to_string(&decoded).expect("serializable"), wire);
+        }
     }
 
     #[test]
@@ -422,13 +568,36 @@ mod tests {
 
     #[test]
     fn auth_header_placement_is_checked_on_deserialization() {
-        let smuggled: Result<Auth, _> =
-            serde_json::from_str(r#"{"scheme":"header","name":"x-trace-id","secret":"k"}"#);
+        for wire in [
+            r#"{"scheme":"header","name":"user-agent","secret":"k"}"#,
+            r#"{"scheme":"header","name":"X-Acme-Key","secret":"k"}"#,
+            r#"{"scheme":"bearer_and_header","name":"content-type","secret":"k"}"#,
+            r#"{"scheme":"bearer_and_header","name":"authorization","secret":"k"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Auth>(wire).is_err(),
+                "a fixture must not be able to place a credential where it cannot belong: {wire}"
+            );
+        }
+        let declared: Auth =
+            serde_json::from_str(r#"{"scheme":"header","name":"x-acme-key","secret":"k"}"#)
+                .expect("a declared-style name deserializes");
+        assert_eq!(declared.secret().as_str(), "k");
+    }
 
-        assert!(
-            smuggled.is_err(),
-            "a fixture must not be able to place a credential where logs would keep it"
-        );
+    #[test]
+    fn bearer_and_header_names_one_secret_for_two_headers() {
+        let gemini = Auth::bearer_and_header("x-goog-api-key", SecretRef::new("gemini_key"))
+            .expect("the Gemini OpenAI-compatible surface's pair");
+        assert_eq!(gemini.secret().as_str(), "gemini_key");
+
+        for name in ["authorization", "Authorization"] {
+            let error = Auth::bearer_and_header(name, SecretRef::new("gemini_key"))
+                .expect_err("the bearer half already writes authorization");
+            assert!(error.to_string().contains("bearer token"));
+        }
+        assert!(Auth::bearer_and_header("host", SecretRef::new("gemini_key")).is_err());
+        assert!(Auth::bearer_and_header("X-Goog-Api-Key", SecretRef::new("gemini_key")).is_ok());
     }
 
     #[test]
@@ -441,6 +610,15 @@ mod tests {
             (
                 Auth::header("x-goog-api-key", SecretRef::new("gemini_key")).expect("valid"),
                 r#"{"scheme":"header","name":"x-goog-api-key","secret":"gemini_key"}"#,
+            ),
+            (
+                Auth::bearer_and_header("x-goog-api-key", SecretRef::new("gemini_key"))
+                    .expect("valid"),
+                r#"{"scheme":"bearer_and_header","name":"x-goog-api-key","secret":"gemini_key"}"#,
+            ),
+            (
+                Auth::header("x-acme-key", SecretRef::new("acme_key")).expect("valid"),
+                r#"{"scheme":"header","name":"x-acme-key","secret":"acme_key"}"#,
             ),
             (
                 Auth::oauth(SecretRef::new("platform_token"), ["inference".to_owned()]),

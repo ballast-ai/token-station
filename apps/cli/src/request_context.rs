@@ -303,11 +303,13 @@ impl RequestContext {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        let auth_name = descriptor.auth.as_ref().map(|auth| match auth {
-            Auth::Bearer { .. } | Auth::OAuth { .. } => "authorization",
-            Auth::Header { name, .. } => name.as_str(),
-        });
-        if let Some(name) = auth_name {
+        let auth_names: &[&str] = match descriptor.auth.as_ref() {
+            None => &[],
+            Some(Auth::Bearer { .. } | Auth::OAuth { .. }) => &["authorization"],
+            Some(Auth::Header { name, .. }) => &[name.as_str()],
+            Some(Auth::BearerAndHeader { name, .. }) => &["authorization", name.as_str()],
+        };
+        for name in auth_names {
             headers.push((name, "<redacted>"));
         }
         let mut trace = self.http_trace.lock().unwrap();
@@ -618,6 +620,30 @@ mod tests {
                 .unwrap()
                 .contains("custom-secret")
         );
+    }
+
+    #[test]
+    fn http_trace_redacts_both_headers_of_a_combined_credential() {
+        let ctx = RequestContext::detached(Duration::from_secs(1), Duration::from_secs(1));
+        ctx.enable_http_trace();
+        let mut descriptor =
+            HttpRequestDescriptor::new(HttpMethod::Post, "https://api.example/v1/chat/completions");
+        descriptor.auth = Some(
+            Auth::bearer_and_header("x-goog-api-key", SecretRef::new("provider_api_key"))
+                .expect("valid combined credential"),
+        );
+        ctx.capture_upstream_request("example", "model-a", &descriptor);
+
+        let trace = ctx.http_trace_snapshot();
+        let headers = &trace.upstream_exchanges[0].request.headers;
+        for name in ["authorization", "x-goog-api-key"] {
+            assert!(
+                headers
+                    .iter()
+                    .any(|header| header.name == name && header.value == "<redacted>"),
+                "`{name}` must appear redacted"
+            );
+        }
     }
 
     #[test]

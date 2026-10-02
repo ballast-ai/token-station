@@ -83,7 +83,14 @@ pub type Extensions = BTreeMap<String, serde_json::Value>;
 ///
 /// Compared lowercase. Single source of truth for both the inbound redaction in
 /// [`HeaderDigest`] and the outbound rejection in [`SafeHeaders`].
-pub(crate) const CREDENTIAL_HEADERS: &[&str] = &[
+///
+/// This is the host's **default** redaction set, not the list of names a
+/// credential may be presented in. Since 0.5.0, [`Auth::header`] admits any
+/// syntactically valid name outside [`NEVER_CREDENTIAL_HEADERS`]; the admitting
+/// layer (south's descriptor admission and a package's declared secret headers)
+/// decides which names a package may use. A host that presents a credential in
+/// a declared name must redact that name as well as this set.
+pub const CREDENTIAL_HEADERS: &[&str] = &[
     "authorization",
     "proxy-authorization",
     "x-api-key",
@@ -95,20 +102,75 @@ pub(crate) const CREDENTIAL_HEADERS: &[&str] = &[
     "set-cookie",
 ];
 
-pub(crate) fn is_credential_header(name: &str) -> bool {
+/// Whether `name` is in [`CREDENTIAL_HEADERS`], ignoring ASCII case.
+#[must_use]
+pub fn is_credential_header(name: &str) -> bool {
     CREDENTIAL_HEADERS
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
+/// Header names that can never carry a credential, sorted.
+///
+/// Each one describes HTTP framing or a hop, routes the request, describes or
+/// negotiates its content, identifies the client, or is a response-only
+/// challenge. A credential written into one of them would corrupt the request
+/// or reach proxies and logs that do not treat it as secret. [`Auth::header`]
+/// and [`Auth::bearer_and_header`] refuse these names. The list is disjoint
+/// from [`CREDENTIAL_HEADERS`], so every name the 0.4.0 kernel accepted is still
+/// accepted. Admitting layers may refuse more names; south does.
+pub const NEVER_CREDENTIAL_HEADERS: &[&str] = &[
+    "accept",
+    "accept-encoding",
+    "connection",
+    "content-encoding",
+    "content-length",
+    "content-type",
+    "expect",
+    "forwarded",
+    "host",
+    "http2-settings",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+    "via",
+    "www-authenticate",
+];
+
+/// The longest header name, in bytes, that [`Auth::header`] admits outside
+/// [`CREDENTIAL_HEADERS`]. The longest catalog name,
+/// `ocp-apim-subscription-key`, is 25 bytes.
+pub const MAX_AUTH_HEADER_NAME_BYTES: usize = 64;
+
 #[cfg(test)]
 mod tests {
-    use super::is_credential_header;
+    use super::{CREDENTIAL_HEADERS, NEVER_CREDENTIAL_HEADERS, is_credential_header};
 
     #[test]
     fn credential_header_match_ignores_case() {
         assert!(is_credential_header("Authorization"));
         assert!(is_credential_header("X-Api-Key"));
         assert!(!is_credential_header("content-type"));
+    }
+
+    #[test]
+    fn never_credential_headers_are_sorted_lowercase_and_disjoint_from_the_catalog() {
+        assert!(
+            NEVER_CREDENTIAL_HEADERS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        for name in NEVER_CREDENTIAL_HEADERS {
+            assert_eq!(*name, name.to_ascii_lowercase());
+            assert!(
+                !CREDENTIAL_HEADERS.contains(name),
+                "`{name}` would turn a 0.4.0 descriptor into a refusal"
+            );
+        }
     }
 }

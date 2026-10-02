@@ -5234,3 +5234,137 @@ mod estimation_eligibility_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod credential_presentation_tests {
+    use super::Gateway;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use token_station_protocol::{Auth, ErrorCode, HttpMethod, HttpRequestDescriptor, SecretRef};
+
+    const KEY: &str = "sk-combined-test";
+
+    /// One upstream on `base_url` whose `provider_api_key` slot reads `KEY` from a file.
+    fn gateway(base_url: &str) -> Gateway {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ts-credential-presentation-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_file = dir.join("key");
+        std::fs::write(&key_file, KEY).unwrap();
+        let config: crate::config::ClientConfig = serde_json::from_value(json!({
+            "version": 1,
+            "server": { "listen": "127.0.0.1:0" },
+            "data": { "dir": dir.join("data"), "metrics": false },
+            "plugins": {
+                "dir": std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("plugins-dist"),
+                "agents": ["agent-openai"],
+                "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+            },
+            "upstreams": {
+                "mock": {
+                    "provider": "openai-compatible",
+                    "base_url": base_url,
+                    "auth": { "slot": "provider_api_key", "file": key_file },
+                    "models": [ { "model": "gpt-5.5" } ]
+                }
+            },
+            "router": {
+                "version": 1,
+                "pools": { "main": [ { "upstream": "mock", "model": "gpt-5.5" } ] },
+                "default_pool": "main"
+            }
+        }))
+        .unwrap();
+        Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder)).unwrap()
+    }
+
+    fn descriptor(base_url: &str, auth: Auth) -> HttpRequestDescriptor {
+        let mut descriptor =
+            HttpRequestDescriptor::new(HttpMethod::Post, format!("{base_url}/chat/completions"));
+        descriptor.body = Some(json!({"model": "gpt-5.5"}));
+        descriptor.auth = Some(auth);
+        descriptor
+    }
+
+    fn agent() -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(5)))
+            .http_status_as_error(false)
+            .build()
+            .into()
+    }
+
+    #[test]
+    fn the_combined_arm_presents_one_secret_as_bearer_and_as_its_header() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let upstream = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "peer closed before the request head");
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                .unwrap();
+            String::from_utf8(bytes).unwrap().to_ascii_lowercase()
+        });
+
+        let gateway = gateway(&base_url);
+        let auth =
+            Auth::bearer_and_header("x-goog-api-key", SecretRef::new("provider_api_key")).unwrap();
+        let response = gateway
+            .send_with(&agent(), &descriptor(&base_url, auth), "mock")
+            .expect("the upstream answers");
+        assert_eq!(response.status, 200);
+
+        let head = upstream.join().unwrap();
+        let key = KEY.to_ascii_lowercase();
+        assert!(
+            head.contains(&format!("\r\nauthorization: bearer {key}\r\n")),
+            "{head}"
+        );
+        assert!(
+            head.contains(&format!("\r\nx-goog-api-key: {key}\r\n")),
+            "{head}"
+        );
+        assert_eq!(head.matches("\r\nauthorization:").count(), 1, "{head}");
+    }
+
+    #[test]
+    fn the_legacy_transport_presents_header_credentials_only_in_names_it_redacts() {
+        // Nothing listens on this port: a refused name must fail before any
+        // credential read or connection.
+        let base_url = "http://127.0.0.1:9/v1";
+        let gateway = gateway(base_url);
+        for auth in [
+            Auth::header("x-acme-key", SecretRef::new("provider_api_key")).unwrap(),
+            Auth::bearer_and_header("x-acme-key", SecretRef::new("provider_api_key")).unwrap(),
+        ] {
+            let Err(refusal) = gateway.send_with(&agent(), &descriptor(base_url, auth), "mock")
+            else {
+                panic!("an undeclared credential header must not be presented");
+            };
+            assert_eq!(refusal.code, ErrorCode::Internal);
+            assert!(
+                refusal.message.contains("x-acme-key"),
+                "{}",
+                refusal.message
+            );
+            assert!(!refusal.message.contains(KEY));
+        }
+    }
+}
