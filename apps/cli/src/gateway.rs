@@ -1396,12 +1396,11 @@ fn restore_configured_capability_evidence(
     if reported.max_output_tokens == 0 {
         reported.max_output_tokens = saved.max_output_tokens;
     }
-    for key in ["catalog_cost"] {
-        if !reported.extensions.contains_key(key)
-            && let Some(value) = saved.extensions.get(key)
-        {
-            reported.extensions.insert(key.to_owned(), value.clone());
-        }
+    let key = "catalog_cost";
+    if !reported.extensions.contains_key(key)
+        && let Some(value) = saved.extensions.get(key)
+    {
+        reported.extensions.insert(key.to_owned(), value.clone());
     }
     reported
 }

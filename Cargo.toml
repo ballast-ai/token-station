@@ -49,8 +49,11 @@ south-provider-runtime = { version = "=0.16.0", git = "https://github.com/ballas
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Rust 1.99 added `assert_is_empty`. Its suggested `assert_eq!(x, [] as [T; 0])` is harder to read
+# than `assert!(x.is_empty())`, and crates/router-core is frozen, so its hits cannot change in place.
+assert_is_empty = "allow"
 
 
 # Release determinism and size: one codegen unit, thin LTO, and stripped symbols.
