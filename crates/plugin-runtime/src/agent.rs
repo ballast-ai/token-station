@@ -174,7 +174,8 @@ impl AdapterWorld for AgentAdapterV1 {
 /// Decodes an agent adapter's normalized request and clears `host_values`.
 ///
 /// Only the host mints host values. An agent adapter sees client input, so any
-/// host value it returns is client-supplied and must not reach a provider.
+/// host value it returns is client-supplied and must not reach a provider. A
+/// map that breaks the `ComponentValues` grammar fails the decode instead.
 fn admit_normalized_request(out: &str) -> AdapterResult<ChatRequest> {
     let mut request: ChatRequest = from_json(out)?;
     request.host_values.clear();
@@ -281,5 +282,13 @@ mod tests {
 
         assert!(request.host_values.is_empty());
         assert_eq!(request.extensions["seed"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn an_agent_adapter_host_value_outside_the_grammar_fails_the_request() {
+        let forged =
+            r#"{"model":"auto","messages":[],"host_values":{"attempt_id":"a\r\nx-injected: 1"}}"#;
+
+        assert!(admit_normalized_request(forged).is_err());
     }
 }

@@ -501,7 +501,7 @@ impl Guest for GeminiClient {
                 stop: string_array(generation.get("stopSequences"), "stopSequences")?,
             },
             stream,
-            host_values: std::collections::BTreeMap::new(),
+            host_values: token_station_protocol::ComponentValues::new(),
             extensions: Extensions::new(),
         })
     }

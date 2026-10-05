@@ -362,7 +362,7 @@ impl Guest for OpenAiClient {
                     .collect(),
             },
             stream: body["stream"].as_bool().unwrap_or(false),
-            host_values: std::collections::BTreeMap::new(),
+            host_values: token_station_protocol::ComponentValues::new(),
             extensions,
         })
     }

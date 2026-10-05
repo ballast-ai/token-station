@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Extensions, Usage};
+use crate::{ComponentValues, Extensions, Usage};
 
 /// Who authored a [`Message`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,8 +223,9 @@ pub struct ChatRequest {
     /// - A provider adapter may read only keys its package declares. The host
     ///   passes only declared keys and validates every value first.
     /// - A secret never travels here.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub host_values: BTreeMap<String, String>,
+    /// - Every key and value satisfies the [`ComponentValues`] grammar.
+    #[serde(default, skip_serializing_if = "ComponentValues::is_empty")]
+    pub host_values: ComponentValues,
     #[serde(default, flatten)]
     pub extensions: Extensions,
 }
@@ -242,7 +241,7 @@ impl ChatRequest {
             tool_choice: None,
             sampling: Sampling::default(),
             stream: false,
-            host_values: BTreeMap::new(),
+            host_values: ComponentValues::new(),
             extensions: Extensions::new(),
         }
     }

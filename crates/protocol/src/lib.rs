@@ -49,6 +49,7 @@ mod http;
 mod provider;
 mod stream;
 mod usage;
+mod values;
 
 use std::collections::BTreeMap;
 
@@ -67,6 +68,9 @@ pub use http::{
 pub use provider::{DescriptorError, EndpointError, ProviderApi, ProviderConfig, ProviderEndpoint};
 pub use stream::{StreamChunk, StreamEvent, StreamOutcome};
 pub use usage::Usage;
+pub use values::{
+    ComponentValueError, ComponentValues, MAX_COMPONENT_VALUE_BYTES, MAX_COMPONENT_VALUE_KEY_BYTES,
+};
 
 /// Forward-compatible bag for fields this ABI version does not model.
 ///
