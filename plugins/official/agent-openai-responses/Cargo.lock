@@ -10,7 +10,7 @@ dependencies = [
  "serde_json",
  "south-north-codec",
  "token-station-protocol 0.3.0",
- "token-station-protocol 0.4.0",
+ "token-station-protocol 0.5.0",
  "wit-bindgen",
 ]
 
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-protocol"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",

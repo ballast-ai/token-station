@@ -870,6 +870,7 @@ impl Guest for AnthropicClient {
                 stop,
             },
             stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+            host_values: token_station_protocol::ComponentValues::new(),
             extensions: request_extensions(body),
         })
     }
