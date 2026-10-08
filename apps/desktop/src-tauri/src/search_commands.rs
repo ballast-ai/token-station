@@ -13,6 +13,8 @@ use token_station_cli::search::{
     SearchController, SearchMode, SearchResponse, SearchSettings, SearchStatus,
 };
 
+use token_station_cli::search_quality::{evaluate_response, SearchQuality, DOCUMENTATION_CASES};
+
 static SETTINGS_OPERATION: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize)]
@@ -21,6 +23,7 @@ pub(crate) struct SearchActivation {
     verified: bool,
     managed_codex_updated: usize,
     execution: Option<&'static str>,
+    quality: Option<SearchQuality>,
 }
 
 #[tauri::command]
@@ -68,6 +71,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
         controller.save(settings.clone())?;
     }
     let mut execution = None;
+    let mut quality = None;
     let result = (|| {
         let runtime = match runtime_from_app(&state) {
             Ok(runtime) => runtime,
@@ -75,7 +79,9 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
             Err(error) => return Err(error.message),
         };
         if settings.enabled {
-            execution = Some(verify_gateway_search(&runtime)?);
+            let (path, evidence) = verify_gateway_search(&runtime)?;
+            execution = Some(path);
+            quality = Some(evidence);
             let current = runtime_from_app(&state).map_err(|error| error.message)?;
             if current.fingerprint() != runtime.fingerprint() {
                 return Err("The proxy changed during verification. Try again.".into());
@@ -90,6 +96,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
             verified: settings.enabled,
             managed_codex_updated: count,
             execution,
+            quality,
         }),
         Err(error) => {
             {
@@ -110,7 +117,9 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
     }
 }
 
-fn verify_gateway_search(runtime: &AgentProxyRuntime) -> Result<&'static str, String> {
+fn verify_gateway_search(
+    runtime: &AgentProxyRuntime,
+) -> Result<(&'static str, SearchQuality), String> {
     let origin = runtime.gateway_origin().map_err(|error| error.message)?;
     let url = reqwest::Url::parse(&origin).map_err(|_| "Invalid local proxy address.")?;
     if url.scheme() != "http"
@@ -150,7 +159,7 @@ fn verify_gateway_search(runtime: &AgentProxyRuntime) -> Result<&'static str, St
         .map_err(|_| "Cannot read the search verification response.")?;
     let document: Value = serde_json::from_slice(&bytes)
         .map_err(|_| "The proxy returned an invalid search response.")?;
-    validate_search_evidence(&document)?;
+    let quality = validate_search_evidence(&document)?;
     let local = document["output"].as_array().is_some_and(|items| {
         items.iter().any(|item| {
             item["type"] == "web_search_call"
@@ -159,43 +168,11 @@ fn verify_gateway_search(runtime: &AgentProxyRuntime) -> Result<&'static str, St
                     .is_some_and(|id| id.starts_with("srvtoolu_ts_"))
         })
     });
-    Ok(if local { "local" } else { "native" })
+    Ok((if local { "local" } else { "native" }, quality))
 }
 
-fn validate_search_evidence(document: &Value) -> Result<(), String> {
-    let output = document["output"]
-        .as_array()
-        .ok_or("The model did not return search evidence.")?;
-    let searched = output.iter().any(|item| {
-        item["type"] == "web_search_call"
-            && item["status"] == "completed"
-            && item["action"]["sources"].as_array().is_some_and(|sources| {
-                sources.iter().any(|source| {
-                    source["url"]
-                        .as_str()
-                        .and_then(|url| reqwest::Url::parse(url).ok())
-                        .is_some_and(|url| {
-                            matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
-                        })
-                })
-            })
-    });
-    let evidence = output.iter().any(|item| {
-        item["type"] == "message"
-            && item["content"].as_array().is_some_and(|content| {
-                content.iter().any(|part| {
-                    part["type"] == "output_text"
-                        && part["text"]
-                            .as_str()
-                            .is_some_and(|text| !text.trim().is_empty())
-                })
-            })
-    });
-    if document["status"] == "completed" && searched && evidence {
-        Ok(())
-    } else {
-        Err("The model did not complete a search with sources. Check Chrome network access, search engine challenges, and model tool support.".into())
-    }
+fn validate_search_evidence(document: &Value) -> Result<SearchQuality, String> {
+    evaluate_response(document, DOCUMENTATION_CASES[0].expected_source)
 }
 
 #[tauri::command]

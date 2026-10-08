@@ -231,12 +231,92 @@ fn append_message(
 }
 
 fn sources(values: &Value) -> Vec<Value> {
+    let mut seen = BTreeSet::new();
     values.as_array().into_iter().flatten().filter_map(|source| {
         let url = source["url"].as_str()?;
         let parsed = url::Url::parse(url).ok()?;
         if !matches!(parsed.scheme(), "https" | "http") { return None; }
+        if !seen.insert(url) { return None; }
         Some(json!({"type":"web_search_result","url":url,"title":source["title"].as_str().unwrap_or(url),"encrypted_content":"","page_age":null}))
     }).collect()
+}
+
+/// Preserve per-call evidence and recover only unclaimed citations on a successful call.
+fn attributed_sources(
+    output: &[Value],
+    max_uses: Option<u64>,
+) -> Result<BTreeMap<usize, Vec<Value>>, ErrorEnvelope> {
+    let mut budget = ResponseBudget {
+        remaining: MAX_UPSTREAM_BODY,
+    };
+    let mut charge = |value: &Value| {
+        serde_json::to_writer(&mut budget, value)
+            .map_err(|_| protocol_error("The attributed search sources exceed the size limit"))
+    };
+    let mut count = 0_u64;
+    let end = output
+        .iter()
+        .position(|item| {
+            if item["type"] == "web_search_call" {
+                count += 1;
+            }
+            max_uses.is_some_and(|limit| count > limit)
+        })
+        .unwrap_or(output.len());
+    let output = &output[..end];
+    let mut citations = BTreeMap::new();
+    for item in output {
+        for block in item["content"].as_array().into_iter().flatten() {
+            for source in sources(&block["annotations"]) {
+                let url = source["url"].as_str().unwrap_or_default().to_owned();
+                let existing = citations.entry(url).or_insert_with(|| source.clone());
+                if existing["title"] == existing["url"] && source["title"] != source["url"] {
+                    existing["title"] = source["title"].clone();
+                }
+            }
+        }
+    }
+    let mut attributed = BTreeSet::new();
+    let mut calls = BTreeMap::new();
+    for (index, item) in output.iter().enumerate() {
+        if item["type"] != "web_search_call" || item["status"] != "completed" {
+            continue;
+        }
+        let mut found = sources(&item["action"]["sources"]);
+        for source in &mut found {
+            charge(source)?;
+            let url = source["url"].as_str().unwrap_or_default().to_owned();
+            if source["title"] == source["url"]
+                && let Some(citation) = citations.get(&url)
+            {
+                // Charge before cloning metadata shared by many calls.
+                charge(&citation["title"])?;
+                source["title"] = citation["title"].clone();
+            }
+            attributed.insert(url);
+        }
+        calls.insert(index, found);
+    }
+    if let Some(entry) = calls.last_entry() {
+        let last = entry.into_mut();
+        for (url, source) in citations {
+            if !attributed.contains(&url) {
+                charge(&source)?;
+                last.push(source);
+            }
+        }
+    }
+    Ok(calls)
+}
+
+fn search_action_input(item: &Value) -> Value {
+    let mut input = serde_json::Map::new();
+    for field in ["query", "queries", "url", "pattern"] {
+        if let Some(value) = item["action"].get(field) {
+            input.insert(field.to_owned(), value.clone());
+        }
+    }
+    Value::Object(input)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -271,18 +351,10 @@ pub(super) fn from_responses(
             "The search backend returned too many output items",
         ));
     }
-    let last_search = output
-        .iter()
-        .rposition(|item| item["type"] == "web_search_call");
+    let mut sources_by_call = attributed_sources(output, max_uses)?;
     let mut content = Vec::new();
     let mut count = 0_u64;
     let mut has_function = false;
-    let mut citations = Vec::new();
-    for item in output {
-        for block in item["content"].as_array().into_iter().flatten() {
-            citations.extend(sources(&block["annotations"]));
-        }
-    }
     for (index, item) in output.iter().enumerate() {
         match item["type"].as_str() {
             Some("web_search_call") => {
@@ -296,19 +368,13 @@ pub(super) fn from_responses(
                     .collect();
                 let id = format!("srvtoolu_{response_id}_{count}");
                 content.push(json!({"type":"server_tool_use","id":id,"name":name,
-                    "input":{"query":item["action"]["query"].as_str().unwrap_or("")}}));
+                    "input":search_action_input(item)}));
                 let result = if max_uses.is_some_and(|limit| count > limit) {
                     json!({"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"})
                 } else if item["status"] != "completed" {
                     json!({"type":"web_search_tool_result_error","error_code":"unavailable"})
                 } else {
-                    let mut found = sources(&item["action"]["sources"]);
-                    // Some compatible backends expose sources only as final citations.
-                    // Assign them only to the final search when per-call sources are absent.
-                    if found.is_empty() && last_search == Some(index) {
-                        found = std::mem::take(&mut citations);
-                    }
-                    json!(found)
+                    json!(sources_by_call.remove(&index).unwrap_or_default())
                 };
                 content.push(
                     json!({"type":"web_search_tool_result","tool_use_id":id,"content":result}),
@@ -778,6 +844,63 @@ mod tests {
             .count();
         assert_eq!(assigned, 1);
         assert!(result.to_string().len() < 1_000_000);
+    }
+
+    #[test]
+    fn final_citations_enrich_successful_calls_before_a_failed_last_call() {
+        let body = json!({"status":"completed","output":[
+            {"type":"web_search_call","status":"completed","action":{"query":"first","sources":[{"url":"https://example.com/a"},{"url":"https://example.com/a"}]}},
+            {"type":"web_search_call","status":"completed","action":{"query":"second"}},
+            {"type":"web_search_call","status":"failed","action":{"query":"third"}},
+            {"type":"message","content":[{"type":"output_text","text":"Evidence","annotations":[
+                {"type":"url_citation","url":"https://example.com/a","title":"First source"},
+                {"type":"url_citation","url":"https://example.com/b","title":"Second source"}
+            ]}]}
+        ]});
+        let answer = from_responses(&body, "web_search", "model", None, &request()).unwrap();
+        assert_eq!(answer["content"][1]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(answer["content"][1]["content"][0]["title"], "First source");
+        assert_eq!(answer["content"][3]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            answer["content"][3]["content"][0]["url"],
+            "https://example.com/b"
+        );
+        assert_eq!(answer["content"][5]["content"]["error_code"], "unavailable");
+    }
+
+    #[test]
+    fn search_bridge_preserves_action_inputs_and_budget_evidence_boundary() {
+        for action in [
+            json!({"type":"search","queries":["Rust", "Cargo"]}),
+            json!({"type":"open_page","url":"https://example.com"}),
+            json!({"type":"find_in_page","url":"https://example.com","pattern":"release"}),
+        ] {
+            let body = json!({"status":"completed","output":[
+                {"type":"web_search_call","status":"completed","action":action},
+                {"type":"web_search_call","status":"completed","action":{"query":"over budget"}},
+                {"type":"message","content":[{"type":"output_text","text":"Late","annotations":[{"url":"https://example.com/late"}]}]}
+            ]});
+            let answer = from_responses(&body, "web_search", "model", Some(1), &request()).unwrap();
+            let mut expected = action.as_object().unwrap().clone();
+            expected.remove("type");
+            assert_eq!(answer["content"][0]["input"], json!(expected));
+            assert_eq!(answer["content"][1]["content"], json!([]));
+            assert_eq!(
+                answer["content"][3]["content"]["error_code"],
+                "max_uses_exceeded"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_source_enrichment_is_bounded_before_metadata_cloning() {
+        let mut output = vec![
+            json!({"type":"web_search_call","status":"completed","action":{"sources":[{"url":"https://example.com"}]}});
+            1000
+        ];
+        output.push(json!({"type":"message","content":[{"type":"output_text","text":"Evidence","annotations":[{"url":"https://example.com","title":"x".repeat(100_000)}]}]}));
+        let body = json!({"status":"completed","output":output});
+        assert!(from_responses(&body, "web_search", "model", None, &request()).is_err());
     }
 
     #[test]

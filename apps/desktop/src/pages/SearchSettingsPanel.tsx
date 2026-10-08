@@ -12,7 +12,8 @@ type Engine = "bing" | "duckduckgo";
 type Mode = "auto" | "native" | "local";
 interface Settings { enabled: boolean; mode: Mode; engine: Engine }
 interface Status { settings: Settings; chrome_available: boolean; busy: boolean }
-interface Activation { status: Status; verified: boolean; managed_codex_updated: number; execution?: "native" | "local" }
+interface Quality { expected_source: string; source_count: number; target_found: boolean; cited_source_count: number }
+interface Activation { status: Status; verified: boolean; managed_codex_updated: number; execution?: "native" | "local"; quality?: Quality | null }
 interface Result { results: Array<{title: string; url: string; snippet: string}>; elapsed_ms: number }
 
 export default function SearchSettingsPanel() {
@@ -58,8 +59,17 @@ export default function SearchSettingsPanel() {
       {status?.settings.enabled && <Button disabled={busy || (status.settings.mode === "local" && !status.chrome_available)} onClick={() => void save(status.settings)}>{copy("Verify again", "重新验证")}</Button>}
       <div role="status" aria-live="polite" className="text-sm space-y-2">
         {busy && <p>{copy("Checking… Keep this panel open.", "正在检查，请保持此页面打开…")}</p>}
-        {activation?.verified ? <><p>{copy("Gateway search verified in the last check. Verify again after changing the model or network.", "上次检查的 Codex 路由已通过真实搜索验证。更换模型或网络后请重新验证。")}</p>
+        {activation?.verified ? <><p>{copy("Gateway search verified: execution completed. Verify again after changing the model or network.", "搜索链路已完成：上次检查的 Codex 路由执行了搜索。更换模型或网络后请重新验证。")}</p>
           {activation.execution && <p>{activation.execution === "native" ? copy("Last check used native search.", "上次验证使用：原生搜索。") : copy("Last check used local browser search.", "上次验证使用：本地浏览器搜索。")}</p>}
+          {activation.quality ? <div className="space-y-1 border-l-2 pl-3">
+            <p>{activation.quality.target_found ? copy("Target source found", "已命中目标来源") : copy("Target source not found", "未命中目标来源")}</p>
+            <p className="text-xs text-muted-foreground break-all">{copy("Expected source", "预期来源")}：{activation.quality.expected_source}</p>
+            <p>{copy(`Retrieved sources: ${activation.quality.source_count}`, `检索来源：${activation.quality.source_count}`)}</p>
+            <p>{activation.quality.cited_source_count > 0
+              ? copy(`Retrieved sources cited: ${activation.quality.cited_source_count} / ${activation.quality.source_count}`, `已引用检索来源：${activation.quality.cited_source_count} / ${activation.quality.source_count}`)
+              : copy("No retrieved source cited", "回答未引用检索来源")}</p>
+            <p className="text-xs text-muted-foreground">{copy("This check observes source URLs. It does not establish relevance, freshness, or factual support for the answer.", "此检查仅核对来源 URL，不能证明回答的相关性、时效性或事实依据。")}</p>
+          </div> : <p>{copy("Source quality was not evaluated in this check.", "此次检查未评估来源质量。")}</p>}
           <p>{activation.managed_codex_updated > 0 ? copy("Managed Codex search configuration updated. Start a new session in Codex.", "已同步受管 Codex 的搜索配置，请在 Codex 中新建会话。") : copy("Connect Codex on the Agents page to use this route. Unmanaged configuration was not changed.", "请在 Agent 页面接入 Codex 后使用此路由。未接入的客户端配置不会被改动。")}</p></>
           : <p>{copy("This panel has not verified the current model route yet. Browser tests alone do not verify model compatibility.", "此页面尚未验证当前模型路由。仅浏览器测试成功不代表模型适配通过。")}</p>}
       </div>

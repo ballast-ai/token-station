@@ -51,6 +51,33 @@ describe("browser search preview", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("did not complete");
     expect(screen.getByRole("switch")).not.toBeChecked();
   });
+  it("separates execution from a missing target and missing citations", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(status).mockResolvedValueOnce({
+      status: { ...status, settings: { ...status.settings, enabled: true } },
+      verified: true, managed_codex_updated: 0, execution: "local",
+      quality: { expected_source: "https://docs.python.org/", source_count: 5, target_found: false, cited_source_count: 0 },
+    });
+    render(<SearchSettingsPanel />);
+    await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch"));
+    expect(await screen.findByText("Target source not found")).toBeInTheDocument();
+    expect(screen.getByText("No retrieved source cited")).toBeInTheDocument();
+    expect(screen.getByText("Retrieved sources: 5")).toBeInTheDocument();
+    expect(screen.getByRole("switch")).toBeChecked();
+    expect(screen.getByText(/does not establish relevance, freshness, or factual support/)).toBeInTheDocument();
+  });
+  it("shows target presence and citation coverage independently", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(status).mockResolvedValueOnce({
+      status: { ...status, settings: { ...status.settings, enabled: true } },
+      verified: true, managed_codex_updated: 1, execution: "native",
+      quality: { expected_source: "https://docs.python.org/", source_count: 3, target_found: true, cited_source_count: 1 },
+    });
+    render(<SearchSettingsPanel />);
+    await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch"));
+    expect(await screen.findByText("Target source found")).toBeInTheDocument();
+    expect(screen.getByText("Retrieved sources cited: 1 / 3")).toBeInTheDocument();
+  });
   it("can disable interception even after Chrome was removed", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({ ...status, chrome_available: false, settings: { ...status.settings, enabled: true } }).mockResolvedValueOnce({ status, verified: false, managed_codex_updated: 0 });
     render(<SearchSettingsPanel />);

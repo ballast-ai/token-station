@@ -106,6 +106,62 @@ mod tests {
 
     #[test]
     #[ignore = "Requires installed Chrome and public network access"]
+    fn live_documentation_benchmark() {
+        use crate::search_quality::{DOCUMENTATION_CASES, matches_target};
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        let engine =
+            if std::env::var("TOKEN_STATION_SEARCH_TEST_ENGINE").as_deref() == Ok("duckduckgo") {
+                Engine::Duckduckgo
+            } else {
+                Engine::Bing
+            };
+        controller
+            .save(SearchSettings {
+                enabled: false,
+                mode: SearchMode::Local,
+                engine,
+            })
+            .unwrap();
+        let mut observations = Vec::new();
+        let mut hits = 0;
+        let mut completed = 0;
+        for case in DOCUMENTATION_CASES {
+            let observation = match controller.search(case.query, &|| false) {
+                Ok(response) => {
+                    completed += 1;
+                    let rank = response
+                        .results
+                        .iter()
+                        .position(|result| matches_target(&result.url, case.expected_source))
+                        .map(|index| index + 1);
+                    hits += usize::from(rank.is_some());
+                    serde_json::json!({"query":case.query,"expected_source":case.expected_source,"execution":"completed","target_rank":rank,"elapsed_ms":response.elapsed_ms,"sources":response.results})
+                }
+                Err(error) => {
+                    serde_json::json!({"query":case.query,"expected_source":case.expected_source,"execution":"failed","error":error})
+                }
+            };
+            observations.push(observation);
+        }
+        println!(
+            "{}",
+            serde_json::json!({"engine":engine,"cases":observations,"completed":completed,"target_hits":hits,"total":DOCUMENTATION_CASES.len(),"scope":"Source presence only. No freshness or factual-support assessment."})
+        );
+        assert_eq!(
+            completed,
+            DOCUMENTATION_CASES.len(),
+            "Some browser searches failed. Inspect the report."
+        );
+        assert_eq!(
+            hits,
+            DOCUMENTATION_CASES.len(),
+            "Some target sources were missing. Execution alone is not success."
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires installed Chrome and public network access"]
     fn live_chrome_search() {
         let root = temporary_dir().unwrap();
         let controller = SearchController::shared(&root.0);
@@ -584,7 +640,7 @@ fn search_url(engine: Engine, query: &str) -> Result<Url, String> {
 }
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)] // URL hosts are normalized domain names.
-fn public_url(raw: &str) -> Option<String> {
+pub(crate) fn public_url(raw: &str) -> Option<String> {
     let url = Url::parse(raw).ok()?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
