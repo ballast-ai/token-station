@@ -44,6 +44,8 @@ App 提供首次使用引导、Agent 重新扫描、供应商、用量、设置�
 
 ## Agent
 
+内置 Connector 不代表每个上游版本均已认证。只读预检检查安装与配置；升级 Agent 后仍需分别验证对话、工具执行、图片与搜索。
+
 | Agent | 接入方式 | 入站协议 |
 |---|---|---|
 | [Claude Code](https://github.com/anthropics/claude-code) | 内置 Connector | Anthropic Messages |
@@ -57,7 +59,7 @@ App 提供首次使用引导、Agent 重新扫描、供应商、用量、设置�
 | [OpenClaw](https://github.com/openclaw/openclaw) | 内置 Connector | OpenAI Chat Completions |
 | [WorkBuddy](https://www.workbuddy.ai/) | 内置 Connector | OpenAI Chat Completions |
 | [OpenCode](https://github.com/anomalyco/opencode) | 内置 Connector | OpenAI Chat Completions |
-| [Cursor](https://github.com/cursor/cursor) | 仅 macOS 专用接入 | OpenAI 兼容端点 |
+| [Cursor](https://github.com/cursor/cursor) | 仅安装发现，不支持接入 | — |
 
 Claude Desktop 目前没有公开的产品仓库。该链接指向 Anthropic 官方 GitHub 组织页。
 
@@ -67,7 +69,7 @@ Grok Build 使用 `~/.grok/config.toml`；设置 `GROK_HOME` 后使用 `$GROK_HO
 
 对十一种内置 Connector，点击“一键接入”即代表同意立即应用一份边界明确的计划。Token Station 会在需要时启动网关，并在首次接入后展示已改动字段。Connector 的可用平台取决于对应 Agent 和操作系统，并不代表 Token Station 已为该平台发布安装包。
 
-Cursor 使用仅限 macOS 的独立接入路径。请先退出 Cursor。Token Station 会私有备份相关 SQLite 记录，写入 OpenAI 兼容端点、虚拟 Key 和启用标记，回读校验失败时恢复原值。完成后重新启动 Cursor，并选择支持自定义 OpenAI Key 路径的模型。在 Windows 与 Linux 的凭证和数据库路径具备等价后端前，这两个平台不会宣称支持 Cursor 独立接入。该路径不受标准 Connector 的字段归属和应用内断开流程管理。
+Cursor 仅在发现注册表中保留，用于识别历史安装；接入、路由和可见性设置均不提供 Cursor 入口。历史 SQLite 配置代码不代表当前受支持的接入流程。
 
 ## 必须留在本机的工作负载
 
@@ -97,7 +99,7 @@ Provider 标签和模型名称本身不能证明请求留在本机。回环端�
 | 供应商凭证 | 默认存储为明文 `secrets.json`，并设置为仅当前用户可读。以同一个操作系统用户运行的其他进程仍可能读取。也支持环境变量和独立文件来源。凭证值不会进入日志、错误或沙箱插件。 |
 | 插件沙箱 | WASM 适配器不能直接访问网络、文件系统、环境变量、参数、继承的标准输入输出或明文凭证，并受内存与调用时限约束。 |
 | 出站授权 | 在附加凭证前，Host 会确认目标 Origin、路径边界和凭证槽位与已配置供应商一致。 |
-| Agent 配置 | 内置 Connector 使用 Revision 与字段归属检查、私有 AES-256-GCM 快照、原子私有写入和恢复流程。快照密钥保存在仅当前用户可读的本地文件中，不是操作系统 Keychain 条目。Cursor 使用上文所述的独立 SQLite 路径。 |
+| Agent 配置 | 内置 Connector 使用 Revision 与字段归属检查、私有 AES-256-GCM 快照、原子私有写入和恢复流程。快照密钥保存在仅当前用户可读的本地文件中，不是操作系统 Keychain 条目。 |
 
 可以在设置页关闭请求正文记录，对应 `data.request_body_capture: false`。保存后在网关按新设置启动时生效。旧配置保持默认开启。已在途的请求沿用开始时的正文记录策略。关闭后仍保留元数据收据，不会立即删除已有正文；已有正文继续遵循保留期限。
 

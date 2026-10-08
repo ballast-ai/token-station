@@ -44,6 +44,9 @@ Background mode is not a system daemon, a login item, or an automatic crash-rest
 
 ## Agents
 
+A supported connector does not certify every upstream release. Read-only preflight checks installation and configuration.
+Verify conversation, tool execution, images, and search separately after an Agent update.
+
 | Agent | Integration | Inbound protocol |
 |---|---|---|
 | [Claude Code](https://github.com/anthropics/claude-code) | Built-in connector | Anthropic Messages |
@@ -57,7 +60,7 @@ Background mode is not a system daemon, a login item, or an automatic crash-rest
 | [OpenClaw](https://github.com/openclaw/openclaw) | Built-in connector | OpenAI Chat Completions |
 | [WorkBuddy](https://www.workbuddy.ai/) | Built-in connector | OpenAI Chat Completions |
 | [OpenCode](https://github.com/anomalyco/opencode) | Built-in connector | OpenAI Chat Completions |
-| [Cursor](https://github.com/cursor/cursor) | Dedicated setup on macOS only | OpenAI-compatible endpoint |
+| [Cursor](https://github.com/cursor/cursor) | Discovery only; no supported connection | — |
 
 Claude Desktop does not currently have a public product repository. Its link opens Anthropic's official GitHub organization.
 
@@ -67,7 +70,7 @@ Grok Build uses `~/.grok/config.toml`, or `$GROK_HOME/config.toml` when `GROK_HO
 
 For the eleven built-in connectors, clicking **Connect** is consent to apply a bounded plan immediately. Token Station starts the gateway when needed and shows the fields changed by the first connection. Connector availability depends on the agent and operating system. It does not imply that Token Station publishes an installer for that platform.
 
-Cursor uses a separate macOS-only path. Quit Cursor first. Token Station privately backs up the relevant SQLite records, writes the OpenAI-compatible endpoint, virtual key, and enablement flag, verifies the result, and restores the previous values if verification fails. Restart Cursor afterward and choose a model that supports its custom OpenAI key path. Windows and Linux builds do not advertise this setup until their native credential and database paths have an equivalent backend. This path is not covered by standard connector ownership or managed disconnect.
+Cursor remains in the discovery registry for legacy installations. It is excluded from connection, routing, and visibility controls. Historical SQLite setup code does not represent a supported connection flow.
 
 ## Workloads that must stay on the device
 
@@ -110,7 +113,7 @@ Database paths with multiple hard links are refused because different names can 
 | Provider credentials | The default store is plaintext `secrets.json` with owner-only permissions. Other processes running as the same operating-system user may still read it. Environment-variable and standalone-file sources are supported. Credential values are excluded from logs, errors, and sandboxed plugins. |
 | Plugin sandbox | WASM adapters receive no direct network, filesystem, environment, arguments, inherited standard I/O, or plaintext credential access. Memory and call time are limited. |
 | Outbound authorization | Before attaching a credential, the host checks that the destination origin, path boundary, and credential slot match the configured provider. |
-| Agent configuration | Built-in connectors use revision and ownership checks, private AES-256-GCM snapshots, atomic private writes, and recovery flows. The snapshot key is an owner-only local file, not an operating-system keychain entry. Cursor uses the separate SQLite path above. |
+| Agent configuration | Built-in connectors use revision and ownership checks, private AES-256-GCM snapshots, atomic private writes, and recovery flows. The snapshot key is an owner-only local file, not an operating-system keychain entry. |
 
 The Settings page can disable request-body capture with `data.request_body_capture: false`. The change applies when the gateway starts with the saved settings. Existing configurations keep capture enabled. Requests already in flight keep their original capture policy. Disabling capture keeps metadata receipts and does not immediately delete existing bodies. Retention cleanup still applies to existing bodies.
 

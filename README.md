@@ -5,7 +5,7 @@
 
 **One local gateway for every AI agent.**
 
-Connect Claude Code, Codex, Gemini CLI, Cursor, and other agents to the models you control. Pin a provider, route by task, or use quota before it resets.
+Connect Claude Code, Codex, Gemini CLI, and other agents to the models you control. Pin a provider, route by task, or use quota before it resets.
 
 [![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
@@ -68,13 +68,10 @@ Connect Claude Code, Codex, Gemini CLI, Cursor, and other agents to the models y
     <td align="center">
       <a href="https://github.com/anomalyco/opencode"><img src="docs/assets/agents/opencode.svg" width="28" height="28" alt=""><br>OpenCode</a>
     </td>
-    <td align="center">
-      <a href="https://github.com/cursor/cursor"><img src="docs/assets/agents/cursor.svg" width="28" height="28" alt=""><br>Cursor</a>
-    </td>
   </tr>
 </table>
 
-Eleven agents use a built-in connector. Cursor's dedicated setup is currently macOS-only. See the [guides](docs/guides/) and [reference](docs/reference.md#agents) for protocols and connector notes.
+Eleven agents use a built-in connector. Cursor is discovery-only and has no supported connection flow. See the [guides](docs/guides/) and [reference](docs/reference.md#agents) for protocols and connector notes.
 
 ## Quick start
 
@@ -83,7 +80,7 @@ You need a provider API key or a local model endpoint. Token Station does not im
 1. Download the latest build from [Releases](https://github.com/ballast-ai/token-station/releases/latest): DMG for macOS, MSI for Windows, or AppImage/DEB/RPM for x86_64 Linux.
 2. Open Token Station and add a provider. Use a preset or a custom OpenAI-compatible endpoint.
 3. On **Home**, set the global route to Direct, Smart tiers, or Quota first.
-4. For a built-in connector, select a detected agent and click **Connect**. Configure Cursor through its dedicated setup flow.
+4. For a built-in connector, select a detected agent and click **Connect**.
 5. Send a request from the agent. Inspect the result in **Usage**.
 
 The default listen address is `127.0.0.1:8787`.
