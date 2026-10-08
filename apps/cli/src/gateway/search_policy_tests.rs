@@ -390,7 +390,6 @@ fn exercise_profile(
     let local = mode == "local"
         || mode == "auto"
             && status == 400
-            && !constrained
             && (error == "Tool type 'web_search' is not supported"
                 || error.contains("only client functions"));
     let seen = seen.lock().unwrap();

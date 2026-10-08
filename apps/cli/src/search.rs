@@ -1,8 +1,82 @@
 //! Opt-in, host-owned headless Chrome search. No personal browser profile is used.
 
+mod filters;
+mod queue;
+pub(crate) use filters::DomainFilter;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
+
+    #[test]
+    fn filters_decoded_links_before_selecting_five_results() {
+        let filter = DomainFilter::new(&["example.com".into()], &[]).unwrap();
+        let mut html = String::new();
+        for index in 0..6 {
+            write!(
+                html,
+                "<li class='b_algo'><h2><a href='https://evil.org/{index}'>Wrong</a></h2></li>"
+            )
+            .unwrap();
+        }
+        html.push_str(
+            "<li class='b_algo'><h2><a href='https://docs.example.com/'>Allowed</a></h2></li>",
+        );
+        let results = parse_filtered_results(&html, Engine::Bing, &filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://docs.example.com/");
+        let html = "<div class='result'><a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fevil.org%2F%3Fnext%3Dexample.com'>Bad redirect</a></div>";
+        assert!(
+            parse_filtered_results(html, Engine::Duckduckgo, &filter)
+                .unwrap_err()
+                .contains("domain filters")
+        );
+    }
+
+    #[test]
+    fn queued_controller_searches_keep_filters_and_release_capacity_after_failure() {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        *controller.fixture.lock().unwrap() = Some(Ok(vec![SearchResult {
+            title: "Wrong source".into(),
+            url: "https://evil.org/".into(),
+            snippet: String::new(),
+        }]));
+        let filter = DomainFilter::new(&["example.com".into()], &[]).unwrap();
+        let held = controller
+            .queue
+            .acquire(&|| false, 8, Duration::from_secs(1))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let search = scope.spawn(|| controller.search_filtered("test", &filter, &|| false));
+            drop(held);
+            assert!(
+                search
+                    .join()
+                    .unwrap()
+                    .unwrap_err()
+                    .contains("domain filters")
+            );
+        });
+        assert!(!controller.status().busy);
+        *controller.fixture.lock().unwrap() = Some(Err("Simulated browser failure".into()));
+        assert!(controller.search("test", &|| false).is_err());
+        assert!(!controller.status().busy);
+        *controller.fixture.lock().unwrap() = Some(Ok(vec![SearchResult {
+            title: "Allowed".into(),
+            url: "https://example.com/".into(),
+            snippet: String::new(),
+        }]));
+        assert_eq!(
+            controller
+                .search_filtered("test", &filter, &|| false)
+                .unwrap()
+                .results
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn extracts_only_public_search_results_and_decodes_text() {
@@ -162,6 +236,38 @@ mod tests {
 
     #[test]
     #[ignore = "Requires installed Chrome and public network access"]
+    fn live_concurrent_filtered_searches() {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (query, domain) in [
+                ("Python documentation", "docs.python.org"),
+                ("Rust Cargo documentation", "doc.rust-lang.org"),
+            ] {
+                let controller = &controller;
+                let barrier = &barrier;
+                handles.push(scope.spawn(move || {
+                    let filter = DomainFilter::new(&[domain.into()], &[]).unwrap();
+                    barrier.wait();
+                    let started = Instant::now();
+                    let response = controller.search_filtered(query, &filter, &|| false);
+                    println!("{}", serde_json::json!({"query":query,"domain":domain,"total_elapsed_ms":started.elapsed().as_millis(),"response":response}));
+                    let response = response.unwrap();
+                    assert!(!response.results.is_empty());
+                    assert!(response.results.iter().all(|result| filter.allows(&result.url)));
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+        assert!(!controller.status().busy);
+    }
+
+    #[test]
+    #[ignore = "Requires installed Chrome and public network access"]
     fn live_chrome_search() {
         let root = temporary_dir().unwrap();
         let controller = SearchController::shared(&root.0);
@@ -187,7 +293,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use url::{Host, Url};
@@ -246,18 +352,12 @@ pub struct SearchResponse {
 pub struct SearchController {
     data_dir: PathBuf,
     settings: Mutex<SearchSettings>,
-    busy: AtomicBool,
+    queue: queue::SearchQueue,
     revision: AtomicU64,
     #[cfg(test)]
     pub(crate) fixture: Mutex<Option<Result<Vec<SearchResult>, String>>>,
 }
 
-struct Permit<'a>(&'a AtomicBool);
-impl Drop for Permit<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
 impl SearchController {
     #[must_use]
     pub fn shared(data_dir: &Path) -> Arc<Self> {
@@ -277,7 +377,7 @@ impl SearchController {
         let controller = Arc::new(Self {
             data_dir: data_dir.to_path_buf(),
             settings: Mutex::new(settings),
-            busy: AtomicBool::new(false),
+            queue: queue::SearchQueue::default(),
             revision: AtomicU64::new(0),
             #[cfg(test)]
             fixture: Mutex::new(None),
@@ -304,7 +404,7 @@ impl SearchController {
         SearchStatus {
             settings: self.settings(),
             chrome_available: chrome_path().is_some(),
-            busy: self.busy.load(Ordering::SeqCst),
+            busy: self.queue.busy(),
         }
     }
 
@@ -338,19 +438,24 @@ impl SearchController {
         query: &str,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<SearchResponse, String> {
+        self.search_filtered(query, &DomainFilter::default(), cancelled)
+    }
+
+    pub(crate) fn search_filtered(
+        &self,
+        query: &str,
+        filter: &DomainFilter,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<SearchResponse, String> {
         if cancelled() {
             return Err("Browser search was cancelled.".into());
         }
         let engine = self.settings().engine;
-        let url = search_url(engine, query)?;
-        if self
-            .busy
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err("Browser search is busy. Retry after the current search finishes.".into());
-        }
-        let _permit = Permit(&self.busy);
+        let mut url = search_url(engine, query)?;
+        url.query_pairs_mut()
+            .clear()
+            .append_pair("q", &filter.query(query)?);
+        let _permit = self.queue.acquire(cancelled, 8, Duration::from_mins(1))?;
         #[cfg(test)]
         if let Some(results) = self
             .fixture
@@ -359,7 +464,7 @@ impl SearchController {
             .clone()
         {
             return Ok(SearchResponse {
-                results: results?,
+                results: filter_results(results?, filter)?,
                 source: "fixture",
                 content_type: "search_snippets",
                 elapsed_ms: 0,
@@ -403,7 +508,7 @@ impl SearchController {
             .spawn()
             .map_err(|_| "Cannot start headless Chrome.")?;
         let mut browser = OwnedBrowser { child, profile };
-        let results = browse(&mut browser, &url, engine, start, cancelled)?;
+        let results = browse(&mut browser, &url, engine, filter, start, cancelled)?;
         Ok(SearchResponse {
             results,
             source: "headless_chrome",
@@ -428,6 +533,7 @@ fn browse(
     browser: &mut OwnedBrowser,
     url: &Url,
     engine: Engine,
+    filter: &DomainFilter,
     start: Instant,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<SearchResult>, String> {
@@ -523,9 +629,11 @@ fn browse(
             if html.len() as u64 > MAX_HTML {
                 return Err("The search page exceeded the size limit.".into());
             }
-            match parse_results(html, engine) {
+            match parse_filtered_results(html, engine, filter) {
                 Ok(results) => return Ok(results),
-                Err(error) if error.contains("verification") => return Err(error),
+                Err(error) if error.contains("verification") => {
+                    return Err(error);
+                }
                 Err(error) => last_error = error,
             }
         }
@@ -670,7 +778,31 @@ pub(crate) fn public_url(raw: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+#[cfg(test)]
 fn parse_results(html: &str, engine: Engine) -> Result<Vec<SearchResult>, String> {
+    parse_filtered_results(html, engine, &DomainFilter::default())
+}
+
+fn filter_results(
+    results: Vec<SearchResult>,
+    filter: &DomainFilter,
+) -> Result<Vec<SearchResult>, String> {
+    let filtered: Vec<_> = results
+        .into_iter()
+        .filter(|result| filter.allows(&result.url))
+        .take(5)
+        .collect();
+    if filtered.is_empty() && !filter.is_empty() {
+        return Err("No search results match the domain filters.".into());
+    }
+    Ok(filtered)
+}
+
+fn parse_filtered_results(
+    html: &str,
+    engine: Engine,
+    filter: &DomainFilter,
+) -> Result<Vec<SearchResult>, String> {
     let document = Html::parse_document(html);
     let (row, link, snippet) = match engine {
         Engine::Bing => ("li.b_algo", "h2 a", "p"),
@@ -744,7 +876,7 @@ fn parse_results(html: &str, engine: Engine) -> Result<Vec<SearchResult>, String
             url,
             snippet: snippet.chars().take(1000).collect(),
         });
-        if results.len() == 5 {
+        if results.len() == 50 {
             break;
         }
     }
@@ -766,5 +898,5 @@ fn parse_results(html: &str, engine: Engine) -> Result<Vec<SearchResult>, String
         }
         return Err("No search results could be extracted. The page may be blocked or its layout may have changed.".into());
     }
-    Ok(results)
+    filter_results(results, filter)
 }

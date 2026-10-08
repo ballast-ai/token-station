@@ -18,6 +18,45 @@ pub(super) fn hosted(tool: &Value, anthropic: bool) -> bool {
     })
 }
 
+fn domain_filter(
+    search: &Value,
+    anthropic: bool,
+) -> Result<crate::search::DomainFilter, ErrorEnvelope> {
+    let present = |field| search.get(field).is_some_and(|value| !value.is_null());
+    if (anthropic && present("filters"))
+        || (!anthropic && (present("allowed_domains") || present("blocked_domains")))
+    {
+        return Err(invalid(
+            "Domain filter fields do not match the request protocol.",
+        ));
+    }
+    let filters = &search["filters"];
+    if !anthropic
+        && !filters.is_null()
+        && !filters
+            .as_object()
+            .is_some_and(|fields| fields.keys().all(|key| key == "allowed_domains"))
+    {
+        return Err(invalid(
+            "Browser search supports only filters.allowed_domains for Responses requests.",
+        ));
+    }
+    let list = |value: &Value| -> Result<Vec<String>, ErrorEnvelope> {
+        if value.is_null() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_value(value.clone())
+            .map_err(|_| invalid("Domain filters must be arrays of domain names."))
+    };
+    let allowed = list(if anthropic {
+        &search["allowed_domains"]
+    } else {
+        &filters["allowed_domains"]
+    })?;
+    let blocked = list(&search["blocked_domains"])?;
+    crate::search::DomainFilter::new(&allowed, &blocked).map_err(|error| invalid(&error))
+}
+
 /// Returns None for normal requests. Validate before invoking any model or browser.
 #[allow(clippy::too_many_lines)]
 fn prepare(
@@ -64,16 +103,11 @@ fn prepare(
     {
         return Err(invalid("Browser search supports direct tool calls only."));
     }
-    for field in [
-        "allowed_domains",
-        "blocked_domains",
-        "user_location",
-        "response_inclusion",
-        "filters",
-    ] {
+    domain_filter(search, anthropic)?;
+    for field in ["user_location", "response_inclusion"] {
         if search.get(field).is_some_and(|v| !v.is_null()) {
             return Err(invalid(
-                "Browser search preview does not support domain filters or location constraints. Remove these constraints or disable the preview.",
+                "Browser search does not support location or response-inclusion constraints.",
             ));
         }
     }
@@ -384,7 +418,9 @@ fn search_outcome(
         Err(message) if message.contains("query") || message.contains("arguments") => {
             Outcome::InvalidArguments
         }
-        Err(message) if message.contains("busy") => Outcome::Busy,
+        Err(message) if message.contains("busy") || message.contains("queue is full") => {
+            Outcome::Busy
+        }
         Err(message) if message.contains("timed out") => Outcome::Timeout,
         Err(message) if message.contains("verification") => Outcome::VerificationRequired,
         Err(message) if message.contains("No search results") => Outcome::NoResults,
@@ -425,6 +461,13 @@ impl Gateway {
         let Some((mut working, name, limit)) = prepare(&original, anthropic)? else {
             return Ok(None);
         };
+        let filter = domain_filter(
+            original["tools"]
+                .as_array()
+                .and_then(|tools| tools.iter().find(|tool| hosted(tool, anthropic)))
+                .expect("prepare validated hosted search"),
+            anthropic,
+        )?;
         if router.config().local_only {
             return Err(invalid("Browser search is unavailable in local-only mode."));
         }
@@ -615,7 +658,8 @@ impl Gateway {
                         let query = args["query"]
                             .as_str()
                             .ok_or("The search query must be a string.")?;
-                        self.search.search(query, &|| ctx.is_cancelled())
+                        self.search
+                            .search_filtered(query, &filter, &|| ctx.is_cancelled())
                     })
                 };
                 if ctx.is_cancelled() {
@@ -1025,10 +1069,38 @@ mod tests {
         );
     }
     #[test]
+    fn accepts_supported_filters_and_rejects_malformed_declarations() {
+        for (anthropic, constraint) in [
+            (true, json!({"allowed_domains":["docs.rs"]})),
+            (true, json!({"blocked_domains":["example.com"]})),
+            (false, json!({"filters":{"allowed_domains":["docs.rs"]}})),
+        ] {
+            let mut tool = constraint;
+            tool["type"] = json!(if anthropic {
+                "web_search_20250305"
+            } else {
+                "web_search"
+            });
+            tool["name"] = json!("web_search");
+            assert!(prepare(&json!({"tools":[tool]}), anthropic).is_ok());
+        }
+        for constraint in [
+            json!({"filters":[]}),
+            json!({"filters":{"allowed_domains":"example.com"}}),
+            json!({"filters":{"allowed_domains":["example.com/path"]}}),
+            json!({"allowed_domains":["example.com"]}),
+        ] {
+            let mut tool = constraint;
+            tool["type"] = json!("web_search");
+            assert!(prepare(&json!({"tools":[tool]}), false).is_err());
+        }
+    }
+
+    #[test]
     fn rejects_constraints_before_any_network_request() {
         for constraint in [
             json!({"external_web_access":false}),
-            json!({"filters":{"allowed_domains":["example.com"]}}),
+            json!({"filters":{"unknown":["example.com"]}}),
             json!({"user_location":{}}),
         ] {
             let mut tool = constraint;

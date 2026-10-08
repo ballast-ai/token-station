@@ -96,7 +96,7 @@ export default function SearchSettingsPanel() {
           </div>)}
         </>}
       </div>
-      <p className="text-xs text-muted-foreground">{copy("Local preview: up to 3 searches per request and 5 snippets per search. Domain filters, geographic targeting, cached-only search, and page reading are not supported. CAPTCHA is reported as an error. Chrome uses the system network settings.", "本地补充范围：每个请求最多搜索 3 次，每次最多返回 5 条摘要。不支持域名过滤、地理定位、仅缓存搜索和正文读取。验证码会明确报错。Chrome 使用系统网络设置。")}</p>
+      <p className="text-xs text-muted-foreground">{copy("Local preview: up to 3 searches per request and 5 snippets per search. One browser runs at a time. Up to 8 requests can wait for 60 seconds. Domain allow or block lists support up to 20 domains. Filters apply to returned source URLs and include subdomains. Geographic targeting, cached-only search, and page reading are not supported. CAPTCHA is reported as an error.", "本地补充范围：每个请求最多搜索 3 次，每次最多返回 5 条摘要。同时运行 1 个浏览器，最多 8 个请求排队，等待上限 60 秒。域名白名单或黑名单最多 20 个域名，过滤返回的来源 URL，包含子域名。不支持地理定位、仅缓存搜索和正文读取。验证码会明确报错。")}</p>
       <p className="text-xs text-muted-foreground">{copy("Managed Codex uses live search in all enabled modes and disables it when off. If the proxy is stopped, configuration sync waits until it restarts. Changing models or networks requires a new check. Claude Code and page fetching need separate validation.", "已接入的 Codex 在三种启用模式下均发送联网搜索请求，关闭总开关则禁用。代理停止时，配置将在代理重启后同步。更换模型或网络后请重新验证。Claude Code 和网页正文读取需要单独验证。")}</p>
     </CardContent>
   </Card>;
