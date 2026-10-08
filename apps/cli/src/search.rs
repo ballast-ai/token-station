@@ -1,6 +1,7 @@
 //! Opt-in, host-owned headless Chrome search. No personal browser profile is used.
 
 mod filters;
+mod page;
 mod queue;
 pub(crate) use filters::DomainFilter;
 
@@ -347,6 +348,8 @@ pub struct SearchResponse {
     pub source: &'static str,
     pub content_type: &'static str,
     pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<page::PageText>,
 }
 
 pub struct SearchController {
@@ -468,6 +471,7 @@ impl SearchController {
                 source: "fixture",
                 content_type: "search_snippets",
                 elapsed_ms: 0,
+                page: None,
             });
         }
         let start = Instant::now();
@@ -514,6 +518,7 @@ impl SearchController {
             source: "headless_chrome",
             content_type: "search_snippets",
             elapsed_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            page: None,
         })
     }
 }

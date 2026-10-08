@@ -10607,10 +10607,21 @@ fn current_route_search_request(stream: bool) -> Value {
 fn claude_search_uses_current_route_for_json_and_sse() {
     for stream in [false, true] {
         let chat = MockUpstream::start(Vec::new());
-        let search = MockUpstream::start(vec![vec![http_json(200,&json!({"id":"resp_search","status":"completed",
+        let document = json!({"id":"resp_search","status":"completed",
             "output":[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"query":"news","sources":[{"url":"https://example.com","title":"News"}]}},
                 {"type":"message","content":[{"type":"output_text","text":"Verified news","annotations":[]}]}],
-            "usage":{"input_tokens":12,"output_tokens":20}}).to_string())]]);
+            "usage":{"input_tokens":12,"output_tokens":20}});
+        let reply = if stream {
+            let events = format!(
+                "event: response.created\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.created","response":{"id":"resp_search"}}),
+                json!({"type":"response.completed","response":document})
+            );
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}", events.len()).into_bytes()
+        } else {
+            http_json(200, &document.to_string())
+        };
+        let search = MockUpstream::start(vec![vec![reply]]);
         let key = key_file("current-route-search", "sk-search-fixture");
         let proxy = start_current_route_search_proxy(&chat, &search, &key);
         let (status, body) = post_messages(
@@ -10628,6 +10639,7 @@ fn claude_search_uses_current_route_for_json_and_sse() {
             seen[0].authorization.as_deref(),
             Some("Bearer sk-search-fixture")
         );
+        assert_eq!(seen[0].body["stream"], stream);
         assert_eq!(seen[0].body["max_tool_calls"], 2);
         assert!(body.contains("web_search_tool_result"));
         assert!(body.contains("https://example.com"));

@@ -166,8 +166,10 @@ impl Gateway {
                 ErrorEnvelope::new(ErrorCode::Internal, 500, "Search route is unavailable.")
             })?
             .search_dialect();
-        let native = dialect == ApiDialect::ResponsesNative
-            || anthropic && dialect == ApiDialect::AnthropicNative;
+        let native = matches!(
+            dialect,
+            ApiDialect::ResponsesNative | ApiDialect::AnthropicNative
+        );
         if !native {
             if settings.mode == SearchMode::Native {
                 return Err(ErrorEnvelope::new(
@@ -195,7 +197,17 @@ impl Gateway {
         let jev_request = self
             .jev
             .is_enabled()
-            .then(|| super::jev_routing::native_request(&original, dialect, model))
+            .then(|| {
+                super::jev_routing::native_request(
+                    &original,
+                    if anthropic {
+                        ApiDialect::AnthropicNative
+                    } else {
+                        ApiDialect::ResponsesNative
+                    },
+                    model,
+                )
+            })
             .flatten();
         decision = self.route_native_with_jev(
             ctx,
@@ -245,9 +257,15 @@ impl Gateway {
                 Some(decision),
             );
         }
-        let bridge = anthropic && dialect == ApiDialect::ResponsesNative;
+        let bridge = (anthropic && dialect == ApiDialect::ResponsesNative)
+            || (!anthropic && dialect == ApiDialect::AnthropicNative);
         let (mut forwarded, name) = if bridge {
-            match super::web_search::to_responses(&original) {
+            let translated = if anthropic {
+                super::web_search::to_responses(&original)
+            } else {
+                super::reverse_search::to_anthropic(&original).map(|body| (body, String::new()))
+            };
+            match translated {
                 Ok(value) => value,
                 Err(error)
                     if settings.mode == SearchMode::Auto && error.code == ErrorCode::Capability =>
@@ -302,6 +320,15 @@ impl Gateway {
                 last_upstream_error: &raw_error,
             }
         };
+        let mut bridge_stream = (bridge && probe.stream).then(|| {
+            super::search_stream::SearchStream::new(
+                anthropic,
+                &original,
+                &name,
+                forwarded["max_tool_calls"].as_u64(),
+            )
+        });
+        let mut bridge_error = None;
         let mut parked = None;
         let mut output_started = false;
         ctx.begin_host_loop_accounting();
@@ -321,7 +348,21 @@ impl Gateway {
                 }
                 reply => {
                     output_started = true;
-                    emit(reply)
+                    if let Some(bridge) = &mut bridge_stream {
+                        if let Reply::Chunk(chunk) = reply {
+                            match bridge.push(&chunk, emit) {
+                                Ok(accepted) => accepted,
+                                Err(error) => {
+                                    bridge_error = Some(error);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        }
+                    } else {
+                        emit(reply)
+                    }
                 }
             },
             record,
@@ -386,6 +427,25 @@ impl Gateway {
             )));
         }
         let (target, outcome) = result?;
+        if let Some(bridge) = &mut bridge_stream
+            && output_started
+            && parked.is_none()
+        {
+            if bridge_error.is_none() && outcome != StreamOutcome::ClientCancelled {
+                bridge_error = bridge.finish().err();
+            }
+            if let Some(error) = bridge_error {
+                if !bridge.started() {
+                    emit(Reply::BeginStream);
+                }
+                super::search_stream::emit_failure(anthropic, &error, emit);
+                record.status = error.http_status;
+                record.error_code = Some(error.code);
+                return Ok(Some((target, StreamOutcome::FailedAfterPartial)));
+            }
+            return Ok(Some((target, outcome)));
+        }
+
         if let Some(reply) = parked {
             let accepted = if bridge && reply.status < 400 {
                 let document = serde_json::from_str(&reply.body).map_err(|_| {
@@ -395,14 +455,19 @@ impl Gateway {
                         "Native search returned invalid JSON.",
                     )
                 })?;
-                let answer = super::web_search::from_responses(
-                    &document,
-                    &name,
-                    original["model"].as_str().unwrap_or(model),
-                    forwarded["max_tool_calls"].as_u64(),
-                    &original,
-                )?;
-                super::web_search::emit_message(&answer, probe.stream, emit)
+                if anthropic {
+                    let answer = super::web_search::from_responses(
+                        &document,
+                        &name,
+                        original["model"].as_str().unwrap_or(model),
+                        forwarded["max_tool_calls"].as_u64(),
+                        &original,
+                    )?;
+                    super::web_search::emit_message(&answer, probe.stream, emit)
+                } else {
+                    let answer = super::reverse_search::from_anthropic(&document, &original)?;
+                    super::local_search::emit_responses(&answer, probe.stream, emit)
+                }
             } else {
                 emit(Reply::BeginJson(reply))
             };

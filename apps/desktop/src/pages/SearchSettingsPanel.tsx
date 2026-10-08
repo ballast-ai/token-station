@@ -38,7 +38,7 @@ export default function SearchSettingsPanel() {
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
-  return <Card>
+  return <Card className="shrink-0">
     <CardHeader><CardTitle>{copy("Web search · Preview", "联网搜索 · 试用")}</CardTitle></CardHeader>
     <CardContent className="space-y-6">
       <p className="text-sm text-muted-foreground">{copy("Auto prefers the provider’s native search. Local Chrome supplements explicit unsupported-search failures. Native provider charges and model tokens still apply.", "自动模式优先使用上游原生搜索，明确不支持时由本地 Chrome 补充。本地搜索无额外搜索 API 费用；原生服务费用及模型 Token 按上游计费。")}</p>
@@ -96,8 +96,8 @@ export default function SearchSettingsPanel() {
           </div>)}
         </>}
       </div>
-      <p className="text-xs text-muted-foreground">{copy("Local preview: up to 3 searches per request and 5 snippets per search. One browser runs at a time. Up to 8 requests can wait for 60 seconds. Domain allow or block lists support up to 20 domains. Filters apply to returned source URLs and include subdomains. Geographic targeting, cached-only search, and page reading are not supported. CAPTCHA is reported as an error.", "本地补充范围：每个请求最多搜索 3 次，每次最多返回 5 条摘要。同时运行 1 个浏览器，最多 8 个请求排队，等待上限 60 秒。域名白名单或黑名单最多 20 个域名，过滤返回的来源 URL，包含子域名。不支持地理定位、仅缓存搜索和正文读取。验证码会明确报错。")}</p>
-      <p className="text-xs text-muted-foreground">{copy("Managed Codex uses live search in all enabled modes and disables it when off. If the proxy is stopped, configuration sync waits until it restarts. Changing models or networks requires a new check. Claude Code and page fetching need separate validation.", "已接入的 Codex 在三种启用模式下均发送联网搜索请求，关闭总开关则禁用。代理停止时，配置将在代理重启后同步。更换模型或网络后请重新验证。Claude Code 和网页正文读取需要单独验证。")}</p>
+      <p className="text-xs text-muted-foreground">{copy("Local preview: up to 3 search or page-read operations per request and 5 snippets per search. One browser runs at a time. Up to 8 requests can wait for 60 seconds. Domain allow or block lists support up to 20 domains. Filters apply to returned source URLs and include subdomains. Page reading opens only sources returned in the same request. It supports static HTML and UTF-8 text, up to 2 MiB and 24,000 returned characters. Literal find applies to returned text. Geographic targeting, cached-only search, PDF, and JavaScript rendering are not supported.", "本地补充范围：每个请求最多执行 3 次搜索或正文读取，每次搜索最多返回 5 条摘要。同时运行 1 个浏览器，最多 8 个请求排队，等待上限 60 秒。域名白名单或黑名单最多 20 个域名，过滤返回的来源 URL，包含子域名。正文读取仅限本次搜索返回的来源，支持静态 HTML 和 UTF-8 文本，下载上限 2 MiB、返回上限 24,000 字符，可在返回文本中查找字面内容。不支持地理定位、仅缓存搜索、PDF 和 JavaScript 渲染。")}</p>
+      <p className="text-xs text-muted-foreground">{copy("Managed Codex uses live search in all enabled modes and disables it when off. If the proxy is stopped, configuration sync waits until it restarts. Changing models or networks requires a new check. Native search bridges support text and direct functions in both directions. Some source metadata is finalized at stream completion. Verify each provider separately.", "已接入的 Codex 在三种启用模式下均发送联网搜索请求，关闭总开关则禁用。代理停止时，配置将在代理重启后同步。更换模型或网络后请重新验证。原生搜索双向桥接支持文本和直接函数调用，部分来源信息会在流结束时补齐。各供应商须分别验证。")}</p>
     </CardContent>
   </Card>;
 }

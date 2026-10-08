@@ -140,7 +140,7 @@ pub(super) fn to_responses(body: &Value) -> Result<(Value, String), ErrorEnvelop
         }
         append_message(&mut input, message, role)?;
     }
-    let mut result = json!({"model":body["model"],"input":input,"tools":output_tools,"stream":false,"store":false,
+    let mut result = json!({"model":body["model"],"input":input,"tools":output_tools,"stream":body["stream"].as_bool().unwrap_or(false),"store":false,
         "include":["web_search_call.action.sources"]});
     if let Some(limit) = tool.get("max_uses") {
         let limit = limit
@@ -309,7 +309,16 @@ fn attributed_sources(
     Ok(calls)
 }
 
-fn search_action_input(item: &Value) -> Value {
+pub(super) fn search_id(response_id: &str, count: u64) -> String {
+    let response_id: String = response_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(100)
+        .collect();
+    format!("srvtoolu_{response_id}_{count}")
+}
+
+pub(super) fn search_action_input(item: &Value) -> Value {
     let mut input = serde_json::Map::new();
     for field in ["query", "queries", "url", "pattern"] {
         if let Some(value) = item["action"].get(field) {
@@ -359,14 +368,7 @@ pub(super) fn from_responses(
         match item["type"].as_str() {
             Some("web_search_call") => {
                 count += 1;
-                let response_id: String = body["id"]
-                    .as_str()
-                    .unwrap_or("search")
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .take(100)
-                    .collect();
-                let id = format!("srvtoolu_{response_id}_{count}");
+                let id = search_id(body["id"].as_str().unwrap_or("search"), count);
                 content.push(json!({"type":"server_tool_use","id":id,"name":name,
                     "input":search_action_input(item)}));
                 let result = if max_uses.is_some_and(|limit| count > limit) {
@@ -499,7 +501,7 @@ impl std::io::Write for ResponseBudget {
     }
 }
 
-fn sse(event: &str, body: &Value) -> String {
+pub(super) fn sse(event: &str, body: &Value) -> String {
     format!("event: {event}\ndata: {body}\n\n")
 }
 
@@ -541,36 +543,7 @@ pub(super) fn emit_message(
         .flatten()
         .enumerate()
     {
-        let mut start = block.clone();
-        let delta = match block["type"].as_str() {
-            Some("text") => {
-                start["text"] = json!("");
-                Some(json!({"type":"text_delta","text":block["text"]}))
-            }
-            Some("tool_use" | "server_tool_use") => {
-                start["input"] = json!({});
-                Some(json!({"type":"input_json_delta","partial_json":block["input"].to_string()}))
-            }
-            _ => None,
-        };
-        if !emit(Reply::Chunk(sse(
-            "content_block_start",
-            &json!({"type":"content_block_start","index":index,"content_block":start}),
-        ))) {
-            return false;
-        }
-        if let Some(delta) = delta
-            && !emit(Reply::Chunk(sse(
-                "content_block_delta",
-                &json!({"type":"content_block_delta","index":index,"delta":delta}),
-            )))
-        {
-            return false;
-        }
-        if !emit(Reply::Chunk(sse(
-            "content_block_stop",
-            &json!({"type":"content_block_stop","index":index}),
-        ))) {
+        if !emit_content(index, block, emit) {
             return false;
         }
     }
@@ -581,6 +554,46 @@ pub(super) fn emit_message(
         "message_stop",
         &json!({"type":"message_stop"}),
     )))
+}
+
+pub(super) fn emit_content(
+    index: usize,
+    block: &Value,
+    emit: &mut dyn FnMut(Reply) -> bool,
+) -> bool {
+    let mut start = block.clone();
+    let delta = match block["type"].as_str() {
+        Some("text") => {
+            start["text"] = json!("");
+            Some(json!({"type":"text_delta","text":block["text"]}))
+        }
+        Some("tool_use" | "server_tool_use") => {
+            start["input"] = json!({});
+            Some(json!({"type":"input_json_delta","partial_json":block["input"].to_string()}))
+        }
+        _ => None,
+    };
+    if !emit(Reply::Chunk(sse(
+        "content_block_start",
+        &json!({"type":"content_block_start","index":index,"content_block":start}),
+    ))) {
+        return false;
+    }
+    if let Some(delta) = delta
+        && !emit(Reply::Chunk(sse(
+            "content_block_delta",
+            &json!({"type":"content_block_delta","index":index,"delta":delta}),
+        )))
+    {
+        return false;
+    }
+    if !emit(Reply::Chunk(sse(
+        "content_block_stop",
+        &json!({"type":"content_block_stop","index":index}),
+    ))) {
+        return false;
+    }
+    true
 }
 
 impl Gateway {
@@ -655,6 +668,9 @@ impl Gateway {
         let stream = original["stream"].as_bool().unwrap_or(false);
         let max_uses = forwarded["max_tool_calls"].as_u64();
         let mut answer = None;
+        let mut bridge =
+            super::search_stream::ResponsesSearchStream::new(&original, &name, max_uses);
+        let mut bridge_error = None;
         let result = self.try_responses_passthrough(
             ctx,
             agent,
@@ -665,8 +681,16 @@ impl Gateway {
                 if let Reply::BeginJson(json) = reply {
                     answer = Some(json);
                     true
+                } else if let Reply::Chunk(chunk) = reply {
+                    match bridge.push(&chunk, emit) {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            bridge_error = Some(error);
+                            false
+                        }
+                    }
                 } else {
-                    false
+                    true
                 }
             },
             record,
@@ -677,6 +701,22 @@ impl Gateway {
             ));
         };
         record.stream = stream;
+        if stream && answer.is_none() {
+            if bridge_error.is_none() && outcome != StreamOutcome::ClientCancelled {
+                bridge_error = bridge.finish().err();
+            }
+            if let Some(error) = bridge_error {
+                if !bridge.started {
+                    emit(Reply::BeginStream);
+                }
+                super::search_stream::emit_failure(true, &error, emit);
+                record.status = error.http_status;
+                record.error_code = Some(error.code);
+                return Ok(Some((target, StreamOutcome::FailedAfterPartial)));
+            }
+            return Ok(Some((target, outcome)));
+        }
+
         if matches!(outcome, StreamOutcome::ClientCancelled) {
             Self::emit_cancelled(emit);
             return Ok(Some((target, outcome)));
@@ -761,7 +801,7 @@ mod tests {
     fn hosted_search_preserves_limits_filters_and_forced_choice() {
         let (body, name) = to_responses(&request()).unwrap();
         assert_eq!(name, "web_search");
-        assert_eq!(body["stream"], false);
+        assert_eq!(body["stream"], true);
         assert_eq!(body["max_tool_calls"], 2);
         assert_eq!(
             body["tools"][0]["filters"]["allowed_domains"],

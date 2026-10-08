@@ -30,7 +30,27 @@ South is the default Provider execution engine: buffered and streaming calls, Be
 
 Anthropic-wire upstreams (`provider: anthropic`, the Anthropic API itself or a compatible `/anthropic/v1` endpoint) are translated through the Anthropic provider component like every other upstream: thinking, a forced `tool_choice`, and server-tool history blocks all round-trip. One thing the Canonical IR cannot carry is a tool the upstream executes itself (`web_search`, `web_fetch`, `code_execution`, `tool_search`, `mcp`, `advisor`). For that, set `"api_dialect": "anthropic-native"` on the upstream: an Anthropic Messages request that declares such a tool is then forwarded verbatim to `base_url` + `/messages` (only `model` is rewritten), while every other request to that upstream still takes the translated path. The setting requires `provider: anthropic` and a `base_url` ending at the version segment. It is edited in the configuration file; the desktop does not offer it.
 
-Codex live Web Search requires a provider that implements the native OpenAI Responses API. Set `"api_dialect": "responses-native"` on an explicitly selected `provider: openai-compatible` upstream whose `base_url` ends at the API version segment, such as `https://api.openai.com/v1`. A Responses request with an active `web_search` tool is then forwarded to `base_url` + `/responses`; Token Station preserves the request and response formats, including `web_search_call` JSON items and SSE events, and rewrites only `model`. Requests without active Web Search use the configured routing policy. Image turns, including continuations with retained images, use the Responses endpoint when the selected upstream uses `responses-native`. Other requests use the translated path. Native continuations replay bounded local input history without sending another account's response ID. A translated upstream still rejects provider-hosted tools before network I/O. The desktop does not currently expose this advanced setting.
+For native Responses passthrough, Codex live Web Search requires a provider that implements the native OpenAI Responses API. Set `"api_dialect": "responses-native"` on an explicitly selected `provider: openai-compatible` upstream whose `base_url` ends at the API version segment, such as `https://api.openai.com/v1`. A Responses request with an active `web_search` tool is then forwarded to `base_url` + `/responses`; Token Station preserves the request and response formats, including `web_search_call` JSON items and SSE events, and rewrites only `model`. Requests without active Web Search use the configured routing policy. Image turns, including continuations with retained images, use the Responses endpoint when the selected upstream uses `responses-native`. Other requests use the translated path. Native continuations replay bounded local input history without sending another account's response ID. A translated upstream still rejects provider-hosted tools before network I/O. The desktop does not currently expose this advanced setting.
+
+With Web Search enabled, Auto and Native modes also bridge hosted search between Anthropic Messages and OpenAI Responses.
+The reverse bridge supports text, ordinary client functions, search history, compatible tool choices, and domain allow lists.
+It maps explicit `reasoning.effort=none` to disabled thinking.
+It rejects images, persisted response IDs, strict function schemas, other reasoning controls, and unsupported fields.
+Both bridges stream answer text before completion. Some search results and citations are finalized at the terminal event.
+The Anthropic-facing bridge returns portable source URLs. It does not invent provider-encrypted citation handles.
+Failures, cancellation, and truncated streams do not produce a successful terminal event.
+
+Local search uses one browser slot and a FIFO queue with eight waiting positions and a 60-second wait limit.
+Each request permits three operations, shared between searches and page reads. Searches return at most five snippets.
+Domain allow or block lists accept up to 20 DNS names, including subdomains. Returned URLs are filtered independently of engine hints.
+The internal search function accepts `query` to search, or `url` to open an exact source returned in the same request.
+An optional `pattern` counts case-sensitive literal matches within returned page text. It cannot be combined with `query`.
+Page reading supports static HTML and UTF-8 plain text. It does not implement a general Anthropic `web_fetch` hosted tool.
+It uses public IPv4 addresses on default HTTP/HTTPS ports, with DNS validation, no proxy or credentials, and at most three checked redirects.
+Each read has a 15-second network budget, a 2 MiB transfer limit, and a 24,000-character text limit. Truncation is explicit.
+PDF, JavaScript rendering, authenticated pages, geographic targeting, and cached-only local search remain unsupported.
+A successful request does not establish source relevance, freshness, or factual support.
+
 
 ## Desktop
 

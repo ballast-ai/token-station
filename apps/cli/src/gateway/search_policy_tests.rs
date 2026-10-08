@@ -91,6 +91,47 @@ fn native_search_succeeds_without_browser_execution() {
     }
 }
 
+#[test]
+fn both_native_search_bridges_preserve_stream_completion_and_never_replay_failures() {
+    for (anthropic, native_anthropic) in [(true, false), (false, true)] {
+        for (truncated, cancel) in [(false, false), (true, false), (false, true)] {
+            exercise_transport(
+                "native",
+                200,
+                "",
+                anthropic,
+                1,
+                false,
+                native_anthropic,
+                true,
+                truncated,
+                cancel,
+            );
+        }
+        exercise_transport(
+            "native",
+            200,
+            "",
+            anthropic,
+            1,
+            false,
+            native_anthropic,
+            false,
+            false,
+            false,
+        );
+    }
+}
+
+#[test]
+fn legacy_search_bridge_streams_without_managed_search_settings() {
+    for (truncated, cancel) in [(false, false), (true, false), (false, true)] {
+        exercise_transport(
+            "disabled", 200, "", true, 1, false, false, true, truncated, cancel,
+        );
+    }
+}
+
 fn exercise(
     mode: &str,
     status: u16,
@@ -230,6 +271,8 @@ fn exercise_profile(
     let stopped = Arc::clone(&stop);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&seen);
+    let early_text = Arc::new(AtomicBool::new(false));
+    let observed_text = Arc::clone(&early_text);
     let response_error = error.to_owned();
     let worker = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -310,12 +353,58 @@ fn exercise_profile(
                 reply = json!({"id":"msg_a","type":"message","role":"assistant","model":"test-model","stop_reason":if content[0]["type"] == "tool_use" {"tool_use"} else {"end_turn"},"content":content,"usage":{"input_tokens":10,"output_tokens":5}});
             }
             if native && body["stream"] == true {
+                let await_early_text = || {
+                    if !cancel && !truncated {
+                        let start = Instant::now();
+                        while !observed_text.load(Ordering::Acquire)
+                            && start.elapsed() < Duration::from_secs(3)
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        assert!(
+                            observed_text.load(Ordering::Acquire),
+                            "The client must receive text before the upstream terminal event"
+                        );
+                    }
+                };
+                if native_anthropic {
+                    let _ = write!(
+                        connection,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                    );
+                    if truncated {
+                        let _ = write!(
+                            connection,
+                            "event: message_start\ndata: {}\n\n",
+                            json!({"type":"message_start","message":{"id":"msg_a","type":"message","role":"assistant","model":"test-model","content":[],"usage":{"input_tokens":10,"output_tokens":0}}})
+                        );
+                    } else {
+                        super::web_search::emit_message(&reply, true, &mut |reply| {
+                            if let Reply::Chunk(chunk) = reply {
+                                let accepted = connection.write_all(chunk.as_bytes()).is_ok();
+                                if accepted && chunk.contains("Native evidence") {
+                                    await_early_text();
+                                }
+                                return accepted;
+                            }
+                            true
+                        });
+                    }
+                    continue;
+                }
+
                 let _ = write!(
                     connection,
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: response.created\ndata: {}\n\n",
                     json!({"type":"response.created","response":{"id":"resp_native","status":"in_progress"}})
                 );
                 if !truncated {
+                    let _ = write!(
+                        connection,
+                        "event: response.output_text.delta\ndata: {}\n\n",
+                        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"Native evidence"})
+                    );
+                    await_early_text();
                     let _ = write!(
                         connection,
                         "event: response.completed\ndata: {}\n\n",
@@ -343,7 +432,7 @@ fn exercise_profile(
     let recorder = Arc::new(Records::default());
     let gateway = Gateway::new(&config, recorder.clone()).unwrap();
     let settings =
-        serde_json::from_value(json!({"enabled":true,"engine":"bing","mode":mode})).unwrap();
+        serde_json::from_value(json!({"enabled":mode != "disabled","engine":"bing","mode":if mode == "disabled" {"native"} else {mode}})).unwrap();
     gateway.search.save(settings).unwrap();
     *gateway.search.fixture.lock().unwrap() = Some(Ok(vec![crate::search::SearchResult {
         title: "Rust".into(),
@@ -377,7 +466,12 @@ fn exercise_profile(
             &mut |reply| {
                 match reply {
                     Reply::BeginJson(reply) => answers.push(reply),
-                    Reply::Chunk(chunk) => chunks.push_str(&chunk),
+                    Reply::Chunk(chunk) => {
+                        if chunk.contains("Native evidence") {
+                            early_text.store(true, Ordering::Release);
+                        }
+                        chunks.push_str(&chunk);
+                    }
                     Reply::BeginStream if cancel => return false,
                     Reply::BeginStream => {}
                 }
@@ -417,13 +511,22 @@ fn exercise_profile(
         assert!(records[0].browser_searches.is_empty());
         assert_eq!(records[0].attempts, 1);
         if !truncated && !cancel {
-            assert!(chunks.contains("response.completed"));
+            assert!(
+                chunks.contains(if anthropic {
+                    "message_stop"
+                } else {
+                    "response.completed"
+                }),
+                "{chunks}"
+            );
         }
         if cancel {
             assert_eq!(records[0].status, 499);
         }
         if truncated {
             assert!(records[0].error_code.is_some());
+            assert!(!chunks.contains("event: response.completed"));
+            assert!(!chunks.contains("event: message_stop"));
         }
     } else {
         assert_eq!(answers.len(), requests);
@@ -486,4 +589,139 @@ fn exercise_profile(
     drop(seen);
     drop(records);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Exercise an existing credential without changing persistent routes or search settings.
+#[test]
+#[ignore = "Requires an explicitly selected live configuration, upstream, and model"]
+#[allow(clippy::too_many_lines)] // Keep the opt-in live setup and evidence checks in one scenario.
+fn live_configured_native_search_bridge() {
+    let path = std::env::var("TOKEN_STATION_SEARCH_LIVE_CONFIG").unwrap();
+    let upstream = std::env::var("TOKEN_STATION_SEARCH_LIVE_UPSTREAM").unwrap();
+    let model = std::env::var("TOKEN_STATION_SEARCH_LIVE_MODEL").unwrap();
+    let anthropic = std::env::var("TOKEN_STATION_SEARCH_LIVE_CLIENT").unwrap() == "anthropic";
+    let mut config = ClientConfig::load(Path::new(&path)).unwrap();
+    config.router = serde_json::from_value(json!({"version":1,"pools":{"live":[{"upstream":upstream,"model":model}]},"default_pool":"live"})).unwrap();
+    config.routing = None;
+    config.agent_routes.clear();
+    let recorder = Arc::new(Records::default());
+    let mut gateway = Gateway::new(&config, recorder.clone()).unwrap();
+    let root = std::env::temp_dir().join(format!("ts-native-live-{}", std::process::id()));
+    gateway.search = crate::search::SearchController::shared(&root);
+    gateway
+        .search
+        .save(
+            serde_json::from_value(json!({"enabled":true,"engine":"bing","mode":"native"}))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut body = if anthropic {
+        json!({"model":"auto","max_tokens":1000,"messages":[{"role":"user","content":"Search the web for Python official documentation. Give one brief sentence and cite the official documentation URL."}],"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":1}],"tool_choice":{"type":"tool","name":"web_search"}})
+    } else {
+        json!({"model":"auto","max_output_tokens":1000,"reasoning":{"effort":"none"},"input":"Search the web for Python official documentation. Give one brief sentence and cite the official documentation URL.","tools":[{"type":"web_search"}],"tool_choice":"required","max_tool_calls":1})
+    };
+    body["stream"] = json!(true);
+    let mut wire = String::new();
+    let mut http_status = None;
+    let mut error_message = Value::Null;
+    let mut json_shape = Value::Null;
+    let started = std::time::Instant::now();
+    let mut first_delta_ms = None;
+    let ctx = RequestContext::detached(
+        std::time::Duration::from_secs(90),
+        std::time::Duration::from_secs(90),
+    );
+    gateway.chat_scoped_without_body_log(
+        &ctx,
+        None,
+        None,
+        "POST",
+        if anthropic {
+            "/v1/messages"
+        } else {
+            "/v1/responses"
+        },
+        &[],
+        body.to_string().as_bytes(),
+        &mut |reply| {
+            match reply {
+                Reply::Chunk(chunk) => {
+                    if first_delta_ms.is_none()
+                        && (chunk.contains("text_delta")
+                            || chunk.contains("response.output_text.delta"))
+                    {
+                        first_delta_ms = Some(started.elapsed().as_millis());
+                    }
+                    wire.push_str(&chunk);
+                }
+                Reply::BeginJson(reply) => {
+                    http_status = Some(reply.status);
+                    let error = serde_json::from_str::<Value>(&reply.body).unwrap_or(Value::Null);
+                    json_shape = json!({"bytes":reply.body.len(),"keys":error.as_object().map(|object| object.keys().collect::<Vec<_>>()),"code":error.get("code"),"error_type":error["error"].as_str()});
+                    error_message = error
+                        .get("message")
+                        .or_else(|| error["error"].get("message"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                }
+                Reply::BeginStream => {}
+            }
+            true
+        },
+    );
+    let mut completed_search_calls = 0;
+    let mut url_annotations = 0;
+    for line in wire.lines().filter_map(|line| line.strip_prefix("data: ")) {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if event["type"] == "error" {
+            error_message = event
+                .get("message")
+                .or_else(|| event["error"].get("message"))
+                .cloned()
+                .unwrap_or(Value::Null);
+        }
+        if event["type"] == "response.output_item.done"
+            && event["item"]["type"] == "web_search_call"
+            && event["item"]["status"] == "completed"
+            && event["item"]["action"]["sources"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        {
+            completed_search_calls += 1;
+        }
+        if event["type"] == "content_block_start"
+            && event["content_block"]["type"] == "web_search_tool_result"
+            && event["content_block"]["content"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        {
+            completed_search_calls += 1;
+        }
+        if event["type"] == "response.output_text.annotation.added"
+            && event["annotation"]["type"] == "url_citation"
+        {
+            url_annotations += 1;
+        }
+    }
+    let records = recorder.0.lock().unwrap();
+    let record = records.last().unwrap();
+    let completed = wire.contains(if anthropic {
+        "event: message_stop"
+    } else {
+        "event: response.completed"
+    });
+    let evidence = wire.contains("https://docs.python.org");
+    println!(
+        "{}",
+        json!({"upstream":upstream,"model":model,"client":if anthropic {"anthropic"} else {"responses"},"status":record.status,"json_status":http_status,"error_message":error_message,"json_shape":json_shape,"error_code":record.error_code,"attempts":record.attempts,"browser_operations":record.browser_searches.len(),"completed":completed,"official_source_present":evidence,"completed_search_calls":completed_search_calls,"url_annotations":url_annotations,"first_delta_ms":first_delta_ms,"elapsed_ms":started.elapsed().as_millis(),"wire_bytes":wire.len()})
+    );
+    drop(records);
+    drop(gateway);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        completed && evidence && completed_search_calls > 0 && first_delta_ms.is_some(),
+        "Live native search did not complete with the expected source."
+    );
 }

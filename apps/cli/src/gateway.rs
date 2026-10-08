@@ -30,9 +30,12 @@ mod jev_tests;
 mod local_search;
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
+mod reverse_search;
+mod reverse_search_stream;
 mod search_policy;
 #[cfg(test)]
 mod search_policy_tests;
+mod search_stream;
 #[cfg(test)]
 mod semantic_tests;
 mod web_search;
