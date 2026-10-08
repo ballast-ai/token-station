@@ -615,7 +615,7 @@ struct StreamState {
     started: bool,
     next_block_index: u32,
     text_blocks: BTreeMap<u32, u32>,
-    thinking_blocks: BTreeMap<u32, u32>,
+    thinking_blocks: BTreeMap<(u32, u32), u32>,
     tool_blocks: BTreeMap<u32, ToolBlock>,
     open_blocks: BTreeSet<u32>,
     pending_finish_reason: Option<FinishReason>,
@@ -654,14 +654,20 @@ impl StreamState {
         Ok(index)
     }
 
-    /// The anthropic content-block index for choice `index`'s thinking
-    /// block, opening it on first use.
-    fn thinking_block(&mut self, index: u32, rendered: &mut String) -> Result<u32, String> {
-        if let Some(block_index) = self.thinking_blocks.get(&index) {
+    /// Return the outbound Anthropic block for one canonical choice and source
+    /// block pair. Open a new outbound block on first use.
+    fn thinking_block(
+        &mut self,
+        choice_index: u32,
+        source_block_index: u32,
+        rendered: &mut String,
+    ) -> Result<u32, String> {
+        let key = (choice_index, source_block_index);
+        if let Some(block_index) = self.thinking_blocks.get(&key) {
             return Ok(*block_index);
         }
         let block_index = self.allocate_block()?;
-        self.thinking_blocks.insert(index, block_index);
+        self.thinking_blocks.insert(key, block_index);
         rendered.push_str(&sse(
             "content_block_start",
             json!({
@@ -864,6 +870,7 @@ impl Guest for AnthropicClient {
                 stop,
             },
             stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+            host_values: token_station_protocol::ComponentValues::new(),
             extensions: request_extensions(body),
         })
     }
@@ -994,17 +1001,18 @@ impl Guest for AnthropicClient {
                     )?);
                     Ok(rendered)
                 }
-                // 0.3.0: reasoning streams as native Anthropic thinking
-                // blocks, one per choice index, closed at `Done` with the
-                // other open blocks.
+                // Reasoning streams as native Anthropic thinking blocks. Each
+                // canonical choice and source-block pair gets one outbound
+                // block, which closes at `Done` with the other open blocks.
                 StreamEvent::ThinkingDelta {
                     index,
+                    block_index,
                     thinking_delta,
                 } => {
                     let state = states.get_mut(stream_id).expect("state inserted above");
                     let mut rendered = String::new();
                     state.ensure_started(&mut rendered)?;
-                    let block_index = state.thinking_block(index, &mut rendered)?;
+                    let block_index = state.thinking_block(index, block_index, &mut rendered)?;
                     rendered.push_str(&sse(
                         "content_block_delta",
                         json!({
@@ -1017,12 +1025,13 @@ impl Guest for AnthropicClient {
                 }
                 StreamEvent::ThinkingSignatureDelta {
                     index,
+                    block_index,
                     signature_delta,
                 } => {
                     let state = states.get_mut(stream_id).expect("state inserted above");
                     let mut rendered = String::new();
                     state.ensure_started(&mut rendered)?;
-                    let block_index = state.thinking_block(index, &mut rendered)?;
+                    let block_index = state.thinking_block(index, block_index, &mut rendered)?;
                     rendered.push_str(&sse(
                         "content_block_delta",
                         json!({
@@ -1033,6 +1042,9 @@ impl Guest for AnthropicClient {
                     )?);
                     Ok(rendered)
                 }
+                StreamEvent::RedactedThinking { .. } => Err(invalid(
+                    "anthropic-messages redacted thinking is not implemented by this adapter version",
+                )),
                 StreamEvent::ToolCallDelta {
                     index,
                     id,
@@ -1183,7 +1195,7 @@ export!(AnthropicClient);
 mod tests {
     use super::{fresh_input_tokens, AnthropicClient, Guest};
     use serde_json::{json, Value};
-    use token_station_protocol::Usage;
+    use token_station_protocol::{ErrorCode, ErrorEnvelope, Usage};
 
     #[test]
     fn canonical_input_is_denormalized_for_anthropic_wire_usage() {
@@ -1235,5 +1247,88 @@ mod tests {
         assert_eq!(rendered["usage"]["input_tokens"], json!(30));
         assert_eq!(rendered["usage"]["cache_read_input_tokens"], json!(100));
         assert_eq!(rendered["usage"]["cache_creation_input_tokens"], json!(20));
+    }
+
+    #[test]
+    fn redacted_thinking_rejection_names_the_adapter_version() {
+        let event = json!({
+            "type": "redacted_thinking",
+            "index": 0,
+            "block_index": 2,
+            "data": "供应商原值+/=opaque"
+        });
+        let context = json!({
+            "stream_id": "stream-redacted",
+            "response_id": "msg-redacted",
+            "model": "claude-test",
+            "input_tokens": 1
+        });
+
+        let error =
+            <AnthropicClient as Guest>::render_stream_event(event.to_string(), context.to_string())
+                .expect_err("redacted thinking needs an explicit wire mapping");
+        let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "anthropic-messages redacted thinking is not implemented by this adapter version"
+        );
+    }
+
+    #[test]
+    fn reasoning_source_blocks_remain_separate_within_one_choice() {
+        let context = json!({
+            "stream_id": "stream-multiple-thinking-blocks",
+            "response_id": "msg-multiple-thinking-blocks",
+            "model": "claude-test",
+            "input_tokens": 1
+        });
+        let render = |event: Value| {
+            let rendered = <AnthropicClient as Guest>::render_stream_event(
+                event.to_string(),
+                context.to_string(),
+            )
+            .expect("reasoning event renders");
+            serde_json::from_str::<Value>(&rendered).expect("render result is JSON")["data"]
+                .as_str()
+                .expect("render result contains SSE data")
+                .to_owned()
+        };
+
+        let first_thinking = render(json!({
+            "type": "thinking_delta",
+            "index": 0,
+            "block_index": 2,
+            "thinking_delta": "first thought"
+        }));
+        let first_signature = render(json!({
+            "type": "thinking_signature_delta",
+            "index": 0,
+            "block_index": 2,
+            "signature_delta": "first signature"
+        }));
+        let second_thinking = render(json!({
+            "type": "thinking_delta",
+            "index": 0,
+            "block_index": 5,
+            "thinking_delta": "second thought"
+        }));
+        let second_signature = render(json!({
+            "type": "thinking_signature_delta",
+            "index": 0,
+            "block_index": 5,
+            "signature_delta": "second signature"
+        }));
+
+        assert!(first_thinking.contains("event: content_block_start"));
+        assert!(first_thinking.contains(r#""index":0"#));
+        assert!(first_thinking.contains(r#""thinking":"first thought""#));
+        assert!(first_signature.contains(r#""index":0"#));
+        assert!(first_signature.contains(r#""signature":"first signature""#));
+        assert!(second_thinking.contains("event: content_block_start"));
+        assert!(second_thinking.contains(r#""index":1"#));
+        assert!(second_thinking.contains(r#""thinking":"second thought""#));
+        assert!(second_signature.contains(r#""index":1"#));
+        assert!(second_signature.contains(r#""signature":"second signature""#));
     }
 }

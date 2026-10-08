@@ -501,6 +501,7 @@ impl Guest for GeminiClient {
                 stop: string_array(generation.get("stopSequences"), "stopSequences")?,
             },
             stream,
+            host_values: token_station_protocol::ComponentValues::new(),
             extensions: Extensions::new(),
         })
     }
@@ -546,15 +547,20 @@ impl Guest for GeminiClient {
         let data = match event {
             // 0.3.0: reasoning deltas stream as Gemini thought parts; a
             // signature fragment has no streaming wire slot and renders
-            // nothing.
+            // nothing. This wire ignores `block_index` while preserving
+            // `index` as the candidate choice index.
             StreamEvent::ThinkingDelta {
                 index,
+                block_index: _,
                 thinking_delta,
             } => sse(&json!({
                 "candidates": [{"index": index, "content": {"role": "model", "parts": [{"text": thinking_delta, "thought": true}]}}],
                 "modelVersion": model,
             }))?,
             StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
+            StreamEvent::RedactedThinking { .. } => {
+                return Err(invalid("gemini cannot render redacted thinking"));
+            }
             StreamEvent::Delta { index, content } => sse(&json!({
                 "candidates": [{"index": index, "content": {"role": "model", "parts": [{"text": content}]}}],
                 "modelVersion": model,
@@ -744,6 +750,26 @@ mod tests {
             messages[1].tool_call_id.as_deref(),
             Some(messages[0].tool_calls[0].id.as_str())
         );
+    }
+
+    #[test]
+    fn redacted_thinking_is_rejected_instead_of_dropped() {
+        let event = json!({
+            "type": "redacted_thinking",
+            "index": 0,
+            "block_index": 2,
+            "data": "供应商原值+/=opaque"
+        });
+        let context = json!({
+            "stream_id": "stream-redacted",
+            "model": "gemini-test"
+        });
+
+        let error = GeminiClient::render_stream_event(event.to_string(), context.to_string())
+            .expect_err("Gemini has no redacted-thinking wire slot");
+        let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.message, "gemini cannot render redacted thinking");
     }
 }
 

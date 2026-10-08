@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Extensions, HttpRequestDescriptor, ModelCapability, SecretRef};
+use crate::{ComponentValues, Extensions, HttpRequestDescriptor, ModelCapability, SecretRef};
 
 /// The upstream a `provider-adapter` is configured against, and the boundary
 /// every request it builds must stay inside.
@@ -36,7 +36,7 @@ impl ProviderEndpoint {
         if rest.contains('?') || rest.contains('#') {
             return Err(EndpointError::CarriesQueryOrFragment);
         }
-        if path_is_ambiguous(rest) {
+        if path_is_ambiguous(rest, EncodedSlash::Refuse) {
             return Err(EndpointError::AmbiguousPath);
         }
 
@@ -58,9 +58,16 @@ impl ProviderEndpoint {
     /// `http://api.example`. Anything this method cannot parse as an origin —
     /// including a `user:pass@` authority — is refused rather than guessed at.
     ///
-    /// Ambiguous spellings (dot segments, encoded separators, backslashes and
+    /// Ambiguous spellings (dot segments, encoded backslashes, backslashes and
     /// repeated separators) fail closed so authorization and the HTTP client
     /// cannot interpret the same descriptor as two different targets.
+    ///
+    /// Since 0.5.0, a segment below the endpoint path may contain an encoded
+    /// slash (`%2F`), so one segment can carry a value with `/`, such as an
+    /// ARN model id. The decoded segment is then split on `/`, and each piece
+    /// must be non-empty and must not be `.` or `..`. An upstream can keep the
+    /// escape or decode it: either way the target stays at or below this
+    /// endpoint. The endpoint path itself never admits an encoded slash.
     #[must_use]
     pub fn permits(&self, url: &str) -> bool {
         let Ok((origin, rest)) = split_origin(url) else {
@@ -73,14 +80,11 @@ impl ProviderEndpoint {
         let path = rest
             .split_once(['?', '#'])
             .map_or(rest, |(before, _)| before);
-        if path_is_ambiguous(path) {
+        let Some(tail) = path.strip_prefix(&self.path) else {
             return false;
-        }
-
-        path == self.path
-            || path
-                .strip_prefix(&self.path)
-                .is_some_and(|tail| tail.starts_with('/'))
+        };
+        (tail.is_empty() || tail.starts_with('/'))
+            && !path_is_ambiguous(tail, EncodedSlash::AdmitInSegment)
     }
 
     #[must_use]
@@ -169,7 +173,15 @@ fn normalize_api_root(path: &str) -> String {
         .to_owned()
 }
 
-fn path_is_ambiguous(path: &str) -> bool {
+/// Whether an escape may decode to `/` inside a path segment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EncodedSlash {
+    Refuse,
+    /// Admitted when every decoded piece is non-empty and not a dot segment.
+    AdmitInSegment,
+}
+
+fn path_is_ambiguous(path: &str, encoded_slash: EncodedSlash) -> bool {
     if path.contains('\\')
         || path.contains("//")
         || path
@@ -201,11 +213,19 @@ fn path_is_ambiguous(path: &str) -> bool {
                 return true;
             };
             let byte = high << 4 | low;
-            if matches!(byte, b'/' | b'\\') || byte.is_ascii_control() {
+            if byte == b'\\'
+                || byte.is_ascii_control()
+                || (byte == b'/' && encoded_slash == EncodedSlash::Refuse)
+            {
                 return true;
             }
             decoded.push(byte);
             index += 3;
+        }
+        if decoded.contains(&b'/') {
+            return decoded
+                .split(|byte| *byte == b'/')
+                .any(|piece| matches!(piece, b"" | b"." | b".."));
         }
         decoded == b"." || decoded == b".."
     })
@@ -313,7 +333,8 @@ impl Error for EndpointError {}
 /// Neither half can go wrong quietly. [`ProviderConfig::authorize`] rejects a
 /// descriptor addressed outside [`ProviderConfig::base_url`] or naming a slot
 /// this upstream does not have, and [`crate::Auth::header`] rejects a header name
-/// the host's redaction does not cover.
+/// that cannot carry a credential. Which admitted names a package may use is the
+/// admitting layer's decision (see [`crate::Auth::header`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// One of the providers the adapter's manifest declares, e.g.
@@ -331,6 +352,23 @@ pub struct ProviderConfig {
     /// [`ModelCapability`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelCapability>,
+    /// Non-secret per-provider values whose keys the adapter's package declares,
+    /// such as a credential attribute or a configuration key the adapter reads
+    /// (0.5.0).
+    ///
+    /// This is the typed channel for those values. The `extensions` fence is
+    /// unchanged: an adapter still must not act on an [`Extensions`] key.
+    ///
+    /// - An adapter may read only keys its package declares.
+    /// - The host passes only declared keys, validates every value first, and
+    ///   drops any client-supplied key that collides with a host-owned name.
+    /// - A secret never travels here. [`ProviderConfig::auth`] and
+    ///   [`crate::Auth`] stay the only credential channel.
+    /// - Every key and value satisfies the [`ComponentValues`] grammar.
+    /// - A credential attribute belongs to one credential, so a host builds
+    ///   this map for each attempt, after it selects the credential.
+    #[serde(default, skip_serializing_if = "ComponentValues::is_empty")]
+    pub declared: ComponentValues,
     #[serde(default, flatten)]
     pub extensions: Extensions,
 }
@@ -343,6 +381,7 @@ impl ProviderConfig {
             base_url,
             auth: None,
             models: Vec::new(),
+            declared: ComponentValues::new(),
             extensions: Extensions::new(),
         }
     }
@@ -606,6 +645,49 @@ mod tests {
                 "ambiguous target must fail closed: {url}"
             );
         }
+    }
+
+    #[test]
+    fn permits_an_encoded_slash_inside_one_segment_below_the_endpoint() {
+        let base = endpoint("https://bedrock-runtime.us-east-1.amazonaws.com");
+
+        for url in [
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/arn:aws:bedrock:us-east-1:123456789012:inference-profile%2Fus.anthropic.x/converse",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/a%2fb%2Fc/converse-stream",
+        ] {
+            assert!(base.permits(url), "one segment may carry a `/`: {url}");
+        }
+    }
+
+    #[test]
+    fn permits_refuses_an_encoded_slash_that_could_leave_the_endpoint_or_collapse() {
+        let base = endpoint("https://api.example.com/v1");
+
+        for url in [
+            // At the boundary, the prefix no longer matches byte for byte.
+            "https://api.example.com/v1%2Fadmin",
+            // Decoded empty pieces read as repeated separators.
+            "https://api.example.com/v1/%2Fadmin",
+            "https://api.example.com/v1/a%2F%2Fb",
+            "https://api.example.com/v1/a%2F",
+            // Decoded dot pieces read as traversal.
+            "https://api.example.com/v1/a%2F..%2Fb",
+            "https://api.example.com/v1/a%2F%2e%2e%2Fb",
+            "https://api.example.com/v1/x/..%2F..%2Fadmin",
+            "https://api.example.com/v1/a%2F.",
+            // An encoded backslash is still refused.
+            "https://api.example.com/v1/a%5Cb",
+        ] {
+            assert!(!base.permits(url), "must fail closed: {url}");
+        }
+    }
+
+    #[test]
+    fn an_endpoint_never_admits_an_encoded_slash() {
+        assert_eq!(
+            ProviderEndpoint::try_new("https://api.example.com/v1/a%2Fb"),
+            Err(EndpointError::AmbiguousPath)
+        );
     }
 
     #[test]

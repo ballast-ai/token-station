@@ -362,6 +362,7 @@ impl Guest for OpenAiClient {
                     .collect(),
             },
             stream: body["stream"].as_bool().unwrap_or(false),
+            host_values: token_station_protocol::ComponentValues::new(),
             extensions,
         })
     }
@@ -497,15 +498,23 @@ impl Guest for OpenAiClient {
             ),
             // 0.3.0: reasoning deltas ride the openai-compat
             // `delta.reasoning_content` slot; the signature fragment has no
-            // openai wire slot and renders nothing.
+            // openai wire slot and renders nothing. This wire has no
+            // content-block ordinal, so it ignores `block_index` while
+            // preserving `index` as the choice index.
             StreamEvent::ThinkingDelta {
                 index,
+                block_index: _,
                 thinking_delta,
             } => format!(
                 "data: {{{stream_identity}\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
                 serde_json::to_string(thinking_delta).map_err(internal)?
             ),
             StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
+            StreamEvent::RedactedThinking { .. } => {
+                return Err(invalid(
+                    "openai-chat-completions cannot render redacted thinking",
+                ));
+            }
             StreamEvent::Finish {
                 finish_reason,
                 // openai chat SSE has no stop-sequence slot to render into.
@@ -726,6 +735,7 @@ mod tests {
         let event = json!({
             "type": "thinking_delta",
             "index": 0,
+            "block_index": 2,
             "thinking_delta": "checking"
         });
         let context = json!({
@@ -748,6 +758,29 @@ mod tests {
         assert_eq!(chunk["id"], json!("chatcmpl-token-station-7"));
         assert_eq!(chunk["object"], json!("chat.completion.chunk"));
         assert_eq!(chunk["model"], json!("routed-model"));
+    }
+
+    #[test]
+    fn redacted_thinking_is_rejected_instead_of_dropped() {
+        let event = json!({
+            "type": "redacted_thinking",
+            "index": 0,
+            "block_index": 2,
+            "data": "供应商原值+/=opaque"
+        });
+        let context = json!({
+            "response_id": "chatcmpl-redacted",
+            "model": "routed-model"
+        });
+
+        let error = OpenAiClient::render_stream_event(event.to_string(), context.to_string())
+            .expect_err("OpenAI chat has no redacted-thinking wire slot");
+        let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "openai-chat-completions cannot render redacted thinking"
+        );
     }
 
     #[test]

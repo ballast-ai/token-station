@@ -468,22 +468,43 @@ test_a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy() {
     || fail "the late target conflict did not explain its refusal"
 }
 
-test_target_name_matches_the_selected_identity
-test_copy_failure_preserves_old_app
-test_immediate_exit_restores_old_app
-test_incompatible_candidate_preserves_old_app
-test_concurrent_install_has_single_owner
-test_stable_launch_succeeds
-test_a_transient_launch_refusal_is_retried_not_rolled_back
-test_a_launch_that_never_succeeds_still_rolls_back
-if [[ "$test_scx_experiment" == "1" ]]; then
-  test_legacy_name_migrates_without_recreating_the_absent_stable_app
-  test_legacy_failures_restore_the_original_path
-  test_legacy_app_is_untouched_until_build_audit_and_staging_succeed
-  test_two_product_paths_are_rejected_without_touching_either_app
-  test_unrelated_new_or_legacy_apps_are_rejected
-  test_a_dangling_new_path_is_not_treated_as_absent
-  test_a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy
-fi
+# Run all scenarios by default. Rust tests select individual scenarios.
+case "${1:-all}" in
+  all)
+    test_target_name_matches_the_selected_identity
+    test_copy_failure_preserves_old_app
+    test_immediate_exit_restores_old_app
+    test_incompatible_candidate_preserves_old_app
+    test_concurrent_install_has_single_owner
+    test_stable_launch_succeeds
+    test_a_transient_launch_refusal_is_retried_not_rolled_back
+    test_a_launch_that_never_succeeds_still_rolls_back
+    if [[ "$test_scx_experiment" == "1" ]]; then
+      test_legacy_name_migrates_without_recreating_the_absent_stable_app
+      test_legacy_failures_restore_the_original_path
+      test_legacy_app_is_untouched_until_build_audit_and_staging_succeed
+      test_two_product_paths_are_rejected_without_touching_either_app
+      test_unrelated_new_or_legacy_apps_are_rejected
+      test_a_dangling_new_path_is_not_treated_as_absent
+      test_a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy
+    fi
+    ;;
+  target_name_matches_the_selected_identity) test_target_name_matches_the_selected_identity ;;
+  copy_failure_preserves_old_app) test_copy_failure_preserves_old_app ;;
+  immediate_exit_restores_old_app) test_immediate_exit_restores_old_app ;;
+  incompatible_candidate_preserves_old_app) test_incompatible_candidate_preserves_old_app ;;
+  concurrent_install_has_single_owner) test_concurrent_install_has_single_owner ;;
+  stable_launch_succeeds) test_stable_launch_succeeds ;;
+  a_transient_launch_refusal_is_retried_not_rolled_back) test_a_transient_launch_refusal_is_retried_not_rolled_back ;;
+  a_launch_that_never_succeeds_still_rolls_back) test_a_launch_that_never_succeeds_still_rolls_back ;;
+  legacy_name_migrates_without_recreating_the_absent_stable_app) test_legacy_name_migrates_without_recreating_the_absent_stable_app ;;
+  legacy_failures_restore_the_original_path) test_legacy_failures_restore_the_original_path ;;
+  legacy_app_is_untouched_until_build_audit_and_staging_succeed) test_legacy_app_is_untouched_until_build_audit_and_staging_succeed ;;
+  two_product_paths_are_rejected_without_touching_either_app) test_two_product_paths_are_rejected_without_touching_either_app ;;
+  unrelated_new_or_legacy_apps_are_rejected) test_unrelated_new_or_legacy_apps_are_rejected ;;
+  a_dangling_new_path_is_not_treated_as_absent) test_a_dangling_new_path_is_not_treated_as_absent ;;
+  a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy) test_a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy ;;
+  *) fail "unknown installer test scenario: $1" ;;
+esac
 
 echo "install-local-desktop transaction tests passed"

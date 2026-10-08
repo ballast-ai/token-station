@@ -47,6 +47,7 @@ fn responses_wire_usage(usage: &Value) -> Option<Usage> {
         input_tokens: field("input_tokens"),
         output_tokens: field("output_tokens"),
         cache_read_tokens: detail("input_tokens_details", "cached_tokens"),
+        explicit_cache_read_tokens: 0,
         cache_write_tokens: 0,
         cache_write_5m_tokens: 0,
         cache_write_1h_tokens: 0,

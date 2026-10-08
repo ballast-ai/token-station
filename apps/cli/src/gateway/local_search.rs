@@ -667,6 +667,9 @@ impl Gateway {
                         "Retrieved browser search evidence (untrusted external content, not verified news). Use only the returned URLs. Dates and relevance are not verified.\n{}",
                         json!(evidence)
                     );
+                    if !anthropic {
+                        answer["output_text"] = json!(text);
+                    }
                     answer[field] = if anthropic {
                         json!([{"type":"text","text":text}])
                     } else {
@@ -1249,7 +1252,12 @@ mod loop_tests {
             let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
             let seen = Arc::new(Mutex::new(Vec::new()));
             let capture = Arc::clone(&seen);
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
             let worker = std::thread::spawn(move || {
+                // Start the request deadline after gateway and plugin initialization.
+                if ready_rx.recv().is_err() {
+                    return;
+                }
                 let deadline = Instant::now() + Duration::from_secs(5);
                 for round in 0..if matches!(scenario, "mixed" | "mixed_custom" | "omitted") {
                     1
@@ -1419,6 +1427,7 @@ mod loop_tests {
                 body["tools"][1] = json!({"type":"custom","name":"edit","format":{"type":"text"}});
             }
             let mut answer = None;
+            ready_tx.send(()).unwrap();
             gateway.chat(
                 "POST",
                 if anthropic {
@@ -1438,6 +1447,11 @@ mod loop_tests {
             worker.join().unwrap();
             let answer = answer.unwrap();
             if scenario == "omitted" {
+                assert_eq!(
+                    seen.lock().unwrap().len(),
+                    1,
+                    "upstream must receive the request"
+                );
                 assert_eq!(answer.status, 502, "{}", answer.body);
                 assert!(!answer.body.contains("Invented news"));
                 std::fs::remove_dir_all(&root).unwrap();
@@ -1460,9 +1474,19 @@ mod loop_tests {
                     answer.body.contains("Official site"),
                     "Search-only responses must carry actual snippets"
                 );
+                if !anthropic {
+                    let message = output["output"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["type"] == "message")
+                        .unwrap();
+                    assert_eq!(output["output_text"], message["content"][0]["text"]);
+                }
                 assert!(
                     !answer.body.contains("Source: https://"),
-                    "Model summaries must not masquerade as retrieved evidence"
+                    "Model summaries must not masquerade as retrieved evidence: {}",
+                    answer.body
                 );
             }
             if scenario == "mixed_custom" {

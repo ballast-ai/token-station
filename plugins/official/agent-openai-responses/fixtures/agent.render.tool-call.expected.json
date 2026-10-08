@@ -5,7 +5,6 @@
   "status": "completed",
   "error": null,
   "incomplete_details": null,
-  "instructions": null,
   "model": "routed-model",
   "output": [
     {
@@ -17,9 +16,6 @@
       "arguments": "{\"path\":\"marker.txt\"}"
     }
   ],
-  "parallel_tool_calls": true,
-  "tool_choice": "auto",
-  "tools": [],
   "usage": {
     "input_tokens": 10,
     "input_tokens_details": {
@@ -27,7 +23,10 @@
       "cache_write_tokens": 1
     },
     "output_tokens": 4,
-    "output_tokens_details": {"reasoning_tokens": 2},
+    "output_tokens_details": {
+      "reasoning_tokens": 2
+    },
     "total_tokens": 14
-  }
+  },
+  "output_text": ""
 }

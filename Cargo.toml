@@ -11,12 +11,11 @@ members = [
     "crates/release",
     "crates/router-core",
 ]
-# WASM guest test fixture targeting wasm32-wasip2. Keep it out of the main
-# workspace build graph; plugin-runtime tests build it in a cargo subprocess.
+# The WASM guest packages under `plugins/official/` need no entry here: each
+# declares its own empty `[workspace]` table, which stops cargo walking up to
+# this manifest. They target wasm32-wasip2 and are built in cargo subprocesses
+# by plugin-runtime's tests and by scripts/build-release.sh.
 exclude = [
-    "plugins/official/agent-anthropic",
-    "plugins/official/agent-openai",
-    "plugins/official/agent-openai-responses",
     # Deliberately exclude the Tauri desktop app from the strict workspace so its
     # large GUI dependency tree does not enter clippy-pedantic or cargo-deny gates.
     # Its path dependency on token-station-cli reuses the core without a fork.
@@ -50,8 +49,11 @@ south-provider-runtime = { version = "=0.16.0", git = "https://github.com/ballas
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Rust 1.99 added `assert_is_empty`. Its suggested `assert_eq!(x, [] as [T; 0])` is harder to read
+# than `assert!(x.is_empty())`, and crates/router-core is frozen, so its hits cannot change in place.
+assert_is_empty = "allow"
 
 
 # Release determinism and size: one codegen unit, thin LTO, and stripped symbols.

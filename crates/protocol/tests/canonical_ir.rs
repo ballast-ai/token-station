@@ -235,3 +235,115 @@ fn model_capability_expresses_what_the_router_filters_on() {
     assert_eq!(capability.context_window, 400_000);
     assert!(capability.supported_parameters.contains("temperature"));
 }
+
+// -- 0.5.0 (kernel B7b) -------------------------------------------------------
+
+#[test]
+fn typed_component_values_stay_off_the_wire_when_empty() {
+    let config: ProviderConfig = serde_json::from_str(PROVIDER_CONFIG).expect("valid config");
+    assert!(config.declared.is_empty());
+    assert!(
+        serde_json::to_value(&config)
+            .expect("serializable config")
+            .get("declared")
+            .is_none()
+    );
+
+    let request: ChatRequest = serde_json::from_str(CHAT_REQUEST).expect("valid request");
+    assert!(request.host_values.is_empty());
+    assert!(
+        serde_json::to_value(&request)
+            .expect("serializable request")
+            .get("host_values")
+            .is_none()
+    );
+}
+
+#[test]
+fn typed_component_values_round_trip_as_typed_fields_not_extensions() {
+    let mut config: Value = serde_json::from_str(PROVIDER_CONFIG).expect("fixture is JSON");
+    config["declared"] =
+        serde_json::json!({"profile_arn": "arn:aws:codewhisperer:us-east-1:1:profile/x"});
+    let parsed: ProviderConfig = assert_exact_round_trip(&config.to_string());
+    assert_eq!(
+        parsed.declared.get("profile_arn"),
+        Some("arn:aws:codewhisperer:us-east-1:1:profile/x")
+    );
+    assert!(!parsed.extensions.contains_key("declared"));
+
+    let mut request: Value = serde_json::from_str(CHAT_REQUEST).expect("fixture is JSON");
+    request["host_values"] = serde_json::json!({"attempt_id": "att_01"});
+    let parsed: ChatRequest = assert_exact_round_trip(&request.to_string());
+    assert_eq!(parsed.host_values.get("attempt_id"), Some("att_01"));
+    assert!(!parsed.extensions.contains_key("host_values"));
+}
+
+#[test]
+fn typed_component_values_refuse_entries_outside_the_grammar_on_deserialization() {
+    let arn = format!(
+        "arn:aws:bedrock:us-east-1:1:inference-profile/{}",
+        "x".repeat(2000)
+    );
+    let largest = "~".repeat(4096);
+    for (key, value) in [("profile_arn", arn.as_str()), ("k", largest.as_str())] {
+        let mut config: Value = serde_json::from_str(PROVIDER_CONFIG).expect("fixture is JSON");
+        config["declared"] = serde_json::json!({ key: value });
+        let parsed: ProviderConfig =
+            serde_json::from_value(config).expect("a value in the grammar is admitted");
+        assert_eq!(parsed.declared.get(key), Some(value));
+    }
+
+    let too_long = "~".repeat(4097);
+    let long_key = "k".repeat(65);
+    for (key, value) in [
+        ("Profile_Arn", "v"),
+        ("profile-arn", "v"),
+        ("", "v"),
+        (long_key.as_str(), "v"),
+        ("profile_arn", ""),
+        ("profile_arn", "a\r\nx-injected: 1"),
+        ("profile_arn", "caf\u{e9}"),
+        ("profile_arn", too_long.as_str()),
+    ] {
+        let mut config: Value = serde_json::from_str(PROVIDER_CONFIG).expect("fixture is JSON");
+        config["declared"] = serde_json::json!({ key: value });
+        assert!(
+            serde_json::from_value::<ProviderConfig>(config).is_err(),
+            "declared {key:?} = {value:?} must be refused"
+        );
+
+        let mut request: Value = serde_json::from_str(CHAT_REQUEST).expect("fixture is JSON");
+        request["host_values"] = serde_json::json!({ key: value });
+        assert!(
+            serde_json::from_value::<ChatRequest>(request).is_err(),
+            "host value {key:?} = {value:?} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_descriptor_can_name_a_declared_header_or_the_combined_arm() {
+    let mut descriptor: Value = serde_json::from_str(PROVIDER_REQUEST).expect("fixture is JSON");
+    for (auth, expected) in [
+        (
+            serde_json::json!({"scheme": "header", "name": "x-acme-key", "secret": "provider_api_key"}),
+            Auth::header(
+                "x-acme-key",
+                token_station_protocol::SecretRef::new("provider_api_key"),
+            )
+            .expect("valid"),
+        ),
+        (
+            serde_json::json!({"scheme": "bearer_and_header", "name": "x-goog-api-key", "secret": "provider_api_key"}),
+            Auth::bearer_and_header(
+                "x-goog-api-key",
+                token_station_protocol::SecretRef::new("provider_api_key"),
+            )
+            .expect("valid"),
+        ),
+    ] {
+        descriptor["auth"] = auth;
+        let parsed: HttpRequestDescriptor = assert_exact_round_trip(&descriptor.to_string());
+        assert_eq!(parsed.auth, Some(expected));
+    }
+}

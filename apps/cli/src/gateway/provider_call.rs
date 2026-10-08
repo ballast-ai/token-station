@@ -26,6 +26,37 @@ impl ProviderCallOutcome {
     }
 }
 
+/// The legacy transport has no package declaration of secret headers, so it
+/// writes a header credential only into the kernel's default redaction set.
+/// Since protocol 0.5.0 the kernel admits other names and leaves the choice
+/// to the admitting layer; this transport keeps its 0.4.0 behaviour.
+fn legacy_credential_header(auth: &Auth) -> Result<(), ErrorEnvelope> {
+    match auth {
+        Auth::Header { name, .. } | Auth::BearerAndHeader { name, .. }
+            if !token_station_protocol::is_credential_header(name) =>
+        {
+            Err(ErrorEnvelope::new(
+                ErrorCode::Internal,
+                500,
+                format!(
+                    "provider plugin named credential header `{name}`, which this transport does not redact"
+                ),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// How one resolved credential value goes on the wire for each `Auth` arm.
+fn present_credential(auth: &Auth, value: &str) -> Vec<(String, String)> {
+    let bearer = || ("authorization".to_owned(), format!("Bearer {value}"));
+    match auth {
+        Auth::Bearer { .. } | Auth::OAuth { .. } => vec![bearer()],
+        Auth::Header { name, .. } => vec![(name.clone(), value.to_owned())],
+        Auth::BearerAndHeader { name, .. } => vec![bearer(), (name.clone(), value.to_owned())],
+    }
+}
+
 /// The content-free classification of a South eligibility refusal.
 const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
     match reason {
@@ -576,11 +607,12 @@ impl Gateway {
         upstream_name: &str,
         max_body_bytes: u64,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
-        let auth_header = descriptor
+        let auth_headers = descriptor
             .auth
             .as_ref()
             .map(|auth| self.resolve_auth(auth, upstream_name))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or_default();
 
         let sent = match descriptor.method {
             HttpMethod::Get => {
@@ -588,7 +620,7 @@ impl Gateway {
                 for (name, value) in descriptor.headers.iter() {
                     request = request.header(name, value);
                 }
-                if let Some((header, value)) = &auth_header {
+                for (header, value) in &auth_headers {
                     request = request.header(header, value);
                 }
                 request.call()
@@ -598,7 +630,7 @@ impl Gateway {
                 for (name, value) in descriptor.headers.iter() {
                     request = request.header(name, value);
                 }
-                if let Some((header, value)) = &auth_header {
+                for (header, value) in &auth_headers {
                     request = request.header(header, value);
                 }
                 match &descriptor.body {
@@ -623,35 +655,27 @@ impl Gateway {
             .map_err(map_transport_error)
     }
 
-    /// `protocol::Auth` dialect -> one concrete header.
+    /// `protocol::Auth` dialect -> the concrete credential headers.
     fn resolve_auth(
         &self,
         auth: &Auth,
         upstream_name: &str,
-    ) -> Result<(String, String), ErrorEnvelope> {
-        let unauthorized = |detail: String| ErrorEnvelope::new(ErrorCode::Auth, 401, detail);
-
-        match auth {
-            Auth::Bearer { secret } => {
-                let value = self
-                    .secrets
-                    .resolve(upstream_name, secret.as_str())
-                    .map_err(unauthorized)?;
-                Ok(("authorization".to_owned(), format!("Bearer {value}")))
-            }
-            Auth::Header { name, secret } => {
-                let value = self
-                    .secrets
-                    .resolve(upstream_name, secret.as_str())
-                    .map_err(unauthorized)?;
-                Ok((name.clone(), value))
-            }
-            Auth::OAuth { .. } => Err(ErrorEnvelope::new(
+    ) -> Result<Vec<(String, String)>, ErrorEnvelope> {
+        if matches!(auth, Auth::OAuth { .. }) {
+            return Err(ErrorEnvelope::new(
                 ErrorCode::Capability,
                 501,
                 "OAuth upstreams arrive with the platform account (C2)",
-            )),
+            ));
         }
+        // Checked before the credential is resolved, so a refused name never
+        // causes a secret read.
+        legacy_credential_header(auth)?;
+        let value = self
+            .secrets
+            .resolve(upstream_name, auth.secret().as_str())
+            .map_err(|detail| ErrorEnvelope::new(ErrorCode::Auth, 401, detail))?;
+        Ok(present_credential(auth, &value))
     }
 
     /// Streams complete byte-framed SSE events through the parse/render pair.

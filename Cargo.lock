@@ -2542,7 +2542,7 @@ dependencies = [
  "south-provider-api",
  "south-provider-runtime",
  "thiserror 2.0.18",
- "token-station-protocol 0.3.0 (git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35)",
+ "token-station-protocol 0.3.0",
 ]
 
 [[package]]
@@ -2854,7 +2854,7 @@ dependencies = [
  "token-station-plugin-api",
  "token-station-plugin-runtime",
  "token-station-private-fs",
- "token-station-protocol 0.3.0",
+ "token-station-protocol 0.5.0",
  "token-station-release",
  "token-station-router-core",
  "tokio",
@@ -2872,7 +2872,7 @@ dependencies = [
  "serde",
  "serde_json",
  "token-station-plugin-api",
- "token-station-protocol 0.3.0",
+ "token-station-protocol 0.5.0",
 ]
 
 [[package]]
@@ -2881,7 +2881,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol 0.3.0",
+ "token-station-protocol 0.5.0",
  "token-station-router-core",
 ]
 
@@ -2902,7 +2902,7 @@ dependencies = [
  "serde_json",
  "token-station-conformance",
  "token-station-plugin-api",
- "token-station-protocol 0.3.0",
+ "token-station-protocol 0.5.0",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -2918,6 +2918,7 @@ dependencies = [
 [[package]]
 name = "token-station-protocol"
 version = "0.3.0"
+source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
 dependencies = [
  "serde",
  "serde_json",
@@ -2925,8 +2926,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-protocol"
-version = "0.3.0"
-source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2948,11 +2948,11 @@ dependencies = [
 
 [[package]]
 name = "token-station-router-core"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol 0.3.0",
+ "token-station-protocol 0.5.0",
 ]
 
 [[package]]

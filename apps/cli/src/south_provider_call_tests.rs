@@ -151,7 +151,7 @@ fn header_descriptor(name: &str, slot: &str) -> HttpRequestDescriptor {
     let mut descriptor = descriptor();
     descriptor.auth = Some(
         Auth::header(name, SecretRef::new(slot))
-            .expect("the test header must be covered by host redaction"),
+            .expect("the test header must be able to carry a credential"),
     );
     descriptor
 }
@@ -248,6 +248,28 @@ fn a_component_declaring_both_arms_still_carries_a_bearer() {
     assert_eq!(prepared.credential_slot(), "provider_api_key");
 }
 
+/// South 0.16's manifest vocabulary has no combined arm, so this host cannot
+/// hand one to a component. The descriptor falls back to the legacy transport,
+/// which presents both headers.
+#[test]
+fn the_combined_arm_is_ineligible_for_south() {
+    let mut request = descriptor();
+    request.auth = Some(
+        Auth::bearer_and_header("x-goog-api-key", SecretRef::new("provider_api_key"))
+            .expect("a valid combined credential"),
+    );
+    assert_eq!(
+        prepare_provider_call_v1(
+            &eligible_policy_with(both_arms()),
+            &provider_config(),
+            &auth_config(),
+            &request,
+        )
+        .expect_err("no South arm carries both headers yet"),
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
+}
+
 #[test]
 fn production_header_auth_does_not_open_the_full_compatibility_catalog() {
     let mut request = header_descriptor("x-api-key", "provider_api_key");
@@ -264,13 +286,21 @@ fn production_header_auth_does_not_open_the_full_compatibility_catalog() {
     )
     .expect("a sanctioned header the component declares it carries is eligible");
 
-    // What still bites is the catalogue, and it bites earlier than the transport:
-    // an arbitrary header name is not a credential header this host knows how to
-    // redact, so `Auth::header` refuses to build the descriptor at all. The
-    // transport never sees the shape it would have had to reject.
-    assert!(
-        Auth::header("x-invented-key", SecretRef::new("provider_api_key")).is_err(),
-        "a header outside the sanctioned catalogue must not become an Auth at all"
+    // What still bites is the catalogue. Since protocol 0.5.0 the kernel builds
+    // an `Auth` for any name that can carry a credential and leaves the choice of
+    // names to the admitting layer. This host admits only South's sanctioned
+    // names, so an invented name is refused here, before any credential is read.
+    let mut invented = header_descriptor("x-invented-key", "provider_api_key");
+    invented.url = request.url.clone();
+    assert_eq!(
+        prepare_provider_call_v1(
+            &eligible_policy_with(header_secret_arms()),
+            &azure_provider_config(),
+            &auth_config(),
+            &invented,
+        )
+        .expect_err("a header outside the sanctioned catalogue must not be presented"),
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
     );
 
     // "Bearer-only" was a host-side restriction, not a property of the package:

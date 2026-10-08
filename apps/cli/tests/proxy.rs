@@ -42,7 +42,12 @@ fn repo_root() -> &'static Path {
 fn plugins_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("ts-proxy-plugins-{}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock follows the Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("ts-proxy-plugins-{}-{nonce}", std::process::id()));
         for (plugin, wasm_file) in [
             ("agent-openai", "adapter.wasm"),
             ("agent-openai-responses", "adapter.wasm"),
@@ -52,8 +57,18 @@ fn plugins_dir() -> &'static Path {
             ("provider-anthropic-v2", "component.wasm"),
         ] {
             let source = repo_root().join("plugins/official").join(plugin);
-            let status = Command::new("cargo")
-                .args(["build", "--target", "wasm32-wasip2"])
+            // Exercise shipped artifacts for the agents used by Responses routes.
+            // Debug Wasm cold compilation can consume the short scenario budget.
+            let release = matches!(
+                plugin,
+                "agent-openai" | "agent-openai-responses" | "agent-anthropic"
+            );
+            let mut build = Command::new("cargo");
+            build.args(["build", "--target", "wasm32-wasip2"]);
+            if release {
+                build.arg("--release");
+            }
+            let status = build
                 .current_dir(&source)
                 .status()
                 .expect("cargo is on PATH");
@@ -65,7 +80,8 @@ fn plugins_dir() -> &'static Path {
                 .expect("manifest copies");
             std::fs::copy(
                 source
-                    .join("target/wasm32-wasip2/debug")
+                    .join("target/wasm32-wasip2")
+                    .join(if release { "release" } else { "debug" })
                     .join(format!("{}.wasm", plugin.replace('-', "_"))),
                 package.join(wasm_file),
             )
@@ -872,8 +888,12 @@ fn start_proxy_with_agents_budgets_catalog_price_and_parameters(
     supported_parameters: Option<Value>,
 ) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock follows the Unix epoch")
+        .as_nanos();
     let data_dir = std::env::temp_dir().join(format!(
-        "ts-proxy-data-{}-{}",
+        "ts-proxy-data-{}-{nonce}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::SeqCst)
     ));
@@ -3534,6 +3554,115 @@ fn search_history_compacts_and_continues_without_executable_search() {
     );
     assert_eq!(status, 200, "{body}");
     assert_eq!(mock.hits(), 2);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn responses_streamed_previous_response_id_replays_terminal_snapshot() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"streamed answer\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let first = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    );
+    let answer = json!({"id":"second","model":"gpt-5.5","choices":[{
+        "index":0,"message":{"role":"assistant","content":"continued"},"finish_reason":"stop"
+    }],"usage":{"prompt_tokens":8,"completion_tokens":2}});
+    let mock = MockUpstream::start(vec![
+        vec![first.into_bytes()],
+        vec![http_json(200, &answer.to_string())],
+    ]);
+    let key = key_file("responses-streamed-continuation", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, false, "agent-openai-responses");
+    let (status, _, body) = send_responses(
+        &proxy,
+        &json!({"model":"auto","input":"first turn","stream":true}),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 200, "{body}");
+    let events = sse_events(&body);
+    assert_responses_terminal_is_unique_and_last(&events, &body);
+    for (sequence, event) in events.iter().enumerate() {
+        assert_eq!(event["sequence_number"], json!(sequence), "{body}");
+    }
+    let response = &events.last().unwrap()["response"];
+    assert_eq!(response["usage"]["input_tokens"], 3);
+    let (status, _, second) = send_responses(
+        &proxy,
+        &json!({"model":"auto","input":"second turn","previous_response_id":response["id"]}),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 200, "{second}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].body["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        seen[1].body["messages"][1]["content"],
+        json!([{"type":"text","text":"streamed answer"}])
+    );
+    assert_eq!(seen[1].body["messages"][2]["content"], "second turn");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn responses_stream_render_error_emits_failure_without_continuation_history() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bad_shell\",\"function\":{\"name\":\"__token_station_responses_local_shell\",\"arguments\":\"not-json\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let first = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    );
+    let mock = MockUpstream::start(vec![vec![first.into_bytes()]]);
+    let key = key_file("responses-render-failure", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, false, "agent-openai-responses");
+    let (status, _, body) = send_responses(
+        &proxy,
+        &json!({"model":"auto","input":"run a command","stream":true,"tools":[{"type":"local_shell"}]}),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 200, "{body}");
+    let events = sse_events(&body);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "response.created")
+            .count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "response.failed")
+            .count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(events.last().unwrap()["type"], "response.failed", "{body}");
+    for (sequence, event) in events.iter().enumerate() {
+        assert_eq!(event["sequence_number"], json!(sequence), "{body}");
+    }
+    let id = &events.last().unwrap()["response"]["id"];
+    let (status, _, rejected) = send_responses(
+        &proxy,
+        &json!({"model":"auto","input":"continue","previous_response_id":id}),
+        &proxy.virtual_key,
+    );
+    assert_eq!(status, 400, "{rejected}");
+    assert!(rejected.contains("continuation_expired"), "{rejected}");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "failed rendering must not create replayable history"
+    );
     std::fs::remove_file(key).ok();
 }
 
