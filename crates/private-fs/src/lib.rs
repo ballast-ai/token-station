@@ -53,6 +53,28 @@ pub fn harden_private_file(path: &Path) -> std::io::Result<()> {
     verify_private_file(path)
 }
 
+/// Verifies that a regular file has one filesystem name. Path-based lifecycle
+/// locks require this check because a hard link can select a different lock.
+pub fn verify_single_link_file(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(invalid("single-link target is not a real regular file"));
+    }
+    #[cfg(unix)]
+    let count = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink()
+    };
+    #[cfg(windows)]
+    let count = windows::link_count(path)?;
+    #[cfg(not(any(unix, windows)))]
+    let count = 1;
+    if count != 1 {
+        return Err(invalid("file has multiple hard links"));
+    }
+    Ok(())
+}
+
 /// Creates a new owner-only file without ever writing sensitive bytes before
 /// the final path is protected. Returns `false` when another process won the
 /// create race; the existing file is verified before that result is returned.
@@ -60,6 +82,11 @@ pub fn create_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("private target has no parent"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     ensure_real_parent_dir(parent)?;
     let mut file = match create_new_private(path) {
         Ok(file) => file,
@@ -91,6 +118,11 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("private target has no parent"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     ensure_real_parent_dir(parent)?;
     match std::fs::symlink_metadata(path) {
         Ok(_) => harden_private_file(path)?,
@@ -116,6 +148,28 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::remove_file(&temporary).ok();
     }
     result
+}
+
+/// Opens a new empty owner-only file for callers that manage their own atomic
+/// transaction. Existing paths are never replaced. The handle is private before
+/// the caller can write the first byte.
+pub fn open_new_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("private target has no parent"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    ensure_real_parent_dir(parent)?;
+    let file = create_new_private(path)?;
+    if let Err(error) = verify_private_file(path) {
+        drop(file);
+        std::fs::remove_file(path).ok();
+        return Err(error);
+    }
+    Ok(file)
 }
 
 fn create_new_private(path: &Path) -> std::io::Result<std::fs::File> {
@@ -336,6 +390,26 @@ mod windows {
         SetFileSecurityW, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    pub(super) fn link_count(path: &Path) -> std::io::Result<u64> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let file = std::fs::File::open(path)?;
+        let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: the live file owns the handle and the output buffer is valid.
+        if unsafe {
+            GetFileInformationByHandle(file.as_raw_handle().cast(), information.as_mut_ptr())
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the successful call initialized the complete output structure.
+        Ok(u64::from(
+            unsafe { information.assume_init() }.nNumberOfLinks,
+        ))
+    }
 
     struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
@@ -641,11 +715,44 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("empty-private-file");
         let _ = std::fs::remove_file(&path);
-        let file = super::create_new_private(&path).unwrap();
+        let file = super::open_new_private_file(&path).unwrap();
         super::verify_private_file(&path)
             .expect("creation must establish private permissions before writing");
         assert_eq!(file.metadata().unwrap().len(), 0);
+        assert_eq!(
+            super::open_new_private_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         drop(file);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bare_relative_private_paths_use_the_current_directory() {
+        let generated = scratch();
+        let path = Path::new(generated.file_name().unwrap());
+        let file = open_new_private_file(path).unwrap();
+        verify_private_file(path).unwrap();
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+        create_private_file(path, b"first").unwrap();
+        write_atomic_private(path, b"second").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"second");
+        verify_private_file(path).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hard_link_aliases_cannot_select_independent_lifecycle_locks() {
+        let root = scratch();
+        let original = root.join("original");
+        let alias = root.join("alias");
+        create_private_file(&original, b"state").unwrap();
+        super::verify_single_link_file(&original).unwrap();
+        std::fs::hard_link(&original, &alias).unwrap();
+        assert!(super::verify_single_link_file(&original).is_err());
+        assert!(super::verify_single_link_file(&alias).is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"state");
         std::fs::remove_dir_all(root).unwrap();
     }
 

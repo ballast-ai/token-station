@@ -55,12 +55,30 @@ fn responses_wire_usage(usage: &Value) -> Option<Usage> {
     (parsed != Usage::default()).then_some(parsed)
 }
 
+fn responses_explicit_failure(response: &Value) -> bool {
+    response["status"] == "failed" || response.get("error").is_some_and(|error| !error.is_null())
+}
+
+fn responses_reports_both_token_counts(response: &Value) -> bool {
+    response.get("usage").is_some_and(|usage| {
+        usage.get("input_tokens").and_then(Value::as_u64).is_some()
+            && usage.get("output_tokens").and_then(Value::as_u64).is_some()
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponsesTerminal {
+    Complete,
+    Incomplete,
+    Failed,
+}
+
 #[derive(Default)]
 pub(super) struct ResponsesSseUsageTap {
     partial: String,
     usage: Option<Usage>,
-    saw_terminal: bool,
-    successful: bool,
+    terminal: Option<ResponsesTerminal>,
+    terminal_reports_both_token_counts: bool,
     abandoned: bool,
     terminal_response: Option<Value>,
 }
@@ -95,12 +113,25 @@ impl ResponsesSseUsageTap {
             event.get("type").and_then(Value::as_str),
             Some("response.completed" | "response.failed" | "response.incomplete")
         ) {
-            self.saw_terminal = true;
-            self.successful = event["type"] == "response.completed"
-                && event["response"].get("error").is_none_or(Value::is_null)
-                && event["response"]
-                    .get("status")
-                    .is_none_or(|status| status == "completed");
+            self.terminal_reports_both_token_counts =
+                responses_reports_both_token_counts(&event["response"]);
+            // An output-limit incomplete response is a terminal generation,
+            // not an upstream outage. Only explicit failure signals fail it.
+            self.terminal = Some(
+                if event["type"] == "response.failed"
+                    || responses_explicit_failure(&event["response"])
+                {
+                    ResponsesTerminal::Failed
+                } else if event["type"] == "response.completed"
+                    && event["response"]
+                        .get("status")
+                        .is_none_or(|status| status == "completed")
+                {
+                    ResponsesTerminal::Complete
+                } else {
+                    ResponsesTerminal::Incomplete
+                },
+            );
         }
         if line.len() <= Self::MAX_LINE
             && event.get("type").and_then(Value::as_str) == Some("response.completed")
@@ -118,7 +149,7 @@ impl ResponsesSseUsageTap {
     }
 
     pub(super) fn completed_successfully(&self) -> bool {
-        self.saw_terminal && self.successful && !self.abandoned
+        self.terminal == Some(ResponsesTerminal::Complete) && !self.abandoned
     }
 
     pub(super) fn finish(&mut self) {
@@ -565,18 +596,34 @@ impl Gateway {
         }
         let parts = response.into_parts()?;
         ctx.append_upstream_response_body(parts.body.as_bytes());
-        if let Some(usage) = serde_json::from_str::<Value>(&parts.body)
-            .ok()
+        let document = serde_json::from_str::<Value>(&parts.body).ok();
+        let failed = document.as_ref().is_some_and(responses_explicit_failure);
+        if let Some(usage) = document
             .as_ref()
             .and_then(|body| body.get("usage"))
             .and_then(responses_wire_usage)
         {
             record.usage = Some(usage);
         }
-        emit(Reply::BeginJson(JsonReply {
+        if !emit(Reply::BeginJson(JsonReply {
             status: parts.status,
             body: parts.body,
-        }));
+        })) {
+            return Ok(StreamOutcome::ClientCancelled);
+        }
+        if failed {
+            if document
+                .as_ref()
+                .is_some_and(responses_reports_both_token_counts)
+            {
+                ctx.mark_reported_terminal_usage();
+            }
+            // The native body was delivered unchanged. Record its failure without
+            // replaying a generation whose HTTP response is already committed.
+            record.error_code = Some(ErrorCode::UpstreamUnavailable);
+            record.status = 502;
+            return Ok(StreamOutcome::FailedAfterPartial);
+        }
         Ok(StreamOutcome::Complete)
     }
 
@@ -623,7 +670,15 @@ impl Gateway {
                     if let Some(usage) = tap.usage {
                         record.usage = Some(usage);
                     }
-                    if tap.saw_terminal {
+                    if let Some(terminal) = tap.terminal {
+                        if terminal == ResponsesTerminal::Failed {
+                            if tap.terminal_reports_both_token_counts && !tap.abandoned {
+                                ctx.mark_reported_terminal_usage();
+                            }
+                            record.error_code = Some(ErrorCode::UpstreamUnavailable);
+                            record.status = 502;
+                            return Ok(StreamOutcome::FailedAfterPartial);
+                        }
                         return Ok(StreamOutcome::Complete);
                     }
                     let error = ErrorEnvelope::new(
@@ -761,7 +816,7 @@ mod tests {
                 tap.observe(std::str::from_utf8(chunk).unwrap());
             }
             tap.finish();
-            assert!(tap.saw_terminal);
+            assert!(tap.terminal.is_some());
             assert_eq!(
                 tap.completed_successfully(),
                 terminal == "response.completed"
@@ -791,13 +846,13 @@ mod tests {
         tap.observe(
             "data: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"ws_1\"}\n\n",
         );
-        assert!(!tap.saw_terminal);
+        assert!(tap.terminal.is_none());
 
         tap.observe(concat!(
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{",
             "\"input_tokens\":13,\"output_tokens\":5}}}\n\n"
         ));
-        assert!(tap.saw_terminal);
+        assert!(tap.terminal.is_some());
         let usage = tap.usage.expect("terminal usage");
         assert_eq!(usage.input_tokens, 13);
         assert_eq!(usage.output_tokens, 5);

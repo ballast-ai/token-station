@@ -383,6 +383,7 @@ pub(crate) fn set_agent_route_mode(
         Ok(())
     })?;
     inner.agent_route_drafts.remove(&agent_id);
+    inner.agent_harness_enabled_drafts.remove(&agent_id);
     Ok(inner.snapshot())
 }
 
@@ -414,13 +415,7 @@ pub(crate) fn set_agent_harness_model_mapping_enabled(
     }
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    if !inner.draft["agent_routes"].is_object() {
-        inner.draft["agent_routes"] = json!({});
-    }
-    if !inner.draft["agent_routes"][&agent_id].is_object() {
-        inner.draft["agent_routes"][&agent_id] = json!({ "mode": "inherit" });
-    }
-    inner.draft["agent_routes"][&agent_id]["harness_model_mapping_enabled"] = json!(enabled);
+    inner.agent_harness_enabled_drafts.insert(agent_id, enabled);
     Ok(inner.snapshot())
 }
 
@@ -492,136 +487,139 @@ pub(crate) fn restart_agent_route(
     agents: State<'_, AgentCommandState>,
     agent_id: String,
 ) -> Result<StateView, String> {
-    let current_runtime = runtime_from_app(state.inner()).ok();
-    let mut transition_runtime = current_runtime.clone();
-    let snapshot = {
-        let mut inner = state.0.lock().unwrap();
-        if !supported_agent_ids().contains(&agent_id) {
-            return Err(format!("未知 Agent：{agent_id}"));
-        }
-        if matches!(
-            inner.server,
-            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
-        ) {
-            return Err("apply_in_progress: 配置正在应用，请完成后再保存 Agent 路由".to_owned());
-        }
-        let applying_direct = inner.draft["agent_routes"][&agent_id]["routing_mode"]
+    restart_agent_route_impl(state.inner(), agents.inner(), &agent_id, false)
+}
+
+/// Save only the Harness editing draft, then publish its safe runtime contract.
+#[tauri::command]
+pub(crate) fn restart_agent_harness_routes(
+    state: State<'_, AppStateManaged>,
+    agents: State<'_, AgentCommandState>,
+    agent_id: String,
+) -> Result<StateView, String> {
+    restart_agent_route_impl(state.inner(), agents.inner(), &agent_id, true)
+}
+
+fn restart_agent_route_impl(
+    state: &AppStateManaged,
+    agents: &AgentCommandState,
+    agent_id: &str,
+    harness_only: bool,
+) -> Result<StateView, String> {
+    use crate::agent_integration::commands::{model_metadata_for_reload, runtime_from_inner};
+    // Discovery can launch version probes. Never run it under the App lock.
+    let scan = if runtime_from_app(state).is_ok() {
+        Some(
+            agents
+                .metadata_refresh_scan()
+                .map_err(|error| error.message)?,
+        )
+    } else {
+        None
+    };
+    let mut inner = state.0.lock().unwrap();
+    ensure_known_agent_id(agent_id)?;
+    if matches!(
+        inner.server,
+        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
+    ) {
+        return Err(
+            "apply_in_progress: Finish the current config apply before saving an Agent route."
+                .to_owned(),
+        );
+    }
+    let current_runtime = runtime_from_inner(&inner).ok();
+    if current_runtime.is_some() && scan.is_none() {
+        return Err("The proxy started during route preparation. Try again.".to_owned());
+    }
+    let previous = inner.draft.clone();
+    let mut committed = false;
+    let mut metadata_attempted = false;
+    let result = (|| {
+        let applying_direct = inner.draft["agent_routes"][agent_id]["routing_mode"]
             .as_str()
             .unwrap_or_else(|| inner.home_routing_mode())
             == "direct";
-        // Tier editor drafts are a separate axis from Direct routing. Applying a
-        // Direct target must neither validate nor silently commit an incomplete
-        // hidden tier draft; keep it in memory for when the operator switches back.
-        if !applying_direct {
-            inner.promote_agent_route_draft(&agent_id)?;
+        if harness_only {
+            inner.begin_agent_harness_route_draft(agent_id);
+            inner.promote_agent_harness_route_draft(agent_id)?;
+        } else if !applying_direct {
+            inner.promote_agent_route_draft(agent_id)?;
         }
-        // Prepare every fallible hot-reload step before persisting. A successful
-        // config save must never be followed by a recoverable router-build failure,
-        // which would split the durable route from the running Gateway.
         let config = inner.materialize()?;
-        let router = config.custom_router_for_agent(&agent_id)?;
-        let harness = config.harness_router_for_agent(&agent_id)?;
-        let prepared = match &inner.server {
-            ServerLifecycle::Running { server, .. } => Some(
-                server
-                    .prepare_agent_router_reload(&agent_id, router, harness)
-                    .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?,
-            ),
-            ServerLifecycle::Stopped { .. }
-            | ServerLifecycle::Failed { .. }
-            | ServerLifecycle::Stopping { .. } => None,
-            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
-                unreachable!("transitional lifecycles were rejected before editing")
+        let router = config.custom_router_for_agent(agent_id)?;
+        let harness = config.harness_router_for_agent(agent_id)?;
+        let (prepared, pending_metadata) = match &inner.server {
+            ServerLifecycle::Running { server, .. } => {
+                let prepared = server.prepare_agent_router_reload(
+                    agent_id,
+                    router.clone(),
+                    harness.clone(),
+                )?;
+                let metadata = model_metadata_for_reload(
+                    server,
+                    router.as_ref(),
+                    harness.as_ref().map(|overlay| &overlay.router),
+                )?;
+                (Some(prepared), metadata)
             }
+            _ => (None, None),
         };
-
-        // Move every connected client to a budget safe for both the old and
-        // pending routes before the gateway changes. If either metadata or the
-        // external config transaction fails, the route is not applied.
-        if let Some(runtime) = transition_runtime.as_mut() {
-            let pending_metadata = model_metadata_for_config(&config, &agent_id)?;
-            let transition_metadata = runtime
-                .model_metadata(&agent_id)
+        if let (Some(current), Some(scan)) = (current_runtime.as_ref(), scan.as_ref()) {
+            let mut transition = current.clone();
+            let safe = current
+                .model_metadata(agent_id)
                 .zip(pending_metadata.as_ref())
                 .map(|(current, next)| transition_model_metadata(current, next))
                 .or(pending_metadata);
-            runtime.replace_model_metadata(&agent_id, transition_metadata);
+            transition.replace_model_metadata(agent_id, safe);
+            metadata_attempted = true;
             agents
-                .refresh_model_metadata(Some(&agent_id), runtime)
-                .map_err(|error| {
-                    format!(
-                        "Agent 路由未应用：无法先写入安全的过渡模型容量：{}",
-                        error.message
-                    )
-                })?;
+                .refresh_model_metadata_from_scan(Some(agent_id), &transition, scan.clone())
+                .map_err(|error| format!("The Agent route was not applied: {}", error.message))?;
         }
-
-        if let Err(error) = inner.save_draft() {
-            if let Some(runtime) = current_runtime.as_ref() {
-                let _ = agents.refresh_model_metadata(Some(&agent_id), runtime);
-            }
-            return Err(error);
-        }
-        if !applying_direct {
-            inner.agent_route_drafts.remove(&agent_id);
+        inner.save_draft()?;
+        committed = true;
+        if harness_only {
+            inner.agent_harness_route_drafts.remove(agent_id);
+            inner.agent_harness_enabled_drafts.remove(agent_id);
+        } else if !applying_direct {
+            inner.agent_route_drafts.remove(agent_id);
         }
         if let (Some(prepared), ServerLifecycle::Running { server, .. }) =
             (prepared, &mut inner.server)
         {
             server.install_prevalidated_agent_router(prepared);
         }
-        inner.snapshot()
-    };
-    if let Ok(runtime) = runtime_from_app(state.inner()) {
-        agents
-            .refresh_model_metadata(Some(&agent_id), &runtime)
-            .map_err(|error| {
-                format!("Agent 路由已应用，但模型元数据刷新失败：{}", error.message)
-            })?;
-    }
-    Ok(snapshot)
-}
-
-/// Save one Agent's Harness model mappings without changing its routing mode
-/// or tier source. Hot-reload the Agent router when the proxy is running.
-#[tauri::command]
-pub(crate) fn restart_agent_harness_routes(
-    state: State<'_, AppStateManaged>,
-    agent_id: String,
-) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    ensure_known_agent_id(&agent_id)?;
-    if matches!(
-        inner.server,
-        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
-    ) {
-        return Err("apply_in_progress: 配置正在应用，请完成后再保存 Harness 映射".to_owned());
-    }
-    inner.begin_agent_harness_route_draft(&agent_id);
-    inner.promote_agent_harness_route_draft(&agent_id)?;
-    let config = inner.materialize()?;
-    let router = config.custom_router_for_agent(&agent_id)?;
-    let harness = config.harness_router_for_agent(&agent_id)?;
-    let prepared = match &inner.server {
-        ServerLifecycle::Running { server, .. } => Some(
-            server
-                .prepare_agent_router_reload(&agent_id, router, harness)
-                .map_err(|error| format!("热重启 Harness 映射失败：{error}"))?,
-        ),
-        ServerLifecycle::Stopped { .. }
-        | ServerLifecycle::Failed { .. }
-        | ServerLifecycle::Stopping { .. } => None,
-        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
-            unreachable!("transitional lifecycles were rejected before editing")
+        if let (Ok(runtime), Some(scan)) = (runtime_from_inner(&inner), scan.as_ref()) {
+            agents
+                .refresh_model_metadata_from_scan(Some(agent_id), &runtime, scan.clone())
+                .map_err(|error| {
+                    format!(
+                        "The Agent route was applied, but model metadata refresh failed: {}",
+                        error.message
+                    )
+                })?;
         }
-    };
-    inner.save_draft()?;
-    inner.agent_harness_route_drafts.remove(&agent_id);
-    if let (Some(prepared), ServerLifecycle::Running { server, .. }) = (prepared, &mut inner.server)
-    {
-        server.install_prevalidated_agent_router(prepared);
+        Ok(inner.snapshot())
+    })();
+    if !committed && result.is_err() {
+        inner.draft = previous;
+        inner.observe_draft()?;
+        if metadata_attempted {
+            if let (Some(runtime), Some(scan)) = (current_runtime.as_ref(), scan.as_ref()) {
+                agents
+                    .refresh_model_metadata_from_scan(Some(agent_id), runtime, scan.clone())
+                    .map_err(|error| {
+                        format!(
+                            "The route was not applied. Restoring Agent metadata failed: {}",
+                            error.message
+                        )
+                    })?;
+            }
+        }
     }
-    Ok(inner.snapshot())
+    result
 }
 
 #[tauri::command]
@@ -630,10 +628,22 @@ pub(crate) fn apply_home_route_to_all_agents(
     agents: State<'_, AgentCommandState>,
 ) -> Result<StateView, String> {
     let agent_ids = supported_agent_ids();
-    let current_runtime = runtime_from_app(state.inner()).ok();
-    let mut transition_runtime = current_runtime.clone();
+    let scan = if runtime_from_app(state.inner()).is_ok() {
+        Some(
+            agents
+                .metadata_refresh_scan()
+                .map_err(|error| error.message)?,
+        )
+    } else {
+        None
+    };
     let snapshot = {
         let mut inner = state.0.lock().unwrap();
+        let current_runtime = crate::agent_integration::commands::runtime_from_inner(&inner).ok();
+        if current_runtime.is_some() && scan.is_none() {
+            return Err("The proxy started during route preparation. Try again.".to_owned());
+        }
+        let mut transition_runtime = current_runtime.clone();
         if matches!(
             inner.server,
             ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
@@ -671,7 +681,14 @@ pub(crate) fn apply_home_route_to_all_agents(
 
         if let Some(runtime) = transition_runtime.as_mut() {
             for agent_id in &agent_ids {
-                let pending_metadata = model_metadata_for_config(&config, agent_id)?;
+                let pending_metadata = match &inner.server {
+                    ServerLifecycle::Running { server, .. } => {
+                        crate::agent_integration::commands::model_metadata_for_reload(
+                            server, None, None,
+                        )?
+                    }
+                    _ => model_metadata_for_config(&config, agent_id)?,
+                };
                 let transition_metadata = runtime
                     .model_metadata(agent_id)
                     .zip(pending_metadata.as_ref())
@@ -680,7 +697,11 @@ pub(crate) fn apply_home_route_to_all_agents(
                 runtime.replace_model_metadata(agent_id, transition_metadata);
             }
             agents
-                .refresh_model_metadata(None, runtime)
+                .refresh_model_metadata_from_scan(
+                    None,
+                    runtime,
+                    scan.as_ref().expect("a running runtime has a scan").clone(),
+                )
                 .map_err(|error| {
                     format!(
                         "Home 路由未应用：无法先写入安全的过渡模型容量：{}",
@@ -691,11 +712,16 @@ pub(crate) fn apply_home_route_to_all_agents(
 
         if let Err(error) = inner.save_draft() {
             if let Some(runtime) = current_runtime.as_ref() {
-                let _ = agents.refresh_model_metadata(None, runtime);
+                let _ = agents.refresh_model_metadata_from_scan(
+                    None,
+                    runtime,
+                    scan.as_ref().expect("a running runtime has a scan").clone(),
+                );
             }
             return Err(error);
         }
         inner.agent_route_drafts.clear();
+        inner.agent_harness_enabled_drafts.clear();
         if let ServerLifecycle::Running { server, .. } = &mut inner.server {
             for prepared in prepared {
                 server.install_prevalidated_agent_router(prepared);
@@ -704,14 +730,18 @@ pub(crate) fn apply_home_route_to_all_agents(
         inner.snapshot()
     };
     if let Ok(runtime) = runtime_from_app(state.inner()) {
-        agents
-            .refresh_model_metadata(None, &runtime)
-            .map_err(|error| {
-                format!(
-                    "The Home route was applied, but the model metadata refresh failed: {}",
-                    error.message
-                )
-            })?;
+        crate::agent_integration::commands::refresh_current_model_metadata(
+            state.inner(),
+            agents.inner(),
+            None,
+            Some(&runtime),
+        )
+        .map_err(|error| {
+            format!(
+                "The Home route was applied, but the model metadata refresh failed: {}",
+                error.message
+            )
+        })?;
     }
     Ok(snapshot)
 }

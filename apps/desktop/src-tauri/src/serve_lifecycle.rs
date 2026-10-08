@@ -141,6 +141,7 @@ pub(crate) struct RunningServer {
     /// router. Keeping this separately avoids pretending unrelated draft
     /// provider/model/pricing edits reached the running Gateway.
     agent_router_overrides: BTreeMap<String, Option<token_station_router_core::RouterConfig>>,
+    agent_harness_overrides: BTreeMap<String, Option<token_station_router_core::RouterConfig>>,
     serve_task: tokio::task::JoinHandle<std::io::Result<()>>,
     retired_controls: Vec<server::ServerControl>,
 }
@@ -151,6 +152,7 @@ pub(crate) struct RunningServer {
 pub(crate) struct PreparedAgentRouterReload {
     agent_id: String,
     router: Option<token_station_router_core::RouterConfig>,
+    harness: Option<token_station_router_core::RouterConfig>,
     gateway_plan: PrevalidatedAgentRouter,
 }
 
@@ -219,6 +221,15 @@ impl RunningServer {
             .map(Option::as_ref)
     }
 
+    pub(crate) fn agent_harness_override(
+        &self,
+        agent_id: &str,
+    ) -> Option<Option<&token_station_router_core::RouterConfig>> {
+        self.agent_harness_overrides
+            .get(agent_id)
+            .map(Option::as_ref)
+    }
+
     /// Proves that every target in a candidate Agent router belongs to this
     /// published server snapshot. Draft-only Providers and models cannot be
     /// hot-swapped into a Gateway that was built before they existed.
@@ -269,10 +280,12 @@ impl RunningServer {
             self.validate_agent_router_targets(&harness.router)?;
         }
         let applied_router = router.clone();
+        let applied_harness = harness.as_ref().map(|overlay| overlay.router.clone());
         let gateway_plan = Gateway::prepare_agent_router_reload(agent_id, router, harness)?;
         Ok(PreparedAgentRouterReload {
             agent_id: agent_id.to_owned(),
             router: applied_router,
+            harness: applied_harness,
             gateway_plan,
         })
     }
@@ -288,6 +301,8 @@ impl RunningServer {
         self.app_state
             .gateway
             .install_prevalidated_agent_router(prepared.gateway_plan);
+        self.agent_harness_overrides
+            .insert(prepared.agent_id.clone(), prepared.harness);
         self.agent_router_overrides
             .insert(prepared.agent_id, prepared.router);
     }
@@ -432,6 +447,7 @@ impl BoundPreparedServer {
             serving_config,
             upstream_epochs,
             agent_router_overrides: BTreeMap::new(),
+            agent_harness_overrides: BTreeMap::new(),
             serve_task,
             retired_controls: Vec::new(),
         })

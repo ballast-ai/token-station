@@ -22,6 +22,13 @@ struct MockReleases {
 
 impl MockReleases {
     fn start(routes: BTreeMap<String, Vec<u8>>) -> Self {
+        Self::with_redirects(routes, BTreeMap::new())
+    }
+
+    fn with_redirects(
+        routes: BTreeMap<String, Vec<u8>>,
+        redirects: BTreeMap<String, String>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
         let base = format!("http://{}", listener.local_addr().expect("bound"));
         let routes = Arc::new(routes);
@@ -47,6 +54,13 @@ impl MockReleases {
                     .and_then(|line| line.split(' ').nth(1))
                     .unwrap_or_default()
                     .to_owned();
+                if let Some(location) = redirects.get(&path) {
+                    let response = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
                 let response = match routes.get(&path) {
                     Some(body) => {
                         let mut response = format!(
@@ -78,8 +92,24 @@ struct Scene {
     _server: MockReleases,
 }
 
+impl Drop for Scene {
+    fn drop(&mut self) {
+        if let Some(root) = self.download_dir.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
 /// `tamper`: mutates the served bodies after signing, to cut one link.
 fn scene(name: &str, tamper: impl FnOnce(&mut BTreeMap<String, Vec<u8>>)) -> Scene {
+    redirected_scene(name, tamper, false)
+}
+
+fn redirected_scene(
+    name: &str,
+    tamper: impl FnOnce(&mut BTreeMap<String, Vec<u8>>),
+    redirect: bool,
+) -> Scene {
     let dir = std::env::temp_dir().join(format!("ts-upgrade-{}-{name}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).expect("temp dir");
@@ -104,7 +134,21 @@ fn scene(name: &str, tamper: impl FnOnce(&mut BTreeMap<String, Vec<u8>>)) -> Sce
     routes.insert("/dl/manifest.json.sig".to_owned(), signature.into_bytes());
     tamper(&mut routes);
 
-    let server = MockReleases::start(routes.clone());
+    let redirects = if redirect {
+        let paths = routes.keys().cloned().collect::<Vec<_>>();
+        paths
+            .into_iter()
+            .map(|path| {
+                let resolved = format!("/resolved{path}");
+                let body = routes.remove(&path).expect("body exists");
+                routes.insert(resolved.clone(), body);
+                (path, resolved)
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let server = MockReleases::with_redirects(routes.clone(), redirects);
     let asset = |name: &str| json!({ "name": name, "browser_download_url": format!("{}/dl/{name}", server.base) });
     let listing = json!({
         "tag_name": "v9.9.9",
@@ -223,4 +267,59 @@ fn a_source_build_without_a_key_refuses_and_points_at_the_docs() {
         .expect_err("no key, no trust chain");
     assert!(error.contains("built from source"), "{error}");
     assert!(error.contains(&scene.release.html_url), "{error}");
+}
+
+#[test]
+fn a_signed_release_verifies_after_all_asset_redirects() {
+    let scene = redirected_scene("redirect-ok", |_| {}, true);
+    let path = upgrade::download_and_verify(&scene.release, &scene.download_dir, &scene.pubkey_hex)
+        .expect("redirected metadata, signature and artifact verify");
+    assert_eq!(std::fs::read(path).unwrap(), b"pretend this is a tarball");
+}
+
+#[test]
+fn redirects_do_not_bypass_artifact_verification() {
+    let scene = redirected_scene(
+        "redirect-tampered",
+        |routes| {
+            for (path, body) in routes {
+                if path.ends_with(".tar.gz") {
+                    *body = b"tampered".to_vec();
+                }
+            }
+        },
+        true,
+    );
+    let error =
+        upgrade::download_and_verify(&scene.release, &scene.download_dir, &scene.pubkey_hex)
+            .expect_err("redirected artifact still needs the signed hash");
+    assert!(error.contains("does not match"), "{error}");
+    assert!(!scene.download_dir.join(&scene.artifact_name).exists());
+}
+
+#[test]
+fn a_release_redirect_loop_is_bounded() {
+    let server = MockReleases::with_redirects(
+        BTreeMap::new(),
+        BTreeMap::from([("/releases/latest".to_owned(), "/releases/latest".to_owned())]),
+    );
+    let error = upgrade::check_latest(&server.base).expect_err("redirect loop must fail");
+    assert!(error.contains("redirect limit"), "{error}");
+}
+
+#[test]
+fn a_release_redirect_cannot_change_to_an_untrusted_origin() {
+    let server = MockReleases::with_redirects(
+        BTreeMap::new(),
+        BTreeMap::from([(
+            "/releases/latest".to_owned(),
+            "https://example.invalid/steal".to_owned(),
+        )]),
+    );
+    let error = upgrade::check_latest(&server.base)
+        .expect_err("untrusted destination must fail before egress");
+    assert!(
+        error.contains("redirect destination is not allowed"),
+        "{error}"
+    );
 }

@@ -1,4 +1,4 @@
-//! Accounting across the provider attempts of one host-owned tool loop.
+//! Accounting across provider attempts, including retries and host-owned tool loops.
 
 use super::{CostKind, RequestRecord, Usage, UsageObservation, can_estimate};
 use crate::pricing::PriceTable;

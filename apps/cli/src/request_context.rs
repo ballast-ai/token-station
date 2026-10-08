@@ -28,10 +28,16 @@ pub struct RequestContext {
     upstream_response_limit: Option<u64>,
     http_trace: Mutex<Option<HttpTraceCapture>>,
     tool_aliases: Mutex<BTreeMap<String, String>>,
-    accounting: Mutex<crate::accounting::AccountingTap>,
+    accounting: Mutex<AttemptAccounting>,
     host_loop_accounting: Mutex<Option<crate::accounting::Aggregate>>,
     error_diagnostic: Mutex<Option<ErrorDiagnosticCapture>>,
     classifier_input: Mutex<Option<token_station_metrics::ClassifierInputDiagnostic>>,
+}
+
+#[derive(Default)]
+struct AttemptAccounting {
+    tap: crate::accounting::AccountingTap,
+    reported_terminal_usage: bool,
 }
 
 /// A buffered host-tool round owns this mapping. It never enters provider extensions.
@@ -192,7 +198,7 @@ impl RequestContext {
             tool_aliases: Mutex::new(BTreeMap::new()),
             error_diagnostic: Mutex::new(None),
             classifier_input: Mutex::new(None),
-            accounting: Mutex::new(crate::accounting::AccountingTap::default()),
+            accounting: Mutex::new(AttemptAccounting::default()),
             host_loop_accounting: Mutex::new(None),
         }
     }
@@ -287,8 +293,10 @@ impl RequestContext {
     }
 
     pub(crate) fn begin_accounting(&self, endpoint: &str) {
-        *self.accounting.lock().expect("accounting lock") =
-            crate::accounting::AccountingTap::new(endpoint);
+        *self.accounting.lock().expect("accounting lock") = AttemptAccounting {
+            tap: crate::accounting::AccountingTap::new(endpoint),
+            reported_terminal_usage: false,
+        };
     }
 
     /// Record this request's classifier input handling, independently of attempts.
@@ -311,8 +319,22 @@ impl RequestContext {
         *self.classifier_input.lock().expect("classifier input lock")
     }
 
-    pub(crate) fn finish_accounting(&self, record: &mut token_station_metrics::RequestRecord) {
-        std::mem::take(&mut *self.accounting.lock().expect("accounting lock")).finish(record);
+    /// A parsed native terminal reported both token counts after a complete read.
+    /// This preserves the tap's validation, including any incomplete observation.
+    pub(crate) fn mark_reported_terminal_usage(&self) {
+        self.accounting
+            .lock()
+            .expect("accounting lock")
+            .reported_terminal_usage = true;
+    }
+
+    pub(crate) fn finish_accounting(
+        &self,
+        record: &mut token_station_metrics::RequestRecord,
+    ) -> bool {
+        let accounting = std::mem::take(&mut *self.accounting.lock().expect("accounting lock"));
+        let complete_envelope = accounting.tap.finish(record);
+        accounting.reported_terminal_usage && complete_envelope
     }
 
     fn captured_headers<'a>(
@@ -462,6 +484,7 @@ impl RequestContext {
         self.accounting
             .lock()
             .expect("accounting lock")
+            .tap
             .head(status, content_type);
         let mut trace = self.http_trace.lock().unwrap();
         let Some(trace) = trace.as_mut() else {
@@ -491,7 +514,11 @@ impl RequestContext {
             let remaining = 8192usize.saturating_sub(body.len());
             body.extend_from_slice(&value[..value.len().min(remaining)]);
         }
-        self.accounting.lock().expect("accounting lock").push(value);
+        self.accounting
+            .lock()
+            .expect("accounting lock")
+            .tap
+            .push(value);
         let mut trace = self.http_trace.lock().unwrap();
         let Some(trace) = trace.as_mut() else {
             return;
@@ -579,6 +606,28 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_usage_evidence_is_attempt_scoped() {
+        let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        for mark_terminal in [true, false] {
+            ctx.mark_reported_terminal_usage();
+            ctx.begin_accounting("https://example.test/v1");
+            ctx.capture_upstream_response_head(200, &BTreeMap::new());
+            ctx.append_upstream_response_body(
+                br#"{"usage":{"input_tokens":10,"output_tokens":2}}"#,
+            );
+            if mark_terminal {
+                ctx.mark_reported_terminal_usage();
+            }
+            assert_eq!(
+                ctx.finish_accounting(&mut token_station_metrics::RequestRecord::begin(
+                    1, "openai"
+                )),
+                mark_terminal,
+            );
+        }
+    }
+
     #[test]
     fn classifier_input_is_request_scoped_and_survives_attempt_accounting() {
         use token_station_metrics::{

@@ -184,6 +184,7 @@ struct AppInner {
     agent_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
     /// In-process Harness mapping edits commit with the matching Agent tier draft.
     agent_harness_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
+    agent_harness_enabled_drafts: BTreeMap<String, bool>,
     /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
     /// Free-provider verification sends real upstream requests; an in-memory single-flight set limits duplication and abuse.

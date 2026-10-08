@@ -90,6 +90,13 @@ pub fn snapshot_database(source: &Path, destination: &Path) -> Result<(), String
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|error| format!("metrics store `{}`: {error}", source.display()))?;
+    // Protect the empty destination before SQLite writes the first private byte.
+    token_station_private_fs::create_private_file(destination, b"").map_err(|error| {
+        format!(
+            "private metrics snapshot `{}`: {error}",
+            destination.display()
+        )
+    })?;
     connection
         .backup(rusqlite::MAIN_DB, destination, None)
         .map_err(|error| {
@@ -700,6 +707,73 @@ CREATE TABLE IF NOT EXISTS conversion_reports (
 /// The SQLite-backed [`Recorder`].
 pub struct SqliteStore {
     connection: Mutex<Connection>,
+    // Drop the connection before releasing the cross-process lifecycle lease.
+    _lifecycle: std::fs::File,
+}
+
+/// Coordinates every CLI and desktop metrics writer with offline restore.
+/// The stable sidecar must never be removed, including after the lock is released.
+pub(crate) fn metrics_lifecycle_lock(
+    path: &Path,
+    exclusive: bool,
+) -> Result<std::fs::File, String> {
+    let canonical = canonical_metrics_path(path, 0)
+        .map_err(|error| format!("metrics database path `{}`: {error}", path.display()))?;
+    let mut name = canonical
+        .file_name()
+        .ok_or("Metrics database path has no filename.")?
+        .to_os_string();
+    name.push(".lifecycle.lock");
+    let lock_path = canonical.with_file_name(name);
+    token_station_private_fs::create_private_file(&lock_path, b"")
+        .map_err(|error| format!("metrics lifecycle lock: {error}"))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("metrics lifecycle lock: {error}"))?;
+    let result = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    result.map_err(|error| format!("Metrics database is in use or cannot be locked: {error}. Stop the running service before restore."))?;
+    if canonical.exists() {
+        token_station_private_fs::verify_single_link_file(&canonical)
+            .map_err(|error| format!("Metrics database requires a single file path: {error}."))?;
+    }
+    Ok(file)
+}
+
+fn canonical_metrics_path(path: &Path, links: usize) -> std::io::Result<std::path::PathBuf> {
+    if links >= 40 {
+        return Err(std::io::Error::other(
+            "Metrics database path contains too many symbolic links.",
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            // Resolve even a dangling file link before SQLite creates its target.
+            let target = std::fs::read_link(path)?;
+            canonical_metrics_path(&parent.join(target), links + 1)
+        }
+        Ok(_) => std::fs::canonicalize(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !parent.exists() {
+                crate::private_fs::ensure_private_dir(parent)?;
+            }
+            Ok(std::fs::canonicalize(parent)?.join(
+                path.file_name().ok_or_else(|| {
+                    std::io::Error::other("Metrics database path has no filename.")
+                })?,
+            ))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1056,6 +1130,7 @@ impl SqliteStore {
     /// A message for the operator: the store failing to open is a startup
     /// error, unlike a single record failing to write.
     pub fn open(path: &Path) -> Result<Self, String> {
+        let lifecycle = metrics_lifecycle_lock(path, false)?;
         let mut connection = Connection::open(path)
             .map_err(|error| format!("metrics store `{}`: {error}", path.display()))?;
 
@@ -1088,6 +1163,7 @@ impl SqliteStore {
 
         Ok(Self {
             connection: Mutex::new(connection),
+            _lifecycle: lifecycle,
         })
     }
 
@@ -2518,6 +2594,7 @@ mod tests {
                 .unwrap();
             let store = SqliteStore {
                 connection: std::sync::Mutex::new(connection),
+                _lifecycle: super::metrics_lifecycle_lock(&path, false).unwrap(),
             };
             let mut old = receipt("old-quota", 1);
             let decision = old.decision.as_mut().unwrap();

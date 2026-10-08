@@ -1,5 +1,7 @@
 //! Browser search activation verifies the real model and browser path.
-use crate::agent_integration::commands::{runtime_from_app, AgentCommandState, AgentProxyRuntime};
+use crate::agent_integration::commands::{
+    refresh_current_model_metadata, runtime_from_app, AgentCommandState, AgentProxyRuntime,
+};
 use crate::AppStateManaged;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -58,7 +60,13 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
             .as_ref()
             .map_err(|error| error.message.clone())?;
     }
-    controller.save(settings.clone())?;
+    {
+        let _inner = state
+            .0
+            .lock()
+            .map_err(|_| "Cannot update search settings.")?;
+        controller.save(settings.clone())?;
+    }
     let mut execution = None;
     let result = (|| {
         let runtime = match runtime_from_app(&state) {
@@ -73,8 +81,7 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
                 return Err("The proxy changed during verification. Try again.".into());
             }
         }
-        agents
-            .refresh_model_metadata(Some("codex"), &runtime)
+        refresh_current_model_metadata(&state, &agents, Some("codex"), Some(&runtime))
             .map_err(|error| error.message)
     })();
     match result {
@@ -85,12 +92,18 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
             execution,
         }),
         Err(error) => {
-            controller.save(previous).map_err(|_| {
-                format!("{error} Search settings could not be restored. Check Settings.")
-            })?;
+            {
+                let _inner = state
+                    .0
+                    .lock()
+                    .map_err(|_| "Cannot restore search settings.")?;
+                controller.save(previous).map_err(|_| {
+                    format!("{error} Search settings could not be restored. Check Settings.")
+                })?;
+            }
             // A client can connect while the probe runs. Reconcile those owned files too.
             if let Ok(runtime) = runtime_from_app(&state) {
-                agents.refresh_model_metadata(Some("codex"), &runtime).map_err(|_| format!("{error} Search settings were restored. Codex configuration needs review on the Agents page."))?;
+                refresh_current_model_metadata(&state, &agents, Some("codex"), Some(&runtime)).map_err(|_| format!("{error} Search settings were restored. Codex configuration needs review on the Agents page."))?;
             }
             Err(format!("{error} Previous search settings were restored."))
         }

@@ -572,6 +572,9 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        // A retry can consume billable tokens before failing. Share the same
+        // accumulator with host tool loops, without resetting earlier rounds.
+        ctx.begin_host_loop_accounting();
         record_route_decision(record, decision);
         // In quota mode, record why this account was chosen — its window/rate
         // picture at decision time — for the receipt ("why this account").
@@ -928,8 +931,8 @@ impl Gateway {
         record: &mut RequestRecord,
         result: &Result<StreamOutcome, ErrorEnvelope>,
     ) {
-        ctx.finish_accounting(record);
-        if !matches!(result, Ok(StreamOutcome::Complete)) {
+        let reported_terminal_usage = ctx.finish_accounting(record);
+        if !matches!(result, Ok(StreamOutcome::Complete)) && !reported_terminal_usage {
             if record.usage_observation.is_none() && record.usage.is_some() {
                 record.usage_observation = Some(token_station_metrics::UsageObservation::default());
             }

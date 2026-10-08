@@ -515,6 +515,7 @@ impl AppInner {
             config_state,
             agent_route_drafts: BTreeMap::new(),
             agent_harness_route_drafts: BTreeMap::new(),
+            agent_harness_enabled_drafts: BTreeMap::new(),
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
@@ -1001,9 +1002,14 @@ impl AppInner {
     }
 
     pub(crate) fn agent_harness_model_mapping_enabled(&self, agent_id: &str) -> bool {
-        self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"]
-            .as_bool()
-            .unwrap_or(false)
+        self.agent_harness_enabled_drafts
+            .get(agent_id)
+            .copied()
+            .unwrap_or_else(|| {
+                self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"]
+                    .as_bool()
+                    .unwrap_or(false)
+            })
     }
 
     pub(crate) fn agent_harness_model_routes(&self, agent_id: &str) -> BTreeMap<String, TierView> {
@@ -1804,13 +1810,15 @@ impl AppInner {
         &mut self,
         agent_id: &str,
     ) -> Result<(), String> {
-        if !self.agent_harness_model_mapping_enabled(agent_id) {
-            return Ok(());
-        }
-        let Some(routes) = self.agent_harness_route_drafts.get(agent_id) else {
-            return Ok(());
+        let enabled = self.agent_harness_model_mapping_enabled(agent_id);
+        let routes = if enabled {
+            self.agent_harness_route_drafts
+                .get(agent_id)
+                .map(|routes| Self::complete_harness_model_route_draft(agent_id, routes))
+                .transpose()?
+        } else {
+            None
         };
-        let routes = Self::complete_harness_model_route_draft(agent_id, routes)?;
         self.edit_validated_draft(|inner| {
             if !inner.draft["agent_routes"].is_object() {
                 inner.draft["agent_routes"] = json!({});
@@ -1818,7 +1826,10 @@ impl AppInner {
             if !inner.draft["agent_routes"][agent_id].is_object() {
                 inner.draft["agent_routes"][agent_id] = json!({ "mode": "inherit" });
             }
-            inner.draft["agent_routes"][agent_id]["harness_model_routes"] = routes;
+            inner.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"] = json!(enabled);
+            if let Some(routes) = routes {
+                inner.draft["agent_routes"][agent_id]["harness_model_routes"] = routes;
+            }
             Ok(())
         })
     }

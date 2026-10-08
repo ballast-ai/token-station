@@ -86,6 +86,19 @@ The quota page distinguishes new, recovered, changed-plan, and unavailable histo
 
 If quota persistence fails, Token Station reports the failure instead of starting with empty counters. Restore `quota.sqlite` from a known backup before removing the `quota-state-unavailable` marker. Do not remove that marker to claim a recovered balance.
 
+## Local backup and restore
+
+Use `token-station-cli backup <directory>` to copy the configuration and a consistent metrics snapshot.
+Online backup is supported. New backup directories and output files have owner-only permissions.
+Existing destination directory permissions remain unchanged.
+
+Before `token-station-cli restore <directory>`, stop all CLI and desktop instances that use the destination database.
+Close external SQLite tools too. Restore preserves the previous files as `<file>.pre-restore`.
+Current builds refuse restoration while a participating database writer holds its lifecycle lock.
+Older builds and external SQLite tools do not participate in that lock protocol.
+Keep the `metrics.sqlite.lifecycle.lock` sidecar in place. Do not delete it to bypass a busy-database error.
+Database paths with multiple hard links are refused because different names can bypass path-based coordination.
+
 ## Security
 
 | Boundary | Current behavior |

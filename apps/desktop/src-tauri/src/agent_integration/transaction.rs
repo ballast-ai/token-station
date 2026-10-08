@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use token_station_private_fs::open_new_private_file;
 
 use super::config_codec::{parse_source_bytes, ConfigDocument};
 use super::ownership::{
@@ -166,19 +167,22 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
             stage: AtomicWriteStage::ParentCreate,
             target_replaced: false,
         })?;
-        let temporary = temporary_path(target).map_err(|stage| AtomicWriteFailure {
+        // Resolve the parent once. Keep the target file unresolved so revision
+        // checks still reject file links, while directory links remain usable.
+        let parent = std::fs::canonicalize(parent).map_err(|_| AtomicWriteFailure {
+            stage: AtomicWriteStage::ParentCreate,
+            target_replaced: false,
+        })?;
+        let resolved_target = parent.join(target.file_name().ok_or(AtomicWriteFailure {
+            stage: AtomicWriteStage::TempCreate,
+            target_replaced: false,
+        })?);
+        let temporary = temporary_path(&resolved_target).map_err(|stage| AtomicWriteFailure {
             stage,
             target_replaced: false,
         })?;
         let result = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary).map_err(|_| AtomicWriteFailure {
+            let mut file = open_new_private_file(&temporary).map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::TempCreate,
                 target_replaced: false,
             })?;
@@ -209,22 +213,28 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
             })?;
             drop(file);
 
-            verify_revision(target, expected_current_hash, normalize_new_owner).map_err(|_| {
-                AtomicWriteFailure {
-                    stage: AtomicWriteStage::PreReplaceRevision,
-                    target_replaced: false,
-                }
+            verify_revision(
+                target,
+                &resolved_target,
+                expected_current_hash,
+                normalize_new_owner,
+            )
+            .map_err(|_| AtomicWriteFailure {
+                stage: AtomicWriteStage::PreReplaceRevision,
+                target_replaced: false,
             })?;
-            atomic_replace(&temporary, target).map_err(|_| AtomicWriteFailure {
+            atomic_replace(&temporary, &resolved_target).map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::Replace,
                 target_replaced: false,
             })?;
             #[cfg(windows)]
-            super::safe_fs::verify_private_file(target).map_err(|_| AtomicWriteFailure {
-                stage: AtomicWriteStage::Permission,
-                target_replaced: true,
+            super::safe_fs::verify_private_file(&resolved_target).map_err(|_| {
+                AtomicWriteFailure {
+                    stage: AtomicWriteStage::Permission,
+                    target_replaced: true,
+                }
             })?;
-            sync_parent(parent).map_err(|_| AtomicWriteFailure {
+            sync_parent(&parent).map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::DirectoryFsync,
                 target_replaced: true,
             })?;
@@ -242,12 +252,12 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
         expected_current_hash: &str,
         normalize_new_owner: bool,
     ) -> Result<(), AtomicWriteFailure> {
-        verify_revision(target, expected_current_hash, normalize_new_owner).map_err(|_| {
-            AtomicWriteFailure {
+        verify_revision(target, target, expected_current_hash, normalize_new_owner).map_err(
+            |_| AtomicWriteFailure {
                 stage: AtomicWriteStage::PreReplaceRevision,
                 target_replaced: false,
-            }
-        })?;
+            },
+        )?;
         std::fs::remove_file(target).map_err(|_| AtomicWriteFailure {
             stage: AtomicWriteStage::Remove,
             target_replaced: false,
@@ -322,10 +332,13 @@ fn temporary_path(target: &Path) -> Result<PathBuf, AtomicWriteStage> {
 
 fn verify_revision(
     target: &Path,
+    source_path: &Path,
     expected_hash: &str,
     normalize_new_owner: bool,
 ) -> Result<(), String> {
-    let mut source = read_config_source(target)?;
+    // Revision identity retains the caller's path, but reads use the same
+    // resolved location as the later replacement.
+    let mut source = read_config_source(source_path)?;
     if normalize_new_owner {
         source.original_owner = None;
     }
@@ -5256,6 +5269,92 @@ keep = true
         assert!(!serialized.contains("vk-repair-required-secret"));
         assert_ne!(std::fs::read(&target).unwrap(), initial);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_writer_replaces_regular_file_through_directory_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = scratch("atomic-directory-link");
+        let real_parent = root.join("dotfiles");
+        let real_target = real_parent.join("settings.json");
+        write_initial(&real_target, br#"{"value":1}"#);
+        std::fs::set_permissions(&real_parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let alias = root.join("agent");
+        symlink(&real_parent, &alias).unwrap();
+        let target = alias.join("settings.json");
+        let before = read_config_source(&target).unwrap();
+        let before_hash = file_revision_hash(&target, &before).unwrap();
+        let result = FsAtomicConfigWriter.replace(
+            &target,
+            br#"{"value":2}"#,
+            before.original_permissions,
+            before.original_owner.as_deref(),
+            &before_hash,
+            false,
+        );
+        if let Err(error) = result {
+            std::fs::remove_dir_all(&root).unwrap();
+            panic!("directory link replacement failed at {:?}", error.stage);
+        }
+        assert_eq!(std::fs::read(&real_target).unwrap(), br#"{"value":2}"#);
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&real_target)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        assert_eq!(
+            std::fs::metadata(&real_parent)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(std::fs::read_dir(&real_parent).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_writer_refuses_a_target_file_changed_to_a_symlink() {
+        let root = scratch("atomic-file-link");
+        let target = root.join("settings.json");
+        let initial = br#"{"value":1}"#;
+        write_initial(&target, initial);
+        let before = read_config_source(&target).unwrap();
+        let before_hash = file_revision_hash(&target, &before).unwrap();
+        let referent = root.join("other.json");
+        std::fs::rename(&target, &referent).unwrap();
+        std::os::unix::fs::symlink(&referent, &target).unwrap();
+        let error = match FsAtomicConfigWriter.replace(
+            &target,
+            br#"{"value":2}"#,
+            before.original_permissions,
+            before.original_owner.as_deref(),
+            &before_hash,
+            false,
+        ) {
+            Ok(()) => panic!("a target file link must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(error.stage, AtomicWriteStage::PreReplaceRevision);
+        assert!(!error.target_replaced);
+        assert!(std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&referent).unwrap(), initial);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

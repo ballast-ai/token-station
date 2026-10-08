@@ -3579,7 +3579,9 @@ fn saving_legacy_harness_mapping_does_not_enable_it() {
         draft,
         None
     )))));
-    let snapshot = restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    manage_test_agent_state(&app, &root);
+    let snapshot =
+        restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     assert!(!snapshot.agent_routes["claude-code"].harness_model_mapping_enabled);
     assert!(snapshot.agent_routes["claude-code"]
         .harness_config_error
@@ -3606,6 +3608,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         template_for_test(&root),
         None,
     )))));
+    manage_test_agent_state(&app, &root);
     add_provider(
         app.state(),
         "provider".to_owned(),
@@ -3647,7 +3650,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
     );
 
     set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
-    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     let config = ClientConfig::load(&config_path).unwrap();
     assert_eq!(
         config.agent_routes["claude-code"].harness_model_routes["claude-fable-5-1"].model,
@@ -3672,7 +3675,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), false)
             .unwrap();
     assert!(!disabled.agent_routes["claude-code"].harness_model_mapping_enabled);
-    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     let disabled_config = ClientConfig::load(&config_path).unwrap();
     assert!(disabled_config
         .harness_router_for_agent("claude-code")
@@ -3685,7 +3688,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         4
     );
     set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
-    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     assert!(ClientConfig::load(&config_path)
         .unwrap()
         .harness_router_for_agent("claude-code")
@@ -3704,6 +3707,7 @@ fn harness_mapping_save_does_not_change_the_agent_route_mode_or_tiers() {
         template_for_test(&root),
         None,
     )))));
+    manage_test_agent_state(&app, &root);
     add_provider(
         app.state(),
         "provider".to_owned(),
@@ -3725,7 +3729,7 @@ fn harness_mapping_save_does_not_change_the_agent_route_mode_or_tiers() {
     let enabled =
         set_agent_harness_model_mapping_enabled(app.state(), "opencode".to_owned(), true).unwrap();
     assert!(!enabled.agent_routes["opencode"].inherits_global);
-    restart_agent_harness_routes(app.state(), "opencode".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "opencode".to_owned()).unwrap();
 
     let config = ClientConfig::load(&config_path).unwrap();
     let route = &config.agent_routes["opencode"];

@@ -259,7 +259,7 @@ impl From<TransactionFailure> for AgentCommandError {
 }
 
 #[derive(Clone)]
-struct ScanSnapshot {
+pub(crate) struct ScanSnapshot {
     catalog: CompatibilityCatalog,
     source: CatalogSource,
     warning: Option<String>,
@@ -519,7 +519,12 @@ fn agent_model_metadata(
     agent_id: &str,
 ) -> Result<Option<AgentModelMetadata>, String> {
     let router = configured_router_for_agent(config, agent_id)?;
-    agent_model_metadata_for_router(config, &router)
+    let harness = config.harness_router_for_agent(agent_id)?;
+    agent_model_metadata_for_routes(
+        config,
+        &router,
+        harness.as_ref().map(|overlay| &overlay.router),
+    )
 }
 
 fn configured_router_for_agent(
@@ -581,7 +586,12 @@ pub(crate) fn model_metadata_for_config(
     agent_id: &str,
 ) -> Result<Option<AgentModelMetadata>, String> {
     let router = configured_router_for_agent(config, agent_id)?;
-    agent_model_metadata_for_router(config, &router)
+    let harness = config.harness_router_for_agent(agent_id)?;
+    agent_model_metadata_for_routes(
+        config,
+        &router,
+        harness.as_ref().map(|overlay| &overlay.router),
+    )
 }
 
 pub(crate) fn transition_model_metadata(
@@ -616,11 +626,15 @@ pub(crate) fn transition_model_metadata(
     }
 }
 
-fn agent_model_metadata_for_router(
+fn agent_model_metadata_for_routes(
     config: &token_station_cli::config::ClientConfig,
     router: &token_station_router_core::RouterConfig,
+    harness: Option<&token_station_router_core::RouterConfig>,
 ) -> Result<Option<AgentModelMetadata>, String> {
-    let candidates = reachable_model_targets(config, router);
+    let mut candidates = reachable_model_targets(config, router);
+    if let Some(harness) = harness {
+        candidates.extend(reachable_model_targets(config, harness));
+    }
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -817,6 +831,28 @@ fn serving_router_for_agent(
     }
 }
 
+pub(crate) fn model_metadata_for_reload(
+    server: &crate::serve_lifecycle::RunningServer,
+    router: Option<&token_station_router_core::RouterConfig>,
+    harness: Option<&token_station_router_core::RouterConfig>,
+) -> Result<Option<AgentModelMetadata>, String> {
+    let home = server.serving_config().home_router_config()?;
+    agent_model_metadata_for_routes(server.serving_config(), router.unwrap_or(&home), harness)
+}
+
+fn serving_harness_for_agent(
+    server: &crate::serve_lifecycle::RunningServer,
+    agent_id: &str,
+) -> Result<Option<token_station_router_core::RouterConfig>, String> {
+    match server.agent_harness_override(agent_id) {
+        Some(router) => Ok(router.cloned()),
+        None => Ok(server
+            .serving_config()
+            .harness_router_for_agent(agent_id)?
+            .map(|overlay| overlay.router)),
+    }
+}
+
 fn opencode_issue_from_inner(
     inner: &crate::AppInner,
 ) -> Result<Option<AgentConnectionIssueView>, String> {
@@ -852,6 +888,8 @@ pub struct AgentCommandState {
     token_key: hmac::Key,
     session: Mutex<CommandSession>,
     scan_in_progress: AtomicBool,
+    #[cfg(test)]
+    scan_override: Mutex<Option<ScanSnapshot>>,
     clock: SystemClock,
 }
 
@@ -1158,6 +1196,8 @@ impl AgentCommandState {
             token_key: hmac::Key::new(hmac::HMAC_SHA256, &process_key),
             session: Mutex::new(CommandSession::default()),
             scan_in_progress: AtomicBool::new(false),
+            #[cfg(test)]
+            scan_override: Mutex::new(None),
             clock: SystemClock,
         })
     }
@@ -1268,6 +1308,10 @@ impl AgentCommandState {
     }
 
     fn perform_scan(&self) -> Result<ScanSnapshot, AgentCommandError> {
+        #[cfg(test)]
+        if let Some(snapshot) = self.scan_override.lock().unwrap().clone() {
+            return Ok(snapshot);
+        }
         let catalog =
             CompatibilityCatalog::builtin(&self.registry).map_err(AgentCommandError::internal)?;
         let records = DiscoveryScanner::from_process(&self.registry).scan_registry(&self.registry);
@@ -1289,14 +1333,15 @@ impl AgentCommandState {
         Ok(())
     }
 
-    /// Refresh route-derived model limits and capabilities in every managed
-    /// connector that projects them. The restore transaction updates the
-    /// active ownership revision but preserves the original disconnect
-    /// baseline snapshot.
-    pub(crate) fn refresh_model_metadata(
+    pub(crate) fn metadata_refresh_scan(&self) -> Result<ScanSnapshot, AgentCommandError> {
+        self.perform_scan()
+    }
+
+    pub(crate) fn refresh_model_metadata_from_scan(
         &self,
         agent_id: Option<&str>,
         runtime: &AgentProxyRuntime,
+        snapshot: ScanSnapshot,
     ) -> Result<usize, AgentCommandError> {
         if crate::experimental::is_scx_experiment() {
             return Ok(0);
@@ -1304,7 +1349,6 @@ impl AgentCommandState {
         if let Some(agent_id) = agent_id {
             validate_short_identifier(agent_id, "agent_id")?;
         }
-        let snapshot = self.perform_scan()?;
         let mut refreshed = 0;
         for record in snapshot
             .records
@@ -2697,6 +2741,34 @@ pub(crate) fn transition_runtime_for_config(
     Ok(transition)
 }
 
+/// Scan without the App lock, then bind every write to the current published runtime.
+/// Lock order is App state, followed by Agent session or filesystem transaction locks.
+pub(crate) fn refresh_current_model_metadata(
+    state: &AppStateManaged,
+    agents: &AgentCommandState,
+    agent_id: Option<&str>,
+    expected: Option<&AgentProxyRuntime>,
+) -> Result<usize, AgentCommandError> {
+    let scan = agents.metadata_refresh_scan()?;
+    let inner = state.0.lock().map_err(|_| {
+        AgentCommandError::boundary("app_state_poisoned", "App state is unavailable.")
+    })?;
+    if !matches!(inner.server, crate::ServerLifecycle::Running { .. }) {
+        return Err(AgentCommandError::boundary(
+            "proxy_runtime_changed",
+            "Wait for the proxy transition to finish.",
+        ));
+    }
+    let runtime = runtime_from_inner(&inner)?;
+    if expected.is_some_and(|expected| expected.fingerprint() != runtime.fingerprint()) {
+        return Err(AgentCommandError::boundary(
+            "proxy_runtime_changed",
+            "The proxy changed. Try again.",
+        ));
+    }
+    agents.refresh_model_metadata_from_scan(agent_id, &runtime, scan)
+}
+
 pub(crate) fn runtime_from_app(
     state: &AppStateManaged,
 ) -> Result<AgentProxyRuntime, AgentCommandError> {
@@ -2704,6 +2776,12 @@ pub(crate) fn runtime_from_app(
         .0
         .lock()
         .map_err(|_| AgentCommandError::boundary("app_state_poisoned", "应用状态不可用"))?;
+    runtime_from_inner(&inner)
+}
+
+pub(crate) fn runtime_from_inner(
+    inner: &crate::AppInner,
+) -> Result<AgentProxyRuntime, AgentCommandError> {
     inner
         .ensure_editable()
         .map_err(AgentCommandError::internal)?;
@@ -2748,8 +2826,11 @@ pub(crate) fn runtime_from_app(
             }
             let router =
                 serving_router_for_agent(serving, agent_id).map_err(AgentCommandError::internal)?;
-            if let Some(metadata) = agent_model_metadata_for_router(config, &router)
-                .map_err(AgentCommandError::internal)?
+            let harness = serving_harness_for_agent(serving, agent_id)
+                .map_err(AgentCommandError::internal)?;
+            if let Some(metadata) =
+                agent_model_metadata_for_routes(config, &router, harness.as_ref())
+                    .map_err(AgentCommandError::internal)?
             {
                 model_metadata.insert(agent_id.to_string(), metadata);
             }
@@ -2851,21 +2932,51 @@ pub(crate) fn apply_agent_plan(
     operation_id: String,
     confirmation_token: String,
 ) -> Result<TransactionOutcome, AgentCommandError> {
-    let intent = state.plan_intent(&operation_id)?;
-    let runtime = if intent == PlanIntent::Connect {
-        Some(runtime_from_app(&app_state)?)
-    } else {
-        None
-    };
-    let outcome = state.apply(
+    let outcome = apply_agent_plan_with_scan(
+        &state,
+        &app_state,
         &operation_id,
         &confirmation_token,
         window.label(),
-        &[PlanIntent::Connect, PlanIntent::Disconnect],
-        runtime.as_ref(),
+        || state.refresh_scan(),
     )?;
     crate::desktop_shell::update_agent_menu(&app);
     Ok(outcome)
+}
+
+fn apply_agent_plan_with_scan(
+    state: &AgentCommandState,
+    app_state: &AppStateManaged,
+    operation_id: &str,
+    confirmation_token: &str,
+    session_label: &str,
+    scan: impl FnOnce() -> Result<(), AgentCommandError>,
+) -> Result<TransactionOutcome, AgentCommandError> {
+    let intent = state.plan_intent(operation_id)?;
+    scan()?;
+    // Keep lifecycle replacement and stop outside the commit. Agent session and
+    // filesystem locks never acquire App state in the opposite direction.
+    let inner = app_state.0.lock().map_err(|_| {
+        AgentCommandError::boundary("app_state_poisoned", "App state is unavailable.")
+    })?;
+    let runtime = if intent == PlanIntent::Connect {
+        if !matches!(inner.server, crate::ServerLifecycle::Running { .. }) {
+            return Err(AgentCommandError::boundary(
+                "proxy_runtime_changed",
+                "Wait for the proxy transition to finish, then preview again.",
+            ));
+        }
+        Some(runtime_from_inner(&inner)?)
+    } else {
+        None
+    };
+    state.apply_from_cached_scan(
+        operation_id,
+        confirmation_token,
+        session_label,
+        &[PlanIntent::Connect, PlanIntent::Disconnect],
+        runtime.as_ref(),
+    )
 }
 
 #[tauri::command(async)]
@@ -3224,6 +3335,182 @@ mod tests {
         assert_eq!(selected.canonical_path, conflicted.canonical_path);
         assert_eq!(decision.status, CompatibilityStatus::DetectedVerified);
         assert_eq!(decision.connector_id.as_deref(), Some("claude-code-v1"));
+    }
+
+    #[test]
+    fn harness_hot_apply_updates_managed_limits_and_rolls_back_failed_saves() {
+        use tauri::Manager;
+        let root = scratch("harness-hot-apply");
+        let path = root.join("token-station.json");
+        let plugins = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins-dist");
+        let mut draft = crate::template(&root.join("data"), &plugins);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["data"]["metrics"] = json!(false);
+        draft["plugins"]["agents"] = json!(["agent-openai"]);
+        draft["routing"] =
+            json!({"mode":"direct","direct_target":{"upstream":"large","model":"model"}});
+        for (name, context) in [("large", 200_000), ("small", 32_000)] {
+            draft["upstreams"][name] = json!({"provider":"openai-compatible","base_url":"https://example.test/v1",
+                "models":[{"model":"model","context_window":context,"max_output_tokens":8_000,"tool":true}]});
+        }
+        draft["agent_routes"]["opencode"] = json!({"mode":"inherit","harness_model_mapping_enabled":false,
+            "harness_model_routes":{"fast":{"upstream":"small","model":"model"}}});
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+        config.save(&path).unwrap();
+        let running = crate::serve_lifecycle::prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(7, BTreeMap::new())
+            .unwrap();
+        let mut inner = crate::AppInner::new(path.clone(), draft, None);
+        inner.server = crate::ServerLifecycle::Running {
+            generation: 1,
+            server: running,
+            apply_error: None,
+        };
+        let app = tauri::test::mock_app();
+        app.manage(AppStateManaged(Mutex::new(inner)));
+        let commands = state("harness-hot-managed");
+        let case = non_codex_lifecycle_cases(&root)
+            .into_iter()
+            .find(|case| case.agent_id == "opencode")
+            .unwrap();
+        seed_lifecycle_case(&case);
+        let catalog = CompatibilityCatalog::builtin(&commands.registry).unwrap();
+        install_scan(&commands, catalog, vec![lifecycle_record(&case)]);
+        *commands.scan_override.lock().unwrap() = commands.session.lock().unwrap().scan.clone();
+        let runtime = runtime_from_app(app.state::<AppStateManaged>().inner()).unwrap();
+        apply_lifecycle_connection(&commands, &case, &runtime, "main");
+        let commands_root = commands.paths.snapshot_root.parent().unwrap().to_path_buf();
+        app.manage(commands);
+        let context = || {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&case.primary.path).unwrap()).unwrap();
+            value["provider"]["tokenstation"]["models"]["fast"]["limit"]["context"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(context(), 200_000);
+        crate::set_agent_harness_model_mapping_enabled(app.state(), "opencode".into(), true)
+            .unwrap();
+        let backup = path.with_extension("before-test");
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            crate::restart_agent_harness_routes(app.state(), app.state(), "opencode".into())
+                .is_err()
+        );
+        assert_eq!(
+            context(),
+            200_000,
+            "A failed save restores the old managed contract"
+        );
+        assert!(
+            crate::get_state(app.state()).agent_routes["opencode"].harness_model_mapping_enabled
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&backup, &path).unwrap();
+        assert!(
+            !token_station_cli::config::ClientConfig::load(&path)
+                .unwrap()
+                .agent_routes["opencode"]
+                .harness_model_mapping_enabled
+        );
+        // Pending capability edits must not relax limits on the existing runtime.
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            inner.draft["upstreams"]["small"]["models"][0]["context_window"] = json!(64_000);
+            inner.observe_draft().unwrap();
+        }
+        for (enabled, expected) in [(true, 32_000), (false, 200_000), (true, 32_000)] {
+            crate::set_agent_harness_model_mapping_enabled(app.state(), "opencode".into(), enabled)
+                .unwrap();
+            crate::restart_agent_harness_routes(app.state(), app.state(), "opencode".into())
+                .unwrap();
+            assert_eq!(context(), expected);
+            let runtime = runtime_from_app(app.state::<AppStateManaged>().inner()).unwrap();
+            assert_eq!(
+                u64::from(runtime.model_metadata("opencode").unwrap().context),
+                expected
+            );
+        }
+        let state = app.state::<AppStateManaged>();
+        let old = std::mem::replace(
+            &mut state.0.lock().unwrap().server,
+            crate::ServerLifecycle::Stopped { generation: 2 },
+        );
+        if let crate::ServerLifecycle::Running { server, .. } = old {
+            server.drain_and_shutdown();
+        }
+        let saved = token_station_cli::config::ClientConfig::load(&path).unwrap();
+        let running = crate::serve_lifecycle::prepare_server(saved)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(8, BTreeMap::new())
+            .unwrap();
+        state.0.lock().unwrap().server = crate::ServerLifecycle::Running {
+            generation: 3,
+            server: running,
+            apply_error: None,
+        };
+        assert_eq!(
+            runtime_from_app(&state)
+                .unwrap()
+                .model_metadata("opencode")
+                .unwrap()
+                .context,
+            64_000
+        );
+        let old = std::mem::replace(
+            &mut state.0.lock().unwrap().server,
+            crate::ServerLifecycle::Stopped { generation: 4 },
+        );
+        if let crate::ServerLifecycle::Running { server, .. } = old {
+            server.drain_and_shutdown();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(commands_root).unwrap();
+    }
+
+    #[test]
+    fn harness_projection_bounds_the_actual_opencode_connector_patch() {
+        let root = scratch("harness-connector-limits");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"] =
+            json!({"mode":"direct","direct_target":{"upstream":"large","model":"model"}});
+        for (name, context) in [("large", 200_000), ("small", 32_000)] {
+            draft["upstreams"][name] = json!({"provider":"openai-compatible","base_url":"https://example.test/v1",
+                "models":[{"model":"model","context_window":context,"max_output_tokens":8_000,"tool":true}]});
+        }
+        draft["agent_routes"]["opencode"] = json!({"mode":"inherit","harness_model_mapping_enabled":true,
+            "harness_model_routes":{"fast":{"upstream":"small","model":"model"}}});
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+        config.validate().unwrap();
+        let metadata = model_metadata_for_config(&config, "opencode")
+            .unwrap()
+            .unwrap();
+        let patch = connector_for("opencode-v1")
+            .unwrap()
+            .connect_patch(&ConnectInput {
+                browser_search_enabled: false,
+                base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+                token: Some("fixture-token"),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            })
+            .unwrap();
+        for id in ["auto", "fast", "balanced", "power"] {
+            assert_eq!(
+                patch[0].value.as_ref().unwrap()["models"][id]["limit"]["context"],
+                json!(32_000)
+            );
+        }
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -4861,6 +5148,115 @@ mod tests {
         assert_eq!(boundary.code, "write_failed");
         assert_eq!(boundary.stage, Some(TransactionStage::TargetWrite));
         assert_eq!(boundary.recovery, Some(RecoveryStatus::RepairRequired));
+    }
+
+    #[cfg(not(feature = "bundled-plugins"))]
+    #[test]
+    fn connection_commit_rechecks_runtime_after_scan_stops_the_proxy() {
+        use tauri::Manager;
+        let (root, app_state) =
+            running_app_with_adapters("scan-stop-race", &["agent-anthropic"], &["agent-anthropic"]);
+        let state = state("scan-stop-race-plans");
+        let target = root.join("home/.claude/settings.json");
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![record(&target, false)]);
+        let old_runtime = runtime_from_app(&app_state).unwrap();
+        let plan = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &old_runtime,
+            )
+            .unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let managed = app.state::<AppStateManaged>();
+        let result = apply_agent_plan_with_scan(
+            &state,
+            &managed,
+            &plan.plan.operation_id,
+            &plan.confirmation_token,
+            "main",
+            || {
+                crate::begin_serve_stop(app.handle().clone(), &managed);
+                Ok(())
+            },
+        );
+        let wrote_target = target.exists();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while managed.0.lock().unwrap().serve_view().phase == crate::ServePhase::Stopping
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(state.paths.snapshot_root.parent().unwrap()).ok();
+        assert!(
+            result.is_err(),
+            "A stop during scan must reject the connection commit"
+        );
+        assert!(
+            !wrote_target,
+            "Rejected connection must not modify the Agent config"
+        );
+    }
+
+    #[cfg(not(feature = "bundled-plugins"))]
+    #[test]
+    fn connection_commit_rejects_an_applying_runtime() {
+        let (root, app_state) = running_app_with_adapters(
+            "scan-apply-race",
+            &["agent-anthropic"],
+            &["agent-anthropic"],
+        );
+        let state = state("scan-apply-race-plans");
+        let target = root.join("home/.claude/settings.json");
+        install_scan(
+            &state,
+            CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            vec![record(&target, false)],
+        );
+        let runtime = runtime_from_app(&app_state).unwrap();
+        let plan = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &runtime,
+            )
+            .unwrap();
+        let result = apply_agent_plan_with_scan(
+            &state,
+            &app_state,
+            &plan.plan.operation_id,
+            &plan.confirmation_token,
+            "main",
+            || {
+                let mut inner = app_state.0.lock().unwrap();
+                let previous = std::mem::replace(
+                    &mut inner.server,
+                    crate::ServerLifecycle::Stopped { generation: 2 },
+                );
+                let crate::ServerLifecycle::Running { server, .. } = previous else {
+                    unreachable!()
+                };
+                inner.server = crate::ServerLifecycle::Applying {
+                    generation: 2,
+                    revision: 8,
+                    old: server,
+                };
+                Ok(())
+            },
+        );
+        let wrote = target.exists();
+        stop_running_app(&app_state);
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(state.paths.snapshot_root.parent().unwrap()).ok();
+        assert!(result.is_err(), "Applying exposes its old listener only for serving existing traffic, not for new Agent writes");
+        assert!(!wrote);
     }
 
     #[test]

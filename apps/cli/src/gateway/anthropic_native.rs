@@ -533,7 +533,7 @@ impl Gateway {
                 )
             })
             .flatten();
-        let decision = self.route_native_with_jev(
+        let mut decision = self.route_native_with_jev(
             ctx,
             router,
             jev_request.as_ref(),
@@ -543,6 +543,18 @@ impl Gateway {
             ApiDialect::AnthropicNative,
             false,
         );
+        // Resolve the actual transport for this body. A Chat offering may have
+        // a compatible native search profile, but cannot receive other native tools.
+        decision.fallbacks.retain(|target| {
+            self.upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| {
+                    upstream
+                        .search_transport(&body_value, ApiDialect::AnthropicNative)
+                        .dialect
+                        == ApiDialect::AnthropicNative
+                })
+        });
         let vision_state = candidates
             .iter()
             .find(|candidate| candidate.target == decision.chosen)
@@ -839,10 +851,12 @@ impl Gateway {
             {
                 record.usage = Some(usage);
             }
-            emit(Reply::BeginJson(JsonReply {
+            if !emit(Reply::BeginJson(JsonReply {
                 status: parts.status,
                 body: parts.body,
-            }));
+            })) {
+                return Ok(StreamOutcome::ClientCancelled);
+            }
             Ok(StreamOutcome::Complete)
         }
     }

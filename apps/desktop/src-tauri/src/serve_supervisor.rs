@@ -127,7 +127,14 @@ pub(crate) fn complete_serve_start<R: Runtime>(
     let result = result.and_then(|prepared| {
         if applying_this_generation {
             let state = app.state::<AppStateManaged>();
-            let current = match crate::agent_integration::commands::runtime_from_app(state.inner())
+            let agents = app.state::<AgentCommandState>();
+            let scan = agents.metadata_refresh_scan()
+                .map_err(|error| StartFailure::new("agent_metadata_transition", error.message))?;
+            let inner = state.0.lock().unwrap();
+            if !matches!(inner.server, ServerLifecycle::Applying { generation: current, .. } if current == generation) {
+                return Err(StartFailure::new("agent_metadata_transition", "The proxy changed during discovery."));
+            }
+            let current = match crate::agent_integration::commands::runtime_from_inner(&inner)
             {
                 Ok(current) => current,
                 Err(error) if error.code == "local_auth_disabled" => return Ok(prepared),
@@ -143,8 +150,7 @@ pub(crate) fn complete_serve_start<R: Runtime>(
                 prepared.serving_config(),
             )
             .map_err(|error| StartFailure::new("agent_metadata_transition", error))?;
-            app.state::<AgentCommandState>()
-                .refresh_model_metadata(None, &transition)
+            agents.refresh_model_metadata_from_scan(None, &transition, scan)
                 .map_err(|error| StartFailure::new("agent_metadata_transition", error.message))?;
             restore_runtime = Some(current);
         }
@@ -345,16 +351,24 @@ pub(crate) fn complete_serve_start<R: Runtime>(
     };
     if !published {
         if let Some(runtime) = restore_runtime.as_ref() {
-            let _ = app
-                .state::<AgentCommandState>()
-                .refresh_model_metadata(None, runtime);
+            let _ = crate::agent_integration::commands::refresh_current_model_metadata(
+                app.state::<AppStateManaged>().inner(),
+                app.state::<AgentCommandState>().inner(),
+                None,
+                Some(runtime),
+            );
         }
     }
     if published {
         let app_state = app.state::<AppStateManaged>();
         let agents = app.state::<AgentCommandState>();
         if let Ok(runtime) = runtime_from_app(app_state.inner()) {
-            if let Err(error) = agents.refresh_model_metadata(None, &runtime) {
+            if let Err(error) = crate::agent_integration::commands::refresh_current_model_metadata(
+                app_state.inner(),
+                agents.inner(),
+                None,
+                Some(&runtime),
+            ) {
                 let mut inner = app_state.0.lock().unwrap();
                 if let ServerLifecycle::Running {
                     generation: current,

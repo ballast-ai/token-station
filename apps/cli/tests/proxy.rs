@@ -11436,3 +11436,6 @@ fn image_format_rejection_does_not_poison_the_next_valid_image_request() {
         std::fs::remove_dir_all(data_dir).ok();
     }
 }
+
+#[path = "proxy/audit_hardening.rs"]
+mod audit_hardening;

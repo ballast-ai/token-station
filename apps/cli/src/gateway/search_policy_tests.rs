@@ -217,7 +217,9 @@ fn exercise_profile(
     cancel: bool,
     profile: bool,
 ) {
-    let root = std::env::temp_dir().join(format!("ts-policy-{}-{mode}-{status}-{anthropic}-{requests}-{constrained}-{native_anthropic}-{stream}-{truncated}-{cancel}-{profile}", std::process::id()));
+    static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("ts-policy-{}-{sequence}-{mode}-{status}-{anthropic}-{requests}-{constrained}-{native_anthropic}-{stream}-{truncated}-{cancel}-{profile}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let key = root.join("key");
     std::fs::write(&key, "test-key").unwrap();

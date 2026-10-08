@@ -50,8 +50,12 @@ pub fn import_config(json: &str, dest: &Path) -> Result<(), String> {
 ///
 /// A filesystem failure creating the directory or copying a file.
 pub fn backup(config_path: &Path, metrics_path: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dest_dir)
-        .map_err(|error| format!("{}: {error}", dest_dir.display()))?;
+    if !dest_dir.exists() {
+        crate::private_fs::ensure_private_dir(dest_dir)
+            .map_err(|error| format!("{}: {error}", dest_dir.display()))?;
+    }
+    let _destination_lease =
+        crate::store::metrics_lifecycle_lock(&dest_dir.join(BACKUP_METRICS), true)?;
 
     copy(config_path, &dest_dir.join(BACKUP_CONFIG))?;
     // The metrics store is optional (it can be disabled); back it up only if it
@@ -60,8 +64,12 @@ pub fn backup(config_path: &Path, metrics_path: &Path, dest_dir: &Path) -> Resul
         let destination = dest_dir.join(BACKUP_METRICS);
         let staged = unique_sibling(&destination, "snapshot")?;
         crate::store::snapshot_database(metrics_path, &staged)?;
-        match std::fs::rename(&staged, &destination) {
-            Ok(()) => {}
+        match swap_in(&staged, &destination) {
+            Ok(Some(old)) => {
+                std::fs::remove_file(&old)
+                    .map_err(|error| format!("{}: {error}", old.display()))?;
+            }
+            Ok(None) => {}
             Err(error) => {
                 let _ = std::fs::remove_file(&staged);
                 return Err(format!(
@@ -81,6 +89,9 @@ pub fn backup(config_path: &Path, metrics_path: &Path, dest_dir: &Path) -> Resul
 ///
 /// A missing backup file, or a filesystem failure copying one into place.
 pub fn restore(backup_dir: &Path, config_path: &Path, metrics_path: &Path) -> Result<(), String> {
+    // Hold this across validation, staging, replacement, rollback, and cleanup.
+    // Read-only SQLite helpers do not acquire a writer lease and cannot self-lock.
+    let _restore_lease = crate::store::metrics_lifecycle_lock(metrics_path, true)?;
     let backup_config = backup_dir.join(BACKUP_CONFIG);
     if !backup_config.exists() {
         return Err(format!(
@@ -159,7 +170,16 @@ fn unique_sibling(path: &Path, tag: &str) -> Result<PathBuf, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{}: path has no parent", path.display()))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    // Directory aliases are supported. Stage in the resolved directory while
+    // retaining create-new and owner-only checks for the file itself.
+    let parent =
+        std::fs::canonicalize(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     let name = path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
@@ -229,8 +249,7 @@ fn stash_current(path: &Path) -> Result<(), String> {
         .and_then(std::ffi::OsStr::to_str)
         .ok_or_else(|| format!("{}: path has no file name", path.display()))?;
     let stash = path.with_file_name(format!("{file_name}.pre-restore"));
-    std::fs::copy(path, &stash).map_err(|error| format!("{}: {error}", stash.display()))?;
-    Ok(())
+    copy(path, &stash)
 }
 
 fn copy(from: &Path, to: &Path) -> Result<(), String> {
@@ -238,9 +257,31 @@ fn copy(from: &Path, to: &Path) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("{}: {error}", parent.display()))?;
     }
-    std::fs::copy(from, to)
-        .map(|_| ())
-        .map_err(|error| format!("copy `{}` -> `{}`: {error}", from.display(), to.display()))
+    let staged = unique_sibling(to, "copy")?;
+    let result = (|| {
+        let mut source = std::fs::File::open(from)?;
+        let mut target = token_station_private_fs::open_new_private_file(&staged)?;
+        std::io::copy(&mut source, &mut target)?;
+        target.sync_all()
+    })()
+    .map_err(|error: std::io::Error| {
+        format!("copy `{}` -> `{}`: {error}", from.display(), to.display())
+    });
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    let old = match swap_in(&staged, to) {
+        Ok(old) => old,
+        Err(error) => {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error);
+        }
+    };
+    if let Some(old) = old {
+        std::fs::remove_file(&old).map_err(|error| format!("{}: {error}", old.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -257,6 +298,220 @@ mod tests {
     fn sample_config() -> ClientConfig {
         // The shipped example is a valid config; use it rather than hand-build one.
         serde_json::from_str(crate::EXAMPLE_CONFIG).expect("the shipped example parses")
+    }
+
+    #[test]
+    fn restore_refuses_a_live_store_before_changing_any_files() {
+        let dir = scratch("active-writer");
+        let config = dir.join("config.json");
+        let metrics = dir.join("metrics.sqlite");
+        import_config(&export_config(&sample_config()).unwrap(), &config).unwrap();
+        let writer = crate::store::SqliteStore::open(&metrics).unwrap();
+        let saved = dir.join("backup");
+        backup(&config, &metrics, &saved).unwrap();
+        let before = std::fs::read(&metrics).unwrap();
+        let error =
+            restore(&saved, &config, &metrics).expect_err("a live writer must block restore");
+        assert!(error.contains("in use"), "{error}");
+        assert_eq!(std::fs::read(&metrics).unwrap(), before);
+        assert!(!dir.join("config.json.pre-restore").exists());
+        drop(writer);
+        restore(&saved, &config, &metrics).unwrap();
+        crate::store::SqliteStore::open(&metrics).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backup_keeps_new_directory_and_database_private() {
+        let dir = scratch("backup-private");
+        let config = dir.join("config.json");
+        let metrics = dir.join("metrics.sqlite");
+        import_config(&export_config(&sample_config()).unwrap(), &config).unwrap();
+        let writer = crate::store::SqliteStore::open(&metrics).unwrap();
+        let saved = dir.join("backup");
+        backup(&config, &metrics, &saved).unwrap();
+        token_station_private_fs::verify_private_dir(&saved).unwrap();
+        for name in ["config.json", "metrics.sqlite"] {
+            token_station_private_fs::verify_private_file(&saved.join(name)).unwrap();
+        }
+        drop(writer);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn backup_preserves_shared_destination_permissions_and_replaces_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("shared-destination");
+        let config = dir.join("config.json");
+        let metrics = dir.join("metrics.sqlite");
+        import_config(&export_config(&sample_config()).unwrap(), &config).unwrap();
+        let writer = crate::store::SqliteStore::open(&metrics).unwrap();
+        let saved = dir.join("existing");
+        std::fs::create_dir(&saved).unwrap();
+        std::fs::set_permissions(&saved, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..2 {
+            backup(&config, &metrics, &saved).unwrap();
+            assert_eq!(
+                std::fs::metadata(&saved).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            for name in ["config.json", "metrics.sqlite"] {
+                token_station_private_fs::verify_private_file(&saved.join(name)).unwrap();
+            }
+        }
+        assert!(
+            backup(&config, &metrics, &dir).is_err(),
+            "backup must not replace an active source database"
+        );
+        drop(writer);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_resolves_symlink_aliases_and_refuses_hardlinks_without_mutation() {
+        let dir = scratch("path-aliases");
+        let config = dir.join("config.json");
+        let metrics = dir.join("metrics.sqlite");
+        import_config(&export_config(&sample_config()).unwrap(), &config).unwrap();
+        let writer = crate::store::SqliteStore::open(&metrics).unwrap();
+        let saved = dir.join("backup");
+        backup(&config, &metrics, &saved).unwrap();
+        let alias = dir.join("linked.sqlite");
+        std::os::unix::fs::symlink(&metrics, &alias).unwrap();
+        assert!(
+            restore(&saved, &config, &alias)
+                .unwrap_err()
+                .contains("in use")
+        );
+        let parent_alias = dir.join("linked-dir");
+        std::os::unix::fs::symlink(&dir, &parent_alias).unwrap();
+        assert!(
+            restore(&saved, &config, &parent_alias.join("metrics.sqlite"))
+                .unwrap_err()
+                .contains("in use")
+        );
+        let second = crate::store::SqliteStore::open(&alias).unwrap();
+        drop(second);
+        drop(writer);
+        std::fs::hard_link(&metrics, dir.join("hardlink.sqlite")).unwrap();
+        assert!(
+            restore(&saved, &config, &metrics)
+                .unwrap_err()
+                .contains("hard link")
+        );
+        assert!(
+            crate::store::SqliteStore::open(&metrics)
+                .err()
+                .unwrap()
+                .contains("hard link")
+        );
+        assert!(!dir.join("config.json.pre-restore").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restore_lease_blocks_new_writers_until_released() {
+        let dir = scratch("exclusive-lease");
+        let metrics = dir.join("metrics.sqlite");
+        let lease = crate::store::metrics_lifecycle_lock(&metrics, true).unwrap();
+        assert!(
+            crate::store::SqliteStore::open(&metrics)
+                .err()
+                .unwrap()
+                .contains("in use")
+        );
+        assert!(!metrics.exists());
+        drop(lease);
+        let writer = crate::store::SqliteStore::open(&metrics).unwrap();
+        let second = crate::store::SqliteStore::open(&metrics).unwrap();
+        drop(writer);
+        assert!(crate::store::metrics_lifecycle_lock(&metrics, true).is_err());
+        drop(second);
+        crate::store::metrics_lifecycle_lock(&metrics, true).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dangling_database_symlink_uses_the_target_lifecycle_lock() {
+        let dir = scratch("dangling-alias");
+        let metrics = dir.join("metrics.sqlite");
+        let alias = dir.join("linked.sqlite");
+        std::os::unix::fs::symlink("metrics.sqlite", &alias).unwrap();
+        let writer = crate::store::SqliteStore::open(&alias).unwrap();
+        assert!(crate::store::metrics_lifecycle_lock(&metrics, true).is_err());
+        drop(writer);
+        crate::store::metrics_lifecycle_lock(&metrics, true).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Subprocess helper for the cross-process lifecycle regression"]
+    fn writer_process_helper() {
+        use std::io::Read as _;
+        let Some(directory) = std::env::var_os("TS_BACKUP_TEST_DIRECTORY") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        let _store = crate::store::SqliteStore::open(&directory.join("metrics.sqlite")).unwrap();
+        std::fs::write(directory.join("ready"), b"ready").unwrap();
+        let _ = std::io::stdin().read(&mut [0_u8; 1]);
+    }
+
+    #[test]
+    fn restore_refuses_another_process_and_recovers_after_process_death() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let dir = scratch("process-writer");
+        let config = dir.join("config.json");
+        let metrics = dir.join("metrics.sqlite");
+        import_config(&export_config(&sample_config()).unwrap(), &config).unwrap();
+        let mut child = ChildGuard(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "backup::tests::writer_process_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("TS_BACKUP_TEST_DIRECTORY", &dir)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !dir.join("ready").exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "writer child exited before readiness"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer child did not become ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let saved = dir.join("backup");
+        backup(&config, &metrics, &saved).unwrap();
+        assert!(
+            restore(&saved, &config, &metrics)
+                .unwrap_err()
+                .contains("in use")
+        );
+        assert!(!dir.join("config.json.pre-restore").exists());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        restore(&saved, &config, &metrics).unwrap();
+        crate::store::SqliteStore::open(&metrics).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
