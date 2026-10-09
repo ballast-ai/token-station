@@ -2,8 +2,8 @@
 set -euo pipefail
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Preserve reviewed routing fixes with the protocol 0.5.0 version update.
-readonly frozen_router_tree="551b62aa03cf1ad492a74c08ac3aa192e3ecf07d"
+# Preserve reviewed routing fixes with the protocol 0.6.0 IR additions.
+readonly frozen_router_tree="6e5804a523af36d1675edf3f5bc8f5115acbb986"
 readonly workspace_packages=(
   token-station-cli
   token-station-conformance

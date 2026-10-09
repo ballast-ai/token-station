@@ -175,6 +175,7 @@ fn parse_image(block: &Value) -> Result<ContentPart, String> {
 
     Ok(ContentPart::ImageUrl {
         image_url: ImageUrl { url, detail: None },
+        cache_control: None,
     })
 }
 
@@ -186,6 +187,7 @@ fn parse_plain_block(block: &Value) -> Result<ContentPart, String> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid("text block declares no text"))?
                 .to_owned(),
+            cache_control: None,
         }),
         Some("image") => parse_image(block),
         Some("thinking") => Ok(ContentPart::Thinking {
@@ -451,7 +453,7 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
             Ok(ToolDef {
                 name,
                 description,
-                parameters,
+                parameters, cache_control: None, strict: None,
             })
         })
         .collect()
@@ -528,7 +530,7 @@ fn response_blocks(message: &Message) -> Result<Vec<Value>, String> {
         Some(Content::Parts(parts)) => {
             for part in parts {
                 match part {
-                    ContentPart::Text { text } => {
+                    ContentPart::Text { text, .. } => {
                         blocks.push(json!({"type": "text", "text": text}));
                     }
                     ContentPart::ImageUrl { .. } => {
@@ -868,10 +870,13 @@ impl Guest for AnthropicClient {
                 top_p: body.get("top_p").and_then(Value::as_f64),
                 max_output_tokens: Some(max_output_tokens),
                 stop,
+                top_k: None,
             },
             stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
             host_values: token_station_protocol::ComponentValues::new(),
             extensions: request_extensions(body),
+            parallel_tool_calls: None,
+            reasoning: token_station_protocol::Reasoning::default(),
         })
     }
 

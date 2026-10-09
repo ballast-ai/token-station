@@ -1076,17 +1076,25 @@ fn anthropic_output_config_effort_maps_to_reasoning_effort() {
         let normalized = plugin
             .normalize_inbound(&request(serde_json::json!(input)))
             .expect("normalizes");
+        // Since protocol 0.6.0 the `reasoning_effort` wire key is the typed
+        // `ChatRequest::reasoning` effort, not an extension.
         assert_eq!(
-            normalized.extensions.get("reasoning_effort"),
-            Some(&serde_json::json!(expected)),
+            normalized
+                .reasoning
+                .effort
+                .as_ref()
+                .map(token_station_protocol::ReasoningEffort::as_str),
+            Some(expected),
             "effort {input} should map to reasoning_effort {expected}"
         );
+        assert_eq!(normalized.extensions.get("reasoning_effort"), None);
     }
 
     // Unknown effort values are dropped rather than sent verbatim.
     let unknown = plugin
         .normalize_inbound(&request(serde_json::json!("turbo")))
         .expect("normalizes");
+    assert_eq!(unknown.reasoning.effort, None);
     assert_eq!(unknown.extensions.get("reasoning_effort"), None);
 }
 
@@ -1115,8 +1123,8 @@ fn anthropic_adaptive_thinking_normalizes_without_losing_compatibility_metadata(
             Some(&json!({"type": kind}))
         );
         assert_eq!(
-            normalized.extensions.get("reasoning_effort"),
-            Some(&json!("medium"))
+            normalized.reasoning.effort,
+            Some(token_station_protocol::ReasoningEffort::Medium)
         );
     }
 
