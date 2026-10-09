@@ -125,8 +125,10 @@ where
 /// different price. The Rust type does not model `type`: it has one value.
 ///
 /// [`CacheControl::ttl`] is a closed set. An unknown TTL fails
-/// deserialization. A north codec answers it with HTTP 400 and does not
-/// forward it.
+/// deserialization. A key other than `type` and `ttl` also fails
+/// deserialization, because dropping it could change what the provider
+/// caches or charges. A north codec answers each of these with HTTP 400 and
+/// does not forward the request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(from = "CacheControlWire", into = "CacheControlWire")]
 pub struct CacheControl {
@@ -159,6 +161,7 @@ impl CacheTtl {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CacheControlWire {
     #[serde(rename = "type", default)]
     kind: CacheKind,
@@ -846,6 +849,10 @@ mod tests {
             json!({"type": "persistent"}),
             json!({"type": "persistent", "ttl": "1h"}),
             json!("ephemeral"),
+            // Unknown sub-fields fail closed too (lv ruling, 2026-10-09).
+            json!({"type": "ephemeral", "scope": "global"}),
+            json!({"type": "ephemeral", "ttl": "1h", "priority": 1}),
+            json!({"ttl": "5m", "extra": null}),
         ] {
             assert!(
                 serde_json::from_value::<CacheControl>(marker.clone()).is_err(),
@@ -911,6 +918,11 @@ mod tests {
             json!({"type": "document", "source": {}, "cache_control": {"ttl": "2h"}}),
             // A malformed known part with an invalid marker is refused too.
             json!({"type": "text", "cache_control": {"ttl": "2h"}}),
+            // An unknown marker sub-field is refused and does not fall back.
+            json!({"type": "text", "text": "x",
+                   "cache_control": {"type": "ephemeral", "scope": "global"}}),
+            json!({"type": "document", "source": {},
+                   "cache_control": {"type": "ephemeral", "scope": "global"}}),
         ] {
             assert!(
                 serde_json::from_value::<ContentPart>(part.clone()).is_err(),
@@ -995,14 +1007,19 @@ mod tests {
         let old: ToolDef = round_trip(&json!({"name": "f", "parameters": {"type": "object"}}));
         assert_eq!(old, ToolDef::new("f", None, json!({"type": "object"})));
 
-        assert!(
-            serde_json::from_value::<ToolDef>(json!({
-                "name": "f",
-                "parameters": {},
-                "cache_control": {"type": "ephemeral", "ttl": "2h"},
-            }))
-            .is_err()
-        );
+        for marker in [
+            json!({"type": "ephemeral", "ttl": "2h"}),
+            json!({"type": "ephemeral", "scope": "global"}),
+        ] {
+            assert!(
+                serde_json::from_value::<ToolDef>(json!({
+                    "name": "f",
+                    "parameters": {},
+                    "cache_control": marker,
+                }))
+                .is_err()
+            );
+        }
     }
 
     #[test]

@@ -45,7 +45,8 @@
 //!
 //! - [`CacheControl`] and the closed [`CacheTtl`] (`"5m"`, `"1h"`): block-level
 //!   prompt-cache markers on [`ContentPart::Text`], [`ContentPart::ImageUrl`]
-//!   and [`ToolDef::cache_control`]. An unknown TTL is a deserialization error.
+//!   and [`ToolDef::cache_control`]. An unknown TTL, an unknown `type` or an
+//!   unknown marker key is a deserialization error.
 //!   A system message keeps one text part per system block. A cached tool
 //!   result puts its marker on the last part of a [`Role::Tool`] message.
 //! - [`Sampling::top_k`].
