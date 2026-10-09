@@ -11,9 +11,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use token_station_protocol::{
-    AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, FinishReason,
-    HttpMethod, HttpRequestDescriptor, HttpResponseParts, ModelCapability, ProviderConfig, Role,
-    StreamEvent,
+    AgentRequestEnvelope, Auth, CacheTtl, ChatRequest, ChatResponse, Content, ContentPart,
+    ErrorCode, ErrorEnvelope, FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts,
+    ModelCapability, ProviderConfig, ReasoningMode, Role, StreamEvent,
 };
 
 /// Parses `fixture`, re-serializes it, and asserts nothing moved.
@@ -38,6 +38,8 @@ const STREAM: &str = include_str!("fixtures/outbound.stream.tool-call.json");
 const RATE_LIMIT: &str = include_str!("fixtures/error.rate-limit.json");
 const CAPABILITY: &str = include_str!("fixtures/model.capability.json");
 const PROVIDER_CONFIG: &str = include_str!("fixtures/provider.config.json");
+const ANTHROPIC_MESSAGES_REQUEST: &str =
+    include_str!("fixtures/inbound.chat.request.anthropic-messages.json");
 
 #[test]
 fn inbound_envelope_expresses_an_openai_request_without_its_credential() {
@@ -346,4 +348,66 @@ fn a_descriptor_can_name_a_declared_header_or_the_combined_arm() {
         let parsed: HttpRequestDescriptor = assert_exact_round_trip(&descriptor.to_string());
         assert_eq!(parsed.auth, Some(expected));
     }
+}
+
+// -- 0.6.0 (canonical_ir 4) ---------------------------------------------------
+
+#[test]
+fn inbound_chat_request_expresses_anthropic_cache_markers_top_k_and_thinking() {
+    let request: ChatRequest = assert_exact_round_trip(ANTHROPIC_MESSAGES_REQUEST);
+
+    // System blocks stay separate parts, each with its own marker.
+    let Some(Content::Parts(system)) = &request.messages[0].content else {
+        panic!("system blocks are parts");
+    };
+    assert_eq!(system.len(), 2);
+    assert_eq!(system[0].cache_control(), None);
+    assert_eq!(
+        system[1].cache_control().and_then(|marker| marker.ttl),
+        Some(CacheTtl::OneHour)
+    );
+
+    // A cached tool result carries its marker on its last part.
+    let tool_result = &request.messages[3];
+    assert_eq!(tool_result.role, Role::Tool);
+    let Some(Content::Parts(parts)) = &tool_result.content else {
+        panic!("a cached tool result is parts");
+    };
+    assert_eq!(
+        parts
+            .last()
+            .and_then(ContentPart::cache_control)
+            .and_then(|marker| marker.ttl),
+        Some(CacheTtl::FiveMinutes)
+    );
+
+    assert_eq!(request.tools[0].strict, Some(true));
+    assert_eq!(
+        request.tools[0].cache_control.and_then(|marker| marker.ttl),
+        Some(CacheTtl::OneHour)
+    );
+    assert_eq!(request.sampling.top_k, Some(40));
+    assert_eq!(request.reasoning.mode, Some(ReasoningMode::Enabled));
+    assert_eq!(request.reasoning.budget_tokens, Some(10_000));
+    assert_eq!(request.reasoning.effort, None);
+    assert_eq!(request.parallel_tool_calls, Some(true));
+
+    // Every new field is typed: nothing falls into extensions.
+    assert!(request.extensions.is_empty());
+    assert!(
+        request
+            .messages
+            .iter()
+            .all(|message| message.extensions.is_empty())
+    );
+}
+
+#[test]
+fn the_0_5_chat_request_fixture_gains_no_new_wire_keys() {
+    let request: ChatRequest = assert_exact_round_trip(CHAT_REQUEST);
+    assert!(request.reasoning.is_unset());
+    assert_eq!(request.parallel_tool_calls, None);
+    assert_eq!(request.sampling.top_k, None);
+    assert_eq!(request.tools[0].strict, None);
+    assert_eq!(request.tools[0].cache_control, None);
 }

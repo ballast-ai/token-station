@@ -103,7 +103,7 @@ fn content_to_json(content: Option<&Content>) -> Value {
         Some(Content::Text(text)) => json!(text),
         Some(Content::Parts(parts)) => {
             let text = parts.iter().fold(String::new(), |mut text, part| {
-                if let ContentPart::Text { text: part } = part {
+                if let ContentPart::Text { text: part, .. } = part {
                     text.push_str(part);
                 }
                 text
@@ -328,6 +328,8 @@ impl Guest for OpenAiClient {
                     .to_owned(),
                 description: tool["function"]["description"].as_str().map(str::to_owned),
                 parameters: tool["function"]["parameters"].clone(),
+                cache_control: None,
+                strict: None,
             })
             .collect();
 
@@ -360,10 +362,13 @@ impl Guest for OpenAiClient {
                     .flatten()
                     .filter_map(|value| value.as_str().map(str::to_owned))
                     .collect(),
+                top_k: None,
             },
             stream: body["stream"].as_bool().unwrap_or(false),
             host_values: token_station_protocol::ComponentValues::new(),
             extensions,
+            parallel_tool_calls: None,
+            reasoning: token_station_protocol::Reasoning::default(),
         })
     }
 
@@ -613,9 +618,11 @@ mod tests {
             },
             ContentPart::Text {
                 text: "Hello".to_owned(),
+                cache_control: None,
             },
             ContentPart::Text {
                 text: ", world".to_owned(),
+                cache_control: None,
             },
         ]);
         assert_eq!(content_to_json(Some(&mixed)), json!("Hello, world"));

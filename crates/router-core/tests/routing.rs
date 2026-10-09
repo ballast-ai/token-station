@@ -112,6 +112,8 @@ fn tool() -> ToolDef {
         name: "get_weather".to_owned(),
         description: None,
         parameters: serde_json::json!({}),
+        cache_control: None,
+        strict: None,
     }
 }
 
@@ -489,6 +491,8 @@ fn a_decision_cannot_carry_the_prompt_that_produced_it() {
         name: CANARY.to_owned(),
         description: Some(CANARY.to_owned()),
         parameters: serde_json::json!({ "secret": CANARY }),
+        cache_control: None,
+        strict: None,
     }];
     let hints = [AgentHint::new(HintKind::StepType, CANARY)];
 
@@ -564,6 +568,7 @@ fn an_all_ejected_pool_degrades_to_last_resort_and_an_incapable_one_hard_fails()
                 url: "https://example/cat.png".to_owned(),
                 detail: None,
             },
+            cache_control: None,
         },
     ]));
     let mut cheap_only = config();

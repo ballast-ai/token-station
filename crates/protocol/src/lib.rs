@@ -34,6 +34,35 @@
 //! is a version mismatch and should surface as an error instead of being
 //! silently coerced. Breaking changes go to `-v2`; they never mutate `v1` in
 //! place.
+//!
+//! # Changes in 0.6.0
+//!
+//! The kernel mirror carries this surface as `canonical_ir` contract 4.
+//! Every addition is optional on the wire: an absent field deserializes to
+//! `None` or to its default, and a `None` field is not serialized. JSON from a
+//! 0.5.0 peer still parses, and a 0.5.0 peer ignores the new fields or keeps
+//! them in [`Extensions`].
+//!
+//! - [`CacheControl`] and the closed [`CacheTtl`] (`"5m"`, `"1h"`): block-level
+//!   prompt-cache markers on [`ContentPart::Text`], [`ContentPart::ImageUrl`]
+//!   and [`ToolDef::cache_control`]. An unknown TTL is a deserialization error.
+//!   A system message keeps one text part per system block. A cached tool
+//!   result puts its marker on the last part of a [`Role::Tool`] message.
+//! - [`Sampling::top_k`].
+//! - [`ChatRequest::reasoning`] ([`Reasoning`], [`ReasoningMode`],
+//!   [`ReasoningEffort`]): one reasoning field for OpenAI `reasoning_effort`
+//!   and Anthropic `thinking`, with the caller's `budget_tokens` unchanged.
+//! - Promotions from `extensions` keys that adapters already acted on:
+//!   `reasoning_effort` becomes [`Reasoning::effort`] and
+//!   `parallel_tool_calls` becomes [`ChatRequest::parallel_tool_calls`]. Both
+//!   keep their wire key. `responses_tool_strict` becomes
+//!   [`ToolDef::strict`]. That one changes shape, from a request-level map to
+//!   a per-tool field, so a producer that still writes the old map leaves it
+//!   in `extensions` as data.
+//!
+//! Rust code that builds these types with a struct literal, or that matches
+//! `ContentPart::Text { text }` without `..`, must add the new fields. Use
+//! [`ContentPart::text`] and [`ToolDef::new`] for the common cases.
 
 #![allow(
     clippy::module_name_repetitions,
@@ -55,8 +84,9 @@ use std::collections::BTreeMap;
 
 pub use capability::{CapabilityState, ModelCapability};
 pub use chat::{
-    CanonicalArguments, ChatRequest, ChatResponse, Choice, Content, ContentPart, FinishReason,
-    ImageUrl, Message, ResponseFormat, Role, Sampling, ToolCall, ToolChoice, ToolDef,
+    CacheControl, CacheTtl, CanonicalArguments, ChatRequest, ChatResponse, Choice, Content,
+    ContentPart, FinishReason, ImageUrl, Message, Reasoning, ReasoningEffort, ReasoningMode,
+    ResponseFormat, Role, Sampling, ToolCall, ToolChoice, ToolDef,
 };
 pub use envelope::{AgentRequestEnvelope, HeaderDigest, Principal};
 pub use error::{ErrorCode, ErrorEnvelope};

@@ -104,7 +104,7 @@ impl RequestFeatures {
                 Some(Content::Parts(parts)) => {
                     for part in parts {
                         match part {
-                            ContentPart::Text { text } => {
+                            ContentPart::Text { text, .. } => {
                                 add(estimate_tokens(text));
                                 code_fences = code_fences.saturating_add(count_fences(text));
                             }
@@ -181,7 +181,7 @@ fn task_text(request: &ChatRequest) -> (Option<String>, bool) {
             Some(Content::Parts(parts)) => parts
                 .iter()
                 .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -282,7 +282,7 @@ fn system_text(request: &ChatRequest) -> String {
             }
             Some(Content::Parts(parts)) => {
                 for part in parts {
-                    if let ContentPart::Text { text: t } = part {
+                    if let ContentPart::Text { text: t, .. } = part {
                         text.push_str(t);
                         text.push(' ');
                     }
@@ -464,12 +464,14 @@ mod tests {
             content: Some(Content::Parts(vec![
                 ContentPart::Text {
                     text: "describe".to_owned(),
+                    cache_control: None,
                 },
                 ContentPart::ImageUrl {
                     image_url: ImageUrl {
                         url: "https://example/cat.png".to_owned(),
                         detail: None,
                     },
+                    cache_control: None,
                 },
             ])),
             ..Message::text(Role::User, "")
@@ -487,6 +489,8 @@ mod tests {
             name: "get_weather".to_owned(),
             description: None,
             parameters: serde_json::json!({}),
+            cache_control: None,
+            strict: None,
         }];
         chat.response_format = Some(ResponseFormat::JsonObject);
 

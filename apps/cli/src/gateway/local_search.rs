@@ -476,13 +476,10 @@ impl Gateway {
             if count >= limit && request.tools.is_empty() {
                 request.tool_choice = None;
             }
-            if request.tools.is_empty() {
-                request.extensions.remove("parallel_tool_calls");
-            } else {
-                request
-                    .extensions
-                    .insert("parallel_tool_calls".to_owned(), json!(false));
-            }
+            // A producer built against protocol 0.5.0 may still hold the key in
+            // `extensions`. Remove it there so the typed field is the only copy.
+            request.extensions.remove("parallel_tool_calls");
+            request.parallel_tool_calls = (!request.tools.is_empty()).then_some(false);
             let (now, session) = Self::quota_preamble(router, || quota_session_key(&request));
             let candidates = self.candidates(Instant::now(), now);
             let selected = if let Some(selected) = &decision {
@@ -1056,6 +1053,8 @@ mod tests {
             name: alias.clone(),
             description: None,
             parameters: json!({}),
+            cache_control: None,
+            strict: None,
         });
         let mapped = alias_client_tools(&mut collision);
         assert_ne!(collision.tools[0].name, alias);

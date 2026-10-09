@@ -137,6 +137,8 @@ impl AgentAdapter for OpenAiClient {
                     .to_owned(),
                 description: tool["function"]["description"].as_str().map(str::to_owned),
                 parameters: tool["function"]["parameters"].clone(),
+                cache_control: None,
+                strict: None,
             })
             .collect();
 
@@ -170,10 +172,13 @@ impl AgentAdapter for OpenAiClient {
                     .flatten()
                     .filter_map(|value| value.as_str().map(str::to_owned))
                     .collect(),
+                top_k: None,
             },
             stream: body["stream"].as_bool().unwrap_or(false),
             host_values: token_station_protocol::ComponentValues::new(),
             extensions,
+            parallel_tool_calls: None,
+            reasoning: token_station_protocol::Reasoning::default(),
         })
     }
 

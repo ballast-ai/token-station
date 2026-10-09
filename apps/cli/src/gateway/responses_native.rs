@@ -202,6 +202,8 @@ impl Gateway {
             name: "responses_native_routing_probe".to_owned(),
             description: None,
             parameters: json!({}),
+            cache_control: None,
+            strict: None,
         });
         let (quota_now_ms, session) =
             Self::quota_preamble(router, || format!("responses-native:{model}"));

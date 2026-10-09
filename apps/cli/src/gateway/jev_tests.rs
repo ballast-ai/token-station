@@ -262,6 +262,8 @@ fn jev_valid_tier_uses_the_router_and_retains_stream_and_tool_requirements() {
         name: "read_file".into(),
         description: None,
         parameters: json!({}),
+        cache_control: None,
+        strict: None,
     });
     let original = request.clone();
     let decision = fixture.route(&router, &request, &[], &candidates());
@@ -302,6 +304,8 @@ fn applied_cloud_classification_keeps_the_host_schema_receipt_estimate() {
         name: "inspect".into(),
         description: Some("Inspect a document".into()),
         parameters: json!({"description":"schema ".repeat(2000)}),
+        cache_control: None,
+        strict: None,
     });
     request.response_format = Some(token_station_protocol::ResponseFormat::JsonSchema {
         json_schema: json!({"description":"output ".repeat(1000)}),
@@ -406,6 +410,8 @@ fn jev_unusable_tiers_keep_the_complete_baseline() {
                     name: "read".into(),
                     description: None,
                     parameters: json!({}),
+                    cache_control: None,
+                    strict: None,
                 });
             }
             _ => {
