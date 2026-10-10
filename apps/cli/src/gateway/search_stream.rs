@@ -13,6 +13,32 @@ fn invalid(message: &str) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorCode::ProviderProtocolError, 502, message)
 }
 
+pub(super) fn limit_stream_output(
+    bytes: &mut u64,
+    emit: &mut dyn FnMut(Reply) -> bool,
+    operation: impl FnOnce(&mut dyn FnMut(Reply) -> bool) -> Result<bool, ErrorEnvelope>,
+) -> Result<bool, ErrorEnvelope> {
+    let mut exceeded = false;
+    let result = operation(&mut |reply| {
+        if let Reply::Chunk(text) = &reply {
+            let next = bytes.saturating_add(text.len() as u64);
+            if next > MAX_UPSTREAM_BODY {
+                exceeded = true;
+                return false;
+            }
+            *bytes = next;
+        }
+        emit(reply)
+    });
+    if exceeded {
+        Err(invalid(
+            "Converted search stream exceeds the output size limit.",
+        ))
+    } else {
+        result
+    }
+}
+
 pub(super) struct ResponsesSearchStream<'a> {
     request: &'a Value,
     name: &'a str,
@@ -26,6 +52,7 @@ pub(super) struct ResponsesSearchStream<'a> {
     next_block: usize,
     open_text: Option<(TextKey, usize)>,
     bytes: usize,
+    output_bytes: u64,
     pub(super) started: bool,
     complete: bool,
 }
@@ -45,6 +72,7 @@ impl<'a> ResponsesSearchStream<'a> {
             next_block: 0,
             open_text: None,
             bytes: 0,
+            output_bytes: 0,
             started: false,
             complete: false,
         }
@@ -130,6 +158,20 @@ impl<'a> ResponsesSearchStream<'a> {
         chunk: &str,
         emit: &mut dyn FnMut(Reply) -> bool,
     ) -> Result<bool, ErrorEnvelope> {
+        let mut bytes = self.output_bytes;
+        let result = limit_stream_output(&mut bytes, emit, |emit| self.push_inner(chunk, emit));
+        self.output_bytes = bytes;
+        if result.is_err() {
+            self.complete = false;
+        }
+        result
+    }
+
+    fn push_inner(
+        &mut self,
+        chunk: &str,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) -> Result<bool, ErrorEnvelope> {
         self.bytes = self.bytes.saturating_add(chunk.len());
         if self.bytes as u64 > MAX_UPSTREAM_BODY {
             return Err(invalid("Search stream exceeds the conversion size limit."));
@@ -174,6 +216,7 @@ impl<'a> ResponsesSearchStream<'a> {
     ) -> Result<bool, ErrorEnvelope> {
         match event["type"].as_str() {
             Some("response.created") => {
+                super::web_search::check_response_id(&event["response"]["id"])?;
                 let id = event["response"]["id"]
                     .as_str()
                     .ok_or_else(|| invalid("Search response ID is missing."))?;
@@ -249,6 +292,7 @@ impl<'a> ResponsesSearchStream<'a> {
         mut document: Value,
         emit: &mut dyn FnMut(Reply) -> bool,
     ) -> Result<bool, ErrorEnvelope> {
+        super::web_search::check_response_id(&document["id"])?;
         let id = document["id"]
             .as_str()
             .ok_or_else(|| invalid("Terminal search response ID is missing."))?
@@ -289,13 +333,14 @@ impl<'a> ResponsesSearchStream<'a> {
         for (&(oi, ci), annotations) in &self.annotations {
             let block = output
                 .get_mut(oi)
-                .and_then(|item| item["content"].as_array_mut())
+                .and_then(|item| item.get_mut("content"))
+                .and_then(Value::as_array_mut)
                 .and_then(|content| content.get_mut(ci))
-                .ok_or_else(|| invalid("Search annotation refers to a missing text block."))?;
-            if block.get("annotations").is_none() {
-                block["annotations"] = json!([]);
-            }
-            let target = block["annotations"]
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| invalid("Search annotation refers to an invalid text block."))?;
+            let target = block
+                .entry("annotations")
+                .or_insert_with(|| json!([]))
                 .as_array_mut()
                 .ok_or_else(|| invalid("Terminal search annotations are invalid."))?;
             for annotation in annotations {
@@ -481,6 +526,111 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn rejects_terminal_annotations_on_non_object_content_without_panicking() {
+        let malformed = [
+            json!(42),
+            json!(false),
+            json!("invalid"),
+            json!([]),
+            Value::Null,
+        ];
+        for output in malformed.iter().flat_map(|block| {
+            [
+                json!([{"type":"message","content":[block]}]),
+                json!([block]),
+            ]
+        }) {
+            let request = request();
+            let mut bridge = ResponsesSearchStream::new(&request, "web_search", None);
+            let mut replies = Vec::new();
+            for event in [
+                json!({"type":"response.created","response":{"id":"resp_test"}}),
+                json!({"type":"response.output_text.annotation.added","output_index":0,"content_index":0,"annotation":{"type":"url_citation","url":"https://docs.rs/","title":"Docs"}}),
+            ] {
+                bridge
+                    .push(&frame(&event), &mut |reply| {
+                        replies.push(reply);
+                        true
+                    })
+                    .unwrap();
+            }
+            let error = bridge.push(
+                &frame(&json!({"type":"response.completed","response":{"id":"resp_test","status":"completed","output":output}})),
+                &mut |reply| {
+                    replies.push(reply);
+                    true
+                },
+            ).expect_err("invalid terminal content must produce a protocol error");
+            assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+            assert!(!chunks(&replies).contains("message_stop"));
+            assert!(bridge.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn converted_output_is_bounded_independently_of_input() {
+        let request = request();
+        let mut bridge = ResponsesSearchStream::new(&request, "web_search", None);
+        let mut emitted = 0_u64;
+        let mut emit = |reply| {
+            if let Reply::Chunk(text) = reply {
+                emitted += text.len() as u64;
+            }
+            true
+        };
+        let start = frame(&json!({"type":"response.created","response":{"id":"r"}}));
+        bridge.push(&start, &mut emit).unwrap();
+        let delta = frame(
+            &json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"x"}),
+        );
+        let mut received = start.len();
+        let mut failure = None;
+        for _ in 0..300_000 {
+            received += delta.len();
+            if let Err(error) = bridge.push(&delta, &mut emit) {
+                failure = Some(error);
+                break;
+            }
+        }
+        let error = failure.expect("converted output must have a separate size limit");
+        assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+        assert!(error.message.contains("output size limit"));
+        assert!((received as u64) < MAX_UPSTREAM_BODY);
+        assert!(emitted <= MAX_UPSTREAM_BODY);
+        assert!(bridge.finish().is_err());
+    }
+
+    #[test]
+    fn duplicate_call_ids_do_not_complete_the_stream() {
+        let mut request = request();
+        request["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"lookup","input_schema":{"type":"object"}}));
+        request["tool_choice"] = json!({"type":"auto"});
+        let client =
+            json!({"type":"function_call","call_id":"same","name":"lookup","arguments":"{}"});
+        let mut bridge = ResponsesSearchStream::new(&request, "web_search", None);
+        let mut replies = Vec::new();
+        bridge
+            .push(
+                &frame(&json!({"type":"response.created","response":{"id":"resp_test"}})),
+                &mut |r| {
+                    replies.push(r);
+                    true
+                },
+            )
+            .unwrap();
+        let error = bridge.push(
+            &frame(&json!({"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[client, client]}})),
+            &mut |r| { replies.push(r); true },
+        ).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+        assert!(!chunks(&replies).contains("message_stop"));
+        assert!(bridge.finish().is_err());
     }
 
     #[test]

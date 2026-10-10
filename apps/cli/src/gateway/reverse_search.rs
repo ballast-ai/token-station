@@ -1,6 +1,6 @@
 //! Explicit text-and-tools boundary for Responses clients on Anthropic native search routes.
 
-use super::{ErrorCode, ErrorEnvelope, MAX_UPSTREAM_BODY, Value};
+use super::{ErrorCode, ErrorEnvelope, Value};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -318,6 +318,7 @@ pub(super) fn message_id(body: &Value, index: usize) -> String {
 
 #[allow(clippy::too_many_lines)] // Keep the ordered wire lifecycle and validation together.
 pub(super) fn from_anthropic(body: &Value, request: &Value) -> Result<Value, ErrorEnvelope> {
+    super::web_search::check_response_id(&body["id"])?;
     if body["type"] != "message"
         || !matches!(
             body["stop_reason"].as_str(),
@@ -354,7 +355,7 @@ pub(super) fn from_anthropic(body: &Value, request: &Value) -> Result<Value, Err
             Some("server_tool_use") => {
                 let id = block["id"]
                     .as_str()
-                    .filter(|id| !id.is_empty())
+                    .filter(|_| super::web_search::valid_call_id(&block["id"]))
                     .ok_or_else(|| invalid("Native search call ID is missing."))?;
                 if block["name"] != "web_search"
                     || !allows_call(request, "web_search", true)
@@ -423,7 +424,7 @@ pub(super) fn from_anthropic(body: &Value, request: &Value) -> Result<Value, Err
                 if !declared_function(request, name)
                     || !allows_call(request, name, false)
                     || !block["input"].is_object()
-                    || block["id"].as_str().is_none_or(str::is_empty)
+                    || !super::web_search::valid_call_id(&block["id"])
                 {
                     return Err(invalid(
                         "Native search returned an unauthorized or invalid client function.",
@@ -436,6 +437,12 @@ pub(super) fn from_anthropic(body: &Value, request: &Value) -> Result<Value, Err
                     "Native search returned an unsupported content block.",
                 ));
             }
+        }
+    }
+    let mut output_ids = BTreeSet::new();
+    for item in &output {
+        if !output_ids.insert(item["id"].as_str().unwrap()) {
+            return Err(invalid("Native search returned duplicate output IDs."));
         }
     }
     if searches.len() != answered.len() || output.is_empty() {
@@ -458,7 +465,7 @@ pub(super) fn from_anthropic(body: &Value, request: &Value) -> Result<Value, Err
         _ => Value::Null,
     };
     let result = json!({"id":response_id(body),"object":"response","model":request["model"],"status":if body["stop_reason"] == "max_tokens" {"incomplete"} else {"completed"},"output":output,"output_text":text_parts.join("\n"),"usage":usage,"error":null,"incomplete_details":if body["stop_reason"] == "max_tokens" {json!({"reason":"max_output_tokens"})} else {Value::Null}});
-    if result.to_string().len() as u64 > MAX_UPSTREAM_BODY {
+    if !super::web_search::response_within_size_limit(&result) {
         return Err(invalid(
             "Converted native search response exceeds the size limit.",
         ));
@@ -475,6 +482,44 @@ mod tests {
     }
     fn answer() -> Value {
         json!({"id":"msg_test","type":"message","stop_reason":"end_turn","content":[{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"query":"Rust"}},{"type":"web_search_tool_result","tool_use_id":"srv_1","content":[{"type":"web_search_result","url":"https://docs.rs/","title":"Docs","encrypted_content":"opaque"}]},{"type":"text","text":"Rust docs","citations":[{"type":"web_search_result_location","url":"https://docs.rs/","title":"Docs","cited_text":"External quote","encrypted_index":"opaque"}]}],"usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":3}})
+    }
+
+    #[test]
+    fn oversized_response_and_call_ids_are_rejected_before_conversion() {
+        let mut body = answer();
+        body["id"] = json!("x".repeat(1025));
+        assert!(from_anthropic(&body, &request()).is_err());
+        let mut body = answer();
+        body["content"][0]["id"] = json!("x".repeat(1025));
+        body["content"][1]["tool_use_id"] = body["content"][0]["id"].clone();
+        assert!(from_anthropic(&body, &request()).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_client_and_hosted_call_ids() {
+        let mut original = request();
+        original["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"function","name":"lookup","parameters":{"type":"object"}}));
+        original["tool_choice"] = json!("auto");
+        let client =
+            |id: &str, x: u32| json!({"type":"tool_use","id":id,"name":"lookup","input":{"x":x}});
+        let hosted = json!({"type":"server_tool_use","id":"same","name":"web_search","input":{"query":"Rust"}});
+        let result = json!({"type":"web_search_tool_result","tool_use_id":"same","content":[]});
+        for content in [
+            json!([client("same", 1), client("same", 2)]),
+            json!([hosted, result, client("same", 1)]),
+            json!([client("same", 1), hosted, result]),
+            json!([client("msg_test_text_1", 1), {"type":"text","text":"Answer"}]),
+        ] {
+            let body = json!({"id":"msg_test","type":"message","stop_reason":"tool_use","content":content});
+            let error = from_anthropic(&body, &original)
+                .expect_err("call IDs must be unique across hosted and client calls");
+            assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+        }
+        let body = json!({"id":"msg_test","type":"message","stop_reason":"tool_use","content":[client("one", 1), client("two", 2)]});
+        assert!(from_anthropic(&body, &original).is_ok());
     }
 
     #[test]

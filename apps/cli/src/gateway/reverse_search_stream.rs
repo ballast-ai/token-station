@@ -21,6 +21,7 @@ pub(super) struct AnthropicSearchStream<'a> {
     outputs: BTreeMap<usize, usize>,
     sequence: usize,
     bytes: usize,
+    output_bytes: u64,
     pub(super) started: bool,
     complete: bool,
 }
@@ -36,6 +37,7 @@ impl<'a> AnthropicSearchStream<'a> {
             outputs: BTreeMap::new(),
             sequence: 0,
             bytes: 0,
+            output_bytes: 0,
             started: false,
             complete: false,
         }
@@ -53,6 +55,22 @@ impl<'a> AnthropicSearchStream<'a> {
     }
 
     pub(super) fn push(
+        &mut self,
+        chunk: &str,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) -> Result<bool, ErrorEnvelope> {
+        let mut bytes = self.output_bytes;
+        let result = super::search_stream::limit_stream_output(&mut bytes, emit, |emit| {
+            self.push_inner(chunk, emit)
+        });
+        self.output_bytes = bytes;
+        if result.is_err() {
+            self.complete = false;
+        }
+        result
+    }
+
+    fn push_inner(
         &mut self,
         chunk: &str,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -107,6 +125,7 @@ impl<'a> AnthropicSearchStream<'a> {
     ) -> Result<bool, ErrorEnvelope> {
         match event["type"].as_str() {
             Some("message_start") => {
+                super::web_search::check_response_id(&event["message"]["id"])?;
                 if self.started
                     || event["message"]["id"].as_str().is_none()
                     || event["message"]["type"] != "message"
@@ -136,6 +155,11 @@ impl<'a> AnthropicSearchStream<'a> {
                 }
                 let ci = Self::index(event)?;
                 let block = &event["content_block"];
+                if matches!(block["type"].as_str(), Some("server_tool_use" | "tool_use"))
+                    && !super::web_search::valid_call_id(&block["id"])
+                {
+                    return Err(invalid("Native search call ID is invalid."));
+                }
                 if ci != self.message["content"].as_array().unwrap().len() {
                     return Err(invalid("Native search content indexes are not sequential."));
                 }
@@ -381,6 +405,96 @@ mod tests {
             json!({"type":"message_stop"}),
         ]
     }
+    #[test]
+    fn oversized_message_id_is_rejected_before_any_output() {
+        let request = request();
+        let mut bridge = AnthropicSearchStream::new(&request);
+        let mut replies = 0;
+        let event = json!({"type":"message_start","message":{"id":"x".repeat(1025),"type":"message","content":[]}});
+        let error = bridge
+            .push(&frame(&event), &mut |_| {
+                replies += 1;
+                true
+            })
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+        assert_eq!(replies, 0);
+        assert!(!bridge.started);
+    }
+
+    #[test]
+    fn repeated_item_ids_cannot_exceed_the_converted_stream_budget() {
+        let request = request();
+        let mut bridge = AnthropicSearchStream::new(&request);
+        let mut emitted = 0_u64;
+        let mut emit = |reply| {
+            if let Reply::Chunk(text) = reply {
+                emitted += text.len() as u64;
+            }
+            true
+        };
+        let start = frame(
+            &json!({"type":"message_start","message":{"id":"x".repeat(1024),"type":"message","content":[]}}),
+        );
+        let block = frame(
+            &json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        );
+        bridge.push(&start, &mut emit).unwrap();
+        bridge.push(&block, &mut emit).unwrap();
+        let delta = frame(
+            &json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}),
+        );
+        let mut received = start.len() + block.len();
+        let mut failure = None;
+        for _ in 0..40_000 {
+            received += delta.len();
+            if let Err(error) = bridge.push(&delta, &mut emit) {
+                failure = Some(error);
+                break;
+            }
+        }
+        let error = failure.expect("small input must not amplify beyond the output budget");
+        assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+        assert!((received as u64) < MAX_UPSTREAM_BODY);
+        assert!(emitted > MAX_UPSTREAM_BODY / 2);
+        assert!(emitted <= MAX_UPSTREAM_BODY);
+        assert!(bridge.finish().is_err());
+    }
+
+    #[test]
+    fn duplicate_call_ids_do_not_complete_the_stream() {
+        let mut request = request();
+        request["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"function","name":"lookup","parameters":{"type":"object"}}));
+        let mut bridge = AnthropicSearchStream::new(&request);
+        let mut chunks = Vec::new();
+        let mut emit = |reply| {
+            if let Reply::Chunk(text) = reply {
+                chunks.push(text);
+            }
+            true
+        };
+        bridge.push(&frame(&wire()[0]), &mut emit).unwrap();
+        for index in 0..2 {
+            bridge.push(&frame(&json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":"same","name":"lookup","input":{"x":index}}})), &mut emit).unwrap();
+            bridge
+                .push(
+                    &frame(&json!({"type":"content_block_stop","index":index})),
+                    &mut emit,
+                )
+                .unwrap();
+        }
+        bridge.push(&frame(&json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}})), &mut emit).unwrap();
+        let error = bridge
+            .push(&frame(&json!({"type":"message_stop"})), &mut emit)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+        assert!(!chunks.join("").contains("response.completed"));
+        assert!(bridge.finish().is_err());
+    }
+
     #[test]
     fn reverse_stream_emits_early_text_and_terminal_sources_with_usage() {
         let request = request();

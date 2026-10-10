@@ -1,7 +1,26 @@
 //! Adapt hosted search through the existing provider route.
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
+
+pub(super) const MAX_SEARCH_ID_BYTES: usize = 1024;
+
+pub(super) fn valid_call_id(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|id| !id.is_empty() && id.len() <= MAX_SEARCH_ID_BYTES)
+}
+
+pub(super) fn check_response_id(value: &Value) -> Result<(), ErrorEnvelope> {
+    if value
+        .as_str()
+        .is_some_and(|id| id.is_empty() || id.len() > MAX_SEARCH_ID_BYTES)
+    {
+        return Err(protocol_error("The search backend response ID is invalid"));
+    }
+    Ok(())
+}
 
 fn search_tool(tool: &Value) -> bool {
     tool.get("type")
@@ -336,6 +355,7 @@ pub(super) fn from_responses(
     max_uses: Option<u64>,
     request: &Value,
 ) -> Result<Value, ErrorEnvelope> {
+    check_response_id(&body["id"])?;
     if !matches!(body["status"].as_str(), Some("completed" | "incomplete")) {
         return Err(protocol_error(
             "The search backend did not complete a valid Responses request",
@@ -430,7 +450,7 @@ pub(super) fn from_responses(
                         "The search backend returned an unauthorized client tool call",
                     ));
                 }
-                if item["call_id"].as_str().is_none_or(str::is_empty) {
+                if !valid_call_id(&item["call_id"]) {
                     return Err(protocol_error(
                         "The search backend function call ID is invalid",
                     ));
@@ -453,6 +473,16 @@ pub(super) fn from_responses(
                     "The search backend returned an unsupported output item",
                 ));
             }
+        }
+    }
+    let mut call_ids = BTreeSet::new();
+    for block in &content {
+        if matches!(block["type"].as_str(), Some("tool_use" | "server_tool_use"))
+            && !call_ids.insert(block["id"].as_str().unwrap())
+        {
+            return Err(protocol_error(
+                "The search backend returned duplicate call IDs",
+            ));
         }
     }
     if !content.iter().any(|block| {
@@ -484,6 +514,13 @@ pub(super) fn from_responses(
 
 struct ResponseBudget {
     remaining: u64,
+}
+
+pub(super) fn response_within_size_limit(value: &Value) -> bool {
+    let mut budget = ResponseBudget {
+        remaining: MAX_UPSTREAM_BODY,
+    };
+    serde_json::to_writer(&mut budget, value).is_ok()
 }
 
 impl std::io::Write for ResponseBudget {
@@ -965,6 +1002,48 @@ mod tests {
             assert_eq!(result["content"][0]["name"], "lookup");
             assert_eq!(result["stop_reason"], "tool_use");
         }
+    }
+
+    #[test]
+    fn oversized_response_and_call_ids_are_rejected() {
+        let mut original = request();
+        original["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"lookup","input_schema":{"type":"object"}}));
+        original["tool_choice"] = json!({"type":"auto"});
+        for id in ["x".repeat(1025), "界".repeat(342)] {
+            let body = json!({"id":id,"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Answer"}]}]});
+            assert!(from_responses(&body, "web_search", "model", None, &original).is_err());
+            let body = json!({"id":"r","status":"completed","output":[{"type":"function_call","call_id":id,"name":"lookup","arguments":"{}"}]});
+            assert!(from_responses(&body, "web_search", "model", None, &original).is_err());
+        }
+        let body = json!({"id":"x".repeat(1024),"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Answer"}]}]});
+        assert!(from_responses(&body, "web_search", "model", None, &original).is_ok());
+    }
+
+    #[test]
+    fn rejects_duplicate_client_and_hosted_call_ids() {
+        let mut original = request();
+        original["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"lookup","input_schema":{"type":"object"}}));
+        original["tool_choice"] = json!({"type":"auto"});
+        let client = |id: &str, x: u32| json!({"type":"function_call","call_id":id,"name":"lookup","arguments":json!({"x":x}).to_string()});
+        let hosted = json!({"type":"web_search_call","status":"completed","action":{"type":"search","query":"Rust","sources":[]}});
+        for output in [
+            json!([client("same", 1), client("same", 2)]),
+            json!([hosted, client("srvtoolu_resp_test_1", 1)]),
+            json!([client("srvtoolu_resp_test_1", 1), hosted]),
+        ] {
+            let body = json!({"id":"resp_test","status":"completed","output":output});
+            let error = from_responses(&body, "web_search", "model", None, &original)
+                .expect_err("call IDs must be unique across hosted and client calls");
+            assert_eq!(error.code, ErrorCode::ProviderProtocolError);
+        }
+        let body = json!({"id":"resp_test","status":"completed","output":[client("one", 1), client("two", 2)]});
+        assert!(from_responses(&body, "web_search", "model", None, &original).is_ok());
     }
 
     #[test]
