@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
 
-use south_provider_api::AuthArmV1;
-
 use crate::{
     config::{AuthConfig, ClientConfig, EgressMode},
     secrets::{SecretStore, store_set},
@@ -63,28 +61,28 @@ use token_station_protocol::{
 use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 /// What a component that carries a bearer token declares.
-fn bearer_arms() -> BTreeSet<AuthArmV1> {
-    BTreeSet::from([AuthArmV1::Bearer])
+fn bearer_arms() -> BTreeSet<String> {
+    BTreeSet::from(["bearer".to_owned()])
 }
 
 /// What a component that carries a sanctioned secret header declares — the
 /// Anthropic package's shape.
-fn header_secret_arms() -> BTreeSet<AuthArmV1> {
-    BTreeSet::from([AuthArmV1::HeaderSecret])
+fn header_secret_arms() -> BTreeSet<String> {
+    BTreeSet::from(["header_secret".to_owned()])
 }
 
 /// The OpenAI-compatible package's shape: it serves both the bearer dialects
 /// and Azure's `api-key`, and says so. What used to be a "cumulative" host mode
 /// is now just a component declaring two arms.
-fn both_arms() -> BTreeSet<AuthArmV1> {
-    BTreeSet::from([AuthArmV1::Bearer, AuthArmV1::HeaderSecret])
+fn both_arms() -> BTreeSet<String> {
+    BTreeSet::from(["bearer".to_owned(), "header_secret".to_owned()])
 }
 
-fn eligible_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
+fn eligible_policy_with(arms: BTreeSet<String>) -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Buffered, arms)
 }
 
-fn eligible_streaming_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
+fn eligible_streaming_policy_with(arms: BTreeSet<String>) -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Streaming, arms)
 }
 

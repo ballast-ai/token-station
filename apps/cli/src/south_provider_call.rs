@@ -6,8 +6,6 @@ use std::{
     time::Duration,
 };
 
-use south_provider_api::AuthArmV1;
-
 use south_contracts::{
     BearerAuthV1, ContractErrorV1, CredentialSlotV1, JsonBodyV1, JsonPostRequestV1,
     PreparationErrorV1, ProviderAuthV1, ProviderEndpointV1, ProviderQuotaMetadataFieldV1,
@@ -75,7 +73,7 @@ pub(crate) struct CommunityCallPolicyV1 {
     /// its manifest, which admission has already verified — so eligibility asks
     /// the component what it does rather than matching its dialect against a
     /// list the host has to remember to extend.
-    auth_arms: BTreeSet<AuthArmV1>,
+    auth_arms: BTreeSet<String>,
 }
 
 impl CommunityCallPolicyV1 {
@@ -83,7 +81,7 @@ impl CommunityCallPolicyV1 {
     pub(crate) const fn new(
         egress_mode: EgressMode,
         body_mode: RequestBodyModeV1,
-        auth_arms: BTreeSet<AuthArmV1>,
+        auth_arms: BTreeSet<String>,
     ) -> Self {
         Self {
             egress_mode,
@@ -297,7 +295,7 @@ fn prepare_provider_call_for_mode_v1(
             ProviderAuthV1::from(BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?))
         }
         Some(Auth::Header { name, secret })
-            if policy.auth_arms.contains(&AuthArmV1::HeaderSecret)
+            if policy.auth_arms.contains("header_secret")
                 && sanctioned_secret_header(name).is_some() =>
         {
             let header = sanctioned_secret_header(name)
@@ -639,10 +637,9 @@ fn check_static_eligibility(
     // component carries. Anything else — the dialect's name in particular — is
     // not the transport's business once admission has run.
     let supported_auth = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { .. }) => policy.auth_arms.contains(&AuthArmV1::Bearer),
+        Some(Auth::Bearer { .. }) => policy.auth_arms.contains("bearer"),
         Some(Auth::Header { name, .. }) => {
-            policy.auth_arms.contains(&AuthArmV1::HeaderSecret)
-                && sanctioned_secret_header(name).is_some()
+            policy.auth_arms.contains("header_secret") && sanctioned_secret_header(name).is_some()
         }
         _ => false,
     };

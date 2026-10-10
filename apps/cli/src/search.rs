@@ -1,6 +1,7 @@
 //! Opt-in, host-owned headless Chrome search. No personal browser profile is used.
 
 mod filters;
+mod html;
 mod page;
 mod queue;
 pub(crate) use filters::DomainFilter;
@@ -86,6 +87,54 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Rust & tools");
         assert_eq!(results[0].snippet, "Official language site.");
+    }
+
+    #[test]
+    fn tokenizer_search_preserves_redirects_entities_and_omitted_rows() {
+        use base64::Engine as _;
+        let destination = "https://example.com/path?a=1&b=2";
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(destination);
+        let bing = format!(
+            "<ol><li class='b_algo other'><h2><a href='https://www.bing.com/ck/a?u=a1{encoded}&amp;other=1'>Caf&eacute; &#x754C;</a></h2><p>First &amp; snippet<li class='b_algo'><h2><a href='https://example.com/two'>Second</a></h2><p>Two</ol>"
+        );
+        let results = parse_results(&bing, Engine::Bing).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, destination);
+        assert_eq!(results[0].title, "Café 界");
+        assert_eq!(results[0].snippet, "First & snippet");
+        let duck = "<div class='result'><a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath%3Fa%3D1%26b%3D2&amp;rut=x'>Docs &amp; tools</a><a class='result__snippet'>Read &#169; documentation</a></div>";
+        let results = parse_results(duck, Engine::Duckduckgo).unwrap();
+        assert_eq!(results[0].url, destination);
+        assert_eq!(results[0].title, "Docs & tools");
+        assert_eq!(results[0].snippet, "Read © documentation");
+    }
+
+    #[test]
+    fn nested_list_items_preserve_the_outer_search_row() {
+        let input = "<ul><li class='b_algo'><ul><li>metadata</li></ul><h2><a href='https://docs.rs/'>Rust</a></h2><p>Readable snippet</p></li></ul>";
+        let results = parse_results(input, Engine::Bing).unwrap();
+        assert_eq!(results[0].url, "https://docs.rs/");
+        assert_eq!(results[0].snippet, "Readable snippet");
+    }
+
+    #[test]
+    fn search_html_parsing_checks_execution_budget() {
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let input = format!("<body>{}</body>", "<p>text</p>".repeat(100));
+        assert!(
+            parse_filtered_results_checked(&input, Engine::Bing, &DomainFilter::default(), &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() >= 50 {
+                    Err("Browser search timed out.".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err()
+            .contains("timed out")
+        );
+        assert_eq!(calls.get(), 50);
     }
 
     #[test]
@@ -289,7 +338,6 @@ mod tests {
     }
 }
 
-use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -359,6 +407,8 @@ pub struct SearchController {
     revision: AtomicU64,
     #[cfg(test)]
     pub(crate) fixture: Mutex<Option<Result<Vec<SearchResult>, String>>>,
+    #[cfg(test)]
+    pub(super) page_fixture: Mutex<Option<(String, String)>>,
 }
 
 impl SearchController {
@@ -384,6 +434,8 @@ impl SearchController {
             revision: AtomicU64::new(0),
             #[cfg(test)]
             fixture: Mutex::new(None),
+            #[cfg(test)]
+            page_fixture: Mutex::new(None),
         });
         registry.insert(data_dir.to_path_buf(), Arc::downgrade(&controller));
         controller
@@ -634,7 +686,7 @@ fn browse(
             if html.len() as u64 > MAX_HTML {
                 return Err("The search page exceeded the size limit.".into());
             }
-            match parse_filtered_results(html, engine, filter) {
+            match parse_filtered_results_checked(html, engine, filter, &check) {
                 Ok(results) => return Ok(results),
                 Err(error) if error.contains("verification") => {
                     return Err(error);
@@ -803,79 +855,125 @@ fn filter_results(
     Ok(filtered)
 }
 
+#[cfg(test)]
 fn parse_filtered_results(
     html: &str,
     engine: Engine,
     filter: &DomainFilter,
 ) -> Result<Vec<SearchResult>, String> {
-    let document = Html::parse_document(html);
-    let (row, link, snippet) = match engine {
-        Engine::Bing => ("li.b_algo", "h2 a", "p"),
-        Engine::Duckduckgo => (".result", "a.result__a", ".result__snippet"),
-    };
-    let select = |value| Selector::parse(value).map_err(|_| "Invalid search parser.".to_string());
-    let (rows, links, snippets) = (select(row)?, select(link)?, select(snippet)?);
+    parse_filtered_results_checked(html, engine, filter, &|| Ok(()))
+}
+
+fn resolve_search_link(href: &str, engine: Engine) -> String {
+    if engine == Engine::Duckduckgo {
+        Url::parse("https://duckduckgo.com")
+            .ok()
+            .and_then(|base| base.join(href).ok())
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(key, _)| key == "uddg")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .unwrap_or_else(|| href.to_owned())
+    } else if href.starts_with("https://www.bing.com/ck/a?") {
+        use base64::Engine as _;
+        Url::parse(href)
+            .ok()
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(key, _)| key == "u")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .and_then(|value| {
+                value.strip_prefix("a1").and_then(|encoded| {
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(encoded)
+                        .ok()
+                })
+            })
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default()
+    } else {
+        href.to_owned()
+    }
+}
+
+fn parse_filtered_results_checked(
+    input: &str,
+    engine: Engine,
+    filter: &DomainFilter,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<Vec<SearchResult>, String> {
+    let document = html::parse(input, usize::try_from(MAX_HTML).unwrap(), check)?;
     let mut seen = BTreeSet::new();
     let mut results = Vec::new();
-    for row in document.select(&rows) {
-        let Some(link) = row.select(&links).next() else {
+    for row in 0..document.len() {
+        check()?;
+        let row_node = document.node(row);
+        let is_row = match engine {
+            Engine::Bing => row_node.name == "li" && html::has_class(row_node, "b_algo"),
+            Engine::Duckduckgo => html::has_class(row_node, "result"),
+        };
+        if !is_row {
+            continue;
+        }
+        let end = document.end(row);
+        let link = match engine {
+            Engine::Bing => {
+                let heading = document.first(row + 1, end, |node| node.name == "h2", check)?;
+                match heading {
+                    Some(heading) => document.first(
+                        heading + 1,
+                        document.end(heading),
+                        |node| node.name == "a",
+                        check,
+                    )?,
+                    None => None,
+                }
+            }
+            Engine::Duckduckgo => document.first(
+                row + 1,
+                end,
+                |node| node.name == "a" && html::has_class(node, "result__a"),
+                check,
+            )?,
+        };
+        let Some(link) = link else {
             continue;
         };
-        let Some(href) = link.value().attr("href") else {
+        let Some(href) = document.node(link).href.as_deref() else {
             continue;
         };
-        let resolved = if engine == Engine::Duckduckgo {
-            Url::parse("https://duckduckgo.com")
-                .ok()
-                .and_then(|base| base.join(href).ok())
-                .and_then(|url| {
-                    url.query_pairs()
-                        .find(|(key, _)| key == "uddg")
-                        .map(|(_, value)| value.into_owned())
-                })
-                .unwrap_or_else(|| href.to_owned())
-        } else if href.starts_with("https://www.bing.com/ck/a?") {
-            use base64::Engine as _;
-            Url::parse(href)
-                .ok()
-                .and_then(|url| {
-                    url.query_pairs()
-                        .find(|(key, _)| key == "u")
-                        .map(|(_, value)| value.into_owned())
-                })
-                .and_then(|value| {
-                    value.strip_prefix("a1").and_then(|encoded| {
-                        base64::engine::general_purpose::URL_SAFE_NO_PAD
-                            .decode(encoded)
-                            .ok()
-                    })
-                })
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_default()
-        } else {
-            href.to_owned()
-        };
+        let resolved = resolve_search_link(href, engine);
         let Some(url) = public_url(&resolved) else {
             continue;
         };
         if !seen.insert(url.clone()) {
             continue;
         }
-        let title = link
-            .text()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let title = document
+            .text(link + 1, document.end(link), 250, &[], check)?
+            .0;
         if title.is_empty() {
             continue;
         }
-        let snippet = row
-            .select(&snippets)
-            .next()
-            .map(|node| node.text().collect::<Vec<_>>().join(" "))
-            .unwrap_or_default();
+        let snippet_node = document.first(
+            row + 1,
+            end,
+            |node| match engine {
+                Engine::Bing => node.name == "p",
+                Engine::Duckduckgo => html::has_class(node, "result__snippet"),
+            },
+            check,
+        )?;
+        let snippet = match snippet_node {
+            Some(index) => {
+                document
+                    .text(index + 1, document.end(index), 1000, &[], check)?
+                    .0
+            }
+            None => String::new(),
+        };
         results.push(SearchResult {
             title: title.chars().take(250).collect(),
             url,
@@ -886,7 +984,7 @@ fn parse_filtered_results(
         }
     }
     if results.is_empty() {
-        let lower = html.to_lowercase();
+        let lower = input.to_lowercase();
         if [
             "verify you are human",
             "captcha",

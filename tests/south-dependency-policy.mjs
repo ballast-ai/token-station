@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8";
-const southVersion = "0.16.0";
+const southRevision = "7afe9a5b8ce80246597c43f7dd1b285b67eef9ed";
+const southVersion = "0.20.0";
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git";
 const kernelRevision = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35";

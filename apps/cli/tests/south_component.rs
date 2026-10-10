@@ -5,7 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use south_provider_api::AuthArmV1;
 use token_station_cli::south_component::{
     ProviderAdapter, SouthComponentAdapter, south_component_runtime,
 };
@@ -214,11 +213,11 @@ fn each_component_declares_the_auth_arms_transport_should_judge_it_by() {
     let anthropic = load("provider-anthropic-v2", "provider_anthropic_v2");
     let arms = anthropic.auth_arms();
     assert!(
-        arms.contains(&AuthArmV1::HeaderSecret),
+        arms.contains("header_secret"),
         "Anthropic authenticates with `x-api-key`, a header secret"
     );
     assert!(
-        !arms.contains(&AuthArmV1::Bearer),
+        !arms.contains("bearer"),
         "and not with a bearer token, so the transport must not offer it one"
     );
 
@@ -227,9 +226,9 @@ fn each_component_declares_the_auth_arms_transport_should_judge_it_by() {
         "provider_openai_compatible_v2",
     );
     let arms = openai.auth_arms();
-    assert!(arms.contains(&AuthArmV1::Bearer));
+    assert!(arms.contains("bearer"));
     assert!(
-        arms.contains(&AuthArmV1::HeaderSecret),
+        arms.contains("header_secret"),
         "the same package serves Azure, which authenticates with `api-key`"
     );
 }

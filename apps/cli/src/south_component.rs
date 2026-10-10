@@ -13,7 +13,7 @@ use std::path::Path;
 
 use std::collections::BTreeSet;
 
-use south_provider_api::{AuthArmV1, HostExpectationsV1};
+use south_provider_api::HostExpectationsV1;
 use south_provider_runtime::{
     CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, LoadedComponentV1, NoSecretsV1,
     RuntimeLimitsV1,
@@ -119,7 +119,7 @@ pub fn south_component_runtime() -> Result<ComponentRuntimeV1, String> {
 pub(crate) const IR_SCHEMA_ID: &str = "token-station-protocol@0.3.0/v0.2.0";
 pub(crate) const KERNEL_VERSION: &str = "0.2.0";
 pub(crate) const KERNEL_REVISION: &str = "72458e3a11fe157f9ac04818c44b62a3dd2cb09c";
-pub(crate) const SOUTH_RUNTIME: &str = "0.16.0";
+pub(crate) const SOUTH_RUNTIME: &str = "0.20.0";
 
 /// The expectation every component is admitted against.
 #[must_use]
@@ -185,7 +185,7 @@ impl SouthComponentAdapter {
     /// a request the transport then refused to send. The manifest already states
     /// the answer, and admission has already verified the manifest.
     #[must_use]
-    pub fn auth_arms(&self) -> BTreeSet<AuthArmV1> {
+    pub fn auth_arms(&self) -> BTreeSet<String> {
         self.component.manifest().auth_arms.clone()
     }
 

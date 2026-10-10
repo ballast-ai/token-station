@@ -1111,7 +1111,7 @@ struct Upstream {
     /// The auth shapes the admitted component declares, read from its manifest
     /// once at assembly. Transport eligibility judges by these instead of by
     /// the dialect's name.
-    auth_arms: std::collections::BTreeSet<south_provider_api::AuthArmV1>,
+    auth_arms: std::collections::BTreeSet<String>,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.

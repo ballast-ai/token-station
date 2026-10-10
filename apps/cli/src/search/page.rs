@@ -76,6 +76,219 @@ mod tests {
     }
 
     #[test]
+    fn rejects_structurally_excessive_page_html() {
+        let html = format!(
+            "<body>{}text{}</body>",
+            "<div>".repeat(129),
+            "</div>".repeat(129)
+        );
+        assert!(extract(&html, "text/html").unwrap_err().contains("depth"));
+    }
+
+    #[test]
+    fn extraction_bounds_bytes_nodes_and_incomplete_tokens() {
+        for (input, expected) in [
+            ("x".repeat(MAX_BYTES + 1), "input limit"),
+            (
+                format!("<body>{}</body>", "<br>".repeat(50_001)),
+                "node limit",
+            ),
+            (
+                format!("<!--{}--><body>text</body>", "x".repeat(20_000)),
+                "token byte limit",
+            ),
+            (
+                format!("<div {}>text</div>", "a='x' ".repeat(4_000)),
+                "token byte limit",
+            ),
+        ] {
+            assert!(
+                extract(&input, "text/html").unwrap_err().contains(expected),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_preserves_entities_raw_text_and_common_omitted_tags() {
+        let html = "<title>Caf&eacute; &amp; &#x754C;</title><script>let x = '<main>fake</main>';</script><body><nav>skip</nav><article>fallback</article><main><p>Caf&eacute; &copy;<p>next<br>line<form>skip</form></main></body>";
+        let (title, text, truncated) = extract(html, "text/html").unwrap();
+        assert_eq!(title, "Café & 界");
+        assert_eq!(text, "Café © next line");
+        assert!(!truncated);
+        assert_eq!(
+            extract(&format!("<body>{}</body>", "x".repeat(2_500)), "text/html")
+                .unwrap()
+                .1,
+            "x".repeat(2_500)
+        );
+        assert!(extract("<body><form><main>hidden</main></form></body>", "text/html").is_err());
+        assert_eq!(
+            extract("<p>Implicit body &amp; entity", "text/html")
+                .unwrap()
+                .1,
+            "Implicit body & entity"
+        );
+    }
+
+    #[test]
+    fn omitted_paragraph_end_does_not_reopen_navigation_text() {
+        assert_eq!(
+            extract(
+                "<body><p>Intro<nav><p>IGNORE NAVIGATION</p></nav>Readable</body>",
+                "text/html"
+            )
+            .unwrap()
+            .1,
+            "Intro Readable"
+        );
+    }
+
+    #[test]
+    fn cancellation_and_deadline_interrupt_parsing_and_plain_text() {
+        use std::cell::Cell;
+        let body = format!("<body>{}</body>", "<p>text</p>".repeat(100));
+        let calls = Cell::new(0);
+        let started = Cell::new(Instant::now());
+        let check = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 50 {
+                started.set(Instant::now().checked_sub(READ_TIMEOUT).unwrap());
+            }
+            check_read(started.get(), &|| false)
+        };
+        assert!(
+            extract_checked(&body, "text/html", &check)
+                .unwrap_err()
+                .contains("timed out")
+        );
+        assert_eq!(calls.get(), 50);
+        for mime in ["text/html", "text/plain"] {
+            calls.set(0);
+            assert!(
+                extract_checked(&body, mime, &|| {
+                    calls.set(calls.get() + 1);
+                    check_read(Instant::now(), &|| calls.get() >= 50)
+                })
+                .unwrap_err()
+                .contains("cancelled")
+            );
+            assert_eq!(calls.get(), 50);
+        }
+    }
+
+    #[test]
+    fn character_tokens_propagate_cancellation_and_deadline_without_panicking() {
+        use std::cell::Cell;
+        let body = format!("<body>{}</body>", "a&amp;b".repeat(200));
+        for error in ["Page reading was cancelled.", "Page reading timed out."] {
+            let checks = Cell::new(0);
+            let result = extract_checked(&body, "text/html", &|| {
+                checks.set(checks.get() + 1);
+                if checks.get() >= 10 {
+                    Err(error.into())
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.unwrap_err(), error);
+        }
+    }
+
+    #[test]
+    fn character_tokens_propagate_node_limits_without_panicking() {
+        let body = format!("<body>{}</body>", "<br>a".repeat(30_000));
+        assert!(
+            extract(&body, "text/html")
+                .unwrap_err()
+                .contains("node limit")
+        );
+    }
+
+    #[test]
+    fn page_parser_failures_and_cancellation_release_the_shared_queue() {
+        use std::cell::Cell;
+        let root = super::super::temporary_dir().unwrap();
+        let controller = super::super::SearchController::shared(&root.0);
+        let known = BTreeSet::from(["https://example.com/".into()]);
+        let filter = DomainFilter::default();
+        *controller.page_fixture.lock().unwrap() = Some((
+            format!(
+                "<body>{}text{}</body>",
+                "<div>".repeat(129),
+                "</div>".repeat(129)
+            ),
+            "text/html".into(),
+        ));
+        assert!(
+            controller
+                .read_page("https://example.com/", &known, &filter, None, &|| false)
+                .unwrap_err()
+                .contains("depth")
+        );
+        assert!(!controller.status().busy);
+        *controller.page_fixture.lock().unwrap() = Some((
+            format!("<body>{}</body>", "<p>text</p>".repeat(100)),
+            "text/html".into(),
+        ));
+        let calls = Cell::new(0);
+        assert!(
+            controller
+                .read_page("https://example.com/", &known, &filter, None, &|| {
+                    calls.set(calls.get() + 1);
+                    calls.get() >= 50
+                })
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        assert!(!controller.status().busy);
+        {
+            // Exercise the same response extraction and queue ownership with a
+            // deadline that expires during token processing, without sleeping.
+            let _permit = controller
+                .queue
+                .acquire(&|| false, 8, Duration::ZERO)
+                .unwrap();
+            let started = Cell::new(Instant::now());
+            calls.set(0);
+            let url = Url::parse("https://example.com/").unwrap();
+            let body = format!("<body>{}</body>", "<p>text</p>".repeat(100));
+            assert!(
+                page_response(&url, &body, "text/html", None, Instant::now(), &|| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 50 {
+                        started.set(Instant::now().checked_sub(READ_TIMEOUT).unwrap());
+                    }
+                    check_read(started.get(), &|| false)
+                })
+                .unwrap_err()
+                .contains("timed out")
+            );
+        }
+        assert!(!controller.status().busy);
+        *controller.page_fixture.lock().unwrap() = Some((
+            "<main>Allowed &amp; readable</main>".into(),
+            "text/html".into(),
+        ));
+        assert_eq!(
+            controller
+                .read_page(
+                    "https://example.com/",
+                    &known,
+                    &filter,
+                    Some("readable"),
+                    &|| false
+                )
+                .unwrap()
+                .page
+                .unwrap()
+                .match_count,
+            Some(1)
+        );
+        assert!(!controller.status().busy);
+    }
+
+    #[test]
     fn cancellation_happens_before_dns_or_http() {
         let root = super::super::temporary_dir().unwrap();
         let controller = super::super::SearchController::shared(&root.0);
@@ -122,7 +335,6 @@ mod tests {
 }
 
 use super::{DomainFilter, SearchController, SearchResponse, SearchResult};
-use scraper::{Html, Selector};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -218,12 +430,16 @@ fn redirect(from: &Url, location: &str, filter: &DomainFilter) -> Result<Url, St
     validate_url(url.as_str(), filter)
 }
 
-fn bounded_text<'a>(parts: impl Iterator<Item = &'a str>) -> (String, bool) {
+fn bounded_text_checked<'a>(
+    parts: impl Iterator<Item = &'a str>,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<(String, bool), String> {
     let mut text = String::new();
     let mut count = 0;
     let mut space = false;
     for part in parts {
         for character in part.chars() {
+            check()?;
             if character.is_whitespace() {
                 space = !text.is_empty();
                 continue;
@@ -234,7 +450,7 @@ fn bounded_text<'a>(parts: impl Iterator<Item = &'a str>) -> (String, bool) {
                 .chain(std::iter::once(character))
             {
                 if count == MAX_TEXT {
-                    return (text, true);
+                    return Ok((text, true));
                 }
                 text.push(ch);
                 count += 1;
@@ -243,55 +459,104 @@ fn bounded_text<'a>(parts: impl Iterator<Item = &'a str>) -> (String, bool) {
         }
         space = !text.is_empty();
     }
-    (text, false)
+    Ok((text, false))
 }
 
+#[cfg(test)]
 fn extract(body: &str, mime: &str) -> Result<(String, String, bool), String> {
+    extract_checked(body, mime, &|| Ok(()))
+}
+
+fn extract_checked(
+    body: &str,
+    mime: &str,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<(String, String, bool), String> {
+    check()?;
+    if body.len() > MAX_BYTES {
+        return Err("The page exceeded the 2 MiB input limit.".into());
+    }
     if mime == "text/plain" {
-        let (text, truncated) = bounded_text(std::iter::once(body));
+        let (text, truncated) = bounded_text_checked(std::iter::once(body), check)?;
         return Ok(("Page text".into(), text, truncated));
     }
     if !matches!(mime, "text/html" | "application/xhtml+xml") {
         return Err("Page reading supports static HTML and plain text only.".into());
     }
-    let document = Html::parse_document(body);
-    let title = document
-        .select(&Selector::parse("title").unwrap())
-        .next()
-        .map_or_else(
-            || "Page text".into(),
-            |node| node.text().collect::<String>().chars().take(250).collect(),
-        );
-    let root = ["main", "article", "body"]
-        .iter()
-        .find_map(|selector| document.select(&Selector::parse(selector).unwrap()).next())
-        .ok_or("The page has no readable body.")?;
-    let parts = root.descendants().filter_map(|node| {
-        if node.ancestors().any(|parent| {
-            parent.value().as_element().is_some_and(|element| {
-                matches!(
-                    element.name(),
-                    "script"
-                        | "style"
-                        | "noscript"
-                        | "nav"
-                        | "header"
-                        | "footer"
-                        | "form"
-                        | "template"
-                        | "svg"
-                )
-            })
-        }) {
-            return None;
+    let document = super::html::parse(body, MAX_BYTES, check)?;
+    let title_node = document.first(0, document.len(), |node| node.name == "title", check)?;
+    let title = match title_node {
+        Some(index) => {
+            document
+                .text(index + 1, document.end(index), 250, &[], check)?
+                .0
         }
-        node.value().as_text().map(|text| text.as_ref())
+        None => "Page text".into(),
+    };
+    let mut root = None;
+    for name in ["main", "article", "body"] {
+        root = document.first(0, document.len(), |node| node.name == name, check)?;
+        if root.is_some() {
+            break;
+        }
+    }
+    let (start, end) = root.map_or((0, document.len()), |index| {
+        (index + 1, document.end(index))
     });
-    let (text, truncated) = bounded_text(parts);
+    let (text, truncated) = document.text(
+        start,
+        end,
+        MAX_TEXT,
+        &[
+            "script", "style", "noscript", "nav", "header", "footer", "form", "template", "svg",
+            "head", "title",
+        ],
+        check,
+    )?;
     if text.is_empty() {
         return Err("The page has no readable text.".into());
     }
     Ok((title, text, truncated))
+}
+
+fn check_read(started: Instant, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+    if cancelled() {
+        Err("Page reading was cancelled.".into())
+    } else if started.elapsed() >= READ_TIMEOUT {
+        Err("Page reading timed out.".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn page_response(
+    url: &Url,
+    body: &str,
+    mime: &str,
+    pattern: Option<&str>,
+    started: Instant,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<SearchResponse, String> {
+    let (title, text, truncated) = extract_checked(body, mime, check)?;
+    check()?;
+    let match_count = pattern.map(|pattern| text.matches(pattern).count());
+    Ok(SearchResponse {
+        results: vec![SearchResult {
+            title,
+            url: url.to_string(),
+            snippet: text.chars().take(300).collect(),
+        }],
+        source: "public_http",
+        content_type: "page_text",
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        page: Some(PageText {
+            url: url.to_string(),
+            text,
+            truncated,
+            pattern: pattern.map(str::to_owned),
+            match_count,
+        }),
+    })
 }
 
 impl SearchController {
@@ -313,15 +578,11 @@ impl SearchController {
         }
         let _permit = self.queue.acquire(cancelled, 8, Duration::from_mins(1))?;
         let started = Instant::now();
-        let check = || {
-            if cancelled() {
-                Err("Page reading was cancelled.")
-            } else if started.elapsed() >= READ_TIMEOUT {
-                Err("Page reading timed out.")
-            } else {
-                Ok(())
-            }
-        };
+        let check = || check_read(started, cancelled);
+        #[cfg(test)]
+        if let Some((body, mime)) = self.page_fixture.lock().unwrap().clone() {
+            return page_response(&url, &body, &mime, pattern, started, &check);
+        }
         for attempt in 0..=3 {
             check()?;
             let config = ureq::Agent::config_builder()
@@ -396,26 +657,7 @@ impl SearchController {
             check()?;
             let body = std::str::from_utf8(&bytes)
                 .map_err(|_| "Page reading supports UTF-8 text only.")?;
-            let (title, text, truncated) = extract(body, &mime)?;
-            check()?;
-            let match_count = pattern.map(|pattern| text.matches(pattern).count());
-            return Ok(SearchResponse {
-                results: vec![SearchResult {
-                    title,
-                    url: url.to_string(),
-                    snippet: text.chars().take(300).collect(),
-                }],
-                source: "public_http",
-                content_type: "page_text",
-                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                page: Some(PageText {
-                    url: url.to_string(),
-                    text,
-                    truncated,
-                    pattern: pattern.map(str::to_owned),
-                    match_count,
-                }),
-            });
+            return page_response(&url, body, &mime, pattern, started, &check);
         }
         unreachable!("redirect limit returns above")
     }
