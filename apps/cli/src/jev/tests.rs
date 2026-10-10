@@ -146,7 +146,10 @@ fn settings_persist_and_clear_preserves_unrelated_credentials() {
     drop(controller);
     let controller = JevController::shared(&dir.0);
     assert!(controller.status().enabled);
-    assert!(controller.clear_key().unwrap().last_outcome == Some(Outcome::Disabled));
+    assert_eq!(
+        controller.clear_key().unwrap().last_outcome,
+        Some(Outcome::Disabled)
+    );
     assert!(!controller.status().enabled);
     assert!(!controller.status().has_key);
     assert_eq!(

@@ -342,7 +342,7 @@ impl JevController {
         check_context(context)?;
         let deadline = context.attempt_deadline_for(TIMEOUT);
         self.workers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < MAX_WORKERS).then_some(count + 1)
             })
             .map_err(|_| Outcome::Busy)?;
