@@ -2850,7 +2850,7 @@ dependencies = [
  "token-station-plugin-api",
  "token-station-plugin-runtime",
  "token-station-private-fs",
- "token-station-protocol 0.5.0",
+ "token-station-protocol 0.6.0",
  "token-station-release",
  "token-station-router-core",
  "tokio",
@@ -2868,7 +2868,7 @@ dependencies = [
  "serde",
  "serde_json",
  "token-station-plugin-api",
- "token-station-protocol 0.5.0",
+ "token-station-protocol 0.6.0",
 ]
 
 [[package]]
@@ -2877,7 +2877,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol 0.5.0",
+ "token-station-protocol 0.6.0",
  "token-station-router-core",
 ]
 
@@ -2898,7 +2898,7 @@ dependencies = [
  "serde_json",
  "token-station-conformance",
  "token-station-plugin-api",
- "token-station-protocol 0.5.0",
+ "token-station-protocol 0.6.0",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2944,11 +2944,11 @@ dependencies = [
 
 [[package]]
 name = "token-station-router-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol 0.5.0",
+ "token-station-protocol 0.6.0",
 ]
 
 [[package]]

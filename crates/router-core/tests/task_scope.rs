@@ -134,12 +134,14 @@ fn multipart_scope_keeps_image_and_schema_admission_flags() {
     message.content = Some(Content::Parts(vec![
         ContentPart::Text {
             text: "Only return the title.".into(),
+            cache_control: None,
         },
         ContentPart::ImageUrl {
             image_url: ImageUrl {
                 url: "https://example.invalid/test.png".into(),
                 detail: None,
             },
+            cache_control: None,
         },
     ]));
     let mut request = ChatRequest::new("auto", vec![message]);

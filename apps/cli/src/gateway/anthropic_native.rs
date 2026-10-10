@@ -491,6 +491,8 @@ impl Gateway {
                 name: "anthropic_native_routing_probe".to_owned(),
                 description: None,
                 parameters: json!({}),
+                cache_control: None,
+                strict: None,
             });
         }
         // Quota-first used to bail out here, which meant a server-tool turn was

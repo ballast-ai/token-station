@@ -147,6 +147,8 @@ impl Gateway {
             name: "native_search_route".into(),
             description: None,
             parameters: json!({}),
+            cache_control: None,
+            strict: None,
         });
         let (now, session) = Self::quota_preamble(router, || {
             if anthropic {

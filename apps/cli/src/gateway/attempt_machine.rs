@@ -1282,6 +1282,7 @@ mod cancelled_settlement_tests {
                 url: "data:image/png;base64,cGl4ZWxz".into(),
                 detail: None,
             },
+            cache_control: None,
         }]));
         for mode in ["tiered", "quota_first"] {
             for exact in [false, true] {
@@ -1954,6 +1955,8 @@ mod schema_estimate_tests {
                 name: "lookup".to_owned(),
                 description: Some("Read a record".to_owned()),
                 parameters: schema,
+                cache_control: None,
+                strict: None,
             });
         }
         request

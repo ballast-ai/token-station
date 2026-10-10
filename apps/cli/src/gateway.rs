@@ -337,7 +337,7 @@ fn content_text(content: &Content) -> impl Iterator<Item = &str> {
     };
     let parts = match content {
         Content::Parts(parts) => Some(parts.iter().filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })),
         Content::Text(_) => None,
@@ -379,7 +379,10 @@ fn replace_canonical_documents(request: &mut ChatRequest) -> DocumentFallbackSta
             continue;
         }
         let (text, extracted) = document_replacement_text(block, prefers_chinese);
-        *part = ContentPart::Text { text };
+        *part = ContentPart::Text {
+            text,
+            cache_control: None,
+        };
         if extracted {
             stats.extracted += 1;
         } else {
@@ -440,6 +443,7 @@ fn add_native_image_requirement(request: &mut ChatRequest, body: &Value) {
                 url: "https://image-routing.invalid/probe".into(),
                 detail: None,
             },
+            cache_control: None,
         }]));
         request.messages.push(message);
     }
@@ -1080,7 +1084,7 @@ fn message_text(message: &Message) -> Option<&str> {
     match message.content.as_ref()? {
         Content::Text(text) => Some(text.as_str()),
         Content::Parts(parts) => parts.iter().find_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         }),
     }
@@ -3026,6 +3030,8 @@ impl Gateway {
                 "properties": {},
                 "additionalProperties": false
             }),
+            cache_control: None,
+            strict: None,
         });
         let response = self.probe_request(upstream_name, upstream, &request, http)?;
         if response.choices.iter().any(|choice| {
