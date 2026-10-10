@@ -103,6 +103,19 @@ impl FileOwnershipStore {
             lock: Mutex::new(()),
         }
     }
+
+    pub(crate) fn list_agent(&self, agent_id: &str) -> Result<Vec<OwnershipRecord>, String> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| "ownership 索引读锁已损坏".to_string())?;
+        Ok(self
+            .read_index()?
+            .records
+            .into_iter()
+            .filter(|record| record.agent_id == agent_id)
+            .collect())
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -175,6 +188,7 @@ impl OwnershipStore for FileOwnershipStore {
         }
         index.records.push(record.clone());
         index.records.sort_by_key(OwnershipRecord::key);
+        let index = validate_index(index)?;
         self.write_index(&index)?;
         Ok(record)
     }
@@ -240,10 +254,14 @@ fn validate_index(index: OwnershipIndex) -> Result<OwnershipIndex, String> {
         return Err("不支持的 ownership 索引 schema".to_string());
     }
     let mut keys = BTreeSet::new();
+    let mut targets = BTreeSet::new();
     for record in &index.records {
         validate_record(record)?;
         if !keys.insert(record.key()) {
             return Err("ownership 索引包含重复实例".to_string());
+        }
+        if !targets.insert((&record.agent_id, &record.target_config_path)) {
+            return Err("ownership 索引包含同一配置的多条接管记录，不能安全恢复".to_string());
         }
     }
     Ok(index)
@@ -569,6 +587,43 @@ mod tests {
     }
 
     #[test]
+    fn ownership_store_rejects_two_installations_for_one_configuration() {
+        let root = scratch();
+        let store = FileOwnershipStore::new(root.clone());
+        let first = store
+            .commit(
+                record(BTreeMap::from([(
+                    "/env/TOKEN".to_string(),
+                    "mac".to_string(),
+                )])),
+                None,
+            )
+            .unwrap();
+        let before = std::fs::read(root.join(INDEX_FILE)).unwrap();
+        let mut second = first.clone();
+        second.installation_path = "/opt/claude-native/2.1.294".to_string();
+        assert!(
+            store.commit(second.clone(), None).is_err(),
+            "another installation must not claim the same configuration"
+        );
+        assert_eq!(std::fs::read(root.join(INDEX_FILE)).unwrap(), before);
+        let ambiguous = OwnershipIndex {
+            schema_version: INDEX_SCHEMA_VERSION,
+            records: vec![first, second],
+        };
+        write_atomic_private(
+            &root.join(INDEX_FILE),
+            &serde_json::to_vec(&ambiguous).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            store.list_agent("claude-code").is_err(),
+            "a legacy ambiguous index must not authorize recovery"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ownership_detects_managed_value_changes_but_ignores_unowned_changes() {
         let key = Zeroizing::new([3_u8; 32]);
         let owned = vec![path(&["provider", "tokenstation"])];
@@ -673,6 +728,7 @@ mod tests {
         second.target_config_path = "/tmp/a-settings.json".to_string();
         let mut other_installation = first.clone();
         other_installation.installation_path = "/opt/other".to_string();
+        other_installation.target_config_path = "/tmp/other-settings.json".to_string();
 
         store.commit(first, None).unwrap();
         store.commit(second, None).unwrap();

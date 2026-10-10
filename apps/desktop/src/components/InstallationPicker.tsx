@@ -46,11 +46,13 @@ function workbuddyVariant(path: string, labels?: WorkBuddyVariantLabels) {
 export function installationLabels(
   installations: AgentInstallationView[],
   workbuddyLabels?: WorkBuddyVariantLabels,
+  recoveryLabel = "Previous connection",
 ) {
   const baseLabels = installations.map((installation) => {
     const name = workbuddyVariant(installation.discovery.canonical_path, workbuddyLabels)
       ?? executableName(installation.discovery.canonical_path);
     const version = normalizedVersion(installation);
+    if (installation.discovery.binary_source === "managed_record") return `${name} · ${recoveryLabel}`;
     return version ? `${name} · ${version}` : name;
   });
   const totals = new Map<string, number>();
@@ -85,10 +87,11 @@ export default function InstallationPicker({
     () => installationLabels(installations, {
       china: copy("WorkBuddy China", "WorkBuddy 中国版", "WorkBuddy 中國版", "WorkBuddy 中国版"),
       global: copy("WorkBuddy Global", "WorkBuddy 海外版", "WorkBuddy 海外版", "WorkBuddy 海外版"),
-    }),
+    }, copy("Previous connection", "旧连接待恢复", "舊連線待恢復", "以前の接続を復元")),
     [copy, installations],
   );
   const sourceLabels: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
+    managed_record: copy("Management record", "接管记录", "接管記錄", "管理記録"),
     homebrew: "Homebrew",
     npm_global: copy("npm global", "npm 全局", "npm 全域", "npm グローバル"),
     microsoft_store: "Microsoft Store",

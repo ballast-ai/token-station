@@ -628,7 +628,7 @@ export interface AgentDiscoveryView {
   agent_id: AgentId;
   executable_path: string;
   canonical_path: string;
-  binary_source: "homebrew" | "npm_global" | "microsoft_store" | "path" | "known_path" | "env_override";
+  binary_source: "homebrew" | "npm_global" | "microsoft_store" | "path" | "known_path" | "env_override" | "managed_record";
   modified_at_ms: number | null;
   binary_sha256: string | null;
   upgrade_command: string | null;
@@ -636,7 +636,7 @@ export interface AgentDiscoveryView {
   version_normalized: string | null;
   environment: AgentPlatform;
   evidence: Array<{
-    source: "known_path" | "package_manager" | "path" | "env_override";
+    source: "known_path" | "package_manager" | "path" | "env_override" | "managed_record";
     observed_path: string;
     is_path_default: boolean;
   }>;

@@ -170,6 +170,7 @@ pub struct ConnectorRuntimePaths {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BinarySource {
+    ManagedRecord,
     Homebrew,
     NpmGlobal,
     MicrosoftStore,
@@ -189,6 +190,7 @@ pub struct DiscoveryEvidence {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoverySource {
+    ManagedRecord,
     KnownPath,
     PackageManager,
     Path,

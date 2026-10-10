@@ -151,6 +151,24 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.getByRole("button", { name: "恢复接入前配置并断开" })).toBeEnabled();
   });
 
+  it("offers snapshot restoration for a previous Claude installation without allowing connection", async () => {
+    const props = connectionFixture(true);
+    const previous = props.agent.installations[0];
+    Object.assign(previous.discovery, {
+      binary_source: "managed_record", runnable: false,
+      version_raw: null, version_normalized: null,
+      diagnostics: [{ reason_code: "CONNECTION_OWNERSHIP_ACTIVE", message: "Previous installation is no longer discovered; restore its managed configuration before reconnecting." }],
+    });
+    previous.compatibility = { ...previous.compatibility, status: "INSTALLED_BROKEN", reason_code: "CONNECTION_OWNERSHIP_ACTIVE" };
+    render(<AgentRoutePage {...props} />);
+    expect(await screen.findByText("旧连接待恢复")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "恢复接入前配置并断开" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "一键接入" })).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "恢复接入前配置并断开" }));
+    expect(planAgentDisconnect).toHaveBeenCalledWith("claude-code", previous.discovery.canonical_path);
+    expect(planAgentConnection).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["en", "Restore pre-connection configuration & disconnect", "Restore this Agent's managed fields to their pre-connection values, then disconnect. Unrelated fields are preserved."],
     ["zh-CN", "恢复接入前配置并断开", "将此 Agent 的受管字段恢复为接入前的值，然后断开；其他字段保持不变。"],

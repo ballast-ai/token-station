@@ -1267,7 +1267,7 @@ impl AgentCommandState {
         perform_scan: impl FnOnce() -> Result<ScanSnapshot, AgentCommandError>,
     ) -> Result<Vec<AgentView>, AgentCommandError> {
         let _scan_guard = self.begin_scan()?;
-        let snapshot = perform_scan()?;
+        let snapshot = self.with_claude_recovery_records(perform_scan()?);
         let views = self.views(&snapshot, runtime, opencode_issue)?;
         self.session
             .lock()
@@ -1319,17 +1319,66 @@ impl AgentCommandState {
     fn perform_scan(&self) -> Result<ScanSnapshot, AgentCommandError> {
         #[cfg(test)]
         if let Some(snapshot) = self.scan_override.lock().unwrap().clone() {
-            return Ok(snapshot);
+            return Ok(self.with_claude_recovery_records(snapshot));
         }
         let catalog =
             CompatibilityCatalog::builtin(&self.registry).map_err(AgentCommandError::internal)?;
         let records = DiscoveryScanner::from_process(&self.registry).scan_registry(&self.registry);
-        Ok(ScanSnapshot {
+        Ok(self.with_claude_recovery_records(ScanSnapshot {
             catalog,
             source: CatalogSource::Builtin,
             warning: None,
             records,
-        })
+        }))
+    }
+
+    /// Keep the original ownership key reachable without claiming executable discovery.
+    /// This only enriches the read-only scan; restoration still verifies the baseline,
+    /// managed-value MACs and revision through the ordinary confirmed transaction.
+    fn with_claude_recovery_records(&self, mut snapshot: ScanSnapshot) -> ScanSnapshot {
+        let Ok(owned) = self.ownership.list_agent("claude-code") else {
+            // Existing discovery remains available when the private index is unreadable.
+            return snapshot;
+        };
+        for ownership in owned {
+            if ownership.connector_id != "claude-code-v1"
+                || snapshot.records.iter().any(|record| {
+                    record.agent_id == ownership.agent_id
+                        && record.canonical_path == ownership.installation_path
+                })
+            {
+                continue;
+            }
+            snapshot.records.push(DiscoveryRecord {
+                runtime_paths: None,
+                agent_id: ownership.agent_id,
+                executable_path: ownership.installation_path.clone(),
+                canonical_path: ownership.installation_path.clone(),
+                binary_source: super::types::BinarySource::ManagedRecord,
+                modified_at_ms: None,
+                binary_sha256: None,
+                upgrade_command: None,
+                version_raw: None,
+                version_normalized: None,
+                environment: super::platform::current_platform(),
+                evidence: vec![super::types::DiscoveryEvidence {
+                    source: super::types::DiscoverySource::ManagedRecord,
+                    observed_path: ownership.installation_path,
+                    is_path_default: false,
+                }],
+                is_path_default: false,
+                runnable: false,
+                config_candidates: vec![ownership.target_config_path],
+                config_fingerprint: None,
+                conflict_group: None,
+                diagnostics: vec![Diagnostic {
+                    reason_code: ReasonCode::ConnectionOwnershipActive,
+                    message: "The previous Claude Code installation is no longer discovered. Restore its pre-connection configuration before connecting the current installation.".to_string(),
+                }],
+                scanned_at_ms: self.clock.now_ms(),
+            });
+        }
+        snapshot
     }
 
     fn refresh_scan(&self) -> Result<(), AgentCommandError> {
@@ -1584,6 +1633,9 @@ impl AgentCommandState {
         record: &DiscoveryRecord,
         runtime: &AgentProxyRuntime,
     ) -> Result<bool, AgentCommandError> {
+        if !record.runnable {
+            return Ok(false);
+        }
         let ownership = self
             .ownership
             .list_agent_installation(&record.agent_id, &record.canonical_path)
@@ -1713,6 +1765,22 @@ impl AgentCommandState {
             ));
         }
         let target = server_target(&record)?;
+        if agent_id == "claude-code"
+            && self
+                .ownership
+                .list_agent(agent_id)
+                .map_err(AgentCommandError::internal)?
+                .iter()
+                .any(|owned| {
+                    owned.target_config_path == target.to_string_lossy()
+                        && owned.installation_path != installation_path
+                })
+        {
+            return Err(AgentCommandError::boundary(
+                "configuration_owned_by_other_installation",
+                "此配置仍由旧安装的 Token Station 连接接管；请在安装选择器中选择旧连接，恢复接入前配置并断开，再连接当前安装",
+            ));
+        }
         let source = read_config_source(target).map_err(AgentCommandError::internal)?;
         let input = runtime.input_for(connector_id)?;
         let now_ms = self.clock.now_ms();
@@ -4364,6 +4432,317 @@ mod tests {
         if let Some(state_root) = state.paths.snapshot_root.parent() {
             std::fs::remove_dir_all(state_root).ok();
         }
+    }
+
+    #[test]
+    fn claude_installation_change_retains_snapshot_backed_recovery() {
+        let state = state("claude-installation-recovery");
+        let root = scratch("claude-installation-recovery-files");
+        let case = non_codex_lifecycle_cases(&root)
+            .into_iter()
+            .find(|case| case.agent_id == "claude-code")
+            .unwrap();
+        seed_lifecycle_case(&case);
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        let proxy = runtime("vk-recovery");
+        install_scan(&state, catalog.clone(), vec![lifecycle_record(&case)]);
+        apply_lifecycle_connection(&state, &case, &proxy, "main");
+        let managed = std::fs::read(&case.primary.path).unwrap();
+        let index = std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap();
+        let mut next = lifecycle_record(&case);
+        next.canonical_path = root
+            .join("install/native/2.1.294")
+            .to_string_lossy()
+            .into_owned();
+        next.executable_path = next.canonical_path.clone();
+        let next_path = next.canonical_path.clone();
+        *state.scan_override.lock().unwrap() = Some(ScanSnapshot {
+            catalog: catalog.clone(),
+            source: CatalogSource::Builtin,
+            warning: None,
+            records: vec![next.clone()],
+        });
+        let scan = || {
+            Ok(ScanSnapshot {
+                catalog: catalog.clone(),
+                source: CatalogSource::Builtin,
+                warning: None,
+                records: vec![next.clone()],
+            })
+        };
+        let views = state.scan_with(Some(&proxy), None, scan).unwrap();
+        let claude = views
+            .iter()
+            .find(|view| view.metadata.agent_id == "claude-code")
+            .unwrap();
+        let recovery = claude
+            .installations
+            .iter()
+            .find(|view| view.discovery.canonical_path == case.installation_path)
+            .expect("the old managed installation must remain selectable for recovery");
+        assert!(recovery.managed);
+        assert!(!recovery.connected);
+        assert!(!recovery.discovery.runnable);
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), managed);
+        assert_eq!(
+            std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap(),
+            index
+        );
+        assert!(state
+            .plan_connection(case.agent_id, &case.installation_path, None, "main", &proxy)
+            .is_err());
+        let conflict = state
+            .plan_connection(
+                case.agent_id,
+                &next_path,
+                Some(case.version),
+                "main",
+                &proxy,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(conflict.code, "configuration_owned_by_other_installation");
+        let plan = state
+            .plan_disconnect(case.agent_id, &case.installation_path, "main")
+            .unwrap();
+        state
+            .apply(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored = parse_source_bytes(
+            Some(&std::fs::read(&case.primary.path).unwrap()),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
+        let original = parse_source_bytes(
+            Some(case.primary.baseline),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_json(&restored).unwrap(),
+            semantic_json(&original).unwrap()
+        );
+        let views = state.scan_with(Some(&proxy), None, scan).unwrap();
+        let claude = views
+            .iter()
+            .find(|view| view.metadata.agent_id == "claude-code")
+            .unwrap();
+        assert_eq!(claude.installations.len(), 1);
+        let plan = state
+            .plan_connection(
+                case.agent_id,
+                &next_path,
+                Some(case.version),
+                "main",
+                &proxy,
+            )
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&proxy),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .ownership
+                .list_agent_installation(case.agent_id, &next_path)
+                .unwrap()
+                .len(),
+            1
+        );
+        clean_lifecycle_case(&state, &root);
+    }
+
+    #[test]
+    fn claude_recovery_rejects_drift_and_stale_discovery_or_ownership() {
+        for scenario in ["drift", "rediscovered", "revision"] {
+            let state = state(scenario);
+            let root = scratch(scenario);
+            let case = non_codex_lifecycle_cases(&root)
+                .into_iter()
+                .find(|case| case.agent_id == "claude-code")
+                .unwrap();
+            seed_lifecycle_case(&case);
+            let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+            let proxy = runtime("vk-recovery-guards");
+            install_scan(&state, catalog.clone(), vec![lifecycle_record(&case)]);
+            apply_lifecycle_connection(&state, &case, &proxy, "main");
+            let snapshot = ScanSnapshot {
+                catalog: catalog.clone(),
+                source: CatalogSource::Builtin,
+                warning: None,
+                records: vec![],
+            };
+            *state.scan_override.lock().unwrap() = Some(snapshot.clone());
+            let views = state
+                .scan_with(Some(&proxy), None, || Ok(snapshot))
+                .unwrap();
+            let claude = views
+                .iter()
+                .find(|view| view.metadata.agent_id == "claude-code")
+                .unwrap();
+            assert_eq!(claude.installations.len(), 1);
+            assert!(!claude.installations[0].connected);
+            if scenario == "drift" {
+                let mut document: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&case.primary.path).unwrap()).unwrap();
+                document["modelPicker"]["options"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"model":"user-added-after-connection"}));
+                std::fs::write(&case.primary.path, serde_json::to_vec(&document).unwrap()).unwrap();
+                let before = std::fs::read(&case.primary.path).unwrap();
+                let error = state
+                    .plan_disconnect(case.agent_id, &case.installation_path, "main")
+                    .err()
+                    .unwrap();
+                assert_eq!(error.code, OWNED_VALUES_CHANGED);
+                assert_eq!(std::fs::read(&case.primary.path).unwrap(), before);
+            } else {
+                let plan = state
+                    .plan_disconnect(case.agent_id, &case.installation_path, "main")
+                    .unwrap();
+                let before = std::fs::read(&case.primary.path).unwrap();
+                if scenario == "rediscovered" {
+                    state
+                        .scan_override
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .records = vec![lifecycle_record(&case)];
+                } else {
+                    let owned = state
+                        .ownership
+                        .list_agent_installation(case.agent_id, &case.installation_path)
+                        .unwrap()
+                        .remove(0);
+                    let revision = owned.revision;
+                    state.ownership.commit(owned, Some(revision)).unwrap();
+                }
+                assert!(state
+                    .apply(
+                        &plan.plan.operation_id,
+                        &plan.confirmation_token,
+                        "main",
+                        &[PlanIntent::Disconnect],
+                        None
+                    )
+                    .is_err());
+                assert_eq!(std::fs::read(&case.primary.path).unwrap(), before);
+            }
+            assert_eq!(
+                state
+                    .ownership
+                    .list_agent_installation(case.agent_id, &case.installation_path)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            clean_lifecycle_case(&state, &root);
+        }
+    }
+
+    #[test]
+    fn delayed_claude_connection_cannot_add_a_second_owner_after_baseline_restore() {
+        let state = state("delayed-claude-owner");
+        let root = scratch("delayed-claude-owner-files");
+        let case = non_codex_lifecycle_cases(&root)
+            .into_iter()
+            .find(|case| case.agent_id == "claude-code")
+            .unwrap();
+        seed_lifecycle_case(&case);
+        let baseline = render_document(
+            &parse_rendered(
+                r#"{"env":{},"unowned":"keep"}"#,
+                DocumentFormat::Json,
+                "Claude Code",
+            )
+            .unwrap(),
+            "Claude Code",
+        )
+        .unwrap();
+        super::super::safe_fs::write_atomic_private(&case.primary.path, baseline.as_bytes())
+            .unwrap();
+        let mut second = lifecycle_record(&case);
+        second.canonical_path = root
+            .join("install/second-claude")
+            .to_string_lossy()
+            .into_owned();
+        second.executable_path = second.canonical_path.clone();
+        let second_path = second.canonical_path.clone();
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![lifecycle_record(&case), second]);
+        let proxy = runtime("vk-delayed-owner");
+        let delayed = state
+            .plan_connection(
+                case.agent_id,
+                &second_path,
+                Some(case.version),
+                "main",
+                &proxy,
+            )
+            .unwrap();
+        apply_lifecycle_connection(&state, &case, &proxy, "main");
+        let owner = state
+            .ownership
+            .list_agent_installation(case.agent_id, &case.installation_path)
+            .unwrap()
+            .remove(0);
+        let restore = state
+            .plan_restore(&owner.baseline_snapshot_id, "main")
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &restore.plan.operation_id,
+                &restore.confirmation_token,
+                "main",
+                &[PlanIntent::Restore],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&case.primary.path).unwrap(),
+            baseline.as_bytes()
+        );
+        let index = std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap();
+        let failure = state
+            .apply_from_cached_scan(
+                &delayed.plan.operation_id,
+                &delayed.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&proxy),
+            )
+            .expect_err("a delayed plan must not create a second configuration owner");
+        assert_eq!(failure.code, "ownership_commit_failed");
+        assert_eq!(failure.recovery, Some(RecoveryStatus::Restored));
+        assert_eq!(
+            std::fs::read(&case.primary.path).unwrap(),
+            baseline.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap(),
+            index
+        );
+        assert!(state
+            .ownership
+            .list_agent_installation(case.agent_id, &second_path)
+            .unwrap()
+            .is_empty());
+        clean_lifecycle_case(&state, &root);
     }
 
     // Only these three tests use it, and they are off under this feature.

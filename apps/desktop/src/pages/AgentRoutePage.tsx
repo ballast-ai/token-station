@@ -280,6 +280,18 @@ function statusCopy(
       ),
     };
   }
+  if (installation?.managed && installation.discovery.binary_source === "managed_record") {
+    return {
+      tone: "warning",
+      label: copy("Previous connection needs recovery", "旧连接待恢复", "舊連線待恢復", "以前の接続を復元"),
+      detail: copy(
+        "The previous installation is no longer discovered. Restore its pre-connection configuration and disconnect, then select the current installation to reconnect.",
+        "旧安装已不在扫描结果中。请先恢复接入前配置并断开，再选择当前安装重新接入。",
+        "舊安裝已不在掃描結果中。請先恢復連線前設定並中斷連線，再選擇目前安裝重新連線。",
+        "以前のインストールは検出されなくなりました。接続前の設定を復元して切断し、現在のインストールを選択して再接続してください。",
+      ),
+    };
+  }
   if (installation?.adapter_ready === false) {
     return {
       tone: "danger",
