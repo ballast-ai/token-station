@@ -1,0 +1,528 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -262,14 +262,14 @@
+ version = "0.8.0"
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gdkwayland-sys]
+-version = "0.18.0"
++version = "0.19"
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gdkx11-sys]
+-version = "0.18"
++version = "0.19"
+ optional = true
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gtk]
+-version = "0.18"
++version = "0.19"
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.parking_lot]
+ version = "0.12"
+@@ -404,3 +404,6 @@
+ 
+ [target.'cfg(target_os = "windows")'.dev-dependencies.softbuffer]
+ version = "0.4"
++
++[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.async-channel]
++version = "2"
+--- a/src/platform/unix.rs
++++ b/src/platform/unix.rs
+@@ -119,7 +119,7 @@
+   fn with_skip_taskbar(self, skip: bool) -> WindowBuilder;
+   /// Set this window as a transient dialog for `parent`
+   /// <https://gtk-rs.org/gtk3-rs/stable/latest/docs/gdk/struct.Window.html#method.set_transient_for>
+-  fn with_transient_for(self, parent: &impl gtk::glib::IsA<gtk::Window>) -> WindowBuilder;
++  fn with_transient_for(self, parent: &impl gtk::glib::object::IsA<gtk::Window>) -> WindowBuilder;
+ 
+   /// Whether to enable or disable the internal draw for transparent window.
+   ///
+@@ -163,8 +163,11 @@
+     self
+   }
+ 
+-  fn with_transient_for(mut self, parent: &impl gtk::glib::IsA<gtk::Window>) -> WindowBuilder {
+-    use gtk::glib::Cast;
++  fn with_transient_for(
++    mut self,
++    parent: &impl gtk::glib::object::IsA<gtk::Window>,
++  ) -> WindowBuilder {
++    use gtk::glib::object::Cast;
+     self.platform_specific.parent = Parent::ChildOf(parent.clone().upcast());
+     self
+   }
+--- a/src/platform_impl/linux/device.rs
++++ b/src/platform_impl/linux/device.rs
+@@ -3,7 +3,6 @@
+   ptr,
+ };
+ 
+-use gtk::glib;
+ use x11_dl::{xinput2, xlib};
+ 
+ use crate::event::{DeviceEvent, ElementState, RawKeyEvent};
+@@ -11,7 +10,7 @@
+ use super::keycode_from_scancode;
+ 
+ /// Spawn Device event thread. Only works on x11 since wayland doesn't have such global events.
+-pub fn spawn(device_tx: glib::Sender<DeviceEvent>) {
++pub fn spawn(device_tx: async_channel::Sender<DeviceEvent>) {
+   std::thread::spawn(move || unsafe {
+     let xlib = xlib::Xlib::open().unwrap();
+     let xinput2 = xinput2::XInput2::open().unwrap();
+@@ -63,7 +62,7 @@
+                 state,
+               };
+ 
+-              if let Err(e) = device_tx.send(DeviceEvent::Key(event)) {
++              if let Err(e) = device_tx.send_blocking(DeviceEvent::Key(event)) {
+                 log::info!("Failed to send device event {} since receiver is closed. Closing x11 thread along with it", e);
+                 break;
+               }
+--- a/src/platform_impl/linux/event_loop.rs
++++ b/src/platform_impl/linux/event_loop.rs
+@@ -16,7 +16,7 @@
+ use crossbeam_channel::SendError;
+ use gdk::{Cursor, CursorType, EventKey, EventMask, ScrollDirection, WindowEdge, WindowState};
+ use gio::Cancellable;
+-use glib::{source::Priority, MainContext};
++use glib::MainContext;
+ use gtk::{
+   cairo, gdk, gio,
+   glib::{self},
+@@ -59,7 +59,7 @@
+   /// Window Ids of the application
+   pub(crate) windows: Rc<RefCell<HashSet<WindowId>>>,
+   /// Window requests sender
+-  pub(crate) window_requests_tx: glib::Sender<(WindowId, WindowRequest)>,
++  pub(crate) window_requests_tx: async_channel::Sender<(WindowId, WindowRequest)>,
+   /// Draw event sender
+   pub(crate) draw_tx: crossbeam_channel::Sender<WindowId>,
+   _marker: std::marker::PhantomData<T>,
+@@ -159,7 +159,7 @@
+   pub fn set_progress_bar(&self, progress: ProgressBarState) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((WindowId::dummy(), WindowRequest::ProgressBarState(progress)))
++      .send_blocking((WindowId::dummy(), WindowRequest::ProgressBarState(progress)))
+     {
+       log::warn!("Fail to send update progress bar request: {e}");
+     }
+@@ -167,7 +167,7 @@
+ 
+   #[inline]
+   pub fn set_badge_count(&self, count: Option<i64>, desktop_filename: Option<String>) {
+-    if let Err(e) = self.window_requests_tx.send((
++    if let Err(e) = self.window_requests_tx.send_blocking((
+       WindowId::dummy(),
+       WindowRequest::BadgeCount(count, desktop_filename),
+     )) {
+@@ -179,7 +179,7 @@
+   pub fn set_theme(&self, theme: Option<Theme>) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((WindowId::dummy(), WindowRequest::SetTheme(theme)))
++      .send_blocking((WindowId::dummy(), WindowRequest::SetTheme(theme)))
+     {
+       log::warn!("Fail to send update theme request: {e}");
+     }
+@@ -241,7 +241,7 @@
+     let user_event_tx = event_tx.clone();
+ 
+     // Create event loop window target.
+-    let (window_requests_tx, window_requests_rx) = glib::MainContext::channel(Priority::default());
++    let (window_requests_tx, window_requests_rx) = async_channel::unbounded();
+     let display = gdk::Display::default()
+       .expect("GdkDisplay not found. This usually means `gkt_init` hasn't called yet.");
+     let window_target = EventLoopWindowTarget {
+@@ -256,22 +256,22 @@
+     // Spawn x11 thread to receive Device events.
+     #[cfg(feature = "x11")]
+     let run_device_thread = if window_target.is_x11() {
+-      let (device_tx, device_rx) = glib::MainContext::channel(glib::Priority::default());
++      let (device_tx, device_rx) = async_channel::unbounded();
+       let user_event_tx = user_event_tx.clone();
+       let run_device_thread = Rc::new(AtomicBool::new(true));
+       let run = run_device_thread.clone();
+       device::spawn(device_tx);
+-      device_rx.attach(Some(&context), move |event| {
+-        if let Err(e) = user_event_tx.send(Event::DeviceEvent {
+-          device_id: DEVICE_ID,
+-          event,
+-        }) {
+-          log::warn!("Fail to send device event to event channel: {}", e);
+-        }
+-        if run.load(Ordering::Relaxed) {
+-          glib::ControlFlow::Continue
+-        } else {
+-          glib::ControlFlow::Break
++      context.spawn_local(async move {
++        while let Ok(event) = device_rx.recv().await {
++          if let Err(e) = user_event_tx.send(Event::DeviceEvent {
++            device_id: DEVICE_ID,
++            event,
++          }) {
++            log::warn!("Fail to send device event to event channel: {}", e);
++          }
++          if !run.load(Ordering::Relaxed) {
++            break;
++          }
+         }
+       });
+       Some(run_device_thread)
+@@ -294,7 +294,7 @@
+     }
+ 
+     // Window Request
+-    window_requests_rx.attach(Some(&context), move |(id, request)| {
++    let mut handle_window_request = move |(id, request): (WindowId, _)| {
+       if let Some(window) = app_.window_by_id(id.0) {
+         match request {
+           WindowRequest::Title(title) => window.set_title(&title),
+@@ -971,7 +971,11 @@
+           _ => unreachable!(),
+         }
+       }
+-      glib::ControlFlow::Continue
++    };
++    context.spawn_local(async move {
++      while let Ok(request) = window_requests_rx.recv().await {
++        handle_window_request(request);
++      }
+     });
+ 
+     // Create event loop itself.
+--- a/src/platform_impl/linux/portal.rs
++++ b/src/platform_impl/linux/portal.rs
+@@ -5,7 +5,7 @@
+   message::MatchRule,
+   Error,
+ };
+-use gtk::glib::{ControlFlow, MainContext, Priority, Sender};
++use gtk::glib::MainContext;
+ use log::warn;
+ use std::{thread, time::Duration};
+ 
+@@ -31,10 +31,12 @@
+   Ok(color_scheme_to_theme(result.0 .0 .0))
+ }
+ 
+-pub fn receive_theme_changed(window_tx: Sender<(WindowId, WindowRequest)>) -> Result<(), Error> {
++pub fn receive_theme_changed(
++  window_tx: async_channel::Sender<(WindowId, WindowRequest)>,
++) -> Result<(), Error> {
+   let conn = SyncConnection::new_session()?;
+   let match_rule = MatchRule::new_signal("org.freedesktop.portal.Settings", "SettingChanged");
+-  let (tx, rx) = MainContext::channel(Priority::DEFAULT);
++  let (tx, rx) = async_channel::unbounded();
+ 
+   conn.add_match(match_rule, move |_: (), _, msg| {
+     let mut iter = msg.iter_init();
+@@ -43,19 +45,22 @@
+       iter.read::<&str>(),         // Key
+       iter.read::<Variant<u32>>(), // Value
+     ) {
+-      if let Err(e) = tx.send(color_scheme_to_theme(value.0)) {
++      if let Err(e) = tx.send_blocking(color_scheme_to_theme(value.0)) {
+         warn!("Failed to send theme change via channel: {}", e);
+       }
+     }
+     true
+   })?;
+ 
+-  rx.attach(None, move |theme| {
+-    if let Err(e) = window_tx.send((WindowId::dummy(), WindowRequest::SetTheme(Some(theme)))) {
+-      warn!("Failed to send theme change request: {}", e);
+-      ControlFlow::Break
+-    } else {
+-      ControlFlow::Continue
++  MainContext::default().spawn_local(async move {
++    while let Ok(theme) = rx.recv().await {
++      if let Err(e) = window_tx
++        .send((WindowId::dummy(), WindowRequest::SetTheme(Some(theme))))
++        .await
++      {
++        warn!("Failed to send theme change request: {}", e);
++        break;
++      }
+     }
+   });
+ 
+--- a/src/platform_impl/linux/util.rs
++++ b/src/platform_impl/linux/util.rs
+@@ -10,7 +10,7 @@
+     Display,
+   },
+   glib::{self},
+-  traits::{GtkWindowExt, WidgetExt},
++  prelude::{GtkWindowExt, WidgetExt},
+ };
+ use std::{cell::RefCell, rc::Rc};
+ 
+--- a/src/platform_impl/linux/window.rs
++++ b/src/platform_impl/linux/window.rs
+@@ -50,7 +50,7 @@
+   pub(crate) window: gtk::ApplicationWindow,
+   pub(crate) default_vbox: Option<gtk::Box>,
+   /// Window requests sender
+-  pub(crate) window_requests_tx: glib::Sender<(WindowId, WindowRequest)>,
++  pub(crate) window_requests_tx: async_channel::Sender<(WindowId, WindowRequest)>,
+   scale_factor: Rc<AtomicI32>,
+   inner_position: Rc<(AtomicI32, AtomicI32)>,
+   outer_position: Rc<(AtomicI32, AtomicI32)>,
+@@ -232,7 +232,7 @@
+       transparent = true;
+     }
+     let cursor_moved = pl_attribs.cursor_moved;
+-    if let Err(e) = window_requests_tx.send((
++    if let Err(e) = window_requests_tx.send_blocking((
+       window_id,
+       WindowRequest::WireUpEvents {
+         transparent,
+@@ -462,14 +462,14 @@
+ 
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Position((x, y))))
++      .send_blocking((self.window_id, WindowRequest::Position((x, y))))
+     {
+       log::warn!("Fail to send position request: {}", e);
+     }
+   }
+ 
+   pub fn set_background_color(&self, color: Option<RGBA>) {
+-    if let Err(e) = self.window_requests_tx.send((
++    if let Err(e) = self.window_requests_tx.send_blocking((
+       self.window_id,
+       WindowRequest::BackgroundColor(self.css_provider.clone(), color),
+     )) {
+@@ -492,7 +492,7 @@
+ 
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Size((width, height))))
++      .send_blocking((self.window_id, WindowRequest::Size((width, height))))
+     {
+       log::warn!("Fail to send size request: {}", e);
+     }
+@@ -511,7 +511,7 @@
+   fn set_size_constraints(&self, constraints: WindowSizeConstraints) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::SizeConstraints(constraints)))
++      .send_blocking((self.window_id, WindowRequest::SizeConstraints(constraints)))
+     {
+       log::warn!("Fail to send size constraint request: {}", e);
+     }
+@@ -541,7 +541,7 @@
+   pub fn set_title(&self, title: &str) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Title(title.to_string())))
++      .send_blocking((self.window_id, WindowRequest::Title(title.to_string())))
+     {
+       log::warn!("Fail to send title request: {}", e);
+     }
+@@ -558,7 +558,7 @@
+   pub fn set_visible(&self, visible: bool) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Visible(visible)))
++      .send_blocking((self.window_id, WindowRequest::Visible(visible)))
+     {
+       log::warn!("Fail to send visible request: {}", e);
+     }
+@@ -568,7 +568,7 @@
+     if !self.minimized.load(Ordering::Acquire) && self.window.get_visible() {
+       if let Err(e) = self
+         .window_requests_tx
+-        .send((self.window_id, WindowRequest::Focus))
++        .send_blocking((self.window_id, WindowRequest::Focus))
+       {
+         log::warn!("Fail to send visible request: {}", e);
+       }
+@@ -586,7 +586,7 @@
+   pub fn set_resizable(&self, resizable: bool) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Resizable(resizable)))
++      .send_blocking((self.window_id, WindowRequest::Resizable(resizable)))
+     {
+       log::warn!("Fail to send resizable request: {}", e);
+     }
+@@ -599,7 +599,7 @@
+   pub fn set_closable(&self, closable: bool) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Closable(closable)))
++      .send_blocking((self.window_id, WindowRequest::Closable(closable)))
+     {
+       log::warn!("Fail to send closable request: {}", e);
+     }
+@@ -608,7 +608,7 @@
+   pub fn set_minimized(&self, minimized: bool) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Minimized(minimized)))
++      .send_blocking((self.window_id, WindowRequest::Minimized(minimized)))
+     {
+       log::warn!("Fail to send minimized request: {}", e);
+     }
+@@ -617,7 +617,7 @@
+   pub fn set_maximized(&self, maximized: bool) {
+     let resizable = self.is_resizable();
+ 
+-    if let Err(e) = self.window_requests_tx.send((
++    if let Err(e) = self.window_requests_tx.send_blocking((
+       self.window_id,
+       WindowRequest::Maximized(maximized, resizable),
+     )) {
+@@ -664,7 +664,7 @@
+   pub fn drag_window(&self) -> Result<(), ExternalError> {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::DragWindow))
++      .send_blocking((self.window_id, WindowRequest::DragWindow))
+     {
+       log::warn!("Fail to send drag window request: {}", e);
+     }
+@@ -674,7 +674,7 @@
+   pub fn drag_resize_window(&self, direction: ResizeDirection) -> Result<(), ExternalError> {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::DragResizeWindow(direction)))
++      .send_blocking((self.window_id, WindowRequest::DragResizeWindow(direction)))
+     {
+       log::warn!("Fail to send drag window request: {}", e);
+     }
+@@ -685,7 +685,7 @@
+     self.fullscreen.replace(fullscreen.clone());
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Fullscreen(fullscreen)))
++      .send_blocking((self.window_id, WindowRequest::Fullscreen(fullscreen)))
+     {
+       log::warn!("Fail to send fullscreen request: {}", e);
+     }
+@@ -698,14 +698,14 @@
+   pub fn set_decorations(&self, decorations: bool) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::Decorations(decorations)))
++      .send_blocking((self.window_id, WindowRequest::Decorations(decorations)))
+     {
+       log::warn!("Fail to send decorations request: {}", e);
+     }
+   }
+ 
+   pub fn set_always_on_bottom(&self, always_on_bottom: bool) {
+-    if let Err(e) = self.window_requests_tx.send((
++    if let Err(e) = self.window_requests_tx.send_blocking((
+       self.window_id,
+       WindowRequest::AlwaysOnBottom(always_on_bottom),
+     )) {
+@@ -716,7 +716,7 @@
+   pub fn set_always_on_top(&self, always_on_top: bool) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::AlwaysOnTop(always_on_top)))
++      .send_blocking((self.window_id, WindowRequest::AlwaysOnTop(always_on_top)))
+     {
+       log::warn!("Fail to send always on top request: {}", e);
+     }
+@@ -725,7 +725,7 @@
+   pub fn set_window_icon(&self, window_icon: Option<Icon>) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::WindowIcon(window_icon)))
++      .send_blocking((self.window_id, WindowRequest::WindowIcon(window_icon)))
+     {
+       log::warn!("Fail to send window icon request: {}", e);
+     }
+@@ -738,14 +738,14 @@
+   pub fn request_user_attention(&self, request_type: Option<UserAttentionType>) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::UserAttention(request_type)))
++      .send_blocking((self.window_id, WindowRequest::UserAttention(request_type)))
+     {
+       log::warn!("Fail to send user attention request: {}", e);
+     }
+   }
+ 
+   pub fn set_visible_on_all_workspaces(&self, visible: bool) {
+-    if let Err(e) = self.window_requests_tx.send((
++    if let Err(e) = self.window_requests_tx.send_blocking((
+       self.window_id,
+       WindowRequest::SetVisibleOnAllWorkspaces(visible),
+     )) {
+@@ -755,7 +755,7 @@
+   pub fn set_cursor_icon(&self, cursor: CursorIcon) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::CursorIcon(Some(cursor))))
++      .send_blocking((self.window_id, WindowRequest::CursorIcon(Some(cursor))))
+     {
+       log::warn!("Fail to send cursor icon request: {}", e);
+     }
+@@ -768,7 +768,7 @@
+       .to_logical::<i32>(self.scale_factor())
+       .into();
+ 
+-    if let Err(e) = self.window_requests_tx.send((
++    if let Err(e) = self.window_requests_tx.send_blocking((
+       self.window_id,
+       WindowRequest::CursorPosition((x + inner_pos.x, y + inner_pos.y)),
+     )) {
+@@ -785,7 +785,7 @@
+   pub fn set_ignore_cursor_events(&self, ignore: bool) -> Result<(), ExternalError> {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::CursorIgnoreEvents(ignore)))
++      .send_blocking((self.window_id, WindowRequest::CursorIgnoreEvents(ignore)))
+     {
+       log::warn!("Fail to send cursor position request: {}", e);
+     }
+@@ -801,7 +801,7 @@
+     };
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::CursorIcon(cursor)))
++      .send_blocking((self.window_id, WindowRequest::CursorIcon(cursor)))
+     {
+       log::warn!("Fail to send cursor visibility request: {}", e);
+     }
+@@ -982,7 +982,7 @@
+   pub fn set_skip_taskbar(&self, skip: bool) -> Result<(), ExternalError> {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((self.window_id, WindowRequest::SetSkipTaskbar(skip)))
++      .send_blocking((self.window_id, WindowRequest::SetSkipTaskbar(skip)))
+     {
+       log::warn!("Fail to send skip taskbar request: {}", e);
+     }
+@@ -993,14 +993,14 @@
+   pub fn set_progress_bar(&self, progress: ProgressBarState) {
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((WindowId::dummy(), WindowRequest::ProgressBarState(progress)))
++      .send_blocking((WindowId::dummy(), WindowRequest::ProgressBarState(progress)))
+     {
+       log::warn!("Fail to send update progress bar request: {}", e);
+     }
+   }
+ 
+   pub fn set_badge_count(&self, count: Option<i64>, desktop_filename: Option<String>) {
+-    if let Err(e) = self.window_requests_tx.send((
++    if let Err(e) = self.window_requests_tx.send_blocking((
+       WindowId::dummy(),
+       WindowRequest::BadgeCount(count, desktop_filename),
+     )) {
+@@ -1025,7 +1025,7 @@
+     *self.preferred_theme.borrow_mut() = theme;
+     if let Err(e) = self
+       .window_requests_tx
+-      .send((WindowId::dummy(), WindowRequest::SetTheme(theme)))
++      .send_blocking((WindowId::dummy(), WindowRequest::SetTheme(theme)))
+     {
+       log::warn!("Fail to send set theme request: {e}");
+     }

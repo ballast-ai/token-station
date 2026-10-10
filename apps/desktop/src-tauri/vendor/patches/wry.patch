@@ -1,0 +1,56 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -204,15 +204,15 @@
+ version = "6"
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gdkx11]
+-version = "0.18"
++version = "0.19"
+ optional = true
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gtk]
+-version = "0.18"
++version = "0.19"
+ optional = true
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.javascriptcore-rs]
+-version = "=1.1.2"
++version = "2.0"
+ features = ["v2_28"]
+ optional = true
+ 
+@@ -220,7 +220,7 @@
+ version = "2.3"
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.soup3]
+-version = "0.5"
++version = "0.9"
+ optional = true
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.webkit2gtk]
+--- a/src/webkitgtk/mod.rs
++++ b/src/webkitgtk/mod.rs
+@@ -231,7 +231,11 @@
+ 
+     // Gtk.Window
+     let window = gtk::Window::new(gtk::WindowType::Toplevel);
+-    window.connect_realize(glib::clone!(@weak gdk_window as wd => move |w| w.set_window(wd)));
++    window.connect_realize(glib::clone!(
++      #[weak]
++      gdk_window,
++      move |w| w.set_window(gdk_window)
++    ));
+     window.set_has_window(true);
+     window.realize();
+ 
+--- a/src/webkitgtk/web_context.rs
++++ b/src/webkitgtk/web_context.rs
+@@ -5,7 +5,7 @@
+ //! Unix platform extensions for [`WebContext`](super::WebContext).
+ 
+ use crate::{Error, RequestAsyncResponder};
+-use gtk::glib::{self, MainContext, ObjectExt};
++use gtk::glib::{self, object::ObjectExt, MainContext};
+ use http::{header::CONTENT_TYPE, HeaderName, HeaderValue, Request, Response as HttpResponse};
+ use soup::{MessageHeaders, MessageHeadersType};
+ use std::{

@@ -1,0 +1,49 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -140,38 +140,38 @@
+ version = "^1.0"
+ 
+ [dependencies.cairo]
+-version = "0.18"
++version = "0.22"
+ package = "cairo-sys-rs"
+ 
+ [dependencies.gdk]
+-version = "0.18"
++version = "0.19"
+ package = "gdk-sys"
+ 
+ [dependencies.gio]
+-version = "0.18"
++version = "0.22"
+ package = "gio-sys"
+ 
+ [dependencies.glib]
+-version = "0.18"
++version = "0.22"
+ package = "glib-sys"
+ 
+ [dependencies.gobject]
+-version = "0.18"
++version = "0.22"
+ package = "gobject-sys"
+ 
+ [dependencies.gtk]
+-version = "0.18"
++version = "0.19"
+ package = "gtk-sys"
+ 
+ [dependencies.java_script_core]
+-version = "=1.1"
++version = "2.0"
+ package = "javascriptcore-rs-sys"
+ 
+ [dependencies.libc]
+ version = "0.2"
+ 
+ [dependencies.soup]
+-version = "0.5"
++version = "0.9"
+ package = "soup3-sys"
+ 
+ [dev-dependencies.shell-words]

@@ -1,0 +1,22 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -104,7 +104,7 @@
+ default-features = false
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gtk]
+-version = "0.18"
++version = "0.19"
+ features = ["v3_24"]
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.percent-encoding]
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1185,7 +1185,7 @@
+     target_os = "netbsd",
+     target_os = "openbsd"
+   ))]
+-  fn transient_for(mut self, parent: &impl gtk::glib::IsA<gtk::Window>) -> Self {
++  fn transient_for(mut self, parent: &impl gtk::prelude::IsA<gtk::Window>) -> Self {
+     self.inner = self.inner.with_transient_for(parent);
+     self
+   }

@@ -79,3 +79,22 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Exercise the actual repaired iterator used by the Linux WebView stack.
+glib = "=0.22.10"
+
+# Source adaptations retain the upstream package versions. See vendor/README.md.
+[patch.crates-io]
+libappindicator = { path = "vendor/libappindicator" }
+libappindicator-sys = { path = "vendor/libappindicator-sys" }
+muda = { path = "vendor/muda" }
+rfd = { path = "vendor/rfd" }
+tao = { path = "vendor/tao" }
+tauri = { path = "vendor/tauri" }
+tauri-runtime = { path = "vendor/tauri-runtime" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
+tray-icon = { path = "vendor/tray-icon" }
+webkit2gtk = { path = "vendor/webkit2gtk" }
+webkit2gtk-sys = { path = "vendor/webkit2gtk-sys" }
+wry = { path = "vendor/wry" }

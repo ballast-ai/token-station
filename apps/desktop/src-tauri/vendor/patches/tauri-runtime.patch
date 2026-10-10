@@ -1,0 +1,22 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -97,7 +97,7 @@
+ default-features = false
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gtk]
+-version = "0.18"
++version = "0.19"
+ features = ["v3_24"]
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.webkit2gtk]
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -452,7 +452,7 @@
+     target_os = "netbsd",
+     target_os = "openbsd"
+   ))]
+-  fn transient_for(self, parent: &impl gtk::glib::IsA<gtk::Window>) -> Self;
++  fn transient_for(self, parent: &impl gtk::prelude::IsA<gtk::Window>) -> Self;
+ 
+   /// Enables or disables drag and drop support.
+   #[cfg(windows)]

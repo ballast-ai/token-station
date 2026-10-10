@@ -185,12 +185,20 @@ jobs:
       - name: Desktop RustSec exception ledger
         if: ${{ !cancelled() }}
         run: node scripts/check-rustsec-exceptions.mjs
+      - name: Published Linux desktop dependency family
+        if: ${{ !cancelled() }}
+        run: node tests/linux-desktop-dependencies.mjs
+      - name: Verify adapted desktop dependency sources
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-desktop-vendor.py
+      - name: RustSec exception policy regressions
+        if: ${{ !cancelled() }}
+        run: node tests/rustsec-exceptions.mjs
       - name: Desktop advisories
         if: ${{ !cancelled() }}
         run: >-
           cargo audit -D unsound
           --file apps/desktop/src-tauri/Cargo.lock
-          --ignore RUSTSEC-2024-0429
       - name: Desktop licenses and sources
         if: ${{ !cancelled() }}
         run: >-
