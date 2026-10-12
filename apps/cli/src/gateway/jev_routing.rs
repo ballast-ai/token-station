@@ -179,6 +179,8 @@ pub(super) fn native_request(
                 // Count the original declaration in context without forwarding
                 // any provider tool vocabulary to the cloud classifier.
                 parameters: tool.clone(),
+                cache_control: None,
+                strict: None,
             });
         }
     }

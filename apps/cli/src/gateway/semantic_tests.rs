@@ -263,6 +263,8 @@ fn applied_local_classification_keeps_the_host_schema_receipt_estimate() {
         name: "inspect".into(),
         description: Some("Inspect a document".into()),
         parameters: json!({"description":"schema ".repeat(2000)}),
+        cache_control: None,
+        strict: None,
     });
     request.response_format = Some(token_station_protocol::ResponseFormat::JsonSchema {
         json_schema: json!({"description":"output ".repeat(1000)}),
@@ -392,6 +394,8 @@ fn a_classifier_suggestion_still_filters_incompatible_tool_models() {
         name: "read_file".into(),
         description: None,
         parameters: json!({}),
+        cache_control: None,
+        strict: None,
     });
 
     let decision = fixture.route(&router, &request, &candidates);

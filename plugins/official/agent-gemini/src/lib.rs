@@ -96,6 +96,7 @@ fn text_parts(parts: &Value, context: &str) -> Result<Option<Content>, String> {
                 .ok_or_else(|| invalid(format!("{context} text part must be a string")))?;
             content.push(ContentPart::Text {
                 text: text.to_owned(),
+                cache_control: None,
             });
         } else if object.contains_key("inlineData")
             || object.contains_key("fileData")
@@ -299,6 +300,8 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 parameters: function_parameters(declaration)?,
+                cache_control: None,
+                strict: None,
             });
         }
     }
@@ -361,7 +364,7 @@ fn response_parts(message: &Message) -> Result<Vec<Value>, String> {
         Some(Content::Parts(items)) => {
             for item in items {
                 match item {
-                    ContentPart::Text { text } => parts.push(json!({"text": text})),
+                    ContentPart::Text { text, .. } => parts.push(json!({"text": text})),
                     ContentPart::ImageUrl { .. } => {
                         return Err(capability("Gemini response cannot render image output"))
                     }
@@ -499,10 +502,13 @@ impl Guest for GeminiClient {
                 top_p: generation.get("topP").and_then(Value::as_f64),
                 max_output_tokens,
                 stop: string_array(generation.get("stopSequences"), "stopSequences")?,
+                top_k: None,
             },
             stream,
             host_values: token_station_protocol::ComponentValues::new(),
             extensions: Extensions::new(),
+            parallel_tool_calls: None,
+            reasoning: token_station_protocol::Reasoning::default(),
         })
     }
 

@@ -825,7 +825,7 @@ fn text_parts(content: Option<&Content>) -> Box<dyn Iterator<Item = &str> + '_> 
     match content {
         Some(Content::Text(text)) => Box::new(std::iter::once(text.as_str())),
         Some(Content::Parts(parts)) => Box::new(parts.iter().filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })),
         None => Box::new(std::iter::empty()),

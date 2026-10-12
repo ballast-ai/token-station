@@ -918,7 +918,7 @@ fn project(request: &ChatRequest, context: &RequestContext) -> Result<String, Ou
                 let mut nonempty = false;
                 for part in parts {
                     match part {
-                        ContentPart::Text { text } => nonempty |= !text.trim().is_empty(),
+                        ContentPart::Text { text, .. } => nonempty |= !text.trim().is_empty(),
                         ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. } => {}
                         _ => return Err(Outcome::Unsupported),
                     }
@@ -947,7 +947,7 @@ fn project(request: &ChatRequest, context: &RequestContext) -> Result<String, Ou
                 let mut text = String::new();
                 for part in parts {
                     match part {
-                        ContentPart::Text { text: part } => {
+                        ContentPart::Text { text: part, .. } => {
                             text.push_str(part);
                             text.push('\n');
                         }
