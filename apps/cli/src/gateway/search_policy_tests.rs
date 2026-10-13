@@ -124,6 +124,13 @@ fn both_native_search_bridges_preserve_stream_completion_and_never_replay_failur
 }
 
 #[test]
+fn auto_reverse_native_search_controls_unrequested_thinking() {
+    for stream in [false, true] {
+        exercise_transport("auto", 200, "", false, 1, false, true, stream, false, false);
+    }
+}
+
+#[test]
 fn legacy_search_bridge_streams_without_managed_search_settings() {
     for (truncated, cancel) in [(false, false), (true, false), (false, true)] {
         exercise_transport(
@@ -240,11 +247,7 @@ fn exercise_transport(
     );
 }
 
-#[allow(
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::fn_params_excessive_bools
-)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn exercise_profile(
     mode: &str,
     status: u16,
@@ -258,9 +261,74 @@ fn exercise_profile(
     cancel: bool,
     profile: bool,
 ) {
+    exercise_backend(
+        mode,
+        status,
+        error,
+        anthropic,
+        requests,
+        constrained,
+        native_anthropic,
+        stream,
+        truncated,
+        cancel,
+        profile,
+        false,
+    );
+}
+
+#[test]
+fn auto_native_priority_and_rejection_use_selected_tavily_backend() {
+    for anthropic in [false, true] {
+        for native_anthropic in [false, true] {
+            for (status, error, requests) in [
+                (200, "", 1),
+                (400, "Tool type 'web_search' is not supported", 3),
+                (401, "web_search not supported", 1),
+                (429, "web_search not supported", 1),
+                (500, "web_search not supported", 1),
+            ] {
+                exercise_backend(
+                    "auto",
+                    status,
+                    error,
+                    anthropic,
+                    requests,
+                    false,
+                    native_anthropic,
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                );
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools
+)]
+fn exercise_backend(
+    mode: &str,
+    status: u16,
+    error: &str,
+    anthropic: bool,
+    requests: usize,
+    constrained: bool,
+    native_anthropic: bool,
+    stream: bool,
+    truncated: bool,
+    cancel: bool,
+    profile: bool,
+    tavily: bool,
+) {
     static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("ts-policy-{}-{sequence}-{mode}-{status}-{anthropic}-{requests}-{constrained}-{native_anthropic}-{stream}-{truncated}-{cancel}-{profile}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("ts-policy-{}-{sequence}-{mode}-{status}-{anthropic}-{requests}-{constrained}-{native_anthropic}-{stream}-{truncated}-{cancel}-{profile}-{tavily}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let key = root.join("key");
     std::fs::write(&key, "test-key").unwrap();
@@ -271,6 +339,8 @@ fn exercise_profile(
     let stopped = Arc::clone(&stop);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&seen);
+    let api_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let api_seen = Arc::clone(&api_calls);
     let early_text = Arc::new(AtomicBool::new(false));
     let observed_text = Arc::clone(&early_text);
     let response_error = error.to_owned();
@@ -303,6 +373,14 @@ fn exercise_profile(
             let mut bytes = vec![0; length];
             connection.read_exact(&mut bytes).unwrap();
             let body: Value = serde_json::from_slice(&bytes).unwrap();
+            if head.starts_with("POST /v1/tavily ") {
+                assert_eq!(body["query"], "Rust");
+                assert!(body.get("messages").is_none());
+                api_seen.fetch_add(1, Ordering::Relaxed);
+                let reply = json!({"results":[{"url":"https://www.rust-lang.org/","title":"Rust","content":"API evidence"}],"usage":{"credits":1}}).to_string();
+                write!(connection,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len()).unwrap();
+                continue;
+            }
             let native = body["tools"].as_array().is_some_and(|tools| {
                 tools.iter().any(|t| {
                     t["type"]
@@ -351,6 +429,11 @@ fn exercise_profile(
                     json!([{"type":"text","text":"Local evidence"}])
                 };
                 reply = json!({"id":"msg_a","type":"message","role":"assistant","model":"test-model","stop_reason":if content[0]["type"] == "tool_use" {"tool_use"} else {"end_turn"},"content":content,"usage":{"input_tokens":10,"output_tokens":5}});
+                // Reproduce native providers that enable thinking when it is omitted.
+                if native && !anthropic && !stream && body["thinking"]["type"] != "disabled" {
+                    reply["content"].as_array_mut().unwrap().insert(0,
+                        json!({"type":"thinking","thinking":"Synthetic planning text","signature":"opaque-signature"}));
+                }
             }
             if native && body["stream"] == true {
                 let await_early_text = || {
@@ -434,6 +517,16 @@ fn exercise_profile(
     let settings =
         serde_json::from_value(json!({"enabled":mode != "disabled","engine":"bing","mode":if mode == "disabled" {"native"} else {mode}})).unwrap();
     gateway.search.save(settings).unwrap();
+    if tavily {
+        gateway
+            .search
+            .save_tavily_key("fixture-tavily-key")
+            .unwrap();
+        let mut settings = gateway.search.settings();
+        settings.backend = crate::search::SearchBackend::Tavily;
+        gateway.search.save(settings).unwrap();
+        *gateway.search.tavily_endpoint.lock().unwrap() = Some(format!("{endpoint}/tavily"));
+    }
     *gateway.search.fixture.lock().unwrap() = Some(Ok(vec![crate::search::SearchResult {
         title: "Rust".into(),
         url: "https://www.rust-lang.org/".into(),
@@ -537,7 +630,22 @@ fn exercise_profile(
         }
         if local {
             assert_eq!(answer.status, 200, "{}", answer.body);
-            assert!(answer.body.contains("Browser evidence"), "{}", answer.body);
+            assert!(
+                answer.body.contains(if tavily {
+                    "API evidence"
+                } else {
+                    "Browser evidence"
+                }),
+                "{}",
+                answer.body
+            );
+            if tavily {
+                assert_eq!(
+                    records[index].browser_searches[0].backend.as_deref(),
+                    Some("tavily")
+                );
+                assert_eq!(records[index].browser_searches[0].credits, Some(1));
+            }
             assert_eq!(records[index].browser_searches.len(), 1);
             assert_eq!(records[index].usage.unwrap().input_tokens, 20);
             assert_eq!(records[index].usage.unwrap().output_tokens, 10);
@@ -568,6 +676,19 @@ fn exercise_profile(
             }
         }
     }
+    if native_anthropic && !anthropic {
+        for (_, body, _) in seen.iter().filter(|(native, _, _)| *native) {
+            assert_eq!(
+                body["thinking"],
+                json!({"type":"disabled"}),
+                "The text-and-search bridge must control unrequested provider thinking"
+            );
+        }
+    }
+    assert_eq!(
+        api_calls.load(Ordering::Relaxed),
+        if tavily && local { requests } else { 0 }
+    );
     let native_count = seen.iter().filter(|(native, _, _)| *native).count();
     assert_eq!(
         native_count,

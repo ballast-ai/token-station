@@ -51,6 +51,12 @@ Admission and fallback share a 35-second search window, with bounded browser I/O
 Cancellation is checked before and after blocking API work; that work can remain active until its timeout.
 Each backend has its own bounded admission queue.
 
+Responses clients can use the Anthropic native search bridge for text, direct functions, and search sources.
+The bridge disables upstream thinking when reasoning is omitted or explicitly set to `none`.
+Other explicit reasoning settings require managed search in Auto mode and are rejected in Native-only mode.
+Direct native protocol requests retain their original thinking settings.
+Unexpected native content still fails explicitly. It does not trigger another search.
+
 ## Native search endpoints
 
 Native search can use a separate endpoint without changing ordinary Chat Completions requests.

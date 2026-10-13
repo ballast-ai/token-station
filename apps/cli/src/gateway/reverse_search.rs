@@ -290,14 +290,16 @@ pub(super) fn to_anthropic(request: &Value) -> Result<Value, ErrorEnvelope> {
             .ok_or_else(|| unsupported("max_output_tokens must be positive."))
     })?;
     let mut result = json!({"model":request["model"],"messages":messages,"tools":translated_tools,"tool_choice":translated_choice,"max_tokens":max_tokens,"stream":request["stream"].as_bool().unwrap_or(false)});
-    if let Some(reasoning) = request.get("reasoning") {
-        if reasoning != &json!({"effort":"none"}) {
-            return Err(unsupported(
-                "The reverse search bridge supports reasoning effort none only.",
-            ));
-        }
-        result["thinking"] = json!({"type":"disabled"});
+    if let Some(reasoning) = request.get("reasoning")
+        && reasoning != &json!({"effort":"none"})
+    {
+        return Err(unsupported(
+            "The reverse search bridge supports reasoning effort none only.",
+        ));
     }
+    // This bridge cannot preserve native thinking signatures. Control provider defaults
+    // when reasoning is omitted, as well as when the caller explicitly selects none.
+    result["thinking"] = json!({"type":"disabled"});
     if !system.is_empty() {
         result["system"] = json!(system.join("\n"));
     }
