@@ -31,6 +31,7 @@ type InvokeMockImplementation = Parameters<typeof invokeMock.mockImplementation>
 function mockInvokeImplementation(implementation: InvokeMockImplementation) {
   let fallbackRuntime = serveFixture();
   invokeMock.mockImplementation(async (...args) => {
+    if (args[0] === "chatgpt_accounts_list") return [];
     try {
       const result = await implementation(...args);
       if (result && typeof result === "object" && "serve" in result) {

@@ -1,10 +1,16 @@
 {
-  "comment": "Where each vendored fixture pack came from. Regenerate with scripts/check-provider-fixtures.py record <south-checkout> only after changing South first and re-pinning the revision.",
+  "comment": "Provider fixture provenance. Entries without source are vendored from South. source=repository identifies locally authored fixtures. Use scripts/check-provider-fixtures.py record <south-checkout> after reviewing changes. Change South first for vendored fixtures.",
   "packages": {
     "provider-anthropic-v2": {
       "files": 46,
       "fixtures": "fixtures-anthropic",
       "sha256": "86569809a50a4ee12c0c2f7c2c47ae9c929b7e7b9157db863af1e7744efd87e7"
+    },
+    "provider-chatgpt-plan-v2": {
+      "files": 14,
+      "fixtures": "fixtures",
+      "sha256": "0fdb2e15e6067a2a5c4dd9202d12c1215587d193db82aa8c708cfc3297d81f83",
+      "source": "repository"
     },
     "provider-openai-compatible-v2": {
       "files": 46,

@@ -412,7 +412,7 @@ fn run_probe_with_before_send(
 ) -> Result<(VisionReport, ProbeIdentity), String> {
     // Retain these values until diagnostics have been redacted. A later read can
     // refer to a rotated key, even when the post-request identity check passed.
-    let snapshot = secrets::SecretStore::snapshot_for_config(config, &config.data.dir)
+    let snapshot = secrets::SecretStore::snapshot_for_upstream(config, &config.data.dir, name)
         .map_err(|_| "Cannot capture the image check credentials".to_owned())?;
     let credentials = ProbeCredentials::from_snapshot(config, name, &snapshot)?;
     let identity = ProbeIdentity::capture(config, &credentials)?;

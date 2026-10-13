@@ -188,7 +188,10 @@ pub struct ProxyAuthConfig {
 
 impl AuthConfig {
     fn source_count(&self) -> usize {
-        usize::from(self.store) + usize::from(self.env.is_some()) + usize::from(self.file.is_some())
+        usize::from(self.store)
+            + usize::from(self.env.is_some())
+            + usize::from(self.file.is_some())
+            + usize::from(self.chatgpt_account.is_some())
     }
 }
 
@@ -273,7 +276,8 @@ impl EgressConfig {
             && (auth.username.is_empty()
                 || auth.username.len() > 128
                 || auth.username.chars().any(char::is_control)
-                || auth.credential.source_count() != 1)
+                || auth.credential.source_count() != 1
+                || auth.credential.chatgpt_account.is_some())
         {
             return Err(
                 "egress proxy auth requires a safe username and exactly one credential source"
@@ -744,6 +748,9 @@ pub struct AuthConfig {
     /// Read from this file (trimmed) at request time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
+    /// Reference to an isolated local `ChatGPT` registration. Never a token value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_account: Option<String>,
 }
 /// Drops the per-upstream `south_component` setting a v1.2.4 file may carry.
 ///
@@ -1311,11 +1318,12 @@ impl ClientConfig {
                 let sources = auth.source_count();
                 if sources != 1 {
                     return Err(format!(
-                        "upstream `{name}` auth for slot `{}` must name exactly one source                          (store / env / file), found {sources}",
+                        "upstream `{name}` auth for slot `{}` must name exactly one source (store / env / file / chatgpt_account), found {sources}",
                         auth.slot
                     ));
                 }
             }
+            validate_chatgpt_reference(upstream)?;
             for capability in &upstream.models {
                 if capability.max_output_tokens > 0
                     && capability.context_window > 0
@@ -1373,6 +1381,45 @@ fn validate_api_dialect(name: &str, upstream: &UpstreamConfig) -> Result<(), Str
          {dialect} upstream must be `provider: {required_provider}`",
         upstream.provider
     ))
+}
+
+fn validate_chatgpt_reference(upstream: &UpstreamConfig) -> Result<(), String> {
+    if let Some(auth) = &upstream.auth
+        && let Some(account) = &auth.chatgpt_account
+        && (upstream.provider != "chatgpt-plan"
+            || upstream.base_url.as_str() != "https://api.openai.com/v1"
+            || auth.slot != "chatgpt_access_token"
+            || account.is_empty()
+            || account.len() > 128
+            || !account
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+    {
+        return Err(
+            "ChatGPT credentials require a valid registration and the fixed ChatGPT plan endpoint"
+                .to_owned(),
+        );
+    }
+    if upstream.provider == "chatgpt-plan" {
+        if upstream.quota_plan.is_some()
+            || upstream.native_search.is_some()
+            || upstream.api_dialect != ApiDialect::Translated
+        {
+            return Err(
+                "ChatGPT plan providers cannot use quota rotation or native passthrough".to_owned(),
+            );
+        }
+        if !upstream.base_url.is_loopback()
+            && upstream
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.chatgpt_account.as_ref())
+                .is_none()
+        {
+            return Err("ChatGPT plan providers require a local ChatGPT registration".to_owned());
+        }
+    }
+    Ok(())
 }
 
 fn validate_local_identity(name: &str, upstream: &UpstreamConfig) -> Result<(), String> {

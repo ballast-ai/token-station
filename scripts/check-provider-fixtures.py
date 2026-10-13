@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Verify each vendored Provider fixture pack against the South revision it came from.
+"""Verify provider fixture digests and their explicit source provenance.
 
 `official_package_set` already checks that a declared directory exists, is
 non-empty, and pairs every `.input.json` with an `.expected.json`. All of that
 holds for a pack whose contents have quietly diverged from South — renaming
-nothing and changing every byte passes it. Conformance fixtures are the
-statement "this component agrees with South about these cases", so a copy that
-drifts does not weaken the claim, it falsifies it while still looking right.
+nothing and changing every byte passes it. Vendored conformance fixtures claim
+agreement with South's cases. A modified copy must not retain that provenance
+claim while silently changing the expected behavior.
 
-This records provenance and checks it: the South revision each pack came from,
-and a digest of its content tree. The digest is provenance, not a second
-source of truth for the fixtures themselves — it answers "is this still the
-copy South published", and nothing else.
+Vendored packs default to source=south. Packs authored in this repository must
+explicitly declare source=repository in the provenance record. Both sources
+have their file count and content digest checked. Only South packs are compared
+against a South checkout. Repository packs do not claim upstream provenance.
 
     check-provider-fixtures.py verify            compare packs against the recorded digest
     check-provider-fixtures.py verify --against-south <checkout>
@@ -61,9 +61,8 @@ def packs() -> list[tuple[str, pathlib.Path, str]]:
     """Only the South components.
 
     The agent adapters declare fixtures too, but those are authored in this
-    repository — they are not vendored from anywhere, and filing them under a
-    South revision would be a provenance claim that is simply untrue. Editing
-    an agent fixture is ordinary work here; editing a provider fixture is not.
+    repository. Provider components can also have repository-authored fixtures,
+    but must explicitly declare that source in their provenance record.
     """
     found = []
     for package in json.loads(PACKAGES.read_text())["packages"]:
@@ -78,20 +77,29 @@ def packs() -> list[tuple[str, pathlib.Path, str]]:
 
 def cmd_record(checkout: pathlib.Path) -> int:
     revision = checkout.name
+    prior = json.loads(PROVENANCE.read_text()) if PROVENANCE.exists() else {"packages": {}}
     entries = {}
     for name, directory, declared in packs():
+        previous = prior["packages"].get(name, {})
+        source = previous.get("source", "south")
+        if source not in ("south", "repository"):
+            print(f"{name}: unsupported fixture source {source!r}", file=sys.stderr)
+            return 1
         if not directory.is_dir():
             print(f"{name}: declares {declared}, which does not exist", file=sys.stderr)
             return 1
         digest, count = tree_digest(directory)
         entries[name] = {"fixtures": declared, "files": count, "sha256": digest}
+        if "source" in previous:
+            entries[name]["source"] = source
     PROVENANCE.write_text(
         json.dumps(
             {
                 "comment": (
-                    "Where each vendored fixture pack came from. Regenerate with "
-                    "scripts/check-provider-fixtures.py record <south-checkout> only "
-                    "after changing South first and re-pinning the revision."
+                    "Provider fixture provenance. Entries without source are vendored "
+                    "from South. source=repository identifies locally authored fixtures. "
+                    "Use scripts/check-provider-fixtures.py record <south-checkout> after "
+                    "reviewing changes. Change South first for vendored fixtures."
                 ),
                 "south_revision": revision,
                 "packages": entries,
@@ -101,7 +109,8 @@ def cmd_record(checkout: pathlib.Path) -> int:
         )
         + "\n"
     )
-    print(f"recorded {len(entries)} packs at South {revision}")
+    local_count = sum(entry.get("source", "south") == "repository" for entry in entries.values())
+    print(f"recorded {len(entries) - local_count} South packs at {revision} and {local_count} repository packs")
     return 0
 
 
@@ -111,11 +120,16 @@ def cmd_verify(against_south: pathlib.Path | None) -> int:
         return 1
     recorded = json.loads(PROVENANCE.read_text())
     failures = []
+    declared_packs = packs()
 
-    for name, directory, declared in packs():
+    for name, directory, declared in declared_packs:
         entry = recorded["packages"].get(name)
         if entry is None:
             failures.append(f"{name}: declares {declared} but has no recorded provenance")
+            continue
+        source = entry.get("source", "south")
+        if source not in ("south", "repository"):
+            failures.append(f"{name}: unsupported fixture source {source!r}")
             continue
         if not directory.is_dir():
             failures.append(f"{name}: declares {declared}, which does not exist")
@@ -125,15 +139,17 @@ def cmd_verify(against_south: pathlib.Path | None) -> int:
             failures.append(
                 f"{name}: manifest declares {declared}, provenance records {entry['fixtures']}"
             )
+        if count != entry["files"]:
+            failures.append(f"{name}: fixture file count is {count}, provenance records {entry['files']}")
         if digest != entry["sha256"]:
+            origin = f"South {recorded['south_revision']}" if source == "south" else "the repository record"
             failures.append(
-                f"{name}: fixture content has drifted from South "
-                f"{recorded['south_revision']} ({count} files here, "
+                f"{name}: fixture content has drifted from {origin} ({count} files here, "
                 f"{entry['files']} recorded)"
             )
 
     for name in recorded["packages"]:
-        if not any(name == pack for pack, _, _ in packs()):
+        if not any(name == pack for pack, _, _ in declared_packs):
             failures.append(f"{name}: has recorded provenance but declares no fixtures")
 
     if against_south is not None:
@@ -141,7 +157,10 @@ def cmd_verify(against_south: pathlib.Path | None) -> int:
         if not source.is_dir():
             failures.append(f"{source} is not a south-component-conformance checkout")
         else:
-            for name, directory, declared in packs():
+            for name, directory, declared in declared_packs:
+                entry = recorded["packages"].get(name)
+                if entry is None or entry.get("source", "south") != "south":
+                    continue
                 upstream = source / declared
                 if not upstream.is_dir():
                     failures.append(f"{name}: South has no {declared} at this revision")
@@ -156,13 +175,14 @@ def cmd_verify(against_south: pathlib.Path | None) -> int:
         for failure in failures:
             print(f"  {failure}", file=sys.stderr)
         print(
-            "\nfixture semantics change in South first. Re-pin the revision, re-vendor, "
-            "then `record`.",
+            "\nChange vendored fixtures in South first. Re-pin and re-vendor before `record`. "
+            "Review repository-authored fixture changes locally before `record`.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"provider fixtures: {len(recorded['packages'])} packs match South {recorded['south_revision']}")
+    local_count = sum(entry.get("source", "south") == "repository" for entry in recorded["packages"].values())
+    print(f"provider fixtures: {len(recorded['packages']) - local_count} packs match South {recorded['south_revision']}; {local_count} repository packs match their recorded digests")
     return 0
 
 

@@ -451,6 +451,7 @@ fn parse_model_spec(raw: &str) -> Result<ModelCapability, String> {
 /// the value itself never appears on a command line.
 fn parse_auth_spec(source: &str, slot: &str) -> Result<AuthConfig, String> {
     let mut auth = AuthConfig {
+        chatgpt_account: None,
         slot: slot.to_owned(),
         store: false,
         env: None,

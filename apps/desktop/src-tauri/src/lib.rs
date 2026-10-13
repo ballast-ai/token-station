@@ -23,6 +23,7 @@ mod provider_tombstones;
 mod recovery;
 mod serve_lifecycle;
 
+mod chatgpt_commands;
 mod config_draft;
 mod desktop_update_commands;
 mod dock_icon;
@@ -499,6 +500,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            chatgpt_commands::chatgpt_accounts_list,
+            chatgpt_commands::chatgpt_login_start,
+            chatgpt_commands::chatgpt_login_status,
+            chatgpt_commands::chatgpt_login_cancel,
+            chatgpt_commands::chatgpt_models,
+            chatgpt_commands::chatgpt_sign_out,
+            chatgpt_commands::chatgpt_connect_provider,
             search_commands::get_search_status,
             search_commands::save_search_settings,
             search_commands::save_search_api_key,

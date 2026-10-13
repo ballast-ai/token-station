@@ -23,6 +23,7 @@ pub mod backup;
 pub mod bodylog;
 pub mod budget;
 pub mod cancel;
+pub mod chatgpt_accounts;
 pub mod config;
 pub mod filelog;
 pub mod gateway;

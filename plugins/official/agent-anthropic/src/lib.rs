@@ -229,12 +229,13 @@ fn content_from_parts(parts: Vec<ContentPart>) -> Option<Content> {
 fn system_message(system: &Value) -> Result<Option<Message>, String> {
     match system {
         Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(Message::text(Role::System, text))),
+        Value::String(text) => Ok((!text.is_empty()).then(|| Message::text(Role::System, text))),
         Value::Array(blocks) => {
-            let parts = blocks
+            let mut parts = blocks
                 .iter()
                 .map(parse_plain_block)
                 .collect::<Result<Vec<_>, _>>()?;
+            parts.retain(|part| !matches!(part, ContentPart::Text { text } if text.is_empty()));
             if parts
                 .iter()
                 .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
@@ -386,9 +387,11 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
             .ok_or_else(|| invalid("message declares no role"))?;
         match (role, raw.get("content")) {
             ("system", Some(content)) => {
-                let message = system_message(content)?
-                    .ok_or_else(|| invalid("system message declares no content"))?;
-                messages.push(message);
+                // Claude Code also sends empty system entries that carry
+                // output configuration. They contain no prompt text.
+                if let Some(message) = system_message(content)? {
+                    messages.push(message);
+                }
             }
             ("user", Some(Value::String(text))) => {
                 messages.push(Message::text(Role::User, text));
@@ -480,10 +483,15 @@ fn is_anthropic_server_tool(tool_type: &str) -> bool {
 /// matching the field's optimistic passthrough, and the provider's own
 /// `reasoning_effort_allowed` gate still drops it for models that opt out.
 fn reasoning_effort_from_output_config(body: &Value) -> Option<&'static str> {
-    match body
-        .pointer("/output_config/effort")
-        .and_then(Value::as_str)?
-    {
+    let output_config = body.get("output_config").or_else(|| {
+        body.get("messages")?
+            .as_array()?
+            .iter()
+            .rev()
+            .filter(|message| message["role"] == "system")
+            .find_map(|message| message.get("output_config"))
+    })?;
+    match output_config.get("effort").and_then(Value::as_str)? {
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" | "max" => Some("high"),
@@ -1196,6 +1204,38 @@ mod tests {
     use super::{fresh_input_tokens, AnthropicClient, Guest};
     use serde_json::{json, Value};
     use token_station_protocol::{ErrorCode, ErrorEnvelope, Usage};
+
+    #[test]
+    fn empty_system_configuration_entries_preserve_effort_without_empty_prompt_text() {
+        let body = json!({
+            "system": [{"type":"text","text":"Keep these instructions."}],
+            "messages": [
+                {"role":"system","content":[{"type":"text","text":""}]},
+                {"role":"user","content":"Read the file."},
+                {"role":"system","content":[],"output_config":{"effort":"low"}},
+                {"role":"system","content":[],"output_config":{"effort":"medium"}}
+            ]
+        });
+        let messages = super::parse_messages(&body).expect("empty configuration entries are valid");
+        assert_eq!(messages.len(), 2);
+        assert!(serde_json::to_string(&messages[0])
+            .unwrap()
+            .contains("Keep these instructions."));
+        assert_eq!(
+            super::request_extensions(&body)["reasoning_effort"],
+            "medium"
+        );
+    }
+
+    #[test]
+    fn top_level_effort_precedes_system_configuration_entries() {
+        let body = json!({"output_config":{"effort":"high"},"messages":[
+            {"role":"system","content":"A later instruction.","output_config":{"effort":"low"}},
+            {"role":"user","content":"Read the file."}
+        ]});
+        assert_eq!(super::request_extensions(&body)["reasoning_effort"], "high");
+        assert_eq!(super::parse_messages(&body).unwrap().len(), 2);
+    }
 
     #[test]
     fn canonical_input_is_denormalized_for_anthropic_wire_usage() {

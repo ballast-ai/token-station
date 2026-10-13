@@ -309,7 +309,7 @@ assert.equal(
   "the host's declared SOUTH_RUNTIME must equal the pinned South version",
 );
 
-for (const componentDir of ["provider-openai-compatible-v2", "provider-anthropic-v2"]) {
+for (const componentDir of ["provider-openai-compatible-v2", "provider-anthropic-v2", "provider-chatgpt-plan-v2"]) {
   const manifest = JSON.parse(
     fs.readFileSync(
       path.join(root, "plugins/official", componentDir, "manifest.json"),

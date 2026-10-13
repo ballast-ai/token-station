@@ -532,6 +532,11 @@ const MIGRATIONS: &[Migration] = &[
               ALTER TABLE decisions ADD COLUMN task_code_block_count INTEGER;
               ALTER TABLE decisions ADD COLUMN task_message_count INTEGER;",
     },
+    Migration {
+        to: 18,
+        sql: "ALTER TABLE requests ADD COLUMN subscription_billing INTEGER NOT NULL DEFAULT 0
+                CHECK (subscription_billing IN (0, 1));",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -578,6 +583,7 @@ CREATE TABLE IF NOT EXISTS requests (
     usage_observation   TEXT,
     usage_semantics     TEXT NOT NULL DEFAULT 'canonical_total_v2'
         CHECK (usage_semantics IN ('provider_reported_v1', 'canonical_total_v2')),
+    subscription_billing INTEGER NOT NULL DEFAULT 0 CHECK (subscription_billing IN (0, 1)),
     -- micro-units; NULL when the model has no price (unknown, not zero)
     cost_micros         INTEGER,
     -- actual/estimated/unknown; unknown never carries a numeric cost
@@ -895,6 +901,9 @@ fn decision_columns(decided_by: &RecordedDecidedBy) -> DecisionColumns {
 }
 
 fn normalized_cost(record: &RequestRecord) -> (CostKind, Option<i64>, Option<u32>) {
+    if record.subscription_billing {
+        return (CostKind::Unknown, None, None);
+    }
     match (record.cost_kind, record.cost_micros) {
         (CostKind::Actual, Some(cost)) if cost >= 0 => {
             (CostKind::Actual, Some(cost), record.price_version)
@@ -1055,6 +1064,7 @@ impl SqliteStore {
                            FROM requests
                           WHERE id > ?1
                             AND cost_kind = 'unknown'
+                            AND subscription_billing = 0
                             AND usage_semantics = 'canonical_total_v2'
                             AND model IS NOT NULL
                             AND input_tokens IS NOT NULL
@@ -1108,7 +1118,7 @@ impl SqliteStore {
                     .execute(
                         "UPDATE requests
                             SET cost_kind = 'estimated', cost_micros = ?1, price_version = ?2
-                          WHERE id = ?3 AND cost_kind = 'unknown'",
+                          WHERE id = ?3 AND cost_kind = 'unknown' AND subscription_billing = 0",
                         rusqlite::params![cost, version, id],
                     )
                     .map_err(|error| format!("cost backfill update: {error}"))?;
@@ -1231,7 +1241,7 @@ impl SqliteStore {
                 est_input_tokens, message_count, tool_count, has_images,
                 requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, usage_semantics, cost_micros, cost_kind, price_version, usage_observation
+                reasoning_tokens, usage_semantics, cost_micros, cost_kind, price_version, usage_observation, subscription_billing
             ) VALUES (
                 :request_id, :agent_id, :running_revision, :request_method, :path_kind,
                 :started_at_ms, :latency_ms, :protocol, :requested_model, :stream, :status,
@@ -1241,7 +1251,7 @@ impl SqliteStore {
                 :est_input_tokens, :message_count, :tool_count, :has_images,
                 :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
                 :input_tokens, :output_tokens, :cache_read_tokens, :cache_write_tokens,
-                :reasoning_tokens, 'canonical_total_v2', :cost_micros, :cost_kind, :price_version, :usage_observation
+                :reasoning_tokens, 'canonical_total_v2', :cost_micros, :cost_kind, :price_version, :usage_observation, :subscription_billing
             )",
             named_params! {
                 ":request_id": record.request_id,
@@ -1282,6 +1292,7 @@ impl SqliteStore {
                 ":reasoning_tokens": record.usage.map(|value| wide(value.reasoning_tokens)),
                 ":usage_observation": record.usage_observation.map(|value| serde_json::to_string(&value).expect("numeric usage observation")),
                 ":cost_micros": cost_micros,
+                ":subscription_billing": record.subscription_billing,
                 ":cost_kind": cost_kind.as_str(),
                 ":price_version": price_version,
             },
@@ -2383,6 +2394,7 @@ mod tests {
                     "ALTER TABLE decisions DROP COLUMN task_tokens;
                 ALTER TABLE decisions DROP COLUMN task_code_block_count;
                 ALTER TABLE decisions DROP COLUMN task_message_count;
+                ALTER TABLE requests DROP COLUMN subscription_billing;
                 PRAGMA user_version = 16;",
                 )
                 .unwrap();
@@ -2566,6 +2578,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep the historical schema fixture and preservation assertions together."
+    )]
     fn v14_classifier_migration_preserves_complete_existing_receipts() {
         let path = scratch("migrate-v14-classifier");
         std::fs::remove_file(&path).ok();
@@ -2589,7 +2605,8 @@ mod tests {
                 .execute_batch(
                     "ALTER TABLE decisions ADD COLUMN task_tokens INTEGER;
                 ALTER TABLE decisions ADD COLUMN task_code_block_count INTEGER;
-                ALTER TABLE decisions ADD COLUMN task_message_count INTEGER;",
+                ALTER TABLE decisions ADD COLUMN task_message_count INTEGER;
+                ALTER TABLE requests ADD COLUMN subscription_billing INTEGER NOT NULL DEFAULT 0;",
                 )
                 .unwrap();
             let store = SqliteStore {
@@ -2620,7 +2637,8 @@ mod tests {
                 .execute_batch(
                     "ALTER TABLE decisions DROP COLUMN task_tokens;
                  ALTER TABLE decisions DROP COLUMN task_code_block_count;
-                 ALTER TABLE decisions DROP COLUMN task_message_count;",
+                 ALTER TABLE decisions DROP COLUMN task_message_count;
+                 ALTER TABLE requests DROP COLUMN subscription_billing;",
                 )
                 .unwrap();
             // The current reader requires the new diagnostic table. Build its
@@ -3406,6 +3424,88 @@ mod tests {
             0
         );
         drop(store);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn subscription_receipts_never_acquire_api_costs_during_insert_or_backfill() {
+        use crate::pricing::{ModelPrice, PriceTable};
+        use std::collections::BTreeMap;
+        let path = scratch("subscription-price-backfill");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for (id, subscription, initial_kind, initial_cost) in [
+            ("plan-unknown", true, CostKind::Unknown, None),
+            ("plan-estimate", true, CostKind::Estimated, Some(500)),
+            ("plan-zero", true, CostKind::Actual, Some(0)),
+            ("api-unknown", false, CostKind::Unknown, None),
+        ] {
+            let mut record = receipt(id, 1);
+            record.subscription_billing = subscription;
+            let routing = record.routing.as_mut().unwrap();
+            // The name has no subscription prefix. The same model also has an API price.
+            routing.upstream = "ordinary-name".into();
+            routing.model = "shared-model".into();
+            record.usage = Some(Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 10,
+                ..Usage::default()
+            });
+            record.cost_kind = initial_kind;
+            record.cost_micros = initial_cost;
+            record.price_version = initial_cost.map(|_| 1);
+            store.record(&record);
+        }
+        drop(store);
+        let pricing = PriceTable {
+            version: 7,
+            models: BTreeMap::from([
+                (
+                    "shared-model".into(),
+                    ModelPrice {
+                        input_per_mtok: 200_000,
+                        ..ModelPrice::default()
+                    },
+                ),
+                (
+                    "ordinary-name/shared-model".into(),
+                    ModelPrice {
+                        input_per_mtok: 900_000,
+                        ..ModelPrice::default()
+                    },
+                ),
+            ]),
+        };
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).unwrap(),
+            1
+        );
+        let rows = SqliteStore::recent_receipts(&path, 10).unwrap();
+        for row in rows {
+            if row.request_id.starts_with("plan-") {
+                assert_eq!(
+                    (row.cost_kind, row.cost_micros, row.price_version),
+                    (CostKind::Unknown, None, None)
+                );
+            } else {
+                assert_eq!(row.cost_micros, Some(900_000));
+            }
+        }
+        // Reopening and changing the price table cannot classify subscription history as API spend.
+        let pricing = PriceTable {
+            version: 8,
+            models: BTreeMap::from([(
+                "shared-model".into(),
+                ModelPrice {
+                    input_per_mtok: 800_000,
+                    ..ModelPrice::default()
+                },
+            )]),
+        };
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).unwrap(),
+            0
+        );
         std::fs::remove_file(path).ok();
     }
 

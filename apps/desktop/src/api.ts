@@ -17,7 +17,7 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
-  credential_source?: "store" | "env" | "file" | "none";
+  credential_source?: "store" | "env" | "file" | "chatgpt_account" | "none";
   credential_reference?: string;
   provider_call?: ProviderCallEngine;
   south_v1_available?: boolean;
@@ -795,6 +795,7 @@ export interface AggView {
   output_reported_requests?: number;
   total_reported_requests?: number;
   incomplete_usage_requests?: number;
+  subscription_requests?: number;
   missing_price_requests?: number;
   missing_usage_requests?: number;
   actual_cost_requests?: number;

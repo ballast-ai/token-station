@@ -1,0 +1,9 @@
+[
+  {
+    "model": "plan-model",
+    "tool": true,
+    "vision": true,
+    "json_schema": true,
+    "context_window": 200000
+  }
+]

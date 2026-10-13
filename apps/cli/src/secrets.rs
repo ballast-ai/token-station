@@ -208,6 +208,7 @@ enum Source {
     Store,
     Env(String),
     File(PathBuf),
+    ChatGpt(String),
 }
 
 /// Resolves configured credential slots to their values at request time.
@@ -222,6 +223,7 @@ pub struct SecretStore {
     /// A store-backed source must surface an authoritative load failure rather
     /// than treating corrupt or unreadable credential data as an empty store.
     store_error: Option<String>,
+    data_dir: PathBuf,
 }
 
 /// An immutable, memory-only resolver for exactly the slots captured from a config.
@@ -261,6 +263,9 @@ impl Drop for SecretStore {
 }
 
 fn source_of(auth: &AuthConfig) -> Option<Source> {
+    if let Some(account) = &auth.chatgpt_account {
+        return Some(Source::ChatGpt(account.clone()));
+    }
     if auth.store {
         Some(Source::Store)
     } else {
@@ -300,6 +305,7 @@ impl SecretStore {
             if usize::from(auth.store)
                 + usize::from(auth.env.is_some())
                 + usize::from(auth.file.is_some())
+                + usize::from(auth.chatgpt_account.is_some())
                 != 1
             {
                 return Err("A snapshot credential must have exactly one source".to_owned());
@@ -311,6 +317,24 @@ impl SecretStore {
             frozen.store.insert(store_key(owner, &auth.slot), value);
         }
         Ok(SecretSnapshot(frozen))
+    }
+
+    /// Capture only the selected Provider and egress credentials for a short probe.
+    /// Other account registrations are not read or refreshed.
+    ///
+    /// # Errors
+    /// The Provider is unknown or a selected credential cannot be resolved.
+    pub fn snapshot_for_upstream(
+        config: &ClientConfig,
+        data_dir: &Path,
+        upstream: &str,
+    ) -> Result<SecretSnapshot, String> {
+        if !config.upstreams.contains_key(upstream) {
+            return Err("The snapshot Provider does not exist".to_owned());
+        }
+        let mut scoped = config.clone();
+        scoped.upstreams.retain(|name, _| name == upstream);
+        Self::snapshot_for_config(&scoped, data_dir)
     }
 
     /// Build the resolver from a full client config, loading the local secrets
@@ -344,6 +368,7 @@ impl SecretStore {
             sources,
             store,
             store_error,
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
@@ -370,6 +395,7 @@ impl SecretStore {
             sources,
             store,
             store_error,
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
@@ -413,6 +439,8 @@ impl SecretStore {
                     path.display()
                 )
             }),
+            Source::ChatGpt(account) => crate::chatgpt_accounts::AccountManager::new(&self.data_dir)
+                .access_token(account),
         }?;
 
         let value = value.trim();
@@ -422,6 +450,23 @@ impl SecretStore {
             ));
         }
         Ok(value.to_owned())
+    }
+
+    /// Resolve rotating credentials without blocking the asynchronous transport executor.
+    ///
+    /// # Errors
+    /// Credential renewal or the configured source can fail.
+    pub async fn resolve_async(&self, upstream: &str, slot: &str) -> Result<String, String> {
+        if let Some(Source::ChatGpt(account)) =
+            self.sources.get(&(upstream.to_owned(), slot.to_owned()))
+        {
+            let manager = crate::chatgpt_accounts::AccountManager::new(&self.data_dir);
+            let account = account.clone();
+            return tokio::task::spawn_blocking(move || manager.access_token(&account))
+                .await
+                .map_err(|_| "ChatGPT credential worker failed".to_owned())?;
+        }
+        self.resolve(upstream, slot)
     }
 
     /// Resolve the configured proxy credential without coupling it to an

@@ -6,6 +6,7 @@
     { "dir": "agent-openai-responses", "id": "agent-openai-responses", "kind": "agent", "wasm": "adapter.wasm" },
     { "dir": "agent-gemini", "id": "agent-gemini", "kind": "agent", "wasm": "adapter.wasm" },
     { "dir": "provider-openai-compatible-v2", "id": "provider-openai-compatible", "kind": "south-component", "wasm": "component.wasm" },
-    { "dir": "provider-anthropic-v2", "id": "provider-anthropic", "kind": "south-component", "wasm": "component.wasm" }
+    { "dir": "provider-anthropic-v2", "id": "provider-anthropic", "kind": "south-component", "wasm": "component.wasm" },
+    { "dir": "provider-chatgpt-plan-v2", "id": "provider-chatgpt-plan", "kind": "south-component", "wasm": "component.wasm" }
   ]
 }

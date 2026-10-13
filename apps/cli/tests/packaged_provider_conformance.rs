@@ -3,7 +3,8 @@
 //! `official_package_set` proves a declared fixture directory exists, is
 //! non-empty, and pairs its inputs with expectations.
 //! `check-provider-fixtures.py` proves the contents still match the South
-//! revision they were vendored from. Neither runs the fixtures. A pack can be
+//! revision they were vendored from, or a repository-authored provenance record.
+//! Neither runs the fixtures. A pack can be
 //! present, paired, byte-identical to South — and the component beside it can
 //! still fail every case, because nothing in this repository had ever executed
 //! one against the other.
@@ -107,4 +108,9 @@ fn the_packaged_openai_compatible_component_passes_its_packaged_fixtures() {
         "provider-openai-compatible-v2",
         "provider_openai_compatible_v2",
     );
+}
+
+#[test]
+fn the_packaged_chatgpt_plan_component_passes_its_packaged_fixtures() {
+    run("provider-chatgpt-plan-v2", "provider_chatgpt_plan_v2");
 }

@@ -1284,7 +1284,17 @@ fn assemble_upstreams(
             .model_capabilities(&provider_config)
             .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
             .into_iter()
-            .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
+            .map(|capability| {
+                let mut capability =
+                    restore_configured_capability_evidence(capability, &entry.models);
+                if entry.provider == "chatgpt-plan" {
+                    capability
+                        .extensions
+                        .insert("subscription_billing".to_owned(), json!(true));
+                    capability.extensions.remove("catalog_cost");
+                }
+                capability
+            })
             .collect();
 
         let reference = token_station_router_core::UpstreamRef::new(name.clone())
@@ -1535,6 +1545,9 @@ fn model_cost_with_price(
     capability: &ModelCapability,
     price: Option<&crate::pricing::ModelPrice>,
 ) -> Option<Value> {
+    if capability.extensions.get("subscription_billing") == Some(&Value::Bool(true)) {
+        return None;
+    }
     let mut cost = capability
         .extensions
         .get("catalog_cost")
@@ -1848,6 +1861,12 @@ fn settle_estimated_cost(
     record: &mut RequestRecord,
     served: &UpstreamModel,
 ) {
+    if record.subscription_billing {
+        record.cost_kind = CostKind::Unknown;
+        record.cost_micros = None;
+        record.price_version = None;
+        return;
+    }
     if record.cost_kind == CostKind::Actual {
         return;
     }
@@ -3221,6 +3240,13 @@ impl Gateway {
             let health = self.health.lock().expect("health lock");
             self.catalog
                 .iter()
+                .filter(|(target, _)| {
+                    quota_now_ms.is_none()
+                        || self
+                            .upstreams
+                            .get(target.upstream.as_str())
+                            .is_none_or(|upstream| upstream.config.provider != "chatgpt-plan")
+                })
                 .map(|(target, capability)| {
                     Candidate::new(
                         target.clone(),
@@ -4041,6 +4067,16 @@ impl Gateway {
         // leaves cost unknown (None), never a claimed-free zero.
         if !ctx.apply_host_loop_accounting(record) {
             settle_estimated_cost(&self.pricing, record, served);
+        }
+        if self
+            .upstreams
+            .get(upstream.as_str())
+            .is_some_and(|upstream| upstream.config.provider == "chatgpt-plan")
+        {
+            record.subscription_billing = true;
+            record.cost_micros = None;
+            record.cost_kind = token_station_metrics::CostKind::Unknown;
+            record.price_version = None;
         }
         match outcome {
             StreamOutcome::Complete => {
@@ -5258,6 +5294,21 @@ mod estimation_eligibility_tests {
                 ..observed
             })
         ));
+    }
+
+    #[test]
+    fn subscription_usage_never_becomes_api_cost() {
+        let mut record = RequestRecord::begin(0, "openai");
+        record.subscription_billing = true;
+        record.cost_kind = CostKind::Actual;
+        record.cost_micros = Some(17);
+        record.price_version = Some(1);
+        let target = UpstreamModel::new(UpstreamRef::new("plan").unwrap(), "gpt-example");
+        settle_estimated_cost(&crate::pricing::PriceTable::builtin(), &mut record, &target);
+        assert_eq!(
+            (record.cost_kind, record.cost_micros, record.price_version),
+            (CostKind::Unknown, None, None)
+        );
     }
 
     #[test]

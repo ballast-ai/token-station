@@ -286,6 +286,17 @@ pub(crate) fn south_header_auth_v1_unavailable_reason(
     package_verified: bool,
 ) -> Option<&'static str> {
     let provider = upstream["provider"].as_str().unwrap_or_default();
+    if provider == "chatgpt-plan" {
+        if !package_verified
+            || draft["plugins"]["providers"][provider].as_str() != Some("provider-chatgpt-plan")
+        {
+            return Some("provider_package");
+        }
+        if upstream["auth"]["chatgpt_account"].as_str().is_none() {
+            return Some("auth");
+        }
+        return None;
+    }
     if upstream
         .get("api_dialect")
         .and_then(Value::as_str)
@@ -410,6 +421,9 @@ pub(crate) fn ensure_generic_provider_mutation_allowed(
     inner: &AppInner,
     name: &str,
 ) -> Result<(), String> {
+    if inner.draft["upstreams"][name]["provider"].as_str() == Some("chatgpt-plan") {
+        return Err("Manage this provider from the ChatGPT plan panel".to_owned());
+    }
     if inner.draft["upstreams"]
         .get(name)
         .and_then(|upstream| upstream.get("access_tier"))

@@ -88,6 +88,8 @@ pub struct Aggregate {
     /// was not covered by the price table.
     pub priced_requests: u64,
     pub unpriced_requests: u64,
+    /// Requests charged against subscription allowance, without an API dollar estimate.
+    pub subscription_requests: u64,
     pub missing_price_requests: u64,
     pub missing_usage_requests: u64,
     pub actual_cost_requests: u64,
@@ -251,7 +253,7 @@ pub fn collect_budget_spend(
     let connection = open_stats_connection(db_path)?;
     let mut statement = connection
         .prepare(
-            "SELECT cost_micros FROM requests
+            "SELECT CASE WHEN subscription_billing = 1 THEN NULL ELSE cost_micros END FROM requests
          WHERE agent_id = ?1 AND started_at_ms >= ?2
            AND (?3 IS NULL OR started_at_ms < ?3)",
         )
@@ -330,7 +332,7 @@ fn select_rows(
                     (SELECT south_fallback_reason FROM attempts
                       WHERE attempts.request_id = requests.request_id
                       ORDER BY ordinal DESC LIMIT 1),
-                    usage_semantics, usage_observation, cost_kind
+                    usage_semantics, usage_observation, cost_kind, subscription_billing
              FROM requests
              WHERE started_at_ms >= ?1
                AND (?2 IS NULL OR started_at_ms < ?2)
@@ -375,6 +377,7 @@ fn select_rows(
                     legacy_input: row.get::<_, String>(17)? == "provider_reported_v1",
                     observation: crate::store::read_usage_observation(row, 18)?,
                     cost_kind: row.get(19)?,
+                    subscription_billing: row.get(20)?,
                 })
             },
         )
@@ -496,6 +499,7 @@ struct Row {
     legacy_input: bool,
     observation: Option<token_station_metrics::UsageObservation>,
     cost_kind: String,
+    subscription_billing: bool,
 }
 
 impl Row {
@@ -637,6 +641,13 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         bucket.reasoning_tokens = bucket
             .reasoning_tokens
             .saturating_add(row.reasoning_tokens.unwrap_or(0));
+        // Subscription allowance has no per-request API dollar price. Keep
+        // its unknown amount distinct from missing API prices or usage.
+        if row.subscription_billing {
+            bucket.subscription_requests += 1;
+            bucket.unpriced_requests += 1;
+            continue;
+        }
         if let Some(cost) = row.cost_micros {
             bucket.cost_micros = Some(bucket.cost_micros.unwrap_or(0).saturating_add(cost));
             bucket.priced_requests = bucket.priced_requests.saturating_add(1);
@@ -707,6 +718,46 @@ mod tests {
         }
         assert_eq!(parse_since("0h"), Ok(Some(0)));
         assert_eq!(parse_since("all"), Ok(None));
+    }
+
+    #[test]
+    fn subscription_usage_stays_unknown_without_claiming_missing_api_prices() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-subscription-{}.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut plan = record(100, 1, 200, Some("plan-account"), None);
+        plan.agent_id = Some("claude-code".into());
+        plan.subscription_billing = true;
+        plan.usage = Some(token_station_protocol::Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Default::default()
+        });
+        store.record(&plan);
+        let report = super::collect(&path, None, None).unwrap().total;
+        assert_eq!(report.cost_micros, None);
+        assert_eq!(report.priced_requests, 0);
+        assert_eq!(report.unpriced_requests, 1);
+        assert_eq!(report.subscription_requests, 1);
+        assert_eq!(report.missing_price_requests, 0);
+        assert_eq!(report.missing_usage_requests, 0);
+        let budget = super::collect_budget_spend(&path, "claude-code", None, None).unwrap();
+        assert_eq!(budget.cost_micros, None);
+        assert_eq!(budget.unpriced_requests, 1);
+        let mut api = record(101, 1, 200, Some("api-account"), None);
+        api.cost_kind = token_station_metrics::CostKind::Actual;
+        api.cost_micros = Some(123);
+        store.record(&api);
+        let report = super::collect(&path, None, None).unwrap().total;
+        assert_eq!(report.cost_micros, Some(123));
+        assert_eq!(report.priced_requests, 1);
+        assert_eq!(report.unpriced_requests, 1);
+        assert_eq!(report.subscription_requests, 1);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

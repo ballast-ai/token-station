@@ -13,6 +13,7 @@ axum = "0.8.9"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 getrandom = "0.4.3"
+jsonwebtoken = "9.3"
 pdf-extract = "0.12.0"
 html5ever = "0.35"
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }

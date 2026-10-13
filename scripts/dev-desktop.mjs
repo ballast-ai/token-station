@@ -17,6 +17,7 @@ const plugins = [
   // loader's file name.
   ["provider-openai-compatible-v2", "component.wasm"],
   ["provider-anthropic-v2", "component.wasm"],
+  ["provider-chatgpt-plan-v2", "component.wasm"],
 ];
 
 function run(command, args, options = {}) {

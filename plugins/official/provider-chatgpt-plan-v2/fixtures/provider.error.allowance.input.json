@@ -1,0 +1,5 @@
+{
+  "status": 429,
+  "headers": {},
+  "body": "{\"error\":{\"code\":\"usage_limit_reached\",\"message\":\"sensitive-value\"}}"
+}

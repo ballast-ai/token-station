@@ -60,7 +60,8 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v15: admits the content-free classifier decision reason.
 /// - v16: records request-scoped classifier input handling without content.
 /// - v17: preserves optional task-scoped heuristic counts for replay.
-pub const SCHEMA_VERSION: u32 = 17;
+/// - v18: marks subscription allowance so API prices cannot backfill its receipts.
+pub const SCHEMA_VERSION: u32 = 18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -723,6 +724,10 @@ pub struct RequestRecord {
     /// Field presence observed before provider normalization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_observation: Option<UsageObservation>,
+    /// This request used subscription allowance, not usage-based API billing.
+    /// Numeric API costs and later price-table backfill must remain unavailable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subscription_billing: bool,
     /// Micro-units of the account currency. `None` when the model has no price
     /// (an unknown cost, never a claimed-free zero).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -765,6 +770,7 @@ impl RequestRecord {
             classifier_input: None,
             usage: None,
             usage_observation: None,
+            subscription_billing: false,
             cost_micros: None,
             cost_kind: CostKind::Unknown,
             price_version: None,

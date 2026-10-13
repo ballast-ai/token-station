@@ -169,6 +169,9 @@ fn offering_views(
     let mut offerings = Vec::new();
     if let Some(upstreams) = draft["upstreams"].as_object() {
         for (name, upstream) in upstreams {
+            if upstream["provider"].as_str() == Some("chatgpt-plan") {
+                continue;
+            }
             let identity = provider_identity(upstream);
             let models: BTreeSet<&str> = upstream["models"]
                 .as_array()
@@ -427,6 +430,9 @@ async fn synchronize(
         let config = inner.materialize()?;
         let mut targets = Vec::new();
         for (name, upstream) in &config.upstreams {
+            if upstream.provider == "chatgpt-plan" {
+                continue;
+            }
             if inner.draft["upstreams"][name]["provider"].as_str() != Some("openai-compatible") {
                 continue;
             }
@@ -902,5 +908,12 @@ mod harness_draft_tests {
                 .harness_model_mapping_enabled
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn subscription_models_are_not_api_price_offerings() {
+        let draft = json!({"upstreams":{"plan":{"provider":"chatgpt-plan","models":[{"model":"gpt-example"}]}}});
+        assert!(
+            offering_views(&draft, &PriceTable::default(), &SyncMetadata::default()).is_empty()
+        );
     }
 }

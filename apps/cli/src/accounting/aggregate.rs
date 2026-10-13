@@ -5,6 +5,10 @@ use crate::pricing::PriceTable;
 use token_station_router_core::UpstreamModel;
 
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent accounting evidence can coexist across attempts."
+)]
 pub(crate) struct Aggregate {
     usage: Option<Usage>,
     observation: Option<UsageObservation>,
@@ -15,6 +19,7 @@ pub(crate) struct Aggregate {
     first_target: Option<UpstreamModel>,
     different_targets: bool,
     actual_charge: bool,
+    subscription_billing: bool,
 }
 
 impl Aggregate {
@@ -25,6 +30,7 @@ impl Aggregate {
         target: &UpstreamModel,
         pricing: &PriceTable,
     ) {
+        self.subscription_billing |= record.subscription_billing;
         // A rejected request without usage is not a generation round. Unknown
         // transport outcomes remain unknown instead of becoming a free round.
         if status.is_some_and(|status| status >= 400)
@@ -87,7 +93,9 @@ impl Aggregate {
             self.observation = Some(observation);
         }
 
-        let price = if record.cost_kind == CostKind::Actual {
+        let price = if record.subscription_billing {
+            None
+        } else if record.cost_kind == CostKind::Actual {
             record.cost_micros.map(|cost| (cost, None))
         } else {
             record
@@ -131,6 +139,12 @@ impl Aggregate {
         } else {
             None
         };
+        record.subscription_billing |= self.subscription_billing;
+        if record.subscription_billing {
+            record.cost_micros = None;
+            record.cost_kind = CostKind::Unknown;
+            record.price_version = None;
+        }
     }
 }
 
@@ -162,6 +176,31 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn subscription_rounds_keep_usage_without_api_pricing_after_repeated_apply() {
+        let mut aggregate = Aggregate::default();
+        let mut round = attempt(
+            "https://api.openai.com/v1",
+            r#"{"usage":{"input_tokens":10,"output_tokens":5}}"#,
+        );
+        round.subscription_billing = true;
+        aggregate.absorb(&round, Some(200), &target("first"), &prices());
+        let mut receipt = RequestRecord::begin(1, "anthropic");
+        for _ in 0..2 {
+            aggregate.apply(&mut receipt);
+            assert!(receipt.subscription_billing);
+            assert_eq!(receipt.usage.unwrap().input_tokens, 10);
+            assert_eq!(
+                (
+                    receipt.cost_kind,
+                    receipt.cost_micros,
+                    receipt.price_version
+                ),
+                (CostKind::Unknown, None, None)
+            );
+        }
     }
 
     #[test]

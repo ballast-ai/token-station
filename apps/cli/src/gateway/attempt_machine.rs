@@ -575,6 +575,20 @@ impl Gateway {
         // A retry can consume billable tokens before failing. Share the same
         // accumulator with host tool loops, without resetting earlier rounds.
         ctx.begin_host_loop_accounting();
+        // A plan selection never authorizes another account or billing source.
+        let mut bounded_decision = decision.clone();
+        let is_plan = |target: &UpstreamModel| {
+            self.upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| upstream.config.provider == "chatgpt-plan")
+        };
+        if is_plan(&decision.chosen) {
+            record.subscription_billing = true;
+            bounded_decision.fallbacks.clear();
+        } else {
+            bounded_decision.fallbacks.retain(|target| !is_plan(target));
+        }
+        let decision = &bounded_decision;
         record_route_decision(record, decision);
         // In quota mode, record why this account was chosen — its window/rate
         // picture at decision time — for the receipt ("why this account").

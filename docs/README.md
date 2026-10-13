@@ -1,5 +1,6 @@
 # Token Station documentation
 
+- [ChatGPT plan connection (experimental)](guides/chatgpt-plan.md)
 - [Reference](reference.md) · [中文参考](reference.zh-CN.md)
 - [Claude Code with DeepSeek](guides/claude-code-deepseek.md)
 - [Claude Code with OpenAI-compatible providers](guides/claude-code-openai-compatible-providers.md)

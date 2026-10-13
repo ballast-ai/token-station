@@ -198,7 +198,8 @@ impl CredentialResolver for CommunityCredentialResolverV1<'_> {
             }
             let secret = self
                 .secrets
-                .resolve(self.upstream, self.declared_slot)
+                .resolve_async(self.upstream, self.declared_slot)
+                .await
                 .map_err(|_| CredentialResolutionErrorV1)?;
             Ok(SecretValue::new(secret))
         })
@@ -669,7 +670,8 @@ fn sanctioned_secret_header(name: &str) -> Option<SecretHeaderV1> {
 fn has_supported_secret_source(auth_config: &AuthConfig) -> bool {
     let source_count = usize::from(auth_config.store)
         + usize::from(auth_config.env.is_some())
-        + usize::from(auth_config.file.is_some());
+        + usize::from(auth_config.file.is_some())
+        + usize::from(auth_config.chatgpt_account.is_some());
     auth_config.file.is_none() && source_count == 1
 }
 

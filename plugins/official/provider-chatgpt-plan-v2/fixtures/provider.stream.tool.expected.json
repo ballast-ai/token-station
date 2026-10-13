@@ -1,0 +1,26 @@
+[
+  {
+    "type": "tool_call_delta",
+    "index": 0,
+    "id": "call_test",
+    "name": "read_file",
+    "arguments_delta": ""
+  },
+  {
+    "type": "tool_call_delta",
+    "index": 0,
+    "arguments_delta": "{\"path\":"
+  },
+  {
+    "type": "tool_call_delta",
+    "index": 0,
+    "arguments_delta": "\"a\"}"
+  },
+  {
+    "type": "finish",
+    "finish_reason": "tool_calls"
+  },
+  {
+    "type": "done"
+  }
+]

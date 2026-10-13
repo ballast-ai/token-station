@@ -1,0 +1,14 @@
+{
+  "provider": "chatgpt-plan",
+  "base_url": "https://api.openai.com/v1",
+  "auth": "chatgpt_access_token",
+  "models": [
+    {
+      "model": "plan-model",
+      "tool": true,
+      "vision": true,
+      "json_schema": true,
+      "context_window": 200000
+    }
+  ]
+}

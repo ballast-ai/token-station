@@ -250,7 +250,9 @@ export default function ProviderList({
               )}</DialogDescription>
             </DialogHeader>
             <div className="provider-management-dialog-body">
-              {activeProvider.access_tier === "free" ? (
+              {activeProvider.provider === "chatgpt-plan" ? (
+                <p>{copy("Manage this account and refresh its models in the ChatGPT plan panel. Save your configuration after choosing a route.", "请在 ChatGPT 套餐面板管理账号和刷新模型。选择路由后保存配置。", "請在 ChatGPT 方案面板管理帳號和更新模型。選擇路由後儲存設定。", "ChatGPT プランパネルでアカウントとモデルを管理し、ルートを選択して設定を保存してください。")}</p>
+              ) : activeProvider.access_tier === "free" ? (
                 <div className="free-provider-managed-note">
                   {copy(
                     "Free provider endpoints and model sets are protected by the catalog. To change the key or models, delete this provider and add it again through the free catalog.",

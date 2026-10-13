@@ -1,0 +1,8 @@
+{
+  "chunks": [
+    "data: {\"type\": \"response.output_item.added\", \"output_index\": 1, \"item\": {\"type\": \"function_call\", \"id\": \"fc_test\", \"call_id\": \"call_test\", \"name\": \"read_file\", \"namespace\": \"tokenstation_tools\"}}\n\n",
+    "data: {\"type\": \"response.function_call_arguments.delta\", \"item_id\": \"fc_test\", \"output_index\": 1, \"delta\": \"{\\\"path\\\":\"}\n\n",
+    "data: {\"type\": \"response.function_call_arguments.done\", \"item_id\": \"fc_test\", \"output_index\": 1, \"arguments\": \"{\\\"path\\\":\\\"a\\\"}\"}\n\n",
+    "data: {\"type\": \"response.completed\", \"response\": {\"status\": \"completed\"}}\n\n"
+  ]
+}
