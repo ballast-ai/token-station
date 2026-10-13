@@ -24,7 +24,8 @@ constraints produce explicit capability errors.
 - The endpoint rejects temperature, top-p, and maximum output token parameters.
   These common Agent sampling fields are not sent. The UI must explain that the
   Agent's output cap and sampling controls do not constrain plan inference.
-- Stop sequences are rejected. Hosted tools, stored response continuations,
+- The standalone component rejects stop sequences. The Host implements local matching for buffered, tool-free requests.
+  Hosted tools, stored response continuations,
   audio, and unknown content blocks are not translated.
 - The pinned South StreamEvent schema cannot carry opaque Responses reasoning.
   This component does not request encrypted reasoning. It does not convert that

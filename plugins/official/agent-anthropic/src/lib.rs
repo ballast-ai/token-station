@@ -931,7 +931,7 @@ impl Guest for AnthropicClient {
             "content": response_blocks(&choice.message)?,
             "model": response.model,
             "stop_reason": finish_reason_to_anthropic(choice.finish_reason.clone()),
-            "stop_sequence": null,
+            "stop_sequence": choice.stop_sequence,
             "usage": Value::Object(usage),
         }))
     }

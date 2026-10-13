@@ -1,6 +1,7 @@
 //! Full local tool loops through the shipped Agent and `ChatGPT` Responses components.
-//! The upstream and credentials are fixtures. Ignored tests run installed Agent CLIs
-//! with isolated configuration and never use a real subscription or API key.
+//! Default tests and installed-CLI tests use fixture credentials and a local upstream.
+//! Explicitly ignored `live_*` tests use the selected real subscription account.
+//! Every CLI runs with isolated configuration and receives only a local virtual key.
 
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -132,11 +133,11 @@ fn sse(events: Vec<Value>) -> String {
     })
 }
 
-fn text_response() -> String {
+fn text_response_with(text: &str, failed: bool) -> String {
     sse(vec![
         json!({"type":"response.created","response":{"id":"resp_final","model":"gpt-5.5","status":"in_progress"}}),
-        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":FINAL_TEXT}),
-        json!({"type":"response.completed","response":{"id":"resp_final","model":"gpt-5.5","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":8}}}),
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":text}),
+        json!({"type":if failed { "response.failed" } else { "response.completed" },"response":{"id":"resp_final","model":"gpt-5.5","status":if failed { "failed" } else { "completed" },"output":[],"usage":{"input_tokens":10,"output_tokens":8},"error":if failed { json!({"code":"server_error","message":"Fixture terminal failure"}) } else { Value::Null }}}),
     ])
 }
 fn tool_response(name: &str, argument: &str, path: &Path, turn: usize) -> String {
@@ -159,11 +160,19 @@ fn tool_response(name: &str, argument: &str, path: &Path, turn: usize) -> String
     ])
 }
 
+fn declared_read_tool(body: &Value) -> Option<&Value> {
+    body["tools"].as_array()?.iter()
+        .find(|group| group["type"] == "namespace" && group["name"] == "tokenstation_tools")?["tools"].as_array()?.iter()
+        .find(|tool| tool["name"].as_str().is_some_and(|name| name.eq_ignore_ascii_case("read")))
+}
+
 struct FakeResponses {
     url: String,
     seen: Arc<Mutex<Vec<Value>>>,
     stop: Arc<AtomicBool>,
     status: Arc<AtomicUsize>,
+    text: Arc<Mutex<String>>,
+    failed_after_text: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl FakeResponses {
@@ -175,6 +184,10 @@ impl FakeResponses {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let status = Arc::new(AtomicUsize::new(200));
         let response_status = Arc::clone(&status);
+        let text = Arc::new(Mutex::new(FINAL_TEXT.to_owned()));
+        let response_text = Arc::clone(&text);
+        let failed_after_text = Arc::new(AtomicBool::new(false));
+        let failed = Arc::clone(&failed_after_text);
         let stopped = Arc::clone(&stop);
         let requests = Arc::clone(&seen);
         let worker = std::thread::spawn(move || {
@@ -218,21 +231,7 @@ impl FakeResponses {
                         "the Agent must execute the local read: {output}"
                     );
                 }
-                let functions = body["tools"]
-                    .as_array()
-                    .and_then(|groups| {
-                        groups.iter().find(|group| {
-                            group["type"] == "namespace" && group["name"] == "tokenstation_tools"
-                        })
-                    })
-                    .and_then(|group| group["tools"].as_array());
-                let reader = functions.and_then(|tools| {
-                    tools.iter().find(|tool| {
-                        tool["name"]
-                            .as_str()
-                            .is_some_and(|name| name.eq_ignore_ascii_case("read"))
-                    })
-                });
+                let reader = declared_read_tool(&body);
                 let response = if outputs.len() < 2 {
                     if let Some(reader) = reader {
                         let properties = &reader["parameters"]["properties"];
@@ -248,10 +247,16 @@ impl FakeResponses {
                             outputs.len(),
                         )
                     } else {
-                        text_response()
+                        text_response_with(
+                            &response_text.lock().unwrap(),
+                            failed.load(Ordering::Relaxed),
+                        )
                     }
                 } else {
-                    text_response()
+                    text_response_with(
+                        &response_text.lock().unwrap(),
+                        failed.load(Ordering::Relaxed),
+                    )
                 };
                 requests.lock().unwrap().push(body);
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).unwrap();
@@ -266,6 +271,8 @@ impl FakeResponses {
             seen,
             stop,
             status,
+            text,
+            failed_after_text,
             worker: Some(worker),
         }
     }
@@ -401,6 +408,90 @@ impl Drop for Harness {
             runtime.shutdown_timeout(Duration::from_secs(2));
         }
     }
+}
+
+fn classifier_request(stops: &Value, stream: bool) -> Value {
+    json!({"model":"gpt-5.5","system":"Synthetic classification. Preserve the supplied answer.","messages":[{"role":"user","content":"Classify this synthetic harmless request."}],"max_tokens":256,"stream":stream,"stop_sequences":stops})
+}
+
+#[test]
+fn buffered_classifier_stops_preserve_allow_block_unicode_and_usage() {
+    let harness = Harness::new();
+    for (upstream, stops, expected, matching) in [
+        (
+            "<severity>allow</severity>ignored",
+            json!(["</block>", "</severity>"]),
+            "<severity>allow",
+            Some("</severity>"),
+        ),
+        (
+            "<block>拒绝执行</block>ignored</severity>",
+            json!(["</severity>", "</block>"]),
+            "<block>拒绝执行",
+            Some("</block>"),
+        ),
+        (
+            "No stop marker is present.",
+            json!(["</block>"]),
+            "No stop marker is present.",
+            None,
+        ),
+    ] {
+        *harness.fake.text.lock().unwrap() = upstream.to_owned();
+        let response = harness.request("/v1/messages", &classifier_request(&stops, false));
+        let text: String = response["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect();
+        assert_eq!(text, expected);
+        assert_eq!(response["stop_sequence"], json!(matching));
+        assert_eq!(
+            response["stop_reason"],
+            if matching.is_some() {
+                "stop_sequence"
+            } else {
+                "end_turn"
+            }
+        );
+        assert_eq!(response["usage"]["input_tokens"], 10);
+        assert_eq!(response["usage"]["output_tokens"], 8);
+    }
+    for body in harness.fake.seen.lock().unwrap().iter() {
+        assert!(body.get("stop").is_none() && body.get("stop_sequences").is_none());
+    }
+}
+
+#[test]
+fn classifier_stop_cannot_hide_failed_terminal_or_enable_streaming_stops() {
+    let harness = Harness::new();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_mins(1)))
+        .build()
+        .into();
+    let send = |body: Value| {
+        agent
+            .post(format!("{}/v1/messages", harness.url))
+            .header("authorization", &format!("Bearer {VIRTUAL_KEY}"))
+            .header("content-type", "application/json")
+            .send(body.to_string())
+            .unwrap()
+    };
+    let response = send(classifier_request(&json!(["</block>"]), true));
+    assert!(response.status().is_client_error());
+    assert!(harness.fake.seen.lock().unwrap().is_empty());
+    *harness.fake.text.lock().unwrap() = "allow</block>".to_owned();
+    harness
+        .fake
+        .failed_after_text
+        .store(true, Ordering::Relaxed);
+    let mut response = send(classifier_request(&json!(["</block>"]), false));
+    assert!(response.status().is_server_error());
+    let body: Value = serde_json::from_str(&response.body_mut().read_to_string().unwrap()).unwrap();
+    assert_ne!(body["stop_reason"], "stop_sequence");
+    assert_eq!(harness.fake.seen.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -658,6 +749,9 @@ struct LiveHarness {
 }
 impl LiveHarness {
     fn new() -> Self {
+        Self::with_request_trace(false)
+    }
+    fn with_request_trace(trace: bool) -> Self {
         use base64::Engine as _;
         let required = |name| {
             std::env::var(name)
@@ -695,10 +789,15 @@ impl LiveHarness {
             .build()
             .unwrap();
         let receipts = Arc::new(CapturedRecords::default());
-        let gateway = Arc::new(
+        let mut gateway =
             Gateway::new_with_provider_runtime(&config, receipts.clone(), runtime.handle().clone())
-                .unwrap(),
-        );
+                .unwrap();
+        if trace {
+            gateway = gateway.with_body_log(Arc::new(
+                token_station_cli::bodylog::BodyLog::open(&scratch.0).unwrap(),
+            ));
+        }
+        let gateway = Arc::new(gateway);
         let state = server::AppState::new(
             gateway,
             Some(Arc::from(virtual_key.as_str())),
@@ -928,5 +1027,110 @@ fn live_opencode_reads_a_random_marker() {
     assert!(
         text.contains("LIVE_TOOL_OK") && text.contains(&harness.marker),
         "The final assistant text must contain the marker read by the tool"
+    );
+}
+
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan and exercises Claude auto-mode classification without allow rules."]
+fn live_claude_auto_mode_classifies_a_temporary_file_write() {
+    let harness = LiveHarness::with_request_trace(true);
+    let debug = harness.scratch.0.join("auto-mode-debug.txt");
+    let debug_path = debug.to_str().unwrap();
+    let events = harness.run("claude", &[
+        "--bare", "--print", "--permission-mode", "auto", "--permission-prompts", "none",
+        "--system-prompt", "Only operate on marker.txt and copied-marker.txt in the current working directory. Use Bash once to run the requested Python file-copy command. Return LIVE_TOOL_OK and the copied file content. Do not inspect other paths.",
+        "--model", "sonnet", "--tools", "Bash", "--setting-sources", "", "--strict-mcp-config",
+        "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--debug-file", debug_path,
+        "Use Bash once to run: python3 -c \"from pathlib import Path; text = Path('marker.txt').read_text(); Path('copied-marker.txt').write_text(text); print(text)\". This copies only the temporary fixture file in the current directory. Return LIVE_TOOL_OK followed by the exact copied content.",
+    ], &[
+        ("ANTHROPIC_BASE_URL",harness.url.clone()),("ANTHROPIC_API_KEY",harness.virtual_key.clone()),("ANTHROPIC_AUTH_TOKEN",harness.virtual_key.clone()),
+        ("CLAUDE_CONFIG_DIR",harness.scratch.0.join("claude").display().to_string()),("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","1".to_owned()),
+    ]);
+    let debug_text =
+        std::fs::read_to_string(debug).expect("The isolated auto-mode debug log exists");
+    assert!(
+        !debug_text.contains("classifier_api_error"),
+        "Auto-mode classification must not fail its model request"
+    );
+    let receipts = harness.receipts.0.lock().unwrap();
+    let mut classifier_requests = 0;
+    for entry in std::fs::read_dir(harness.scratch.0.join("request-bodies")).unwrap() {
+        let exchange: token_station_cli::bodylog::PlaintextExchange =
+            serde_json::from_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap()).unwrap();
+        let Some(request) = exchange.http_trace.agent_request else {
+            continue;
+        };
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        let classifier_stop = body["stop_sequences"].as_array().is_some_and(|stops| {
+            stops
+                .iter()
+                .any(|stop| stop == "</block>" || stop == "</severity>")
+        });
+        if classifier_stop
+            && body["stream"] != true
+            && body["tools"].as_array().is_none_or(Vec::is_empty)
+        {
+            let receipt = receipts
+                .iter()
+                .find(|receipt| receipt.request_id == exchange.request_id)
+                .expect("The classifier has a matching receipt");
+            assert_eq!(
+                receipt.status, 200,
+                "The real classifier request must finish successfully"
+            );
+            classifier_requests += 1;
+        }
+    }
+    eprintln!("successful live classifier requests: {classifier_requests}");
+    assert!(
+        classifier_requests > 0,
+        "Auto-mode acceptance requires a real buffered stop-sequence classifier request, not a tool exemption"
+    );
+    drop(receipts);
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "assistant")
+        .filter_map(|event| event["message"]["content"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "tool_use")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "Exactly one harmless fixture-copy tool call is required"
+    );
+    assert_eq!(calls[0]["name"], "Bash");
+    let result = events
+        .iter()
+        .filter(|event| event["type"] == "user")
+        .filter_map(|event| event["message"]["content"].as_array())
+        .flatten()
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == calls[0]["id"])
+        .expect("A real Bash result must match the emitted tool ID");
+    assert_ne!(
+        result["is_error"], true,
+        "The auto classifier must permit this harmless fixture operation"
+    );
+    assert!(result["content"].to_string().contains(&harness.marker));
+    assert_eq!(
+        std::fs::read_to_string(harness.scratch.0.join("copied-marker.txt")).unwrap(),
+        harness.marker
+    );
+    let final_result = events
+        .iter()
+        .find(|event| event["type"] == "result")
+        .expect("Claude emits a final structured result");
+    assert_ne!(final_result["is_error"], true);
+    assert!(
+        final_result["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("LIVE_TOOL_OK")
+    );
+    assert!(
+        final_result["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&harness.marker)
     );
 }

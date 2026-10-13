@@ -28,6 +28,7 @@ mod jev_routing;
 #[cfg(test)]
 mod jev_tests;
 mod local_search;
+mod plan_stops;
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
 mod reverse_search;

@@ -46,7 +46,9 @@ If authorization, eligibility, allowance, or the provider fails, the request rep
 - Function tools use a namespace. Tool names, call IDs, arguments, and results survive history replay.
 - The Agent must send complete history. Stored response continuation is unsupported.
 - Text and supported image inputs work. Unsupported content fails explicitly.
-- Stop sequences, signed or encrypted reasoning, and hosted tools are unsupported.
+- Buffered requests without tools support local stop-sequence matching, including Claude Code auto-mode classifier requests.
+- Streaming stop sequences, signed or encrypted reasoning, and hosted tools are unsupported.
+- Local stop matching trims the returned text after successful upstream completion. It does not stop upstream generation or reduce its usage.
 - Local MCP tools can work when the Agent exposes them as function tools.
 - Temperature, top-p, and maximum output token settings are not sent. The endpoint does not support those controls.
 - Only `response.completed` confirms success. A truncated, failed, or incomplete stream returns an error.
@@ -76,7 +78,7 @@ cargo test -p token-station-cli --test chatgpt_tools -- --include-ignored --skip
 
 Simulated tests do not prove live account eligibility, endpoint acceptance, or allowance charging.
 Live validation requires the user's browser authorization and a request through that registered account.
-Two separately ignored `live_` checks consume the explicitly selected account's plan allowance.
+Separately ignored `live_` checks consume the explicitly selected account's plan allowance.
 After connecting that account in the desktop app, set these three values in the test process environment:
 
 - `TOKEN_STATION_CHATGPT_LIVE_DATA_DIR`: the app's existing data directory.
@@ -91,6 +93,7 @@ cargo test -p token-station-cli --test chatgpt_tools live_ -- --ignored --test-t
 
 These tests start an isolated gateway, use the Host account resolver, and let each installed CLI read one
 temporary random-marker file. They require an actual completed tool result and matching final answer.
+The auto-mode check also requires an observed safety-classifier request and a completed temporary-file copy.
 They do not change existing Agent configurations or pass OAuth tokens to either CLI.
 The account resolver may refresh the selected registration, and the gateway opens its existing quota database.
 

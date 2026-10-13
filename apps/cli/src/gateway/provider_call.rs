@@ -104,9 +104,12 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<HttpRequestDescriptor, ErrorEnvelope> {
         let provider_protocol = upstream.config.provider.as_str();
-        let descriptor = upstream
-            .plugin
-            .build_http_request(request, &upstream.config)
+        let descriptor = super::plan_stops::prepare(provider_protocol, request)
+            .and_then(|projected| {
+                upstream
+                    .plugin
+                    .build_http_request(&projected, &upstream.config)
+            })
             .inspect_err(|error| {
                 record_conversion(
                     record,
@@ -350,6 +353,14 @@ impl Gateway {
         let mut chat_response = upstream
             .plugin
             .parse_response(&parts)
+            .and_then(|mut response| {
+                super::plan_stops::apply(
+                    upstream.config.provider.as_str(),
+                    request,
+                    &mut response,
+                )?;
+                Ok(response)
+            })
             .inspect_err(|error| {
                 record_conversion(
                     record,
