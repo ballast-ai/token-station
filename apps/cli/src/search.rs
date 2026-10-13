@@ -1,5 +1,11 @@
-//! Opt-in, host-owned headless Chrome search. No personal browser profile is used.
+//! Opt-in managed retrieval. Browser search uses an isolated, host-owned Chrome profile.
 
+mod backend;
+#[cfg(test)]
+pub(crate) mod backend_tests;
+mod browser;
+mod tavily;
+pub use backend::{SearchBackend, SearchError, SearchErrorKind};
 mod filters;
 mod html;
 mod page;
@@ -58,6 +64,7 @@ mod tests {
                     .join()
                     .unwrap()
                     .unwrap_err()
+                    .to_string()
                     .contains("domain filters")
             );
         });
@@ -194,6 +201,7 @@ mod tests {
             enabled: true,
             mode: SearchMode::Local,
             engine: Engine::Duckduckgo,
+            ..SearchSettings::default()
         };
         controller.save(settings.clone()).unwrap();
         assert_eq!(controller.settings(), settings);
@@ -245,6 +253,7 @@ mod tests {
                 enabled: false,
                 mode: SearchMode::Local,
                 engine,
+                ..SearchSettings::default()
             })
             .unwrap();
         let mut observations = Vec::new();
@@ -327,6 +336,7 @@ mod tests {
                     enabled: false,
                     mode: SearchMode::Local,
                     engine: Engine::Duckduckgo,
+                    ..SearchSettings::default()
                 })
                 .unwrap();
         }
@@ -342,6 +352,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -374,12 +385,17 @@ pub struct SearchSettings {
     #[serde(default)]
     pub mode: SearchMode,
     pub engine: Engine,
+    #[serde(default)]
+    pub backend: SearchBackend,
+    #[serde(default)]
+    pub browser_fallback: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchStatus {
     pub settings: SearchSettings,
     pub chrome_available: bool,
+    pub tavily_configured: bool,
     pub busy: bool,
 }
 
@@ -398,12 +414,19 @@ pub struct SearchResponse {
     pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<page::PageText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<SearchErrorKind>,
 }
 
 pub struct SearchController {
     data_dir: PathBuf,
     settings: Mutex<SearchSettings>,
     queue: queue::SearchQueue,
+    api_queue: queue::SearchQueue,
+    #[cfg(test)]
+    pub(crate) tavily_endpoint: Mutex<Option<String>>,
     revision: AtomicU64,
     #[cfg(test)]
     pub(crate) fixture: Mutex<Option<Result<Vec<SearchResult>, String>>>,
@@ -431,6 +454,9 @@ impl SearchController {
             data_dir: data_dir.to_path_buf(),
             settings: Mutex::new(settings),
             queue: queue::SearchQueue::default(),
+            api_queue: queue::SearchQueue::default(),
+            #[cfg(test)]
+            tavily_endpoint: Mutex::new(None),
             revision: AtomicU64::new(0),
             #[cfg(test)]
             fixture: Mutex::new(None),
@@ -459,7 +485,8 @@ impl SearchController {
         SearchStatus {
             settings: self.settings(),
             chrome_available: chrome_path().is_some(),
-            busy: self.queue.busy(),
+            busy: self.queue.busy() || self.api_queue.busy(),
+            tavily_configured: self.tavily_key().is_ok(),
         }
     }
 
@@ -494,84 +521,7 @@ impl SearchController {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<SearchResponse, String> {
         self.search_filtered(query, &DomainFilter::default(), cancelled)
-    }
-
-    pub(crate) fn search_filtered(
-        &self,
-        query: &str,
-        filter: &DomainFilter,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<SearchResponse, String> {
-        if cancelled() {
-            return Err("Browser search was cancelled.".into());
-        }
-        let engine = self.settings().engine;
-        let mut url = search_url(engine, query)?;
-        url.query_pairs_mut()
-            .clear()
-            .append_pair("q", &filter.query(query)?);
-        let _permit = self.queue.acquire(cancelled, 8, Duration::from_mins(1))?;
-        #[cfg(test)]
-        if let Some(results) = self
-            .fixture
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            return Ok(SearchResponse {
-                results: filter_results(results?, filter)?,
-                source: "fixture",
-                content_type: "search_snippets",
-                elapsed_ms: 0,
-                page: None,
-            });
-        }
-        let start = Instant::now();
-        let chrome = chrome_path().ok_or("Chrome is not installed in a supported location.")?;
-        let profile = temporary_dir()?;
-        let mut command = Command::new(chrome);
-        command
-            .args([
-                "--headless=new",
-                "--disable-gpu",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-sync",
-                "--use-mock-keychain",
-                "--password-store=basic",
-                "--disable-component-update",
-                "--remote-debugging-address=127.0.0.1",
-                "--remote-debugging-port=0",
-            ])
-            .arg(format!("--user-data-dir={}", profile.0.display()))
-            .arg("about:blank")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
-        }
-        let child = command
-            .spawn()
-            .map_err(|_| "Cannot start headless Chrome.")?;
-        let mut browser = OwnedBrowser { child, profile };
-        let results = browse(&mut browser, &url, engine, filter, start, cancelled)?;
-        Ok(SearchResponse {
-            results,
-            source: "headless_chrome",
-            content_type: "search_snippets",
-            elapsed_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
-            page: None,
-        })
+            .map_err(|error| error.to_string())
     }
 }
 

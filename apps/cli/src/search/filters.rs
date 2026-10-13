@@ -71,8 +71,8 @@ use url::{Host, Url};
 
 #[derive(Default)]
 pub(crate) struct DomainFilter {
-    allowed: Vec<String>,
-    blocked: Vec<String>,
+    pub(super) allowed: Vec<String>,
+    pub(super) blocked: Vec<String>,
 }
 
 impl DomainFilter {

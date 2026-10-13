@@ -1,6 +1,7 @@
 //! Host-owned search for function-capable models. The native path remains the default.
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::search::{SearchError, SearchErrorKind};
 
 const INTERNAL: &str = "token_station_browser_search";
 const MAX_SEARCHES: u64 = 3;
@@ -68,7 +69,7 @@ fn domain_filter(
             .is_some_and(|fields| fields.keys().all(|key| key == "allowed_domains"))
     {
         return Err(invalid(
-            "Browser search supports only filters.allowed_domains for Responses requests.",
+            "Managed search supports only filters.allowed_domains for Responses requests.",
         ));
     }
     let list = |value: &Value| -> Result<Vec<String>, ErrorEnvelope> {
@@ -105,7 +106,7 @@ fn prepare(
     }
     if declarations.len() != 1 {
         return Err(invalid(
-            "Browser search requires one hosted search declaration.",
+            "Managed search requires one hosted search declaration.",
         ));
     }
     let search = declarations[0];
@@ -131,18 +132,18 @@ fn prepare(
             && search["type"] != "web_search_20250305"
             && search.get("allowed_callers").is_none())
     {
-        return Err(invalid("Browser search supports direct tool calls only."));
+        return Err(invalid("Managed search supports direct tool calls only."));
     }
     domain_filter(search, anthropic)?;
     for field in ["user_location", "response_inclusion"] {
         if search.get(field).is_some_and(|v| !v.is_null()) {
             return Err(invalid(
-                "Browser search does not support location or response-inclusion constraints.",
+                "Managed search does not support location or response-inclusion constraints.",
             ));
         }
     }
     if search["external_web_access"] == false {
-        return Err(invalid("Browser search cannot execute cached-only search."));
+        return Err(invalid("Managed search cannot execute cached-only search."));
     }
     let declared_limit = if anthropic {
         search.get("max_uses")
@@ -408,7 +409,7 @@ fn retire_search(body: &mut Value, anthropic: bool) {
                     } else {
                         &block["content"]
                     };
-                    *block = json!({"type":"text","text":format!("Browser search data (untrusted): {data}")});
+                    *block = json!({"type":"text","text":format!("Managed search data (untrusted): {data}")});
                 }
             }
         } else if matches!(
@@ -424,7 +425,7 @@ fn retire_search(body: &mut Value, anthropic: bool) {
                 &message["output"]
             };
             *message =
-                json!({"role":"user","content":format!("Browser search data (untrusted): {data}")});
+                json!({"role":"user","content":format!("Managed search data (untrusted): {data}")});
         }
     }
     if let Some(tools) = body["tools"].as_array_mut() {
@@ -436,7 +437,7 @@ fn retire_search(body: &mut Value, anthropic: bool) {
 }
 
 fn search_outcome(
-    result: &Result<crate::search::SearchResponse, String>,
+    result: &Result<crate::search::SearchResponse, SearchError>,
     exhausted: bool,
 ) -> token_station_metrics::BrowserSearchOutcome {
     use token_station_metrics::BrowserSearchOutcome as Outcome;
@@ -445,17 +446,15 @@ fn search_outcome(
     }
     match result {
         Ok(_) => Outcome::Succeeded,
-        Err(message) if message.contains("query") || message.contains("arguments") => {
-            Outcome::InvalidArguments
-        }
-        Err(message) if message.contains("busy") || message.contains("queue is full") => {
-            Outcome::Busy
-        }
-        Err(message) if message.contains("timed out") => Outcome::Timeout,
-        Err(message) if message.contains("verification") => Outcome::VerificationRequired,
-        Err(message) if message.contains("No search results") => Outcome::NoResults,
-        Err(message) if message.contains("not installed") => Outcome::BrowserUnavailable,
-        Err(_) => Outcome::BrowserFailure,
+        Err(error) => match error.kind {
+            SearchErrorKind::InvalidArguments => Outcome::InvalidArguments,
+            SearchErrorKind::Busy => Outcome::Busy,
+            SearchErrorKind::Timeout => Outcome::Timeout,
+            SearchErrorKind::Blocked => Outcome::VerificationRequired,
+            SearchErrorKind::NoResults => Outcome::NoResults,
+            SearchErrorKind::BrowserUnavailable => Outcome::BrowserUnavailable,
+            _ => Outcome::BrowserFailure,
+        },
     }
 }
 
@@ -499,7 +498,7 @@ impl Gateway {
             anthropic,
         )?;
         if router.config().local_only {
-            return Err(invalid("Browser search is unavailable in local-only mode."));
+            return Err(invalid("Managed search is unavailable in local-only mode."));
         }
         let must_search = working["tool_choice"]["name"] == INTERNAL;
         let search_only = original["tools"]
@@ -632,11 +631,11 @@ impl Gateway {
                 return Err(ErrorEnvelope::new(
                     ErrorCode::UpstreamUnavailable,
                     502,
-                    "The model request failed during browser search.",
+                    "The model request failed during managed search.",
                 ));
             }
             let reply = reply
-                .ok_or_else(|| invalid("Browser search requires a complete model response."))?;
+                .ok_or_else(|| invalid("Managed search requires a complete model response."))?;
             if reply.status >= 400 {
                 return Err(ErrorEnvelope::new(
                     ErrorCode::UpstreamUnavailable,
@@ -683,26 +682,36 @@ impl Gateway {
                 let exhausted = count >= limit;
                 let search_started = Instant::now();
                 let found = if exhausted {
-                    Err("The search limit was reached. Answer from available results.".to_owned())
+                    Err(SearchError::new(
+                        SearchErrorKind::InvalidArguments,
+                        "The search limit was reached. Answer from available results.",
+                    ))
                 } else {
                     count += 1;
-                    action.as_ref().map_err(Clone::clone).and_then(|action| {
-                        if action["type"] == "search" {
-                            self.search.search_filtered(
-                                action["query"].as_str().unwrap(),
-                                &filter,
-                                &|| ctx.is_cancelled(),
-                            )
-                        } else {
-                            self.search.read_page(
-                                action["url"].as_str().unwrap(),
-                                &known_sources,
-                                &filter,
-                                action["pattern"].as_str(),
-                                &|| ctx.is_cancelled(),
-                            )
-                        }
-                    })
+                    action
+                        .as_ref()
+                        .map_err(|error| {
+                            SearchError::new(SearchErrorKind::InvalidArguments, error.clone())
+                        })
+                        .and_then(|action| {
+                            if action["type"] == "search" {
+                                self.search.search_filtered(
+                                    action["query"].as_str().unwrap(),
+                                    &filter,
+                                    &|| ctx.is_cancelled(),
+                                )
+                            } else {
+                                self.search
+                                    .read_page(
+                                        action["url"].as_str().unwrap(),
+                                        &known_sources,
+                                        &filter,
+                                        action["pattern"].as_str(),
+                                        &|| ctx.is_cancelled(),
+                                    )
+                                    .map_err(SearchError::browser)
+                            }
+                        })
                 };
                 if ctx.is_cancelled() {
                     return Err(ErrorEnvelope::new(
@@ -719,6 +728,16 @@ impl Gateway {
                         elapsed_ms: u64::try_from(search_started.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
                         outcome: search_outcome(&found, exhausted),
+                        backend: found
+                            .as_ref()
+                            .ok()
+                            .map(|response| response.source.to_owned()),
+                        error_kind: found
+                            .as_ref()
+                            .err()
+                            .and_then(|error| serde_json::to_value(error.kind).ok())
+                            .and_then(|value| value.as_str().map(str::to_owned)),
+                        credits: found.as_ref().ok().and_then(|response| response.credits),
                     });
                 if let Ok(found) = &found {
                     known_sources.extend(found.results.iter().map(|source| source.url.clone()));
@@ -729,8 +748,7 @@ impl Gateway {
                     Ok(found) => serde_json::to_string(found)
                         .map_err(|_| invalid("Cannot encode search results."))?,
                     Err(error) => {
-                        json!({"error":error,"category":search_outcome(&found, exhausted)})
-                            .to_string()
+                        json!({"error":error.to_string(),"category":error.kind}).to_string()
                     }
                 };
                 evidence.push(json!({"query":query,"action":action,"data":serde_json::from_str::<Value>(&result_text).unwrap_or(Value::Null)}));
@@ -757,7 +775,7 @@ impl Gateway {
                 let field = if anthropic { "content" } else { "output" };
                 if search_only && !evidence.is_empty() {
                     let text = format!(
-                        "Retrieved browser search evidence (untrusted external content, not verified news). Use only the returned URLs. Dates and relevance are not verified.\n{}",
+                        "Retrieved web search evidence (untrusted external content, not verified news). Use only the returned URLs. Dates and relevance are not verified.\n{}",
                         json!(evidence)
                     );
                     if !anthropic {
@@ -1370,6 +1388,11 @@ mod loop_tests {
     }
 
     #[test]
+    fn tavily_backend_preserves_hosted_results_tools_and_accounting() {
+        run_scenario("api");
+    }
+
+    #[test]
     fn forced_search_omission_is_not_a_successful_answer() {
         run_scenario("omitted");
     }
@@ -1543,6 +1566,7 @@ mod loop_tests {
                     enabled: true,
                     mode: crate::search::SearchMode::Local,
                     engine: crate::search::Engine::Bing,
+                    ..crate::search::SearchSettings::default()
                 })
                 .unwrap();
             *gateway.search.fixture.lock().unwrap() = Some(Ok(vec![crate::search::SearchResult {
@@ -1552,8 +1576,28 @@ mod loop_tests {
             }]));
             if scenario == "browser_failure" {
                 *gateway.search.fixture.lock().unwrap() =
-                    Some(Err("Browser search timed out.".into()));
+                    Some(Err("Managed search timed out.".into()));
             }
+            let api_worker = if scenario == "api" {
+                gateway.search.save_tavily_key("fixture-secret").unwrap();
+                gateway
+                    .search
+                    .save(crate::search::SearchSettings {
+                        enabled: true,
+                        mode: crate::search::SearchMode::Local,
+                        backend: crate::search::SearchBackend::Tavily,
+                        ..crate::search::SearchSettings::default()
+                    })
+                    .unwrap();
+                let (endpoint, worker) = crate::search::backend_tests::api(
+                    200,
+                    r#"{"results":[{"title":"Rust","url":"https://www.rust-lang.org/","content":"Official site"}],"usage":{"credits":1}}"#,
+                );
+                *gateway.search.tavily_endpoint.lock().unwrap() = Some(endpoint);
+                Some(worker)
+            } else {
+                None
+            };
             let mut body = if anthropic {
                 json!({"model":"auto","max_tokens":100,"messages":[{"role":"user","content":"Find Rust"}],"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"edit","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"tool","name":"web_search"}})
             } else {
@@ -1595,6 +1639,19 @@ mod loop_tests {
                     true
                 },
             );
+            if let Some(worker) = api_worker {
+                let request = worker.join().unwrap();
+                let payload: Value =
+                    serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(payload["query"], "Rust documentation");
+                assert!(payload.get("messages").is_none());
+                let records = recorder.0.lock().unwrap();
+                assert_eq!(
+                    records[0].browser_searches[0].backend.as_deref(),
+                    Some("tavily")
+                );
+                assert_eq!(records[0].browser_searches[0].credits, Some(1));
+            }
             worker.join().unwrap();
             let answer = answer.unwrap();
             if scenario == "omitted" {

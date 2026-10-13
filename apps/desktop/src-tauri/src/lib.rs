@@ -501,6 +501,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             search_commands::get_search_status,
             search_commands::save_search_settings,
+            search_commands::save_search_api_key,
             search_commands::test_browser_search,
             jev_commands::get_jev_status,
             jev_commands::save_jev_key,

@@ -1,4 +1,4 @@
-//! Browser search activation verifies the real model and browser path.
+//! Search activation verifies the real model and selected retrieval path.
 use crate::agent_integration::commands::{
     refresh_current_model_metadata, runtime_from_app, AgentCommandState, AgentProxyRuntime,
 };
@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Manager, State};
 use token_station_cli::search::{
-    SearchController, SearchMode, SearchResponse, SearchSettings, SearchStatus,
+    SearchBackend, SearchController, SearchMode, SearchResponse, SearchSettings, SearchStatus,
 };
 
 use token_station_cli::search_quality::{evaluate_response, SearchQuality, DOCUMENTATION_CASES};
@@ -56,8 +56,17 @@ fn activate(app: &tauri::AppHandle, settings: SearchSettings) -> Result<SearchAc
     let previous = controller.settings();
     let previous_runtime = runtime_from_app(&state);
     if settings.enabled {
-        if settings.mode == SearchMode::Local && !controller.status().chrome_available {
+        if settings.mode == SearchMode::Local
+            && settings.backend == SearchBackend::Browser
+            && !controller.status().chrome_available
+        {
             return Err("Install Google Chrome. Then verify search again.".into());
+        }
+        if settings.mode != SearchMode::Native
+            && settings.backend == SearchBackend::Tavily
+            && !controller.status().tavily_configured
+        {
+            return Err("Save a Tavily API key before enabling managed API search.".into());
         }
         previous_runtime
             .as_ref()
@@ -183,6 +192,9 @@ pub(crate) async fn test_browser_search(
     let controller = {
         let inner = state.0.lock().map_err(|_| "Cannot read search settings.")?;
         inner.ensure_editable()?;
+        if inner.draft["router"]["local_only"].as_bool() == Some(true) {
+            return Err("Search is unavailable in local-only mode.".into());
+        }
         SearchController::shared(&inner.data_dir())
     };
     tauri::async_runtime::spawn_blocking(move || {
@@ -192,7 +204,27 @@ pub(crate) async fn test_browser_search(
         controller.search(&query, &|| false)
     })
     .await
-    .map_err(|_| "Browser search test failed.".to_owned())?
+    .map_err(|_| "Search backend test failed.".to_owned())?
+}
+
+#[tauri::command]
+pub(crate) async fn save_search_api_key(
+    state: State<'_, AppStateManaged>,
+    key: String,
+) -> Result<SearchStatus, String> {
+    let controller = {
+        let inner = state.0.lock().map_err(|_| "Cannot read search settings.")?;
+        inner.ensure_editable()?;
+        SearchController::shared(&inner.data_dir())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = SETTINGS_OPERATION
+            .try_lock()
+            .map_err(|_| "Search settings are busy. Try again.")?;
+        controller.save_tavily_key(&key)
+    })
+    .await
+    .map_err(|_| "Search credential update failed.".to_owned())?
 }
 
 #[cfg(test)]

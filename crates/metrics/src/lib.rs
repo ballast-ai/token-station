@@ -632,6 +632,13 @@ pub struct BrowserSearchRecord {
     pub ordinal: u32,
     pub elapsed_ms: u64,
     pub outcome: BrowserSearchOutcome,
+    /// The actual retrieval backend. The surrounding field name is retained for compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<u32>,
 }
 
 /// The selected search execution path. No external content is recorded.

@@ -547,6 +547,8 @@ fn page_response(
             snippet: text.chars().take(300).collect(),
         }],
         source: "public_http",
+        credits: None,
+        fallback_reason: None,
         content_type: "page_text",
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         page: Some(PageText {

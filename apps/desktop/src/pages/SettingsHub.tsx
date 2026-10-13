@@ -122,8 +122,8 @@ const SECTIONS: Array<{
     description: "settings.generalHint",
     englishLabel: "Web search",
     chineseLabel: "联网搜索",
-    englishDescription: "Local browser search preview",
-    chineseDescription: "后台浏览器搜索 · 试用",
+    englishDescription: "Native and managed search preview",
+    chineseDescription: "原生搜索与补充后端 · 试用",
     icon: Monitor,
   },
   {

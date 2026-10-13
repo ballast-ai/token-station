@@ -99,4 +99,25 @@ describe("browser search preview", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_search_settings", { settings: { enabled: false, mode: "native", engine: "bing" } }));
   });
 
+  it("tests Tavily without Chrome and shows reported credits", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ ...status, chrome_available: false, tavily_configured: true, settings: { ...status.settings, backend: "tavily" } }).mockResolvedValueOnce({ source: "tavily", credits: 1, elapsed_ms: 100, results: [] });
+    render(<SearchSettingsPanel />);
+    const button = await screen.findByRole("button", { name: "Test search" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByText(/Tavily credits: 1/)).toBeInTheDocument();
+  });
+  it("saves the credential separately without enabling search", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(status).mockResolvedValueOnce({ ...status, tavily_configured: true });
+    render(<SearchSettingsPanel />);
+    const input = await screen.findByLabelText("Tavily API key");
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "fixture-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_search_api_key", { key: "fixture-secret" }));
+    expect(await screen.findByText("Tavily key saved")).toBeInTheDocument();
+    expect(input).toHaveValue("");
+    expect(invoke).not.toHaveBeenCalledWith("save_search_settings", expect.anything());
+  });
+
 });
