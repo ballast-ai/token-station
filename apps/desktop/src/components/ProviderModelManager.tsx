@@ -168,7 +168,7 @@ export default function ProviderModelManager({
   const [editBaseUrl, setEditBaseUrl] = useState(provider.base_url);
   const [editKey, setEditKey] = useState("");
   const [credentialSource, setCredentialSource] = useState<"store" | "env" | "file" | "none">(
-    provider.credential_source === "chatgpt_account" ? "none" : provider.credential_source ?? (provider.has_auth ? "store" : "none"),
+    (provider.credential_source === "chatgpt_account" || provider.credential_source === "codex_account") ? "none" : provider.credential_source ?? (provider.has_auth ? "store" : "none"),
   );
   const [credentialReference, setCredentialReference] = useState(
     provider.credential_reference ?? "",

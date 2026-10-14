@@ -26,6 +26,7 @@ function renderShell(
   modelCount = 0,
 ) {
   const onNavigate = vi.fn();
+  const onConnectPlan = vi.fn();
   function ShellHarness() {
     const [modelEntryOpen, setModelEntryOpen] = useState(false);
     return (
@@ -40,6 +41,7 @@ function renderShell(
         onModelEntryOpenChange={setModelEntryOpen}
         onNavigate={onNavigate}
         onToggleServe={vi.fn()}
+        onConnectPlan={onConnectPlan}
       >
         <div>content</div>
       </AppShell>
@@ -53,6 +55,7 @@ function renderShell(
   return {
     navigation: within(document.querySelector(`[aria-label="${navigationName}"]`)!),
     onNavigate,
+    onConnectPlan,
   };
 }
 
@@ -142,4 +145,22 @@ describe("AppShell Agent and routing navigation", () => {
 
     expect(screen.queryByRole("dialog", { name: "选择模型接入方式" })).toBeNull();
   });
+});
+
+
+it.each([
+  ["本机 Codex 登录", "codex"],
+  ["ChatGPT 套餐", "chatgpt"],
+])("opens %s from the existing model chooser without navigating to API setup", async (label, kind) => {
+  const user = userEvent.setup();
+  const { navigation, onNavigate, onConnectPlan } = renderShell("overview");
+  await user.click(navigation.getByRole("button", { name: "模型" }));
+  const dialog = screen.getByRole("dialog", { name: "选择模型接入方式" });
+  expect(within(dialog).getByRole("button", { name: "先选供应商" })).toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "先搜模型" })).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: label }));
+  expect(onConnectPlan).toHaveBeenCalledWith(kind);
+  expect(onNavigate).toHaveBeenCalledTimes(1);
+  expect(onNavigate).toHaveBeenCalledWith("providers");
+  expect(screen.queryByRole("dialog", { name: "选择模型接入方式" })).toBeNull();
 });

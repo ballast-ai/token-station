@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { connectCodexProvider, discoverCodexAccount, disconnectCodexAccount, getCodexModels, listCodexAccounts, type LocalCodexAccount } from "../codexAccountsApi";
-import type { ChatGPTPlanModel } from "../chatgptPlanApi";
+import { openChatGPTUsage, type ChatGPTPlanModel } from "../chatgptPlanApi";
+import type { ProviderView } from "../api";
+import { Alert, AlertDescription } from "./ui/alert";
+import PlanConnectionContent from "./PlanConnectionContent";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Button } from "./ui/button";
-import "./LocalCodexPanel.css";
 
-export default function LocalCodexPanel({ onChanged }: { onChanged?: () => void | Promise<void> }) {
+export default function LocalCodexPanel({ provider, onChanged, onConnected }: {
+  provider?: ProviderView;
+  onChanged?: () => void | Promise<void>;
+  onConnected?: () => void;
+}) {
   const { copy } = useLocalizedCopy();
   const [accounts, setAccounts] = useState<LocalCodexAccount[]>([]);
   const [detected, setDetected] = useState<LocalCodexAccount | null>(null);
@@ -50,37 +56,57 @@ export default function LocalCodexPanel({ onChanged }: { onChanged?: () => void 
       try { const next = await discoverCodexAccount(); if (mounted.current) setDetected(next); } catch { /* Keep only the safe operation error. */ }
       throw failure;
     }
-    await refresh(); await onChanged?.();
+    if (!mounted.current) return;
+    await refresh();
+    if (!mounted.current) return;
+    await onChanged?.();
+    if (!mounted.current) return;
+    onConnected?.();
     if (mounted.current) setDetected(null);
     if (mounted.current) setNotice(copy("Local Codex provider connected. Select the provider for your Agents.", "本机 Codex 供应商已接入，请为 Agent 选择该供应商。", "本機 Codex 供應商已接入，請為 Agent 選擇此供應商。", "Codex を接続しました。Agent 用のプロバイダーを選択してください。"));
   });
-  return <section className="local-codex-panel" aria-labelledby="local-codex-title" aria-busy={busy}>
-    <div className="local-codex-heading"><div><h2 id="local-codex-title">{copy("Local Codex login", "本机 Codex 登录", "本機 Codex 登入", "ローカル Codex サインイン")}</h2>
-      <p>{copy("Reuse your existing login without browser authorization.", "复用已有登录，无需浏览器重新授权。", "重用現有登入，無需瀏覽器重新授權。", "既存のサインインを再利用します。ブラウザー認証は不要です。")}</p></div>
-      <Button type="button" disabled={busy} onClick={() => void connect()}>{copy("Use local Codex login", "使用本机 Codex 登录", "使用本機 Codex 登入", "ローカル Codex に接続")}</Button></div>
-    <p className="local-codex-note">{copy("Agents share this account's subscription allowance. No API cost is estimated and exhausted allowance does not switch to a paid API. Disconnecting here does not sign Codex out.", "Agent 共享该账号的套餐额度，不估算 API 费用，额度耗尽时不会切换到付费 API。在此断开不会退出 Codex 登录。", "Agent 共用此帳號的方案額度，不估算 API 費用，額度用盡時不會切換至付費 API。在此中斷不會登出 Codex。", "Agent はこのアカウントのプラン枠を共有します。API 費用の推定や有料 API への切替は行いません。接続を解除しても Codex からはサインアウトしません。")}</p>
-    <Button type="button" variant="ghost" disabled={busy} onClick={() => void run(checkFailure, async () => {
-      const next = await discoverCodexAccount(); if (mounted.current) setDetected(next); await refresh();
-    })}>{copy("Check local login", "检查本机登录", "檢查本機登入", "サインインを確認")}</Button>
-    {detected && <div className="local-codex-detected" role="status"><strong>{detected.label || detected.email}</strong><p>{stateText(detected.state)}</p></div>}
-    {notice && <p role="status" aria-live="polite">{notice}</p>}
-    {error && <p role="alert" className="local-codex-error">{error}</p>}
-    <ul className="local-codex-accounts">{accounts.map(account => <li key={account.id}>
-      <div className="local-codex-summary"><strong>{account.label || account.email || account.id}</strong>{account.email && account.email !== account.label && <span>{account.email}</span>}<span>{stateText(account.state)}</span></div>
-      <div className="local-codex-actions">
-        <Button type="button" disabled={busy || account.state !== "ready"} onClick={() => void connect(account.id)}>{copy("Connect as provider", "接入为供应商", "接入為供應商", "プロバイダーに接続")}</Button>
-        <Button type="button" variant="secondary" disabled={busy || account.state !== "ready"} onClick={() => void run(copy("Could not refresh Codex models. Check the local login and retry.", "无法刷新 Codex 模型，请检查本机登录后重试。", "無法重新整理 Codex 模型，請檢查本機登入後重試。", "Codex のモデルを更新できません。サインインを確認してください。"), async () => {
-          const models = await getCodexModels(account.id); if (mounted.current) setCatalogs(current => ({ ...current, [account.id]: models }));
-        })}>{copy("Refresh models", "刷新模型", "重新整理模型", "モデルを更新")}</Button>
-        <Button type="button" variant="ghost" disabled={busy} onClick={() => void run(copy("Could not disconnect the Codex reference. Try again.", "无法断开 Codex 引用，请重试。", "無法中斷 Codex 參照，請重試。", "Codex の参照を解除できません。再試行してください。"), async () => {
-          await disconnectCodexAccount(account.id); await refresh(); await onChanged?.();
-          if (mounted.current) {
-            setCatalogs(current => { const next = { ...current }; delete next[account.id]; return next; });
-            setNotice(copy("Reference disconnected. Codex remains signed in. Requests through the old provider stop until reconnected.", "引用已断开，Codex 仍保持登录。旧供应商的请求会停止，重新接入后才会恢复。", "參照已中斷，Codex 仍保持登入。舊供應商的請求會停止，重新接入後才會恢復。", "参照を解除しました。Codex はサインインしたままです。再接続まで旧プロバイダーのリクエストは停止します。"));
-          }
-        })}>{copy("Disconnect reference", "断开引用", "中斷參照", "参照を解除")}</Button>
-      </div>
-      {catalogs[account.id] && <ul className="local-codex-models" aria-label={copy("Available Codex models", "可用 Codex 模型", "可用 Codex 模型", "利用可能な Codex モデル")}>{catalogs[account.id].map(model => <li key={model.id}><strong>{model.name}</strong> <code>{model.id}</code></li>)}{catalogs[account.id].length === 0 && <li>{copy("No models returned.", "未返回可用模型。", "未傳回可用模型。", "モデルが返されませんでした。")}</li>}</ul>}
-    </li>)}</ul>
+  const visibleAccounts = provider ? accounts.filter(account => account.id === provider.credential_reference) : accounts;
+  return <section className="plan-connection-panel" aria-label={copy("Local Codex login", "本机 Codex 登录", "本機 Codex 登入", "ローカル Codex サインイン")} aria-busy={busy}>
+    {!provider && <Alert role="note" className="plan-connection-callout"><AlertDescription>{copy("Agents share this account's subscription allowance. No API cost is estimated and exhausted allowance does not switch to a paid API. Disconnecting here does not sign Codex out.", "Agent 共享该账号的套餐额度，不估算 API 费用。额度用尽时停止请求，不会切换到付费 API。在此断开不会退出 Codex 登录。", "Agent 共用此帳號的方案額度，不估算 API 費用。額度用盡時停止請求，不會切換至付費 API。在此中斷不會登出 Codex。", "Agent はこのアカウントのプラン枠を共有します。API 費用は推定せず、利用枠を使い切ると停止します。接続を解除しても Codex はサインインしたままです。")}</AlertDescription></Alert>}
+    {detected && <div className="plan-connection-detected" role="status"><strong>{detected.label || detected.email}</strong><p>{stateText(detected.state)}</p></div>}
+    {notice && <p role="status" aria-live="polite" className="plan-connection-notice">{notice}</p>}
+    {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
+    {provider && !busy && visibleAccounts.length === 0 && <Alert role="status"><AlertDescription>{copy(
+      "This local reference is disconnected. Use Add model to reconnect the intended Codex login.",
+      "此本机引用已断开，请通过“添加模型”重新接入目标 Codex 登录。",
+      "此本機參照已中斷，請透過「新增模型」重新接入目標 Codex 登入。",
+      "この参照は解除されています。モデル追加から必要な Codex サインインを再接続してください。",
+    )}</AlertDescription></Alert>}
+    {visibleAccounts.map(account => <PlanConnectionContent key={account.id} kind="codex" accountId={account.id}
+      label={account.label} email={account.email} ready={account.state === "ready"} busy={busy} managed={Boolean(provider)}
+      catalogLoaded={catalogs[account.id] !== undefined}
+      models={catalogs[account.id] ?? (provider?.models.map(id => ({ id, name: id })) ?? [])}
+      recovery={account.state !== "ready" && <div className="plan-connection-recovery"><Alert role="status"><AlertDescription>{stateText(account.state)}</AlertDescription></Alert>
+        {account.state === "expired" && <Button type="button" disabled={busy} onClick={() => void connect(account.id)}>{copy("Reconnect", "重新接入", "重新接入", "再接続")}</Button>}</div>}
+      connect={!provider && <Button type="button" className="plan-connect-account-button" disabled={busy || account.state !== "ready"} onClick={() => void connect(account.id)}>{copy("Use this account", "使用此账号接入", "使用此帳號接入", "このアカウントを使用")}</Button>}
+      onUsage={() => run(copy("Could not open ChatGPT usage. Try again.", "无法打开 ChatGPT 用量，请重试。", "無法開啟 ChatGPT 用量，請重試。", "ChatGPT の使用量を表示できません。再試行してください。"), openChatGPTUsage)}
+      onRefresh={() => run(copy("Could not refresh Codex models. Check the local login and retry.", "无法刷新 Codex 模型，请检查本机登录后重试。", "無法重新整理 Codex 模型，請檢查本機登入後重試。", "Codex のモデルを更新できません。サインインを確認してください。"), async () => {
+        const models = await getCodexModels(account.id);
+        if (!mounted.current) return;
+        await onChanged?.();
+        if (mounted.current) setCatalogs(current => ({ ...current, [account.id]: models }));
+      })}
+      onDisconnect={() => run(copy("Could not disconnect the Codex reference. Try again.", "无法断开 Codex 引用，请重试。", "無法中斷 Codex 參照，請重試。", "Codex の参照を解除できません。再試行してください。"), async () => {
+        await disconnectCodexAccount(account.id);
+        if (!mounted.current) return;
+        await refresh();
+        if (!mounted.current) return;
+        await onChanged?.();
+        if (mounted.current) {
+          setCatalogs(current => { const next = { ...current }; delete next[account.id]; return next; });
+          setNotice(copy("Reference disconnected. Codex remains signed in. Requests through the old provider stop until reconnected.", "引用已断开，Codex 仍保持登录。旧供应商的请求会停止，重新接入后才会恢复。", "參照已中斷，Codex 仍保持登入。舊供應商的請求會停止，重新接入後才會恢復。", "参照を解除しました。Codex はサインインしたままです。再接続まで旧プロバイダーのリクエストは停止します。"));
+        }
+      })} />)}
+    <div className="plan-connection-start">
+      {!provider && visibleAccounts.length === 0 && <Button type="button" disabled={busy} onClick={() => void connect()}>{copy("Use local Codex login", "使用本机 Codex 登录", "使用本機 Codex 登入", "ローカル Codex に接続")}</Button>}
+      <Button type="button" variant="ghost" disabled={busy} onClick={() => void run(checkFailure, async () => {
+        const next = await discoverCodexAccount(); if (mounted.current) setDetected(next); await refresh();
+      })}>{copy("Check local login", "检查本机登录", "檢查本機登入", "サインインを確認")}</Button>
+    </div>
   </section>;
 }

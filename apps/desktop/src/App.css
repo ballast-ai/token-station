@@ -14090,3 +14090,72 @@ samp {
     padding-left: 0;
   }
 }
+
+/* Account-based model connections use the existing setup and management dialogs. */
+.model-entry-plan-heading { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 10px; }
+.model-entry-plan-heading > span { flex: 0 0 auto; }
+.model-entry-plan-heading [data-slot="separator"] { flex: 1; }
+.model-entry-plan-options { display: grid; gap: 7px; }
+.model-entry-plan-options > button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 12px; border: 0; border-radius: 8px; color: var(--ink); background: var(--surface-2); text-align: left; cursor: pointer; }
+.model-entry-plan-options > button:hover,
+.model-entry-plan-options > button:focus-visible { background: var(--signal-soft); outline: 2px solid var(--signal); outline-offset: -2px; }
+.model-entry-plan-icon { width: 30px; display: grid; place-items: center; flex: 0 0 auto; }
+.model-entry-plan-icon > svg { width: 25px; height: 25px; }
+.model-entry-plan-options > button > svg { width: 15px; height: 15px; color: var(--muted); }
+.model-entry-plan-copy { min-width: 0; flex: 1; display: grid; gap: 5px; }
+.model-entry-plan-copy strong { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; }
+.model-entry-plan-copy small { color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.model-entry-plan-copy [data-slot="badge"] { height: 16px; font-size: 8px; font-weight: 500; }
+.model-entry-plan-note { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.provider-card .provider-account-summary { font-family: "IBM Plex Sans", sans-serif; }
+.plan-account-status[data-slot="badge"] { min-height: 18px; height: auto; gap: 5px; border: 0; font-size: 9px; }
+.plan-account-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.plan-account-status.ready { color: var(--success); background: color-mix(in srgb, var(--success) 10%, var(--surface)); }
+.plan-account-status.unavailable { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); }
+.plan-connection-dialog[data-slot="dialog-content"] { width: min(560px, calc(100vw - 32px)); max-width: 560px; max-height: calc(100vh - 40px); grid-template-rows: auto minmax(0, 1fr); gap: 20px; padding: 22px; }
+.plan-provider-management-dialog[data-slot="dialog-content"] { width: min(750px, calc(100vw - 40px)); max-width: 750px; height: auto; max-height: calc(100vh - 40px); padding: 22px; }
+.plan-connection-dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.plan-connection-panel { display: grid; gap: 16px; min-width: 0; }
+.plan-connection-panel [data-slot="alert"] { padding: 13px 15px; border: 0; border-radius: 8px; background: var(--surface-2); }
+.plan-connection-panel [data-slot="alert-description"] { font-size: 11px; line-height: 1.7; }
+.plan-connection-pending,
+.plan-connection-recovery { display: grid; gap: 10px; }
+.plan-connection-pending p,
+.plan-connection-notice { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.plan-connection-detected { display: grid; gap: 7px; font-size: 11px; }
+.plan-connection-detected p { margin: 0; color: var(--muted); line-height: 1.6; }
+.plan-connection-start { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.plan-connection-account { min-width: 0; display: grid; gap: 18px; }
+.plan-account-summary { display: flex; align-items: center; gap: 12px; padding: 15px 16px; border-radius: 9px; background: var(--content-block-surface); }
+.plan-account-icon { width: 32px; display: grid; place-items: center; flex: 0 0 auto; }
+.plan-account-icon > svg { width: 30px; height: 30px; }
+.plan-account-identity { min-width: 0; flex: 1; display: grid; gap: 5px; }
+.plan-account-identity strong { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.plan-account-identity span,
+.plan-account-identity small { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.plan-account-usage { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 0 2px 18px; border-bottom: 1px solid var(--line); }
+.plan-account-usage strong { font-size: 11px; font-weight: 550; }
+.plan-account-usage p { margin: 4px 0 0; font-size: 10px; color: var(--muted); line-height: 1.6; }
+.plan-account-usage [data-slot="button"] { font-size: 10px; }
+.plan-account-model-heading { display: flex; align-items: center; gap: 8px; }
+.plan-account-model-heading h3 { margin: 0; font-size: 12px; font-weight: 600; }
+.plan-account-model-heading > [data-slot="button"] { margin-left: auto; }
+.plan-account-model-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 22px; list-style: none; margin: 12px 0 0; padding: 13px 15px; border-radius: 8px; background: var(--content-block-surface); }
+.plan-account-model-grid li { min-width: 0; display: grid; gap: 4px; padding: 7px 0; overflow-wrap: anywhere; }
+.plan-account-model-grid strong { font-size: 10.5px; font-weight: 500; }
+.plan-account-model-grid code { color: var(--muted); font-size: 9px; }
+.plan-account-note { margin: 10px 2px 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.plan-account-details { color: var(--muted); font-size: 10.5px; }
+.plan-account-details > summary { cursor: pointer; }
+.plan-account-details p { margin: 8px 0; font-size: 10px; line-height: 1.7; }
+.plan-account-details code { font-size: 10px; overflow-wrap: anywhere; user-select: text; }
+.plan-account-disconnect { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.plan-account-disconnect p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.plan-account-disconnect > button { color: var(--danger); font-size: 11px; }
+@media (max-width: 860px) {
+  .plan-account-model-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .plan-account-summary { flex-wrap: wrap; }
+  .plan-account-summary .plan-account-status { margin-left: 44px; }
+}
+
+.plan-connect-account-button[data-slot="button"] { width: 100%; height: 37px; }

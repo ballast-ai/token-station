@@ -17,7 +17,7 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
-  credential_source?: "store" | "env" | "file" | "chatgpt_account" | "none";
+  credential_source?: "store" | "env" | "file" | "chatgpt_account" | "codex_account" | "none";
   credential_reference?: string;
   provider_call?: ProviderCallEngine;
   south_v1_available?: boolean;

@@ -1,6 +1,3 @@
-import { getState } from "../api";
-import LocalCodexPanel from "../components/LocalCodexPanel";
-import ChatGPTPlanPanel from "../components/ChatGPTPlanPanel";
 import { useState } from "react";
 import type { ModelDiscoveryView, ProviderView, StateView } from "../api";
 import { Building2, Plus } from "lucide-react";
@@ -59,8 +56,6 @@ export default function ProvidersPage(props: ProvidersPageProps) {
           </Button>
         </div>
       </header>
-      <LocalCodexPanel onChanged={async () => props.onStateChange(await getState())} />
-      <ChatGPTPlanPanel onChanged={async () => props.onStateChange(await getState())} />
       <ProviderList {...props} />
       <Dialog open={enterpriseOpen} onOpenChange={setEnterpriseOpen}>
         <DialogContent className="enterprise-route-dialog" closeLabel={copy("Close", "关闭", "關閉", "閉じる")}>

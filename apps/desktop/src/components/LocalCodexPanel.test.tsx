@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import LocalCodexPanel from "./LocalCodexPanel";
@@ -39,11 +39,13 @@ describe("Local Codex connection", () => {
     expect(invoke).not.toHaveBeenCalledWith("codex_connect_provider", expect.anything());
   });
   it("refreshes live models and disconnects the reference", async () => {
-    commands({ codex_accounts_list: [account] }); render(<LocalCodexPanel />);
+    commands({ codex_accounts_list: [account] }); render(<LocalCodexPanel provider={{ name: "codex_local-1", provider: "codex-plan", credential_reference: account.id, base_url: "https://chatgpt.com/backend-api/codex", has_auth: true, models: ["managed-model"] }} />);
     fireEvent.click(await screen.findByRole("button", { name: "Refresh models" }));
     expect(await screen.findByText("Live model")).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("codex_account_models", { accountId: "local-1" });
     fireEvent.click(screen.getByRole("button", { name: "Disconnect reference" }));
+    expect(invoke).not.toHaveBeenCalledWith("codex_account_disconnect", expect.anything());
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Disconnect reference" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("codex_account_disconnect", { accountId: "local-1" }));
     expect(await screen.findByText(/Codex remains signed in/)).toBeInTheDocument();
   });
@@ -62,11 +64,36 @@ describe("Local Codex connection", () => {
     expect(document.body.textContent).not.toContain("SECRET_FIXTURE");
   });
   it("disables changed accounts and redacts backend errors", async () => {
-    commands({ codex_accounts_list: [{ ...account, state: "account_changed" }] }); render(<LocalCodexPanel />);
+    commands({ codex_accounts_list: [{ ...account, state: "account_changed" }] }); render(<LocalCodexPanel provider={{ name: "codex_local-1", provider: "codex-plan", credential_reference: account.id, base_url: "https://chatgpt.com/backend-api/codex", has_auth: true, models: ["managed-model"] }} />);
     expect(await screen.findByRole("button", { name: "Refresh models" })).toBeDisabled();
     vi.mocked(invoke).mockRejectedValue("access_token=SECRET_FIXTURE");
     fireEvent.click(screen.getByRole("button", { name: "Check local login" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not check the local Codex login");
     expect(document.body.textContent).not.toContain("SECRET_FIXTURE");
   });
+});
+
+
+it("shows only the local reference bound to the managed provider", async () => {
+  commands({ codex_accounts_list: [account, { ...account, id: "local-2", label: "Second local reference" }] });
+  render(<LocalCodexPanel provider={{ name: "custom-local", provider: "codex-plan", credential_reference: "local-2", base_url: "https://chatgpt.com/backend-api/codex", has_auth: true, models: ["bound-model"] }} />);
+  expect(await screen.findByText("Second local reference")).toBeInTheDocument();
+  expect(screen.queryByText("Local account")).toBeNull();
+  expect(screen.getByText("bound-model")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("codex_account_models", { accountId: "local-2" }));
+  expect(invoke).not.toHaveBeenCalledWith("codex_connect_provider", expect.anything());
+});
+
+
+it("keeps local setup focused on connecting the intended account", async () => {
+  commands({ codex_accounts_list: [account] });
+  const connected = vi.fn();
+  render(<LocalCodexPanel onConnected={connected} />);
+  expect(await screen.findByText("Local account")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Refresh models" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Disconnect reference" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Use this account" }));
+  await waitFor(() => expect(connected).toHaveBeenCalledOnce());
+  expect(invoke).toHaveBeenCalledWith("codex_connect_provider", { accountId: "local-1" });
 });

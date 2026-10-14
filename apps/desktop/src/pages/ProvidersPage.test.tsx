@@ -1,6 +1,8 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { listCodexAccounts } from "../codexAccountsApi";
+import { listChatGPTAccounts } from "../chatgptPlanApi";
 import ProvidersPage from "./ProvidersPage";
 
 vi.mock("../codexAccountsApi", () => ({ listCodexAccounts: vi.fn().mockResolvedValue([]) }));
@@ -171,4 +173,43 @@ it("searches connected models without changing their configuration", async () =>
   await user.click(screen.getByRole("button", { name: "清空搜索" }));
   expect(screen.getByRole("searchbox")).toHaveFocus();
   expect(screen.getByText("model-one")).toBeInTheDocument();
+});
+
+
+it("keeps account setup out of the managed model collection", () => {
+  render(<ProvidersPage {...baseProps} />);
+  expect(screen.getByRole("heading", { name: "已接入模型" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "本机 Codex 登录" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "ChatGPT 套餐" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Continue with ChatGPT" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "使用本机 Codex 登录" })).toBeNull();
+});
+
+
+it.each([
+  ["chatgpt-plan", "ChatGPT 套餐", "chatgpt_account"],
+  ["codex-plan", "本机 Codex 登录", "codex_account"],
+] as const)("opens the bound %s account inside provider management", async (providerKind, title, source) => {
+  const user = userEvent.setup();
+  const account = { id: "bound-reference", label: "Bound account", email: "same@example.test", state: "ready" as const, expires_at: null, account_id: "account-a", client_version: "1.0.0" };
+  const other = { ...account, id: "other-reference", label: "Other account" };
+  vi.mocked(listChatGPTAccounts).mockResolvedValue([account, other]);
+  vi.mocked(listCodexAccounts).mockResolvedValue([account, other]);
+  render(<ProvidersPage {...baseProps} providers={[{
+    name: "opaque-provider-name", provider: providerKind, credential_source: source,
+    credential_reference: "bound-reference", base_url: "https://example.test/v1", has_auth: true,
+    models: ["account-model"],
+  }]} />);
+  const group = screen.getByRole("group", { name: `${title} 供应商` });
+  expect(await within(group).findByText(/same@example.test/)).toBeInTheDocument();
+  expect(within(group).queryByText("opaque-provider-name")).toBeNull();
+  await user.click(within(group).getByRole("button", { name: "管理" }));
+  const dialog = screen.getByRole("dialog", { name: `管理 ${title}` });
+  expect(await within(dialog).findByText("Bound account")).toBeInTheDocument();
+  expect(within(dialog).queryByText("Other account")).toBeNull();
+  expect(within(dialog).getByText("account-model")).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(within(group).getByRole("button", { name: "管理" })).toHaveFocus());
+  vi.mocked(listChatGPTAccounts).mockResolvedValue([]);
+  vi.mocked(listCodexAccounts).mockResolvedValue([]);
 });

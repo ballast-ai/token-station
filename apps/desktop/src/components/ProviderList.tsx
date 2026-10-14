@@ -1,7 +1,12 @@
 import { useRef, useState } from "react";
-import { previewProviderRemoval } from "../api";
+import { getState, previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import { providerDisplayName } from "../providerPresentation";
+import { planConnectionTitle, providerPlanKind } from "../planConnections";
+import { usePlanAccountSummaries } from "./usePlanAccountSummaries";
+import ChatGPTPlanPanel from "./ChatGPTPlanPanel";
+import LocalCodexPanel from "./LocalCodexPanel";
+import { cn } from "../lib/utils";
 import ProviderModelManager from "./ProviderModelManager";
 import { useVisionVerificationTasks } from "./useVisionVerificationTasks";
 import { useLocalizedCopy } from "./LanguageProvider";
@@ -50,9 +55,14 @@ export default function ProviderList({
   const { showError } = useErrorToast();
   const confirmNavigation = useDraftNavigation();
   const [query, setQuery] = useState("");
+  const accountSummary = usePlanAccountSummaries(providers);
+  const displayName = (provider: ProviderView) => {
+    const kind = providerPlanKind(provider);
+    return kind ? planConnectionTitle(kind, copy) : providerDisplayName(provider);
+  };
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const matches = (text: string) => text.toLocaleLowerCase().includes(normalizedQuery);
-  const visibleProviders = providers.filter((provider) => matches(providerDisplayName(provider)) || provider.models.some(matches));
+  const visibleProviders = providers.filter((provider) => matches(displayName(provider)) || provider.models.some(matches));
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -64,7 +74,7 @@ export default function ProviderList({
   const purgeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const removalRequestRef = useRef(0);
   const modelCount = providers.reduce((total, provider) => total + provider.models.length, 0);
-  const matchedModelCount = visibleProviders.reduce((total, provider) => total + provider.models.filter((model) => matches(model) || matches(providerDisplayName(provider))).length, 0);
+  const matchedModelCount = visibleProviders.reduce((total, provider) => total + provider.models.filter((model) => matches(model) || matches(displayName(provider))).length, 0);
   const searchRef = useRef<HTMLInputElement>(null);
   const activeProvider = providers.find((provider) => provider.name === managedProvider);
 
@@ -145,7 +155,9 @@ export default function ProviderList({
           </div>
         )}
         {visibleProviders.map((provider) => {
-          const displayName = providerDisplayName(provider);
+          const kind = providerPlanKind(provider);
+          const summary = kind ? accountSummary(kind, provider.credential_reference) : null;
+          const displayName = kind ? planConnectionTitle(kind, copy) : providerDisplayName(provider);
           return (
             <article
               className="provider-card"
@@ -156,12 +168,16 @@ export default function ProviderList({
             >
               <div className="provider-card-head provider-identity-bar">
                 <div className="provider-monogram" aria-hidden="true">
-                  <ProviderIcon id={provider.brand_id} label={displayName} size={34} />
+                  <ProviderIcon id={kind ? "openai" : provider.brand_id} label={displayName} size={34} />
                 </div>
                 <div className="provider-main provider-identity">
-                  <small>{copy("Provider", "供应商", "供應商", "プロバイダー")}</small>
+                  <small>{kind ? copy("Plan connection", "套餐接入", "方案接入", "プラン接続") : copy("Provider", "供应商", "供應商", "プロバイダー")}</small>
                   <strong className="provider-identity-name">{displayName}</strong>
-                  <div className="provider-url">{provider.base_url}</div>
+                  <div className={cn("provider-url", kind && "provider-account-summary")}>{kind
+                    ? <>{summary?.account?.email || summary?.account?.label || copy("Account unavailable", "账号暂不可用", "帳號暫時無法使用", "アカウントを利用できません")} · {kind === "codex"
+                      ? copy("Reuse local login", "复用本机登录", "重用本機登入", "ローカルのサインインを再利用")
+                      : copy("Browser authorization", "浏览器授权", "瀏覽器授權", "ブラウザー認証")}</>
+                    : provider.base_url}</div>
                 </div>
               <Badge variant="secondary" className="provider-model-count">
                 {copy(`${provider.models.length} models`, `${provider.models.length} 个模型`, `${provider.models.length} 個模型`, `${provider.models.length} 個モデル`)}
@@ -170,7 +186,12 @@ export default function ProviderList({
                 {provider.access_tier === "free" && (
                   <Badge variant="secondary" className="provider-access-badge">{copy("Free", "免费", "免費", "無料")}</Badge>
                 )}
-                <Badge variant={provider.has_auth ? "secondary" : "ghost"} className={`auth ${provider.has_auth ? "yes" : "no"}`}>
+                {kind ? <Badge variant="secondary" className={cn("plan-account-status", summary?.account?.state === "ready" ? "ready" : "unavailable")}>
+                  {summary?.account?.state === "ready" ? copy("Connected", "已连接", "已連線", "接続済み")
+                    : !summary?.loaded ? copy("Status unknown", "状态未知", "狀態未知", "状態不明")
+                    : summary.account ? copy("Unavailable", "不可用", "無法使用", "利用不可")
+                    : copy("Disconnected", "已断开", "已中斷", "接続解除済み")}
+                </Badge> : <Badge variant={provider.has_auth ? "secondary" : "ghost"} className={`auth ${provider.has_auth ? "yes" : "no"}`}>
                   {provider.has_auth
                     ? copy(
                       "Credential ready",
@@ -179,7 +200,7 @@ export default function ProviderList({
                     : provider.credential_source === "none"
                       ? copy("No credential required", "无需凭据", "無需憑據", "認証情報は不要")
                       : copy("Credential missing", "缺少凭据", "缺少憑據", "認証情報がありません")}
-                </Badge>
+                </Badge>}
                 <Button
                   variant="secondary"
                   size="sm"
@@ -233,7 +254,7 @@ export default function ProviderList({
       <Dialog open={Boolean(activeProvider)} onOpenChange={(open) => !open && confirmNavigation(() => setManagedProvider(null))}>
         {activeProvider && (
           <DialogContent
-            className="provider-management-dialog"
+            className={cn("provider-management-dialog", providerPlanKind(activeProvider) && "plan-provider-management-dialog")}
             closeLabel={copy("Close", "关闭", "關閉", "閉じる")}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
@@ -241,8 +262,8 @@ export default function ProviderList({
             }}
           >
             <DialogHeader>
-              <DialogTitle>{copy(`Manage ${activeProvider.name}`, `管理 ${activeProvider.name}`, `管理 ${activeProvider.name}`, `${activeProvider.name} を管理`)}</DialogTitle>
-              <DialogDescription>{copy(
+              <DialogTitle>{copy(`Manage ${displayName(activeProvider)}`, `管理 ${displayName(activeProvider)}`, `管理 ${displayName(activeProvider)}`, `${displayName(activeProvider)} を管理`)}</DialogTitle>
+              <DialogDescription>{providerPlanKind(activeProvider) ? copy("Manage the account and its models here.", "账号与模型在这里统一管理。", "帳號與模型在此統一管理。", "ここでアカウントとモデルを管理します。") : copy(
                 "Manage models, credentials, and connection diagnostics without changing the model list behind the dialog.",
                 "在弹窗中管理模型、凭据与连接诊断，不改变后方模型列表的位置。",
                 "在彈窗中管理模型、憑證與連線診斷，不改變後方模型清單的位置。",
@@ -251,7 +272,9 @@ export default function ProviderList({
             </DialogHeader>
             <div className="provider-management-dialog-body">
               {activeProvider.provider === "chatgpt-plan" ? (
-                <p>{copy("Manage this account and refresh its models in the ChatGPT plan panel. Save your configuration after choosing a route.", "请在 ChatGPT 套餐面板管理账号和刷新模型。选择路由后保存配置。", "請在 ChatGPT 方案面板管理帳號和更新模型。選擇路由後儲存設定。", "ChatGPT プランパネルでアカウントとモデルを管理し、ルートを選択して設定を保存してください。")}</p>
+                <ChatGPTPlanPanel key={activeProvider.name} provider={activeProvider} onChanged={async () => onStateChange(await getState())} />
+              ) : activeProvider.provider === "codex-plan" ? (
+                <LocalCodexPanel key={activeProvider.name} provider={activeProvider} onChanged={async () => onStateChange(await getState())} />
               ) : activeProvider.access_tier === "free" ? (
                 <div className="free-provider-managed-note">
                   {copy(

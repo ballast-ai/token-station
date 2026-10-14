@@ -14,11 +14,12 @@ See the [OpenAI Sign in with ChatGPT documentation](https://developers.openai.co
 ## Reuse an existing Codex login
 
 1. Open **Models** in Token Station.
-2. Find **Local Codex login** and select **Use local Codex login**.
-3. Wait for account validation and model discovery.
-4. Select the local Codex provider and a discovered model in the desired route.
-5. Save and apply the configuration.
-6. Connect the Agent through its existing connection workflow.
+2. Select **Add model**, then **Local Codex login** under **Use an existing plan**.
+3. Select the intended account or **Use local Codex login**.
+4. Wait for account validation and model discovery.
+5. Select the local Codex provider and a discovered model in the desired route.
+6. Save and apply the configuration.
+7. Connect the Agent through its existing connection workflow.
 
 Token Station reads `CODEX_HOME/auth.json`, or `~/.codex/auth.json` when `CODEX_HOME` is unset.
 This version supports Codex file storage. Keyring, auto, and ephemeral storage modes are not supported.
@@ -40,10 +41,10 @@ Existing ChatGPT plan registrations remain separate and continue to work.
 ## Connect a separate ChatGPT registration
 
 1. Open **Models** in Token Station.
-2. Find the **ChatGPT plan** panel and select **Continue with ChatGPT**.
-3. Complete the OpenAI browser authorization for Token Station.
-4. Check that the account is ready for inference.
-5. Load the account model catalog and connect the provider.
+2. Select **Add model**, then **ChatGPT plan** under **Use an existing plan**.
+3. Select an existing account or **Continue with ChatGPT**.
+4. Complete the OpenAI browser authorization for Token Station.
+5. Wait for the account's model catalog and provider connection.
 6. Select that provider and model in the desired route.
 7. Save the configuration and apply it to the local gateway.
 8. Connect a supported Agent through its existing Agent connection workflow.
@@ -56,6 +57,16 @@ Claude Code keeps its own client-facing model aliases. Token Station selects the
 OpenCode can use the gateway's OpenAI-compatible endpoint and model catalog.
 Both Agents execute local function tools themselves. Token Station translates calls and results across protocols.
 A Claude Code conversation routed here uses an OpenAI model. It does not convert plan allowance into Claude model credits.
+
+## Manage a plan connection
+
+On **Models**, select **Manage** beside **ChatGPT plan** or **Local Codex login**.
+The dialog shows only the account bound to that provider, its connection status, and its model catalog.
+Select **Refresh models** to refresh the current account catalog. Select **View usage** to open ChatGPT usage settings.
+Expand **Connection details and usage limits** to inspect the non-secret reference or reauthorize a ChatGPT account.
+Confirm **Disconnect connection** or **Disconnect reference** to make the associated models unavailable.
+The provider and its route bindings remain configured. Deleting a provider remains a separate operation.
+If a local reference was disconnected, reconnect the intended login from **Add model**.
 
 ## Allowance and failures
 
