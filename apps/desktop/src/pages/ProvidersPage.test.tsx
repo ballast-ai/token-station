@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import ProvidersPage from "./ProvidersPage";
 
+vi.mock("../codexAccountsApi", () => ({ listCodexAccounts: vi.fn().mockResolvedValue([]) }));
 vi.mock("../chatgptPlanApi", () => ({ listChatGPTAccounts: vi.fn().mockResolvedValue([]) }));
 
 const baseProps = {

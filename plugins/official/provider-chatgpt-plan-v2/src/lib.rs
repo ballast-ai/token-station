@@ -15,6 +15,7 @@ use token_station_protocol::{
     ToolChoice, Usage,
 };
 
+mod codex;
 #[cfg(target_arch = "wasm32")]
 mod shell;
 mod stream;
@@ -32,6 +33,9 @@ fn protocol(message: &str) -> ErrorEnvelope {
 }
 
 fn check_config(config: &ProviderConfig) -> ComponentResultV1<()> {
+    if config.provider == "codex-plan" {
+        return codex::check_config(config);
+    }
     let endpoint = config.base_url.as_str();
     // Host account bindings remain fixed to OpenAI. Loopback is reserved for
     // isolated conformance tests with a synthetic store credential.
@@ -274,6 +278,14 @@ fn build_body(r: &ChatRequest) -> ComponentResultV1<Value> {
     Ok(body)
 }
 
+// Match machine-readable fields only; upstream text can reflect private inputs.
+fn reasoning_rejection(error: &Value) -> Option<ErrorEnvelope> {
+    (error["code"].as_str() == Some("unsupported_value")
+        && error["param"].as_str() == Some("reasoning.effort"))
+    .then(|| ErrorEnvelope::new(ErrorCode::InvalidRequest, 400,
+        "Unsupported value for reasoning_effort. The selected model does not support this reasoning effort."))
+}
+
 impl ProviderComponentV1 for ChatGptPlan {
     fn metadata(&self) -> ComponentMetadataV1 {
         ComponentMetadataV1 {
@@ -298,13 +310,22 @@ impl ProviderComponentV1 for ChatGptPlan {
             HttpMethod::Post,
             config.base_url.resolve(ProviderApi::Responses),
         );
-        descriptor.headers = SafeHeaders::try_new([
-            ("content-type", "application/json"),
-            ("accept", "text/event-stream"),
-        ])
-        .map_err(|_| protocol("Cannot build safe request headers"))?;
+        descriptor.headers = if config.provider == "codex-plan" {
+            codex::headers(config)?
+        } else {
+            SafeHeaders::try_new([
+                ("content-type", "application/json"),
+                ("accept", "text/event-stream"),
+            ])
+            .map_err(|_| protocol("Cannot build safe request headers"))?
+        };
         descriptor.auth = config.auth.clone().map(Auth::bearer);
-        descriptor.body = Some(build_body(r)?);
+        let body = build_body(r)?;
+        descriptor.body = Some(if config.provider == "codex-plan" {
+            codex::body(body)?
+        } else {
+            body
+        });
         Ok(descriptor)
     }
     fn parse_response(&self, parts: &HttpResponseParts) -> ComponentResultV1<ChatResponse> {
@@ -392,7 +413,12 @@ impl ProviderComponentV1 for ChatGptPlan {
             ErrorCode::InvalidRequest => "The ChatGPT plan endpoint rejected the request.",
             _ => "The ChatGPT plan endpoint failed.",
         };
-        let mut error = ErrorEnvelope::new(code, parts.status, message);
+        let mut error = if parts.status == 400 {
+            reasoning_rejection(&raw["error"])
+        } else {
+            None
+        }
+        .unwrap_or_else(|| ErrorEnvelope::new(code, parts.status, message));
         error.retry_after_ms = parts
             .headers
             .iter()

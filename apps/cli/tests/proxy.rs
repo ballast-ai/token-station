@@ -3228,33 +3228,40 @@ fn codex_missing_provider_key_names_the_selected_upstream_without_leaking_a_valu
 }
 
 #[test]
-fn chat_completions_structured_output_fails_before_the_upstream() {
-    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+fn chat_completions_structured_output_reaches_the_supported_upstream_unchanged() {
+    let answer = json!({
+        "id":"chatcmpl-structured", "model":"gpt-5.5",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"{\"title\":\"Fixture title\"}"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":7,"completion_tokens":3}
+    });
+    let reply = http_json(200, &answer.to_string());
+    let mock = MockUpstream::start(vec![vec![reply.clone()], vec![reply]]);
     let key = key_file("chat-structured-output", "sk-test-key-abc");
     let proxy = start_proxy(&mock, &key);
-
-    let (status, body) = post_chat(
-        &proxy,
-        &json!({
-            "model": "auto",
-            "messages": [{"role": "user", "content": "return JSON"}],
-            "response_format": {"type": "json_object"}
-        }),
-        None,
-    );
-
-    assert_eq!(status, 400, "{body}");
-    let body: Value = serde_json::from_str(&body).expect("the refusal is JSON");
-    assert_eq!(body["error"]["code"], json!("capability"));
-    assert_eq!(mock.hits(), 0, "the adapter must reject before routing");
-
+    for (index, format) in [
+        json!({"type":"json_object"}),
+        json!({"type":"json_schema","json_schema":{"name":"session_title","description":"A short title","strict":true,"schema":{"type":"object","properties":{"title":{"type":"string","maxLength":80}},"required":["title"],"additionalProperties":false}}}),
+    ].into_iter().enumerate() {
+        let (status, body) = post_chat(
+            &proxy,
+            &json!({"model":"auto","messages":[{"role":"user","content":"Return a JSON title"}],"response_format":format}),
+            None,
+        );
+        assert_eq!(status, 200, "{body}");
+        let body: Value = serde_json::from_str(&body).expect("The completion is JSON");
+        let result: Value = serde_json::from_str(body["choices"][0]["message"]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(result["title"], "Fixture title");
+        let seen = mock.seen();
+        assert_eq!(seen.len(), index + 1);
+        assert_eq!(seen[index].path, "/v1/chat/completions");
+        assert_eq!(seen[index].body["response_format"], format, "The adapter and South must preserve every output constraint");
+    }
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(400)");
-    assert_eq!(row["error_code"], "Text(\"capability\")");
-    assert_eq!(row["attempts"], "Integer(0)");
-    assert_eq!(row["upstream"], "Null");
-
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["error_code"], "Null");
+    assert_eq!(row["attempts"], "Integer(1)");
+    assert_eq!(row["upstream"], "Text(\"mock_primary\")");
     std::fs::remove_file(key).ok();
 }
 

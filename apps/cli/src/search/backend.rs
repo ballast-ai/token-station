@@ -34,6 +34,10 @@ pub enum SearchErrorKind {
 pub struct SearchError {
     pub kind: SearchErrorKind,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<u32>,
 }
 impl std::fmt::Display for SearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -46,7 +50,15 @@ impl SearchError {
         Self {
             kind,
             message: message.into(),
+            backend: None,
+            credits: None,
         }
+    }
+
+    pub(super) fn observed(mut self, backend: &'static str, credits: Option<u32>) -> Self {
+        self.backend = Some(backend);
+        self.credits = credits;
+        self
     }
     // The browser predates typed errors. Keep its compatibility mapping at this boundary.
     pub(crate) fn browser(message: String) -> Self {
@@ -59,7 +71,9 @@ impl SearchError {
             K::Busy
         } else if message.contains("verification") {
             K::Blocked
-        } else if message.contains("No search results") {
+        } else if message.contains("No search results")
+            || message == "The page has no readable text."
+        {
             K::NoResults
         } else if message.contains("not installed") {
             K::BrowserUnavailable
@@ -154,10 +168,18 @@ impl SearchController {
             tavily::search(&endpoint, &key, query.trim(), filter, start, cancelled)
         };
         if cancelled() {
-            return Err(SearchError::new(
-                SearchErrorKind::Cancelled,
-                "Search was cancelled.",
-            ));
+            let mut error = SearchError::new(SearchErrorKind::Cancelled, "Search was cancelled.");
+            match &result {
+                Ok(response) => {
+                    error.backend = Some(response.source);
+                    error.credits = response.credits;
+                }
+                Err(observed) => {
+                    error.backend = observed.backend;
+                    error.credits = observed.credits;
+                }
+            }
+            return Err(error);
         }
         match result {
             Err(error)
@@ -168,10 +190,13 @@ impl SearchController {
                 let mut response = self
                     .browser_search(query, settings.engine, start, filter, cancelled)
                     .map_err(|fallback| {
-                        SearchError::new(
+                        let mut failure = SearchError::new(
                             SearchError::browser(fallback.clone()).kind,
                             format!("{error} Browser fallback failed: {fallback}"),
-                        )
+                        );
+                        failure.backend = error.backend;
+                        failure.credits = error.credits;
+                        failure
                     })?;
                 response.fallback_reason = Some(error.kind);
                 Ok(response)

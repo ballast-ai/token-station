@@ -1,0 +1,12 @@
+.local-codex-panel { margin-block: 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; min-width: 0; }
+.local-codex-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.local-codex-heading h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+.local-codex-heading p, .local-codex-note { color: var(--muted-foreground); font-size: .85rem; line-height: 1.6; }
+.local-codex-accounts { list-style: none; padding: 0; margin: .75rem 0 0; display: grid; gap: .75rem; }
+.local-codex-accounts > li { border-top: 1px solid var(--border); padding-top: .75rem; min-width: 0; }
+.local-codex-summary { display: grid; gap: .25rem; overflow-wrap: anywhere; font-size: .85rem; }
+.local-codex-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.local-codex-detected { margin-block: .5rem; font-size: .85rem; overflow-wrap: anywhere; }
+.local-codex-error { color: var(--destructive); font-size: .85rem; }
+.local-codex-models { padding-left: 1.25rem; font-size: .8rem; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .local-codex-heading { align-items: stretch; flex-direction: column; } .local-codex-actions > button { flex: 1 1 auto; white-space: normal; } }

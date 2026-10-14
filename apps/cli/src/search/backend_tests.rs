@@ -108,6 +108,96 @@ fn tavily_search_preserves_contract_filters_sources_and_reports_usage() {
 }
 
 #[test]
+fn rejected_tavily_results_preserve_observed_credits_without_inventing_usage() {
+    for (body, kind, credits) in [
+        (
+            r#"{"results":[],"usage":{"credits":1}}"#,
+            SearchErrorKind::NoResults,
+            Some(1),
+        ),
+        (
+            r#"{"results":[{"title":"Filtered","url":"https://other.org/","content":"Outside the filter"}],"usage":{"credits":2}}"#,
+            SearchErrorKind::NoResults,
+            Some(2),
+        ),
+        (
+            r#"{"results":[{"url":"https://example.com/"}],"usage":{"credits":3}}"#,
+            SearchErrorKind::Protocol,
+            Some(3),
+        ),
+        (
+            r#"{"usage":{"credits":4}}"#,
+            SearchErrorKind::Protocol,
+            Some(4),
+        ),
+        (r#"{"results":[]}"#, SearchErrorKind::NoResults, None),
+        (
+            r#"{"results":[],"usage":{"credits":-1}}"#,
+            SearchErrorKind::NoResults,
+            None,
+        ),
+        (
+            r#"{"results":[],"usage":{"credits":4294967296}}"#,
+            SearchErrorKind::NoResults,
+            None,
+        ),
+    ] {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        controller.save_tavily_key("fixture-secret").unwrap();
+        controller
+            .save(SearchSettings {
+                backend: SearchBackend::Tavily,
+                ..SearchSettings::default()
+            })
+            .unwrap();
+        let (url, task) = api(200, body);
+        *controller.tavily_endpoint.lock().unwrap() = Some(url);
+        let filter = DomainFilter::new(&["example.com".into()], &[]).unwrap();
+        let error = controller
+            .search_filtered("test", &filter, &|| false)
+            .unwrap_err();
+        task.join().unwrap();
+        assert_eq!(error.kind, kind);
+        let metadata = serde_json::to_value(error).unwrap();
+        assert_eq!(metadata["backend"], "tavily");
+        if let Some(credits) = credits {
+            assert_eq!(metadata["credits"], credits);
+        } else {
+            assert!(metadata.get("credits").is_none());
+        }
+        assert!(!controller.status().busy);
+    }
+}
+
+#[test]
+fn tavily_http_errors_keep_reported_usage_without_exposing_response_details() {
+    let root = temporary_dir().unwrap();
+    let controller = SearchController::shared(&root.0);
+    controller.save_tavily_key("fixture-secret").unwrap();
+    controller
+        .save(SearchSettings {
+            backend: SearchBackend::Tavily,
+            ..SearchSettings::default()
+        })
+        .unwrap();
+    let (url, task) = api(429, r#"{"error":"fixture-secret","usage":{"credits":1}}"#);
+    *controller.tavily_endpoint.lock().unwrap() = Some(url);
+    let error = controller
+        .search_filtered("test", &DomainFilter::default(), &|| false)
+        .unwrap_err();
+    task.join().unwrap();
+    assert_eq!(error.kind, SearchErrorKind::RateLimited);
+    assert_eq!(error.backend, Some("tavily"));
+    assert_eq!(error.credits, Some(1));
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("fixture-secret")
+    );
+}
+
+#[test]
 fn api_failures_are_typed_sanitized_and_do_not_silently_use_browser() {
     for (status, body, kind) in [
         (401, "fixture-secret", SearchErrorKind::Authentication),
@@ -134,6 +224,9 @@ fn api_failures_are_typed_sanitized_and_do_not_silently_use_browser() {
             .unwrap_err();
         assert_eq!(error.kind, kind);
         assert!(!error.to_string().contains("fixture-secret"));
+        let metadata = serde_json::to_value(&error).unwrap();
+        assert_eq!(metadata["backend"], "tavily");
+        assert!(metadata.get("credits").is_none());
         task.join().unwrap();
     }
 }
@@ -153,13 +246,13 @@ fn missing_key_and_cancellation_do_not_fallback() {
         (false, SearchErrorKind::MissingCredential),
         (true, SearchErrorKind::Cancelled),
     ] {
-        assert_eq!(
-            controller
-                .search_filtered("test", &DomainFilter::default(), &|| cancelled)
-                .unwrap_err()
-                .kind,
-            expected
-        );
+        let error = controller
+            .search_filtered("test", &DomainFilter::default(), &|| cancelled)
+            .unwrap_err();
+        assert_eq!(error.kind, expected);
+        let metadata = serde_json::to_value(error).unwrap();
+        assert!(metadata.get("backend").is_none());
+        assert!(metadata.get("credits").is_none());
     }
 }
 

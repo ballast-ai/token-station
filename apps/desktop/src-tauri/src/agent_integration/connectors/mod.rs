@@ -471,7 +471,7 @@ mod tests {
             ("codex-v1", b"keep = \"codex\"\n", "codex"),
             (
                 "deepseek-harness-v1",
-                b"# keep DeepSeek comment\nkeep: deepseek-harness\n",
+                b"# keep DeepSeek comment\n- id: keep\n  config: {value: deepseek-harness}\n",
                 "deepseek-harness",
             ),
             ("gemini-cli-v1", b"KEEP=gemini\n", "gemini"),
@@ -828,7 +828,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let primary = root.join("settings.yaml");
+        let primary = root.join("cordis.patch.yml");
         let credentials = root.join(".credentials.yaml");
         std::fs::write(&credentials, b"USER_API_KEY: keep-me\n").unwrap();
         let metadata = AgentModelMetadata {
@@ -850,7 +850,7 @@ mod tests {
         };
         let mut document = parse_source_bytes(
             Some(
-                b"# keep DeepSeek comment\nllm-pi-ai:\n  providers:\n    user:\n      api: anthropic-messages\nkeep: deepseek-harness\n",
+                b"# keep DeepSeek comment\n- id: llm-pi-ai\n  config:\n    providers:\n      user:\n        api: anthropic-messages\n- id: keep\n  config: {value: deepseek-harness}\n",
             ),
             connector.format(),
             connector.label(),
@@ -861,7 +861,14 @@ mod tests {
         validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
         apply_patch(&mut document, &patch).unwrap();
         connector.validate_projected(&document, &input).unwrap();
-        let semantic = semantic_json(&document).unwrap();
+        let rows = semantic_json(&document).unwrap();
+        let semantic: serde_json::Value = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["id"].as_str().unwrap().to_string(), r["config"].clone()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
         assert_eq!(
             semantic["agent-default-model"]["provider"],
             json!("tokenstation")
@@ -914,41 +921,22 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_harness_accepts_the_stock_onboarding_settings_file() {
-        let connector = find_connector("deepseek-harness-v1")
-            .expect("DeepSeek Harness connector is registered");
-        let input = ConnectInput {
-            browser_search_enabled: false,
-            base_url: "http://127.0.0.1:8787/agents/deepseek-harness/v1",
-            token: Some("fixture-dsh-key"),
-            adapter_ready: true,
-            model_metadata: None,
-        };
-        let mut document = parse_source_bytes(
+    fn deepseek_harness_rejects_legacy_mapping_for_new_connections() {
+        let connector = find_connector("deepseek-harness-v1").unwrap();
+        let document = parse_source_bytes(
             Some(b"ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\n"),
             connector.format(),
             connector.label(),
         )
-        .expect("the stock DSH settings file is valid YAML");
-
-        connector
+        .unwrap();
+        assert!(connector
             .validate_source(&document)
-            .expect("the stock DSH settings file is safe to extend");
-        prepare_owned_paths_for_write(&mut document, &connector.owned_paths())
-            .expect("the Token Station paths are safe to create");
-        let patch = connector.connect_patch(&input).unwrap();
-        apply_patch(&mut document, &patch).unwrap();
-        connector.validate_projected(&document, &input).unwrap();
-
-        let semantic = semantic_json(&document).unwrap();
-        assert_eq!(
-            semantic["ui-onboarding"]["welcomeNoticeVersion"],
-            json!("2026-08-13.1")
-        );
-        assert_eq!(
-            semantic["llm-pi-ai"]["providers"]["tokenstation"]["api"],
-            json!("openai-completions")
-        );
+            .unwrap_err()
+            .contains("YAML array"));
+        assert!(connector.capabilities().restart_required);
+        assert!(connector
+            .config_path(std::path::Path::new("/home/user"))
+            .ends_with(".dsh/cordis.patch.yml"));
     }
 
     #[test]
@@ -1768,7 +1756,9 @@ experimental_bearer_token = "fixture-codex-key"
                 DocumentFormat::Json => b"{invalid-json".as_slice(),
                 DocumentFormat::Json5 => b"{invalid-json5".as_slice(),
                 DocumentFormat::Toml => b"invalid = [".as_slice(),
-                DocumentFormat::Yaml => b"model:\n  broken: [\n".as_slice(),
+                DocumentFormat::Yaml | DocumentFormat::CordisYaml => {
+                    b"model:\n  broken: [\n".as_slice()
+                }
                 DocumentFormat::Dotenv => b"BROKEN".as_slice(),
             };
             let malformed =

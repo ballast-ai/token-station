@@ -1,0 +1,75 @@
+{
+  "method": "POST",
+  "url": "https://chatgpt.com/backend-api/codex/responses",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "text/event-stream",
+    "chatgpt-account-id": "account-fixture-123",
+    "version": "0.162.0",
+    "originator": "codex_cli_rs",
+    "openai-beta": "responses=experimental",
+    "user-agent": "codex_cli_rs/0.162.0 (Token Station)"
+  },
+  "body": {
+    "model": "plan-model",
+    "instructions": "",
+    "input": [
+      {
+        "type": "function_call",
+        "namespace": "tokenstation_tools",
+        "name": "read",
+        "call_id": "call-123",
+        "arguments": "{\"path\":\"file.txt\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call-123",
+        "output": "actual result"
+      }
+    ],
+    "stream": true,
+    "store": false,
+    "tool_choice": "required",
+    "parallel_tool_calls": false,
+    "reasoning": {
+      "effort": "low"
+    },
+    "text": {
+      "format": {
+        "type": "json_schema",
+        "name": "result",
+        "schema": {
+          "type": "object"
+        },
+        "strict": true
+      }
+    },
+    "tools": [
+      {
+        "type": "namespace",
+        "name": "tokenstation_tools",
+        "description": "Tools executed by the requesting local agent.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "read",
+            "description": "",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": false
+          }
+        ]
+      }
+    ]
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "codex_access_token"
+  }
+}

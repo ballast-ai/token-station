@@ -7,9 +7,9 @@
       "sha256": "86569809a50a4ee12c0c2f7c2c47ae9c929b7e7b9157db863af1e7744efd87e7"
     },
     "provider-chatgpt-plan-v2": {
-      "files": 14,
+      "files": 18,
       "fixtures": "fixtures",
-      "sha256": "0fdb2e15e6067a2a5c4dd9202d12c1215587d193db82aa8c708cfc3297d81f83",
+      "sha256": "4a6abf21ee87a307e593ae5c8d870192fe35396dbf02ab3139d6d5646ce0938d",
       "source": "repository"
     },
     "provider-openai-compatible-v2": {

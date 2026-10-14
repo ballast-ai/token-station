@@ -192,6 +192,7 @@ impl AuthConfig {
             + usize::from(self.env.is_some())
             + usize::from(self.file.is_some())
             + usize::from(self.chatgpt_account.is_some())
+            + usize::from(self.codex_account.is_some())
     }
 }
 
@@ -277,7 +278,8 @@ impl EgressConfig {
                 || auth.username.len() > 128
                 || auth.username.chars().any(char::is_control)
                 || auth.credential.source_count() != 1
-                || auth.credential.chatgpt_account.is_some())
+                || auth.credential.chatgpt_account.is_some()
+                || auth.credential.codex_account.is_some())
         {
             return Err(
                 "egress proxy auth requires a safe username and exactly one credential source"
@@ -654,6 +656,9 @@ pub struct UpstreamConfig {
     /// Absent for unauthenticated upstreams such as a local Ollama.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthConfig>,
+    /// Non-secret identity for the bound local Codex session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_identity: Option<CodexIdentity>,
     /// This upstream runs on the local machine (a local Ollama / LM Studio, say).
     /// The router honors `router.local_only` by keeping traffic on these; without
     /// it a request may not leave the box. Default false, so an ordinary cloud
@@ -751,6 +756,9 @@ pub struct AuthConfig {
     /// Reference to an isolated local `ChatGPT` registration. Never a token value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_account: Option<String>,
+    /// Reference to a local Codex session. Never a token value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_account: Option<String>,
 }
 /// Drops the per-upstream `south_component` setting a v1.2.4 file may carry.
 ///
@@ -1318,12 +1326,13 @@ impl ClientConfig {
                 let sources = auth.source_count();
                 if sources != 1 {
                     return Err(format!(
-                        "upstream `{name}` auth for slot `{}` must name exactly one source (store / env / file / chatgpt_account), found {sources}",
+                        "upstream `{name}` auth for slot `{}` must name exactly one source (store / env / file / chatgpt_account / codex_account), found {sources}",
                         auth.slot
                     ));
                 }
             }
             validate_chatgpt_reference(upstream)?;
+            validate_codex_reference(upstream)?;
             for capability in &upstream.models {
                 if capability.max_output_tokens > 0
                     && capability.context_window > 0
@@ -1381,6 +1390,81 @@ fn validate_api_dialect(name: &str, upstream: &UpstreamConfig) -> Result<(), Str
          {dialect} upstream must be `provider: {required_provider}`",
         upstream.provider
     ))
+}
+
+/// Whether a provider uses subscription allowance rather than API pricing.
+#[must_use]
+pub fn is_subscription_provider(provider: &str) -> bool {
+    matches!(provider, "chatgpt-plan" | "codex-plan")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexIdentity {
+    pub account_id: String,
+    pub client_version: String,
+}
+
+fn validate_codex_reference(upstream: &UpstreamConfig) -> Result<(), String> {
+    let auth = upstream.auth.as_ref();
+    let reference = auth.and_then(|a| a.codex_account.as_deref());
+    if upstream.provider != "codex-plan" {
+        if reference.is_some() || upstream.codex_identity.is_some() {
+            return Err("Codex session references require the Codex plan provider".into());
+        }
+        return Ok(());
+    }
+    let safe = |v: &str| {
+        !v.is_empty()
+            && v.len() <= 128
+            && v.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    };
+    let identity = upstream
+        .codex_identity
+        .as_ref()
+        .ok_or("Codex plan requires a bound account identity")?;
+    let version = &identity.client_version;
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let parts = core.split('.').collect::<Vec<_>>();
+    let valid_version = !version.is_empty()
+        && version.len() <= 64
+        && version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'+'))
+        && parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()));
+    if !safe(&identity.account_id) || !valid_version {
+        return Err("Codex plan identity metadata is invalid".into());
+    }
+    if let Some(reference) = reference {
+        if !safe(reference)
+            || reference.contains('.')
+            || upstream.base_url.as_str() != "https://chatgpt.com/backend-api/codex"
+            || auth.is_none_or(|a| a.slot != "codex_access_token")
+        {
+            return Err(
+                "Codex credentials require a valid reference and the fixed Codex endpoint".into(),
+            );
+        }
+    } else if !upstream.base_url.is_loopback()
+        || auth.is_none_or(|a| a.slot != "codex_access_token" || !a.store)
+        || !upstream.base_url.as_str().ends_with("/v1")
+            && !upstream.base_url.as_str().ends_with("/backend-api/codex")
+    {
+        return Err(
+            "Codex plan requires a local Codex reference or a loopback fixture store".into(),
+        );
+    }
+    if upstream.quota_plan.is_some()
+        || upstream.native_search.is_some()
+        || upstream.api_dialect != ApiDialect::Translated
+    {
+        return Err("Codex plan providers cannot use quota rotation or native passthrough".into());
+    }
+    Ok(())
 }
 
 fn validate_chatgpt_reference(upstream: &UpstreamConfig) -> Result<(), String> {

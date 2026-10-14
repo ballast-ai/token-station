@@ -15,13 +15,16 @@ Claude Code
 
 ### Web Search is a separate capability
 
-Chat Completions compatibility alone does not provide Claude Code's hosted WebSearch tool. Search follows the existing provider route. There is no separate search-provider setting.
+Chat Completions compatibility alone does not provide native hosted WebSearch. Token Station supports native search or Host-managed search through its search settings.
 
 An `anthropic-native` route passes hosted search through to the provider. A `responses-native` route translates Anthropic search into Responses `web_search`. The provider and model must implement that capability. Token Station does not infer search support from a model name or select another provider for search.
 
 The Responses bridge preserves allowed domains, location, search limits, sources, and declared client function calls. It rejects unsupported filters and content instead of silently removing requirements. It buffers the response before emitting Claude-compatible JSON or SSE. Previous hosted search results are replayed as readable context.
 
-If the selected route only provides Chat Completions, WebSearch returns an unsupported-route error. Ordinary chat remains available.
+In **Auto** mode, routes without native hosted search use the configured local search backend. **Local** mode explicitly selects Host-managed search.
+The model must support function tools. Configure a browser backend or Tavily in the search settings.
+Tavily search credits are separate from model usage. Native-only mode rejects routes without native hosted search.
+Managed search preserves supported domain constraints, call budgets, tool history, and retrieved evidence. It rejects unsupported constraints explicitly.
 
 A provider must meet these minimum requirements:
 

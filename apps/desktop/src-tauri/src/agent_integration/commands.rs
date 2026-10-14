@@ -1267,7 +1267,7 @@ impl AgentCommandState {
         perform_scan: impl FnOnce() -> Result<ScanSnapshot, AgentCommandError>,
     ) -> Result<Vec<AgentView>, AgentCommandError> {
         let _scan_guard = self.begin_scan()?;
-        let snapshot = self.with_claude_recovery_records(perform_scan()?);
+        let snapshot = self.with_managed_recovery_records(perform_scan()?);
         let views = self.views(&snapshot, runtime, opencode_issue)?;
         self.session
             .lock()
@@ -1319,12 +1319,12 @@ impl AgentCommandState {
     fn perform_scan(&self) -> Result<ScanSnapshot, AgentCommandError> {
         #[cfg(test)]
         if let Some(snapshot) = self.scan_override.lock().unwrap().clone() {
-            return Ok(self.with_claude_recovery_records(snapshot));
+            return Ok(self.with_managed_recovery_records(snapshot));
         }
         let catalog =
             CompatibilityCatalog::builtin(&self.registry).map_err(AgentCommandError::internal)?;
         let records = DiscoveryScanner::from_process(&self.registry).scan_registry(&self.registry);
-        Ok(self.with_claude_recovery_records(ScanSnapshot {
+        Ok(self.with_managed_recovery_records(ScanSnapshot {
             catalog,
             source: CatalogSource::Builtin,
             warning: None,
@@ -1335,18 +1335,20 @@ impl AgentCommandState {
     /// Keep the original ownership key reachable without claiming executable discovery.
     /// This only enriches the read-only scan; restoration still verifies the baseline,
     /// managed-value MACs and revision through the ordinary confirmed transaction.
-    fn with_claude_recovery_records(&self, mut snapshot: ScanSnapshot) -> ScanSnapshot {
-        let Ok(owned) = self.ownership.list_agent("claude-code") else {
-            // Existing discovery remains available when the private index is unreadable.
-            return snapshot;
-        };
+    fn with_managed_recovery_records(&self, mut snapshot: ScanSnapshot) -> ScanSnapshot {
+        let owned = ["claude-code", "deepseek-harness"]
+            .into_iter()
+            .filter_map(|agent| self.ownership.list_agent(agent).ok())
+            .flatten()
+            .collect::<Vec<_>>();
         for ownership in owned {
-            if ownership.connector_id != "claude-code-v1"
-                || snapshot.records.iter().any(|record| {
-                    record.agent_id == ownership.agent_id
-                        && record.canonical_path == ownership.installation_path
-                })
-            {
+            if !matches!(
+                ownership.connector_id.as_str(),
+                "claude-code-v1" | "deepseek-harness-v1"
+            ) || snapshot.records.iter().any(|record| {
+                record.agent_id == ownership.agent_id
+                    && record.canonical_path == ownership.installation_path
+            }) {
                 continue;
             }
             snapshot.records.push(DiscoveryRecord {
@@ -1373,7 +1375,7 @@ impl AgentCommandState {
                 conflict_group: None,
                 diagnostics: vec![Diagnostic {
                     reason_code: ReasonCode::ConnectionOwnershipActive,
-                    message: "The previous Claude Code installation is no longer discovered. Restore its pre-connection configuration before connecting the current installation.".to_string(),
+                    message: "The previous Agent installation is no longer discovered. Restore its pre-connection configuration before connecting the current installation.".to_string(),
                 }],
                 scanned_at_ms: self.clock.now_ms(),
             });
@@ -1765,6 +1767,19 @@ impl AgentCommandState {
             ));
         }
         let target = server_target(&record)?;
+        if agent_id == "deepseek-harness"
+            && self
+                .ownership
+                .list_agent(agent_id)
+                .map_err(AgentCommandError::internal)?
+                .iter()
+                .any(|owned| Path::new(&owned.target_config_path).parent() == target.parent())
+        {
+            return Err(AgentCommandError::boundary(
+                "configuration_owned_by_other_installation",
+                "DSH 配置目录仍有旧连接。请选择旧连接，恢复原始配置并断开，再接入当前版本。",
+            ));
+        }
         if agent_id == "claude-code"
             && self
                 .ownership
@@ -3173,7 +3188,7 @@ mod tests {
             ("gemini-cli-v1", DocumentFormat::Dotenv, ""),
             ("grok-build-v1", DocumentFormat::Toml, ""),
             ("kimi-code-v1", DocumentFormat::Toml, ""),
-            ("deepseek-harness-v1", DocumentFormat::Yaml, "{}\n"),
+            ("deepseek-harness-v1", DocumentFormat::CordisYaml, "[]\n"),
             ("hermes-v1", DocumentFormat::Yaml, "model:\n"),
             (
                 "openclaw-v1",
@@ -6795,18 +6810,156 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_harness_connects_from_stock_settings_without_a_credentials_file() {
+    fn deepseek_legacy_settings_snapshot_remains_disconnectable_after_path_change() {
+        use crate::agent_integration::ownership::{compute_owned_value_macs, OwnershipRecord};
+        use crate::agent_integration::plan::file_revision_hash;
+        use crate::agent_integration::snapshot::SnapshotRequest;
+        let root = scratch("dsh-legacy-recovery");
+        let state = state("dsh-legacy-recovery");
+        let target = root.join(".dsh/settings.yaml");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"keep: original\n").unwrap();
+        let baseline = read_config_source(&target).unwrap();
+        let before_hash = file_revision_hash(&target, &baseline).unwrap();
+        let snapshot = state
+            .snapshots
+            .create(SnapshotRequest {
+                operation_id: &"12".repeat(16),
+                agent_id: "deepseek-harness",
+                target_config_path: target.to_str().unwrap(),
+                before_hash: before_hash.clone(),
+                source: &baseline,
+                created_at_ms: 1,
+                connector_id: "deepseek-harness-v1",
+                app_version: "2.1.3",
+                pinned: true,
+            })
+            .unwrap()
+            .record;
+        std::fs::write(&target,b"keep: original\nagent-default-model: {provider: tokenstation, model: auto}\nllm-pi-ai:\n  providers:\n    tokenstation: {api: openai-completions}\n").unwrap();
+        let current = read_config_source(&target).unwrap();
+        let document =
+            parse_source_bytes(Some(&current.exact_bytes), DocumentFormat::Yaml, "legacy").unwrap();
+        let connector = connector_for("deepseek-harness-v1").unwrap();
+        let paths = connector.legacy_owned_paths();
+        let key = state.keys.load().unwrap();
+        state
+            .ownership
+            .commit(
+                OwnershipRecord {
+                    schema_version: 1,
+                    revision: 0,
+                    agent_id: "deepseek-harness".into(),
+                    installation_path: "/opt/dsh".into(),
+                    target_config_path: target.to_string_lossy().into_owned(),
+                    connector_id: connector.connector_id().into(),
+                    baseline_snapshot_id: snapshot.snapshot_id.clone(),
+                    last_transaction_snapshot_id: snapshot.snapshot_id,
+                    before_hash,
+                    managed_after_hash: file_revision_hash(&target, &current).unwrap(),
+                    owned_value_macs: compute_owned_value_macs(&document, &paths, &key).unwrap(),
+                    owned_paths: paths,
+                    companion_files: vec![],
+                    acquired_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+        let mut discovered = record(&target.with_file_name("cordis.patch.yml"), false);
+        discovered.agent_id = "deepseek-harness".into();
+        discovered.canonical_path = "/opt/dsh".into();
+        discovered.executable_path = "/opt/dsh".into();
+        discovered.version_normalized = Some("0.2.0-rc.2".into());
+        install_scan(
+            &state,
+            CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            vec![discovered],
+        );
+        assert!(state
+            .plan_connection(
+                "deepseek-harness",
+                "/opt/dsh",
+                Some("0.2.0-rc.2"),
+                "legacy",
+                &runtime("vk-fixture")
+            )
+            .is_err());
+        let mut moved = record(&target.with_file_name("cordis.patch.yml"), false);
+        moved.agent_id = "deepseek-harness".into();
+        moved.canonical_path = "/opt/dsh-upgraded".into();
+        moved.executable_path = "/opt/dsh-upgraded".into();
+        moved.version_normalized = Some("0.2.0-rc.2".into());
+        let snapshot = state.with_managed_recovery_records(ScanSnapshot {
+            catalog: CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            source: CatalogSource::Builtin,
+            warning: None,
+            records: vec![moved],
+        });
+        assert!(snapshot
+            .records
+            .iter()
+            .any(|r| r.canonical_path == "/opt/dsh" && !r.runnable));
+        install_scan(&state, snapshot.catalog, snapshot.records);
+        let denied = state
+            .plan_connection(
+                "deepseek-harness",
+                "/opt/dsh-upgraded",
+                Some("0.2.0-rc.2"),
+                "legacy-new",
+                &runtime("vk-fixture"),
+            )
+            .err()
+            .expect("the previous credentials owner must block connection");
+        assert_eq!(denied.code, "configuration_owned_by_other_installation");
+        let plan = state
+            .plan_disconnect("deepseek-harness", "/opt/dsh", "legacy")
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "legacy",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored = parse_source_bytes(
+            Some(&std::fs::read(&target).unwrap()),
+            DocumentFormat::Yaml,
+            "restored",
+        )
+        .unwrap();
+        let restored = semantic_json(&restored).unwrap();
+        assert_eq!(restored["keep"], "original");
+        for path in connector.legacy_owned_paths() {
+            assert!(
+                crate::agent_integration::config_codec::semantic_value_at(&restored, &path)
+                    .is_none()
+            );
+        }
+        assert!(state
+            .ownership
+            .list_agent("deepseek-harness")
+            .unwrap()
+            .is_empty());
+        assert!(!target.with_file_name("cordis.patch.yml").exists());
+        clean_lifecycle_case(&state, &root);
+    }
+
+    #[test]
+    fn deepseek_harness_connects_to_cordis_overlay_without_a_credentials_file() {
         let root = scratch("dsh-stock");
         let case = LifecycleCase {
             label: "deepseek-harness",
             agent_id: "deepseek-harness",
             connector_id: "deepseek-harness-v1",
-            version: "0.1.0-rc.6",
+            version: "0.2.0-rc.2",
             installation_path: root.join("install/dsh").to_string_lossy().into_owned(),
             primary: LifecycleFileFixture {
-                path: root.join("home/.dsh/settings.yaml"),
-                baseline: b"ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\n",
-                format: DocumentFormat::Yaml,
+                path: root.join("home/.dsh/cordis.patch.yml"),
+                baseline: b"# keep settings independent\n- id: ui-onboarding\n  config: {welcomeNoticeVersion: 2026-08-13.1}\n",
+                format: DocumentFormat::CordisYaml,
                 marker: "welcomeNoticeVersion",
             },
             companions: vec![LifecycleFileFixture {
@@ -6896,6 +7049,45 @@ mod tests {
             );
         }
 
+        // Concurrent unowned edits invalidate the exact preview before either file is written.
+        let mut changed = std::fs::read_to_string(&case.primary.path).unwrap();
+        changed.push_str("# concurrent user comment\n");
+        std::fs::write(&case.primary.path, &changed).unwrap();
+        assert!(state
+            .apply_from_cached_scan(
+                &disconnect.plan.operation_id,
+                &disconnect.confirmation_token,
+                "dsh-disconnect-review",
+                &[PlanIntent::Disconnect],
+                None
+            )
+            .is_err());
+        assert!(std::fs::read_to_string(&case.companions[0].path)
+            .unwrap()
+            .contains(fixture_runtime.virtual_key()));
+        let fresh = state
+            .plan_disconnect(case.agent_id, &case.installation_path, "dsh-fresh")
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &fresh.plan.operation_id,
+                &fresh.confirmation_token,
+                "dsh-fresh",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored = std::fs::read_to_string(&case.primary.path).unwrap();
+        assert!(restored.contains("# concurrent user comment"));
+        let restored = semantic_json(
+            &parse_rendered(&restored, DocumentFormat::CordisYaml, "restored").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored,
+            json!([{"id":"ui-onboarding","config":{"welcomeNoticeVersion":"2026-08-13.1"}}])
+        );
+        assert!(!case.companions[0].path.exists());
         clean_lifecycle_case(&state, &root);
     }
 

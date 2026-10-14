@@ -209,6 +209,10 @@ enum Source {
     Env(String),
     File(PathBuf),
     ChatGpt(String),
+    Codex {
+        reference: String,
+        account_id: String,
+    },
 }
 
 /// Resolves configured credential slots to their values at request time.
@@ -262,7 +266,13 @@ impl Drop for SecretStore {
     }
 }
 
-fn source_of(auth: &AuthConfig) -> Option<Source> {
+fn source_of(auth: &AuthConfig, identity: Option<&crate::config::CodexIdentity>) -> Option<Source> {
+    if let Some(reference) = &auth.codex_account {
+        return Some(Source::Codex {
+            reference: reference.clone(),
+            account_id: identity.map_or_else(String::new, |i| i.account_id.clone()),
+        });
+    }
     if let Some(account) = &auth.chatgpt_account {
         return Some(Source::ChatGpt(account.clone()));
     }
@@ -276,6 +286,18 @@ fn source_of(auth: &AuthConfig) -> Option<Source> {
             (None, None) => None,
         }
     }
+}
+
+fn resolve_codex_token(
+    root: &Path,
+    reference: &str,
+    expected_account: &str,
+) -> Result<String, String> {
+    let manager = crate::codex_accounts::AccountManager::new(root);
+    if expected_account.is_empty() || manager.account(reference)?.account_id != expected_account {
+        return Err("The Codex account identity changed. Reconnect the local session.".into());
+    }
+    manager.access_token(reference)
 }
 
 impl SecretStore {
@@ -306,6 +328,7 @@ impl SecretStore {
                 + usize::from(auth.env.is_some())
                 + usize::from(auth.file.is_some())
                 + usize::from(auth.chatgpt_account.is_some())
+                + usize::from(auth.codex_account.is_some())
                 != 1
             {
                 return Err("A snapshot credential must have exactly one source".to_owned());
@@ -344,13 +367,13 @@ impl SecretStore {
         let mut sources = BTreeMap::new();
         for (upstream, entry) in &config.upstreams {
             if let Some(auth) = &entry.auth
-                && let Some(source) = source_of(auth)
+                && let Some(source) = source_of(auth, entry.codex_identity.as_ref())
             {
                 sources.insert((upstream.clone(), auth.slot.clone()), source);
             }
         }
         if let Some(egress_auth) = &config.egress.auth
-            && let Some(source) = source_of(&egress_auth.credential)
+            && let Some(source) = source_of(&egress_auth.credential, None)
         {
             sources.insert(
                 (
@@ -377,7 +400,7 @@ impl SecretStore {
     pub fn from_egress_config(egress: &EgressConfig, data_dir: &Path) -> Self {
         let mut sources = BTreeMap::new();
         if let Some(egress_auth) = &egress.auth
-            && let Some(source) = source_of(&egress_auth.credential)
+            && let Some(source) = source_of(&egress_auth.credential, None)
         {
             sources.insert(
                 (
@@ -439,6 +462,9 @@ impl SecretStore {
                     path.display()
                 )
             }),
+            Source::Codex { reference, account_id } => {
+                resolve_codex_token(&self.data_dir, reference, account_id)
+            }
             Source::ChatGpt(account) => crate::chatgpt_accounts::AccountManager::new(&self.data_dir)
                 .access_token(account),
         }?;
@@ -465,6 +491,20 @@ impl SecretStore {
             return tokio::task::spawn_blocking(move || manager.access_token(&account))
                 .await
                 .map_err(|_| "ChatGPT credential worker failed".to_owned())?;
+        }
+        if let Some(Source::Codex {
+            reference,
+            account_id,
+        }) = self.sources.get(&(upstream.to_owned(), slot.to_owned()))
+        {
+            let root = self.data_dir.clone();
+            let reference = reference.clone();
+            let account_id = account_id.clone();
+            return tokio::task::spawn_blocking(move || {
+                resolve_codex_token(&root, &reference, &account_id)
+            })
+            .await
+            .map_err(|_| "Codex credential worker failed".to_owned())?;
         }
         self.resolve(upstream, slot)
     }

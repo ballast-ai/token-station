@@ -129,6 +129,22 @@ pub fn evaluate_discovery(
         }
     };
 
+    if descriptor.agent_id == "deepseek-harness"
+        && discovery
+            .version_normalized
+            .as_deref()
+            .and_then(|v| Version::parse(v).ok())
+            .is_none_or(|v| v < Version::parse("0.2.0-rc.2").expect("static minimum version"))
+    {
+        return decision(
+            CompatibilityStatus::DetectedBlocked,
+            ReasonCode::BlockedVersionMatch,
+            "DSH requires version 0.2.0-rc.2 or later. Upgrade DSH, then rescan.".into(),
+            None,
+            &[],
+        );
+    }
+
     if let Some(version) = discovery
         .version_normalized
         .as_deref()
@@ -335,7 +351,31 @@ mod tests {
         let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
 
         assert_eq!(catalog.entries.len(), registry.descriptors().len());
-        assert!(catalog.entries.iter().all(|entry| entry.blocked.is_empty()));
+        assert!(catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.agent_id != "deepseek-harness")
+            .all(|entry| entry.blocked.is_empty()));
+    }
+
+    #[test]
+    fn deepseek_requires_a_known_cordis_overlay_version() {
+        let registry = AgentRegistry::builtin().unwrap();
+        let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
+        let dsh = descriptor(&registry, "deepseek-harness");
+        for version in [None, Some("0.1.0-rc.6"), Some("0.2.0-rc.1")] {
+            assert_eq!(
+                evaluate_discovery(&catalog, dsh, &discovery("deepseek-harness", version)).status,
+                CompatibilityStatus::DetectedBlocked
+            );
+        }
+        for version in ["0.2.0-rc.2", "0.2.0", "0.3.0"] {
+            assert_eq!(
+                evaluate_discovery(&catalog, dsh, &discovery("deepseek-harness", Some(version)))
+                    .status,
+                CompatibilityStatus::DetectedVerified
+            );
+        }
     }
 
     #[test]

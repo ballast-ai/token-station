@@ -67,6 +67,30 @@ fn capability(detail: impl Into<String>) -> String {
     fail(&ErrorEnvelope::new(ErrorCode::Capability, 400, detail))
 }
 
+fn validate_response_format(body: &Value) -> Result<(), String> {
+    let has_format = |value: &Value| {
+        value.get("output_format").is_some()
+            || value
+                .get("output_config")
+                .is_some_and(|config| config.get("format").is_some())
+    };
+    if has_format(body)
+        || body
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages
+                    .iter()
+                    .any(|message| message["role"] == "system" && has_format(message))
+            })
+    {
+        return Err(capability(
+            "Anthropic structured response formats are not supported by this adapter",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_thinking(body: &Value) -> Result<(), String> {
     match body.get("thinking") {
         None | Some(Value::Null) => Ok(()),
@@ -818,6 +842,7 @@ impl Guest for AnthropicClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
+        validate_response_format(body)?;
         validate_thinking(body)?;
         validate_tool_choice(body)?;
         let model = body
@@ -1206,6 +1231,40 @@ mod tests {
     use token_station_protocol::{ErrorCode, ErrorEnvelope, Usage};
 
     #[test]
+    fn structured_response_constraints_are_rejected_without_affecting_effort_or_tools() {
+        let normalize = |body: Value| {
+            AnthropicClient::normalize_inbound(
+                json!({
+                    "protocol":"anthropic-messages","principal":{"subject":"fixture"},
+                    "headers":{"names":[],"values":{}},"body":body
+                })
+                .to_string(),
+            )
+        };
+        let base = json!({"model":"fixture","max_tokens":100,"messages":[{"role":"user","content":"test"}],"tools":[{"name":"read","input_schema":{"type":"object"}}]});
+        for legacy in [false, true] {
+            let mut body = base.clone();
+            let format = json!({"type":"json_schema","schema":{"type":"object"}});
+            if legacy {
+                body["output_format"] = format;
+            } else {
+                body["output_config"] = json!({"effort":"low","format":format});
+            }
+            let error: ErrorEnvelope = serde_json::from_str(&normalize(body).unwrap_err()).unwrap();
+            assert_eq!(error.code, ErrorCode::Capability);
+            assert_eq!(error.http_status, 400);
+        }
+        let mut body = base.clone();
+        body["messages"].as_array_mut().unwrap().push(json!({"role":"system","content":[],"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}));
+        assert!(normalize(body).is_err());
+        let mut body = base;
+        body["output_config"] = json!({"effort":"low"});
+        let request: super::ChatRequest = serde_json::from_str(&normalize(body).unwrap()).unwrap();
+        assert_eq!(request.extensions["reasoning_effort"], "low");
+        assert_eq!(request.tools[0].parameters, json!({"type":"object"}));
+    }
+
+    #[test]
     fn empty_system_configuration_entries_preserve_effort_without_empty_prompt_text() {
         let body = json!({
             "system": [{"type":"text","text":"Keep these instructions."}],
@@ -1287,6 +1346,25 @@ mod tests {
         assert_eq!(rendered["usage"]["input_tokens"], json!(30));
         assert_eq!(rendered["usage"]["cache_read_input_tokens"], json!(100));
         assert_eq!(rendered["usage"]["cache_creation_input_tokens"], json!(20));
+    }
+
+    #[test]
+    fn buffered_stop_sequence_preserves_the_matched_value() {
+        for sequence in [Some("_STOP_"), None] {
+            let response = json!({"id":"fixture","model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"prefix"},"finish_reason":if sequence.is_some(){"stop_sequence"}else{"stop"},"stop_sequence":sequence}],"usage":{"input_tokens":1,"output_tokens":1}});
+            let rendered =
+                AnthropicClient::render_response(response.to_string(), "{}".into()).unwrap();
+            let rendered: Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(rendered["stop_sequence"], json!(sequence));
+            assert_eq!(
+                rendered["stop_reason"],
+                if sequence.is_some() {
+                    "stop_sequence"
+                } else {
+                    "end_turn"
+                }
+            );
+        }
     }
 
     #[test]

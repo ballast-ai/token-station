@@ -3,7 +3,8 @@
   "version": "2.1.0",
   "api_version": "provider-adapter-v2",
   "providers": [
-    "chatgpt-plan"
+    "chatgpt-plan",
+    "codex-plan"
   ],
   "capabilities": [
     "chat",
@@ -18,7 +19,8 @@
     "network": false,
     "filesystem": false,
     "secrets": [
-      "chatgpt_access_token"
+      "chatgpt_access_token",
+      "codex_access_token"
     ]
   },
   "conformance": {

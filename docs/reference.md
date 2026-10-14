@@ -18,6 +18,11 @@ Do not use Quota first when the workload must stay on the device. That path does
 
 ## Providers
 
+The Models page offers **Local Codex login** and **ChatGPT plan** as separate experimental subscription connections.
+Local Codex reuses an existing file-backed login without browser authorization. The separate ChatGPT login remains available.
+Both use subscription accounting, exclude quota rotation, and stop instead of falling back to paid APIs.
+See [subscription setup and verification](guides/chatgpt-plan.md).
+
 Start from 40+ editable official, managed, and local presets, or add a custom OpenAI-compatible endpoint. The app can discover and compare models, record capabilities and limits, and run model-level health checks.
 
 Before a selected free or trial entry is added, a real completion validates reachability and protocol behavior. That check does not prove later requests stay free. Offer availability and billing stay under provider control.
@@ -86,7 +91,9 @@ Claude Desktop does not currently have a public product repository. Its link ope
 
 DeepSeek Harness discovery covers both a normal `dsh` command and the bounded npm cache layout created by `npx @deepseek-ai/dsh web`. Token Station reads existing cache entries only. It never runs `npx` or installs the package during a scan.
 
-Grok Build uses `~/.grok/config.toml`, or `$GROK_HOME/config.toml` when `GROK_HOME` is set. Kimi Code uses `~/.kimi-code/config.toml`, or `$KIMI_CODE_HOME/config.toml` when `KIMI_CODE_HOME` is set. DeepSeek Harness uses `~/.dsh/settings.yaml` and `~/.dsh/.credentials.yaml`. When `DSH_HOME` is set, both files use that directory. All three connectors route OpenAI Chat Completions through the built-in `agent-openai` ingress.
+Grok Build uses `~/.grok/config.toml`, or `$GROK_HOME/config.toml` when `GROK_HOME` is set. Kimi Code uses `~/.kimi-code/config.toml`, or `$KIMI_CODE_HOME/config.toml` when `KIMI_CODE_HOME` is set. DeepSeek Harness uses `~/.dsh/cordis.patch.yml` and `~/.dsh/.credentials.yaml`. When `DSH_HOME` is set, both files use that directory. All three connectors route OpenAI Chat Completions through the built-in `agent-openai` ingress.
+
+DeepSeek Harness requires an identified version of `0.2.0-rc.2` or later. The connector edits Cordis rows by stable `id` and preserves other plugins and providers. Use a YAML block array or a JSON array. Commented YAML flow arrays fail before write. The credentials file uses mode `0600`. Restart DSH after connection or restoration. Disconnect existing `settings.yaml` ownership before reconnecting. Existing snapshots remain recoverable.
 
 For the eleven built-in connectors, clicking **Connect** is consent to apply a bounded plan immediately. Token Station starts the gateway when needed and shows the fields changed by the first connection. Connector availability depends on the agent and operating system. It does not imply that Token Station publishes an installer for that platform.
 

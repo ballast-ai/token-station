@@ -414,15 +414,15 @@
           "env_override": {
             "name": "DSH_HOME",
             "value_kind": "directory",
-            "suffix": "settings.yaml"
+            "suffix": "cordis.patch.yml"
           },
           "platform_defaults": {
-            "macos": ["${HOME}/.dsh/settings.yaml"],
-            "linux": ["${HOME}/.dsh/settings.yaml"],
-            "windows": ["${USERPROFILE}/.dsh/settings.yaml"],
-            "wsl": ["${HOME}/.dsh/settings.yaml"]
+            "macos": ["${HOME}/.dsh/cordis.patch.yml"],
+            "linux": ["${HOME}/.dsh/cordis.patch.yml"],
+            "windows": ["${USERPROFILE}/.dsh/cordis.patch.yml"],
+            "wsl": ["${HOME}/.dsh/cordis.patch.yml"]
           },
-          "format": "yaml"
+          "format": "cordis_yaml"
         }
       ],
       "protocol_binding": {

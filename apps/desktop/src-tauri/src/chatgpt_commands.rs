@@ -89,7 +89,7 @@ fn upstream_document(account_id: &str, models: &[PlanModel]) -> Result<Value, St
             "model": id, "tool": true, "tool_state": "declared",
             "vision": model.supports_images == Some(true),
             "vision_state": match model.supports_images {Some(true)=>"declared",Some(false)=>"unsupported",None=>"unknown"},
-            "json_schema": false, "json_schema_state": "unsupported",
+            "json_schema": true, "json_schema_state": "declared",
             "context_window": model.context_window.and_then(|value| u32::try_from(value).ok()).unwrap_or(0),
         })
     }).collect::<Vec<_>>();
@@ -171,6 +171,8 @@ mod tests {
         );
         assert_eq!(document["models"][0]["context_window"], 0);
         assert_eq!(document["models"][0]["vision_state"], "unknown");
+        assert_eq!(document["models"][0]["json_schema"], true);
+        assert_eq!(document["models"][0]["json_schema_state"], "declared");
         assert!(document.get("quota_plan").is_none());
         assert!(document["models"][0].get("catalog_cost").is_none());
     }

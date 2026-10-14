@@ -879,7 +879,7 @@ fn responses_tool_search_round_trips() {
 }
 
 #[test]
-fn chat_completions_structured_output_is_rejected_by_the_real_wasm() {
+fn chat_completions_structured_output_is_preserved_by_the_real_wasm() {
     let plugin = AgentPlugin::load(&runtime(), agent_package()).expect("loads clean");
     let request = |format: serde_json::Value| {
         envelope(
@@ -895,12 +895,25 @@ fn chat_completions_structured_output_is_rejected_by_the_real_wasm() {
     let plain = plugin
         .normalize_inbound(&request(serde_json::json!({"type": "text"})))
         .expect("plain text remains supported");
-    assert_eq!(plain.response_format, None);
+    assert_eq!(plain.response_format, Some(ResponseFormat::Text));
 
     for format in [
-        serde_json::json!({"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}),
-        serde_json::json!({"type": "json_object"}),
+        serde_json::json!({"type":"json_schema","json_schema":{"name":"session_title","description":"Session title","strict":true,"schema":{"type":"object","properties":{"title":{"type":"string","maxLength":80}},"required":["title"],"additionalProperties":false}}}),
+        serde_json::json!({"type":"json_object"}),
+    ] {
+        let normalized = plugin
+            .normalize_inbound(&request(format.clone()))
+            .expect("Existing Canonical formats must be preserved");
+        assert_eq!(
+            serde_json::to_value(normalized.response_format).unwrap(),
+            format
+        );
+    }
+    for format in [
         serde_json::json!({"type": "future_structured_format"}),
+        serde_json::json!({"type":"text","unknown":true}),
+        serde_json::json!({"type":"json_object","json_schema":{}}),
+        serde_json::json!({"type":"json_schema","json_schema":{"name":"answer","schema":{},"unknown":true}}),
     ] {
         let error = plugin
             .normalize_inbound(&request(format))

@@ -39,6 +39,10 @@ impl NativeSearchTransport {
 
 /// Explicit declarations override verified official endpoint defaults.
 pub(crate) fn resolve(upstream: &UpstreamConfig) -> Option<NativeSearchTransport> {
+    // The plan interface shares the paid API origin, but not its hosted tools.
+    if crate::config::is_subscription_provider(&upstream.provider) {
+        return None;
+    }
     if let Some(profile) = &upstream.native_search {
         return Some(profile.clone());
     }
@@ -82,6 +86,13 @@ mod tests {
     fn upstream(base: &str) -> UpstreamConfig {
         serde_json::from_value(json!({"provider":"openai-compatible","base_url":base,"models":[]}))
             .unwrap()
+    }
+
+    #[test]
+    fn chatgpt_plan_does_not_inherit_paid_api_search_from_its_origin() {
+        let mut config = upstream("https://api.openai.com/v1");
+        config.provider = "chatgpt-plan".into();
+        assert!(resolve(&config).is_none());
     }
 
     #[test]

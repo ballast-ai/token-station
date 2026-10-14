@@ -117,6 +117,7 @@ dependencies = [
 name = "provider-anthropic-v2"
 version = "1.0.1"
 dependencies = [
+ "serde_json",
  "south-component-conformance",
  "south-provider-api",
  "wit-bindgen",

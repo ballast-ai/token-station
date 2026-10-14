@@ -755,8 +755,11 @@ impl Gateway {
                             );
                         }
                     };
-                    let events =
+                    let mut events =
                         canonical_provider_events(upstream.config.provider.as_str(), events);
+                    for event in &mut events {
+                        ctx.restore_tool_event(event);
+                    }
                     for event in &events {
                         if let StreamEvent::Usage { usage } = event {
                             absorb_record_usage(record, *usage);
@@ -914,7 +917,11 @@ impl Gateway {
                         );
                     }
                 };
-                let events = canonical_provider_events(upstream.config.provider.as_str(), events);
+                let mut events =
+                    canonical_provider_events(upstream.config.provider.as_str(), events);
+                for event in &mut events {
+                    ctx.restore_tool_event(event);
+                }
                 for event in &events {
                     if let StreamEvent::Usage { usage } = event {
                         absorb_record_usage(record, *usage);

@@ -117,7 +117,9 @@ pub(crate) fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Pa
     if let Some(upstreams) = draft["upstreams"].as_object_mut() {
         for upstream in upstreams.values_mut() {
             if upstream["access_tier"].as_str() == Some("free")
-                || upstream["provider"].as_str() == Some("chatgpt-plan")
+                || token_station_cli::config::is_subscription_provider(
+                    upstream["provider"].as_str().unwrap_or_default(),
+                )
             {
                 continue;
             }
@@ -770,7 +772,9 @@ impl AppInner {
                     catalog_revision,
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
-                    credential_source: if up["auth"]["chatgpt_account"].is_string() {
+                    credential_source: if up["auth"]["codex_account"].is_string() {
+                        "codex_account"
+                    } else if up["auth"]["chatgpt_account"].is_string() {
                         "chatgpt_account"
                     } else if up["auth"]["store"].as_bool() == Some(true) {
                         "store"
@@ -786,6 +790,7 @@ impl AppInner {
                         .as_str()
                         .or_else(|| up["auth"]["file"].as_str())
                         .or_else(|| up["auth"]["chatgpt_account"].as_str())
+                        .or_else(|| up["auth"]["codex_account"].as_str())
                         .unwrap_or_default()
                         .to_owned(),
                     provider_call: up

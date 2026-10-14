@@ -42,8 +42,8 @@ If you stop the Gateway, capability application does not start it again.
 
 | Agent | Requirement or limit |
 | --- | --- |
-| Claude Code | Native WebSearch requires a compatible search route. A translated model route alone does not supply search. |
-| Claude Desktop | The native search route must support WebSearch. Webpage access also depends on the App's egress allowlist. |
+| Claude Code | WebSearch uses a supported native route or Host-managed search. For ChatGPT plan routes, enable search with Auto or Local mode and configure a backend. WebFetch runs in the client. |
+| Claude Desktop | Search requires a compatible route or Host-managed search. Webpage access also depends on the App's egress allowlist. GUI acceptance is separate from Claude Code. |
 | Codex | Token Station keeps hosted search disabled for dynamic translated routes. See [native Responses configuration](reference.md). |
 | Gemini CLI | The conversion adapter accepts function tools. Google Search and URL Context hosted tools are unsupported. Use a separate search MCP. |
 | Grok Build | Tool availability depends on the backend and session. Use a search-capable backend or a search MCP. |
@@ -86,7 +86,11 @@ Do not treat an HTTP 200 response or a CLI exit code of zero as proof of success
 Check the native tool result and final task output.
 
 Gemini CLI can send function parameters in `parametersJsonSchema` instead of legacy `parameters`.
-Token Station preserves either schema. It rejects declarations that combine them or provide a non-object schema.
+Token Station preserves JSON Schema and converts supported legacy Gemini schema constraints to JSON Schema.
+Unsupported legacy constraints fail explicitly. Declarations cannot combine both schema fields or provide a non-object schema.
+Function call IDs and function selection constraints survive translation and history replay.
 Malformed model-generated arguments remain errors. The gateway does not guess executable parameters.
 
 See the [Gemini FunctionDeclaration reference](https://ai.google.dev/api/generate-content#FunctionDeclaration) for the schema contract.
+
+For measured ChatGPT plan tool-loop results and remaining limits, see [ChatGPT plan verification](guides/chatgpt-plan.md#agent-acceptance-matrix).

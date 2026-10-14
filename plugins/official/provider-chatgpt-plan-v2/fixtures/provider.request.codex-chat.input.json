@@ -1,0 +1,36 @@
+{
+  "provider_config": {
+    "provider": "codex-plan",
+    "base_url": "https://chatgpt.com/backend-api/codex",
+    "auth": "codex_access_token",
+    "models": [
+      {
+        "model": "plan-model",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 200000
+      }
+    ],
+    "codex_account_id": "account-fixture-123",
+    "codex_client_version": "0.162.0"
+  },
+  "chat_request": {
+    "model": "plan-model",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Follow the user."
+      },
+      {
+        "role": "user",
+        "content": "hello"
+      }
+    ],
+    "sampling": {
+      "max_output_tokens": 256,
+      "temperature": 0.2
+    },
+    "stream": false
+  }
+}

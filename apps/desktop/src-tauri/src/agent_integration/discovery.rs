@@ -2091,8 +2091,13 @@ fn config_shape(candidate: &ResolvedConfigCandidate) -> Result<String, ReasonCod
                 toml::from_str(text).map_err(|_| ReasonCode::ConfigParseFailed)?;
             Ok(format!("toml:{}", toml_shape(&value)))
         }
-        ConfigFormat::Yaml => {
-            let document = parse_rendered(text, DocumentFormat::Yaml, "YAML discovery")
+        ConfigFormat::Yaml | ConfigFormat::CordisYaml => {
+            let format = if candidate.format == ConfigFormat::CordisYaml {
+                DocumentFormat::CordisYaml
+            } else {
+                DocumentFormat::Yaml
+            };
+            let document = parse_rendered(text, format, "YAML discovery")
                 .map_err(|_| ReasonCode::ConfigParseFailed)?;
             let value = semantic_json(&document).map_err(|_| ReasonCode::ConfigParseFailed)?;
             Ok(format!("yaml:{}", json_shape(&value)))

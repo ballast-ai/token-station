@@ -1220,7 +1220,15 @@ fn validate_management_binding(
     if discovery.conflict_group.is_some() {
         return Err("检测到多个安装实例，必须先选择精确实例".to_string());
     }
-    if !discovery.config_candidates.is_empty()
+    let legacy_dsh_target = connector.agent_id() == "deepseek-harness"
+        && target_path
+            .file_name()
+            .is_some_and(|name| name == "settings.yaml")
+        && discovery.config_candidates.iter().any(|candidate| {
+            Path::new(candidate) == target_path.with_file_name("cordis.patch.yml")
+        });
+    if !legacy_dsh_target
+        && !discovery.config_candidates.is_empty()
         && !discovery
             .config_candidates
             .iter()
@@ -1528,6 +1536,7 @@ fn format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Json5 => "json5",
         DocumentFormat::Toml => "toml",
         DocumentFormat::Yaml => "yaml",
+        DocumentFormat::CordisYaml => "cordis_yaml",
         DocumentFormat::Dotenv => "dotenv",
     }
 }

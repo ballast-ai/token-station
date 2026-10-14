@@ -159,6 +159,7 @@ fn document_format_name(format: super::config_codec::DocumentFormat) -> &'static
         super::config_codec::DocumentFormat::Json5 => "json5",
         super::config_codec::DocumentFormat::Toml => "toml",
         super::config_codec::DocumentFormat::Yaml => "yaml",
+        super::config_codec::DocumentFormat::CordisYaml => "cordis_yaml",
         super::config_codec::DocumentFormat::Dotenv => "dotenv",
     }
 }
@@ -221,7 +222,7 @@ fn validate_descriptor(descriptor: &AgentDescriptor) -> Result<(), String> {
         let required = match format {
             ConfigFormat::Json | ConfigFormat::Jsonc | ConfigFormat::Json5 => "json-shape-v1",
             ConfigFormat::Toml => "toml-shape-v1",
-            ConfigFormat::Yaml => "yaml-shape-v1",
+            ConfigFormat::Yaml | ConfigFormat::CordisYaml => "yaml-shape-v1",
             ConfigFormat::Dotenv => "dotenv-shape-v1",
         };
         if !descriptor

@@ -28,6 +28,8 @@ mod jev_routing;
 #[cfg(test)]
 mod jev_tests;
 mod local_search;
+#[cfg(test)]
+mod plan_search_tests;
 mod plan_stops;
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
@@ -39,6 +41,7 @@ mod search_policy_tests;
 mod search_stream;
 #[cfg(test)]
 mod semantic_tests;
+mod tool_names;
 mod web_search;
 
 #[allow(clippy::wildcard_imports)]
@@ -170,6 +173,7 @@ const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
 const CONTINUATION_KEY_EXTENSION: &str = "token_station_private_continuation_key";
 const CONTINUATION_SCOPE_EXTENSION: &str = "token_station_continuation_scope";
 const TOOL_NAMESPACES_EXTENSION: &str = "responses_tool_namespaces";
+const RESPONSE_TOOLS_EXTENSION: &str = "token_station_private_response_tools";
 const NO_ATTEMPT_FALLBACK_EXTENSION: &str = "token_station_private_no_attempt_fallback";
 
 fn upstream_body_limit(ctx: &RequestContext) -> u64 {
@@ -1272,6 +1276,15 @@ fn assemble_upstreams(
         let mut provider_config =
             ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
         provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
+        if let Some(identity) = &entry.codex_identity {
+            provider_config
+                .extensions
+                .insert("codex_account_id".into(), json!(identity.account_id));
+            provider_config.extensions.insert(
+                "codex_client_version".into(),
+                json!(identity.client_version),
+            );
+        }
         provider_config.models = entry
             .models
             .iter()
@@ -1288,7 +1301,7 @@ fn assemble_upstreams(
             .map(|capability| {
                 let mut capability =
                     restore_configured_capability_evidence(capability, &entry.models);
-                if entry.provider == "chatgpt-plan" {
+                if crate::config::is_subscription_provider(&entry.provider) {
                     capability
                         .extensions
                         .insert("subscription_billing".to_owned(), json!(true));
@@ -3246,7 +3259,9 @@ impl Gateway {
                         || self
                             .upstreams
                             .get(target.upstream.as_str())
-                            .is_none_or(|upstream| upstream.config.provider != "chatgpt-plan")
+                            .is_none_or(|upstream| {
+                                !crate::config::is_subscription_provider(&upstream.config.provider)
+                            })
                 })
                 .map(|(target, capability)| {
                     Candidate::new(
@@ -3858,7 +3873,7 @@ impl Gateway {
             extensions,
         };
 
-        let request = match agent.plugin.normalize_inbound(&envelope) {
+        let mut request = match agent.plugin.normalize_inbound(&envelope) {
             Ok(request) => {
                 record_conversion(
                     record,
@@ -3889,7 +3904,15 @@ impl Gateway {
         // namespace) that `normalize_inbound` flattened into plain functions.
         // The gateway only transports this blob; all Codex semantics live in the
         // agent plugin, which rebuilds its restore map from it at render time.
-        let inbound_tools = envelope.body.get("tools").cloned().unwrap_or(Value::Null);
+        // Newer Codex clients carry declarations in a developer input item.
+        // Only the Responses adapter can supply this validated private handoff.
+        let projected_tools = request.extensions.remove(RESPONSE_TOOLS_EXTENSION);
+        let inbound_tools = if agent.protocol == "openai-responses" {
+            projected_tools
+        } else {
+            None
+        }
+        .unwrap_or_else(|| envelope.body.get("tools").cloned().unwrap_or(Value::Null));
         Ok((request, hints, inbound_tools))
     }
 
@@ -4072,7 +4095,9 @@ impl Gateway {
         if self
             .upstreams
             .get(upstream.as_str())
-            .is_some_and(|upstream| upstream.config.provider == "chatgpt-plan")
+            .is_some_and(|upstream| {
+                crate::config::is_subscription_provider(&upstream.config.provider)
+            })
         {
             record.subscription_billing = true;
             record.cost_micros = None;

@@ -3,6 +3,9 @@
 //! Explicitly ignored `live_*` tests use the selected real subscription account.
 //! Every CLI runs with isolated configuration and receives only a local virtual key.
 
+#[path = "common/live_subscription.rs"]
+mod live_subscription;
+
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -50,6 +53,8 @@ fn stage_plugins(destination: &Path) {
         .unwrap();
     let packages = [
         ("agent-openai", "adapter.wasm"),
+        ("agent-openai-responses", "adapter.wasm"),
+        ("agent-gemini", "adapter.wasm"),
         ("agent-anthropic", "adapter.wasm"),
         ("provider-openai-compatible-v2", "component.wasm"),
         ("provider-chatgpt-plan-v2", "component.wasm"),
@@ -345,7 +350,7 @@ impl Harness {
         let receipts = Arc::new(CapturedRecords::default());
         let config: ClientConfig = serde_json::from_value(json!({
             "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":data,"metrics":false},
-            "plugins":{"dir":plugin_dir,"agents":["agent-openai","agent-anthropic"],"providers":{"chatgpt-plan":"provider-chatgpt-plan-v2","openai-compatible":"provider-openai-compatible-v2"}},
+            "plugins":{"dir":plugin_dir,"agents":["agent-openai","agent-openai-responses","agent-anthropic","agent-gemini"],"providers":{"chatgpt-plan":"provider-chatgpt-plan-v2","openai-compatible":"provider-openai-compatible-v2"}},
             "upstreams":{"plan":{"provider":"chatgpt-plan","base_url":fake.url,"auth":{"slot":"chatgpt_access_token","store":true},"models":[{"model":"gpt-5.5","tool":true,"tool_state":"verified","context_window":200_000}]},"paid":{"provider":"openai-compatible","base_url":paid_url,"models":[{"model":"gpt-5.5","tool":true,"tool_state":"verified","context_window":200_000}]}},
             "pricing":{"version":1,"models":{"plan/gpt-5.5":{"input_per_mtok":5_000_000,"output_per_mtok":30_000_000,"cache_read_per_mtok":0,"cache_write_per_mtok":0}}},
             "router":{"version":1,"pools":{"main":[{"upstream":"plan","model":"gpt-5.5"},{"upstream":"paid","model":"gpt-5.5"}]},"default_pool":"main"}
@@ -735,6 +740,89 @@ fn installed_opencode_executes_two_tools() {
     );
 }
 
+fn live_tool_shape(tool: &Value) -> Value {
+    json!({"type":tool["type"],"name":tool["name"],"keys":tool.as_object().map(|object| object.keys().collect::<Vec<_>>()),"parameter_keys":tool["parameters"].as_object().map(|object| object.keys().collect::<Vec<_>>()),"property_keys":tool["parameters"]["properties"].as_object().map(|object| object.keys().collect::<Vec<_>>()),"nested_tools":tool["tools"].as_array().map(|tools| tools.iter().map(live_tool_shape).collect::<Vec<_>>())})
+}
+
+fn live_failure_metadata(harness: &LiveHarness) {
+    let Ok(entries) = std::fs::read_dir(harness.scratch.0.join("request-bodies")) else {
+        return;
+    };
+    for entry in entries {
+        let exchange: token_station_cli::bodylog::PlaintextExchange =
+            serde_json::from_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap()).unwrap();
+        if let Some(request) = &exchange.http_trace.agent_request {
+            let body: Value = serde_json::from_str(&request.body).unwrap();
+            let fields: Vec<_> = body
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(key, _)| key)
+                .collect();
+            let tool_types: Vec<_> = body["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|tool| tool["type"].as_str().unwrap_or("function"))
+                .collect();
+            eprintln!("live failed request: fields={fields:?} tool_types={tool_types:?}");
+            let input_items: Vec<_> = body["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|item| {
+                    (
+                        item["type"].as_str(),
+                        item["role"].as_str(),
+                        item.as_object()
+                            .map(|object| object.keys().collect::<Vec<_>>()),
+                    )
+                })
+                .collect();
+            eprintln!("live failed input structure: {input_items:?}");
+            for (index, item) in body["input"].as_array().into_iter().flatten().enumerate() {
+                if item["type"] == "additional_tools" {
+                    let tools: Vec<_> = item["tools"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(live_tool_shape)
+                        .collect();
+                    eprintln!(
+                        "live embedded tool structure: input_index={index} tools={}",
+                        json!(tools)
+                    );
+                }
+            }
+        }
+        if let Some(response) = exchange
+            .http_trace
+            .agent_response
+            .filter(|response| response.status >= 400)
+        {
+            let body: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+            let error = body["error"]["message"]
+                .as_str()
+                .or_else(|| body["detail"].as_str())
+                .unwrap_or("no_json_error");
+            if !["Bearer", "sk-", "eyJ", "access_token", "refresh_token"]
+                .iter()
+                .any(|marker| error.contains(marker))
+            {
+                eprintln!(
+                    "live failed response: status={} message={}",
+                    response.status,
+                    error
+                        .replace(&harness.virtual_key, "[redacted]")
+                        .chars()
+                        .take(600)
+                        .collect::<String>()
+                );
+            }
+        }
+    }
+}
+
 /// Explicit live acceptance. The account reference reaches only the Host.
 /// The CLI receives a new local virtual key, never an OAuth credential.
 struct LiveHarness {
@@ -758,7 +846,11 @@ impl LiveHarness {
                 .unwrap_or_else(|_| panic!("Explicit live acceptance requires {name}"))
         };
         let data = PathBuf::from(required("TOKEN_STATION_CHATGPT_LIVE_DATA_DIR"));
-        let account = required("TOKEN_STATION_CHATGPT_LIVE_ACCOUNT_ID");
+        let account = if live_subscription::use_codex() {
+            String::new()
+        } else {
+            required("TOKEN_STATION_CHATGPT_LIVE_ACCOUNT_ID")
+        };
         let model = required("TOKEN_STATION_CHATGPT_LIVE_MODEL");
         assert!(
             data.is_dir(),
@@ -776,12 +868,12 @@ impl LiveHarness {
         std::fs::write(scratch.0.join("marker.txt"), &marker).unwrap();
         let plugin_dir = scratch.0.join("plugins");
         stage_plugins(&plugin_dir);
-        let config: ClientConfig = serde_json::from_value(json!({
+        let config: ClientConfig = serde_json::from_value(live_subscription::configure(json!({
             "version":1,"server":{"listen":"127.0.0.1:0"},"data":{"dir":data,"metrics":false},
-            "plugins":{"dir":plugin_dir,"agents":["agent-openai","agent-anthropic"],"providers":{"chatgpt-plan":"provider-chatgpt-plan-v2"}},
+            "plugins":{"dir":plugin_dir,"agents":["agent-openai","agent-openai-responses","agent-anthropic","agent-gemini"],"providers":{"chatgpt-plan":"provider-chatgpt-plan-v2"}},
             "upstreams":{"live_plan":{"provider":"chatgpt-plan","base_url":"https://api.openai.com/v1","auth":{"slot":"chatgpt_access_token","chatgpt_account":account},"models":[{"model":model,"tool":true,"tool_state":"declared","context_window":200_000}]}},
             "router":{"version":1,"pools":{"main":[{"upstream":"live_plan","model":model}]},"default_pool":"main"}
-        })).unwrap();
+        }), "live_plan", Path::new(&data))).unwrap();
         config.validate().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -851,6 +943,16 @@ impl LiveHarness {
             }
             std::thread::sleep(Duration::from_millis(50));
         };
+        if self
+            .receipts
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|receipt| receipt.status >= 400)
+        {
+            live_failure_metadata(self);
+        }
         // Failure diagnostics are closed metadata. Do not print upstream bodies
         // or a child environment during a live account test.
         let receipts = self.receipts.0.lock().unwrap();
@@ -1133,4 +1235,740 @@ fn live_claude_auto_mode_classifies_a_temporary_file_write() {
             .unwrap_or_default()
             .contains(&harness.marker)
     );
+}
+
+fn live_web_upstream_error(trace: &token_station_cli::bodylog::HttpTraceSnapshot) {
+    for exchange in &trace.upstream_exchanges {
+        let Some(response) = exchange
+            .response
+            .as_ref()
+            .filter(|response| response.status >= 400)
+        else {
+            continue;
+        };
+        let body: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+        let request: Value = serde_json::from_str(&exchange.request.body).unwrap_or(Value::Null);
+        let fields: Vec<_> = request
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(key, _)| key)
+            .collect();
+        let error = &body["error"];
+        let raw = error["message"].as_str().unwrap_or("no_json_error_message");
+        let safe = if ["Bearer", "sk-", "eyJ", "access_token", "refresh_token"]
+            .iter()
+            .any(|marker| raw.contains(marker))
+            || raw.split_whitespace().any(|word| word.len() > 80)
+        {
+            "redacted_error_message".to_owned()
+        } else {
+            raw.chars().take(400).collect()
+        };
+        eprintln!(
+            "web upstream error: status={} code={} type={} param={} message={safe} fields={fields:?} reasoning={} tool_choice={}",
+            response.status,
+            error["code"],
+            error["type"],
+            error["param"],
+            request["reasoning"],
+            request["tool_choice"]
+        );
+    }
+}
+
+fn live_web_trace_summary(harness: &LiveHarness) -> (usize, usize) {
+    let receipts = harness.receipts.0.lock().unwrap();
+    let mut classifiers = 0;
+    let mut auxiliary = 0;
+    for entry in std::fs::read_dir(harness.scratch.0.join("request-bodies")).unwrap() {
+        let exchange: token_station_cli::bodylog::PlaintextExchange =
+            serde_json::from_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap()).unwrap();
+        live_web_upstream_error(&exchange.http_trace);
+        let Some(request) = exchange.http_trace.agent_request else {
+            continue;
+        };
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        let stops = body["stop_sequences"].as_array();
+        let classifier = stops.is_some_and(|stops| {
+            stops
+                .iter()
+                .any(|stop| stop == "</block>" || stop == "</severity>")
+        });
+        let receipt = receipts
+            .iter()
+            .find(|receipt| receipt.request_id == exchange.request_id)
+            .unwrap();
+        if receipt.status >= 400 {
+            let fields: Vec<_> = body.as_object().unwrap().keys().collect();
+            let tool_fields: Vec<_> = body["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+                .map(|tool| tool.keys().collect::<Vec<_>>())
+                .collect();
+            let conversion: Vec<_> = receipt
+                .conversion_reports
+                .iter()
+                .map(|report| (report.stage, report.outcome, report.error_code))
+                .collect();
+            eprintln!(
+                "web failure: fields={fields:?} tool_fields={tool_fields:?} attempts={} conversions={conversion:?}",
+                receipt.attempts
+            );
+        }
+        if classifier {
+            classifiers += 1;
+        }
+        if !classifier && body["tools"].as_array().is_none_or(Vec::is_empty) {
+            auxiliary += 1;
+        }
+        let types: Vec<_> = body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["type"].as_str())
+            .collect();
+        // Print structure and status only. The temporary trace holds no real
+        // user conversation, and neither its prompt nor credentials are printed.
+        eprintln!(
+            "web request: stream={} classifier={} stop_count={} tools={} tool_types={types:?} status={} error={:?}",
+            body["stream"] == true,
+            classifier,
+            stops.map_or(0, Vec::len),
+            body["tools"].as_array().map_or(0, Vec::len),
+            receipt.status,
+            receipt.error_code
+        );
+    }
+    let searches: Vec<_> = receipts
+        .iter()
+        .flat_map(|receipt| receipt.browser_searches.iter())
+        .map(|search| (&search.backend, search.outcome))
+        .collect();
+    eprintln!(
+        "web acceptance: classifier_requests={classifiers} auxiliary_requests={auxiliary} searches={searches:?}"
+    );
+    (classifiers, auxiliary)
+}
+
+fn run_live_claude_web(harness: &LiveHarness, tool: &str, prompt: &str) -> Vec<Value> {
+    harness.run("claude", &[
+        "--safe-mode","--print","--permission-mode","auto","--permission-prompts","none",
+        "--system-prompt","Use the requested web tool exactly once. Ground the final answer in its actual result. Cite the retrieved public source URL. Do not inspect local files or perform unrelated searches.",
+        "--model","sonnet","--tools",tool,"--setting-sources","","--strict-mcp-config","--no-session-persistence","--output-format","stream-json","--verbose",prompt,
+    ], &[
+        ("ANTHROPIC_BASE_URL",harness.url.clone()),("ANTHROPIC_API_KEY",harness.virtual_key.clone()),("ANTHROPIC_AUTH_TOKEN",harness.virtual_key.clone()),
+        ("HOME",harness.scratch.0.display().to_string()),("CLAUDE_CONFIG_DIR",harness.scratch.0.join("claude").display().to_string()),("DISABLE_AUTOUPDATER","1".to_owned()),("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","1".to_owned()),
+    ])
+}
+
+fn live_web_tool_result<'a>(events: &'a [Value], name: &str) -> &'a Value {
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "assistant")
+        .filter_map(|event| event["message"]["content"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "tool_use")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "The live web task must invoke exactly one requested tool"
+    );
+    assert_eq!(calls[0]["name"], name);
+    let result = events
+        .iter()
+        .filter(|event| event["type"] == "user")
+        .filter_map(|event| event["message"]["content"].as_array())
+        .flatten()
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == calls[0]["id"])
+        .expect("A real web tool result must match the emitted call ID");
+    if result["is_error"] == true {
+        let error_text = result["content"].to_string();
+        if !["Bearer", "sk-", "eyJ", "access_token", "refresh_token"]
+            .iter()
+            .any(|marker| error_text.contains(marker))
+        {
+            eprintln!(
+                "web tool error detail: {}",
+                error_text.chars().take(600).collect::<String>()
+            );
+        }
+        let rendered = error_text.to_ascii_lowercase();
+        eprintln!(
+            "web tool error: http400={} http403={} classifier={} capability={} network={}",
+            rendered.contains("400"),
+            rendered.contains("403"),
+            rendered.contains("classif"),
+            rendered.contains("capability"),
+            rendered.contains("fetch") || rendered.contains("network")
+        );
+    }
+    result
+}
+
+fn live_web_final(events: &[Value]) -> &str {
+    let result = events
+        .iter()
+        .find(|event| event["type"] == "result")
+        .expect("Claude emits a final structured result");
+    assert_ne!(result["is_error"], true);
+    result["result"].as_str().expect("Final answer is text")
+}
+
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan and fetches example.com through Claude auto mode without allow rules."]
+fn live_claude_webfetch_completes_page_summary() {
+    let harness = LiveHarness::with_request_trace(true);
+    let events = run_live_claude_web(
+        &harness,
+        "WebFetch",
+        "Use WebFetch exactly once on https://example.com with the prompt: identify the page title and explain in one sentence what this domain is for. Return the title, that sentence, and the source URL. Do not use prior knowledge instead of the fetched result.",
+    );
+    let (classifiers, auxiliary) = live_web_trace_summary(&harness);
+    assert!(
+        classifiers > 0,
+        "Claude auto mode must perform a real safety-classifier request"
+    );
+    let result = live_web_tool_result(&events, "WebFetch");
+    assert_ne!(result["is_error"], true, "The actual web tool must succeed");
+    assert!(
+        result["content"]
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("example"),
+        "The actual fetched page result must concern the example domain"
+    );
+    assert!(
+        auxiliary > 0,
+        "WebFetch must exercise its page-summary model request"
+    );
+    let final_answer = live_web_final(&events).to_ascii_lowercase();
+    assert!(final_answer.contains("example domain"));
+    assert!(final_answer.contains("https://example.com"));
+}
+
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan and a real search query through Claude auto mode without allow rules."]
+fn live_claude_websearch_returns_retrieved_citations() {
+    let harness = LiveHarness::with_request_trace(true);
+    let events = run_live_claude_web(
+        &harness,
+        "WebSearch",
+        "Use WebSearch exactly once for: IANA reserved example domains example.com example.org documentation. Explain what these domains are reserved for and cite the actual IANA source URL returned by the search. Do not answer from prior knowledge or fetch another page.",
+    );
+    let (classifiers, _) = live_web_trace_summary(&harness);
+    assert!(
+        classifiers > 0,
+        "Claude auto mode must perform a real safety-classifier request"
+    );
+    let result = live_web_tool_result(&events, "WebSearch");
+    assert_ne!(result["is_error"], true, "The actual web tool must succeed");
+    let result_text = result["content"].to_string().to_ascii_lowercase();
+    assert!(
+        result_text.contains("iana.org") && result_text.contains("https://"),
+        "The actual search tool result must contain a retrieved IANA source URL"
+    );
+    let receipts = harness.receipts.0.lock().unwrap();
+    assert!(
+        receipts
+            .iter()
+            .flat_map(|receipt| &receipt.browser_searches)
+            .any(|search| search.outcome == token_station_metrics::BrowserSearchOutcome::Succeeded),
+        "The Host must record actual successful retrieval"
+    );
+    drop(receipts);
+    let final_answer = live_web_final(&events).to_ascii_lowercase();
+    assert!(final_answer.contains("iana.org") && final_answer.contains("https://"));
+    let grounded_citation = final_answer
+        .split([' ', '\n', '(', ')', '[', ']', '"'])
+        .map(|word| word.trim_end_matches(['.', ',', ';']))
+        .find(|url| {
+            (url.starts_with("https://www.iana.org/") || url.starts_with("https://iana.org/"))
+                && result_text.contains(url)
+        });
+    assert!(
+        grounded_citation.is_some(),
+        "At least one final IANA citation must match an actual retrieved source URL"
+    );
+    assert!(
+        final_answer.contains("documentation")
+            || final_answer.contains("illustrat")
+            || final_answer.contains("文档")
+    );
+}
+
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan and one public HTTPS missing-page fetch without allow rules."]
+fn live_claude_webfetch_reports_a_missing_page() {
+    let harness = LiveHarness::with_request_trace(true);
+    let url = format!(
+        "https://example.com/token-station-missing-page-{}",
+        std::process::id()
+    );
+    let prompt = format!(
+        "Use WebFetch exactly once on {url} with the prompt: identify the page title. If fetching fails, report that failure and the returned HTTP status. Do not retry, use another tool, or pretend that page content was retrieved."
+    );
+    let events = run_live_claude_web(&harness, "WebFetch", &prompt);
+    let (classifiers, _) = live_web_trace_summary(&harness);
+    assert!(
+        classifiers > 0,
+        "Claude auto mode must perform a real safety-classifier request"
+    );
+    let result = live_web_tool_result(&events, "WebFetch");
+    let result_text = result["content"].to_string().to_ascii_lowercase();
+    eprintln!(
+        "missing-page result: error_flag={} http404={} failed={} denied={}",
+        result["is_error"] == true,
+        result_text.contains("404"),
+        result_text.contains("fail"),
+        result_text.contains("denied")
+    );
+    assert!(
+        result["content"].to_string().contains("404"),
+        "The actual tool result must confirm HTTP 404"
+    );
+    let final_answer = live_web_final(&events).to_ascii_lowercase();
+    assert!(final_answer.contains("404"));
+    assert!(
+        final_answer.contains("fail")
+            || final_answer.contains("not found")
+            || final_answer.contains("失败")
+    );
+}
+
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan and one public HTTPS fetch with isolated OpenCode defaults."]
+fn live_opencode_webfetch_returns_page_content() {
+    let harness = LiveHarness::with_request_trace(true);
+    let model_id = format!("tokenstation/{}", harness.model);
+    let denied = [
+        "bash",
+        "edit",
+        "write",
+        "read",
+        "glob",
+        "grep",
+        "list",
+        "task",
+        "question",
+        "todoread",
+        "todowrite",
+        "websearch",
+        "codesearch",
+        "skill",
+        "apply_patch",
+        "lsp",
+    ];
+    let permission: serde_json::Map<String, Value> = denied
+        .into_iter()
+        .map(|tool| (tool.to_owned(), json!("deny")))
+        .collect();
+    let config = json!({"model":model_id,"small_model":model_id,"enabled_providers":["tokenstation"],"permission":permission,"agent":{"title":{"disable":true}},"provider":{"tokenstation":{"npm":"@ai-sdk/openai-compatible","name":"live plan acceptance","options":{"baseURL":format!("{}/v1",harness.url),"apiKey":harness.virtual_key},"models":{harness.model.clone():{"name":harness.model,"limit":{"context":200_000,"output":2048}}}}}});
+    let mut env = vec![
+        ("OPENCODE_CONFIG_CONTENT", config.to_string()),
+        ("OPENCODE_AUTH_CONTENT", "{}".to_owned()),
+    ];
+    for key in [
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_TEST_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ] {
+        let dir = harness.scratch.0.join(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        env.push((key, dir.display().to_string()));
+    }
+    for key in [
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+        "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+        "OPENCODE_DISABLE_CLAUDE_CODE",
+        "OPENCODE_DISABLE_LSP_DOWNLOAD",
+        "OPENCODE_DISABLE_MODELS_FETCH",
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "OPENCODE_DISABLE_SHARE",
+    ] {
+        env.push((key, "1".to_owned()));
+    }
+    let events = harness.run("opencode", &["run", "--pure", "--format", "json", "--model", &model_id, "Use webfetch exactly once on https://example.com in text format. Report the actual page title and its purpose, and cite the source URL. Do not use any other tool or answer from prior knowledge."], &env);
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "tool_use")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "OpenCode must execute exactly one actual web tool"
+    );
+    let call = &calls[0]["part"];
+    assert_eq!(call["tool"], "webfetch");
+    assert_eq!(call["state"]["status"], "completed");
+    assert!(
+        call["state"]["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Example Domain")
+    );
+    let final_text = events
+        .iter()
+        .filter(|event| event["type"] == "text")
+        .filter_map(|event| event["part"]["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    assert!(final_text.contains("example domain") && final_text.contains("https://example.com"));
+    assert!(final_text.contains("documentation") || final_text.contains("illustrat"));
+}
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan and one isolated OpenCode Exa opt-in search without external credentials."]
+fn live_opencode_websearch_exa_opt_in_returns_sources() {
+    let harness = LiveHarness::with_request_trace(true);
+    let model_id = format!("tokenstation/{}", harness.model);
+    let denied = [
+        "bash",
+        "edit",
+        "write",
+        "read",
+        "glob",
+        "grep",
+        "list",
+        "task",
+        "question",
+        "todoread",
+        "todowrite",
+        "webfetch",
+        "codesearch",
+        "skill",
+        "apply_patch",
+        "lsp",
+    ];
+    let permission: serde_json::Map<String, Value> = denied
+        .into_iter()
+        .map(|tool| (tool.to_owned(), json!("deny")))
+        .collect();
+    let config = json!({"model":model_id,"small_model":model_id,"enabled_providers":["tokenstation"],"permission":permission,"agent":{"title":{"disable":true}},"provider":{"tokenstation":{"npm":"@ai-sdk/openai-compatible","name":"live plan acceptance","options":{"baseURL":format!("{}/v1",harness.url),"apiKey":harness.virtual_key},"models":{harness.model.clone():{"name":harness.model,"limit":{"context":200_000,"output":2048}}}}}});
+    let mut env = vec![
+        ("OPENCODE_CONFIG_CONTENT", config.to_string()),
+        ("OPENCODE_AUTH_CONTENT", "{}".to_owned()),
+        ("OPENCODE_ENABLE_EXA", "1".to_owned()),
+    ];
+    for key in [
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_TEST_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ] {
+        let dir = harness.scratch.0.join(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        env.push((key, dir.display().to_string()));
+    }
+    for key in [
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+        "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+        "OPENCODE_DISABLE_CLAUDE_CODE",
+        "OPENCODE_DISABLE_LSP_DOWNLOAD",
+        "OPENCODE_DISABLE_MODELS_FETCH",
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "OPENCODE_DISABLE_SHARE",
+    ] {
+        env.push((key, "1".to_owned()));
+    }
+    let events = harness.run("opencode", &["run", "--pure", "--format", "json", "--model", &model_id, "Use websearch exactly once for: IANA reserved example domains example.com example.org documentation. Use numResults 3 and type fast. Explain their purpose and cite the actual IANA source URL returned by search. Do not use other tools or answer from prior knowledge."], &env);
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "tool_use")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "OpenCode must execute exactly one actual web tool"
+    );
+    let call = &calls[0]["part"];
+    assert_eq!(call["tool"], "websearch");
+    assert_eq!(call["state"]["status"], "completed");
+    assert_eq!(call["state"]["metadata"]["provider"], "exa");
+    let actual_result = call["state"]["output"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(actual_result.contains("iana.org") && actual_result.contains("https://"));
+    let final_text = events
+        .iter()
+        .filter(|event| event["type"] == "text")
+        .filter_map(|event| event["part"]["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    assert!(
+        final_text
+            .split([' ', '\n', '(', ')', '[', ']', '"'])
+            .map(|word| word.trim_end_matches(['.', ',', ';']))
+            .any(|url| (url.starts_with("https://www.iana.org/")
+                || url.starts_with("https://iana.org/"))
+                && actual_result.contains(url)),
+        "A final IANA citation must match the actual Exa tool result"
+    );
+    assert!(
+        harness
+            .receipts
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|receipt| receipt.browser_searches.is_empty()),
+        "OpenCode Exa retrieval is independent of Host hosted search"
+    );
+    assert!(final_text.contains("documentation") || final_text.contains("illustrat"));
+}
+
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan with isolated installed Codex and a workspace-write sandbox."]
+fn live_codex_reads_edits_and_executes_in_a_scratch_workspace() {
+    let harness = LiveHarness::with_request_trace(true);
+    let home = harness.scratch.0.join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(harness.scratch.0.join("edited.txt"), "UNINITIALIZED\n").unwrap();
+    let provider = format!(
+        "model_providers.tokenstation={{name=\"Token Station acceptance\",base_url=\"{}/agents/codex/v1\",env_key=\"TOKEN_STATION_LOCAL_KEY\",wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}}",
+        harness.url
+    );
+    let events = harness.run("codex", &[
+        "--no-daemon", "-a", "on-request", "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "--json", "-s", "workspace-write", "-C", harness.scratch.0.to_str().unwrap(),
+        "-m", &harness.model, "-c", "model_provider=\"tokenstation\"", "-c", &provider, "-c", "web_search=\"disabled\"", "-c", "model_reasoning_effort=\"low\"",
+        "Perform these three tool steps in order and separately. First use a shell command to read marker.txt. Second use apply_patch to update edited.txt, which already contains UNINITIALIZED followed by a newline. Use one Update File operation with a replacement hunk. Do not combine Delete File and Add File for that path. Write the exact marker you read followed by ::EDITED and a newline. Third use a shell command to read edited.txt and confirm its actual content. If a local tool reports an error, correct it and retry before verification. Do not inspect any other user file, use the network, delegate, spawn agents, or ask for user input. Use only the functions exec tool and wait if needed. Finish with LIVE_CODEX_OK and the exact edited content. The random marker is available only in marker.txt.",
+    ], &[
+        ("HOME",home.display().to_string()), ("CODEX_HOME",home.display().to_string()), ("TOKEN_STATION_LOCAL_KEY",harness.virtual_key.clone()),
+    ]);
+    let expected = format!("{}::EDITED\n", harness.marker);
+    if std::fs::read_to_string(harness.scratch.0.join("edited.txt")).unwrap() != expected {
+        diagnose_codex_local_results(&harness, &events);
+    }
+    assert_eq!(
+        std::fs::read_to_string(harness.scratch.0.join("edited.txt")).unwrap(),
+        expected
+    );
+    assert!(events.iter().any(|event| {
+        let item = &event["item"];
+        event["type"] == "item.completed"
+            && item["type"] == "agent_message"
+            && item["text"].as_str().is_some_and(|text| {
+                text.contains("LIVE_CODEX_OK") && text.contains(&harness.marker)
+            })
+    }));
+    assert!(harness.receipts.0.lock().unwrap().len() >= 3);
+    let mut result_turns = 0;
+    let mut calls = std::collections::BTreeMap::new();
+    let mut outputs = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(harness.scratch.0.join("request-bodies")).unwrap() {
+        let exchange: token_station_cli::bodylog::PlaintextExchange =
+            serde_json::from_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap()).unwrap();
+        let Some(request) = exchange.http_trace.agent_request else {
+            continue;
+        };
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        for item in body["input"].as_array().into_iter().flatten() {
+            let Some(id) = item["call_id"].as_str() else {
+                continue;
+            };
+            match item["type"].as_str() {
+                Some("custom_tool_call" | "function_call") => {
+                    assert_eq!(
+                        item["namespace"], "functions",
+                        "Only the authorized local executor may run"
+                    );
+                    assert!(matches!(item["name"].as_str(), Some("exec" | "wait")));
+                    calls.insert(id.to_owned(), item.clone());
+                }
+                Some("custom_tool_call_output" | "function_call_output") => {
+                    outputs.insert(id.to_owned(), item["output"].to_string());
+                }
+                _ => {}
+            }
+        }
+        if body["input"].as_array().is_some_and(|input| {
+            input.iter().any(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("function_call_output" | "custom_tool_call_output")
+                ) && item["output"].to_string().contains(&harness.marker)
+            })
+        }) {
+            result_turns += 1;
+        }
+    }
+    assert!(
+        calls.len() >= 3,
+        "Codex must execute distinct read, patch, and verification calls"
+    );
+    assert!(
+        calls.keys().all(|id| outputs.contains_key(id)),
+        "Each executed tool must return an output with its original call ID"
+    );
+    assert!(
+        outputs
+            .values()
+            .filter(|output| output.contains(&harness.marker))
+            .count()
+            >= 2,
+        "Distinct actual read results must carry the unpredictable marker"
+    );
+    assert!(
+        calls.values().any(|call| call["input"]
+            .as_str()
+            .is_some_and(|input| input.contains("apply_patch"))),
+        "The actual executor call must invoke the patch tool"
+    );
+    assert!(
+        result_turns >= 2,
+        "Actual tool output must return in subsequent model requests"
+    );
+}
+
+fn diagnose_codex_local_results(harness: &LiveHarness, events: &[Value]) {
+    for event in events {
+        eprintln!(
+            "Codex event type={} item_type={} status={}",
+            event["type"], event["item"]["type"], event["item"]["status"]
+        );
+    }
+    for entry in std::fs::read_dir(harness.scratch.0.join("request-bodies")).unwrap() {
+        let exchange: token_station_cli::bodylog::PlaintextExchange =
+            serde_json::from_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap()).unwrap();
+        if let Some(request) = exchange.http_trace.agent_request {
+            let body: Value = serde_json::from_str(&request.body).unwrap();
+            for item in body["input"].as_array().into_iter().flatten() {
+                if matches!(
+                    item["type"].as_str(),
+                    Some("custom_tool_call_output" | "function_call_output")
+                ) {
+                    let output = item["output"].to_string();
+                    if !output.contains(&harness.virtual_key) && !output.contains("access_token") {
+                        eprintln!(
+                            "Codex local tool output: {}",
+                            output.chars().take(1000).collect::<String>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn live_gemini_post(harness: &LiveHarness, body: &Value) -> Value {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_mins(1)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut response = agent
+        .post(format!(
+            "{}/agents/gemini-cli/v1beta/models/{}:generateContent",
+            harness.url, harness.model
+        ))
+        .header("x-goog-api-key", &harness.virtual_key)
+        .header("content-type", "application/json")
+        .send(body.to_string())
+        .unwrap();
+    let status = response.status().as_u16();
+    if status >= 400 {
+        live_failure_metadata(harness);
+    }
+    assert_eq!(status, 200, "The real Gemini-protocol request must succeed");
+    serde_json::from_str(&response.body_mut().read_to_string().unwrap()).unwrap()
+}
+
+#[test]
+#[ignore = "Consumes the selected real ChatGPT plan through Gemini HTTP function calls. This is protocol acceptance, not Gemini CLI acceptance."]
+fn live_gemini_protocol_reads_writes_and_verifies_tool_results() {
+    let harness = LiveHarness::with_request_trace(true);
+    let mut contents = vec![
+        json!({"role":"user","parts":[{"text":"Complete the provided local tool steps one at a time. Start by calling read_marker. After receiving the marker, call write_result with exactly the marker followed by ::GEMINI_EDITED. Then call verify_result. Finally return LIVE_GEMINI_OK and the verified text. The random marker is only available from read_marker."}]}),
+    ];
+    let mut ids = std::collections::BTreeSet::new();
+    for name in ["read_marker", "write_result", "verify_result"] {
+        let parameters = if name == "write_result" {
+            json!({"type":"object","properties":{"content":{"type":"string"}},"required":["content"],"additionalProperties":false})
+        } else {
+            json!({"type":"object","properties":{},"additionalProperties":false})
+        };
+        let answer = live_gemini_post(
+            &harness,
+            &json!({"contents":contents,"tools":[{"functionDeclarations":[{"name":name,"description":"Execute the current local scratch-workspace step.","parameters":parameters}]}]}),
+        );
+        let content = &answer["candidates"][0]["content"];
+        let calls: Vec<_> = content["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|part| part.get("functionCall"))
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "Each model turn must request one actual function"
+        );
+        let call = calls[0];
+        assert_eq!(call["name"], name);
+        let id = call["id"].as_str();
+        if let Some(id) = id {
+            assert!(
+                ids.insert(id.to_owned()),
+                "Returned tool IDs must stay unique across turns"
+            );
+        }
+        let actual = match name {
+            "read_marker" => std::fs::read_to_string(harness.scratch.0.join("marker.txt")).unwrap(),
+            "write_result" => {
+                let content = call["args"]["content"].as_str().unwrap();
+                assert_eq!(content, format!("{}::GEMINI_EDITED", harness.marker));
+                std::fs::write(harness.scratch.0.join("gemini-result.txt"), content).unwrap();
+                "written".to_owned()
+            }
+            "verify_result" => {
+                let output = Command::new("/bin/cat")
+                    .env_clear()
+                    .arg(harness.scratch.0.join("gemini-result.txt"))
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                String::from_utf8(output.stdout).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        contents.push(content.clone());
+        contents.push(json!({"role":"user","parts":[{"functionResponse":{"id":id,"name":name,"response":{"result":actual}}}]}));
+    }
+    let final_answer = live_gemini_post(&harness, &json!({"contents":contents}));
+    let text: String = final_answer["candidates"][0]["content"]["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|part| part["text"].as_str())
+        .collect();
+    assert!(
+        text.contains("LIVE_GEMINI_OK")
+            && text.contains(&format!("{}::GEMINI_EDITED", harness.marker))
+    );
+    assert_eq!(
+        std::fs::read_to_string(harness.scratch.0.join("gemini-result.txt")).unwrap(),
+        format!("{}::GEMINI_EDITED", harness.marker)
+    );
+    // HTTP delivery can complete just before the asynchronous recorder commit.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while harness.receipts.0.lock().unwrap().len() < 4 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let receipts = harness.receipts.0.lock().unwrap().clone();
+    assert_eq!(receipts.len(), 4);
+    assert!(receipts.iter().all(|receipt| receipt.status == 200
+        && receipt.subscription_billing
+        && receipt.cost_micros.is_none()));
 }

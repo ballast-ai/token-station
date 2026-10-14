@@ -76,6 +76,30 @@ mod tests {
     }
 
     #[test]
+    fn empty_pages_report_no_results_and_release_the_reader_queue() {
+        let root = super::super::temporary_dir().unwrap();
+        let controller = super::super::SearchController::shared(&root.0);
+        let known = BTreeSet::from(["https://example.com/".into()]);
+        for mime in ["text/plain", "text/html"] {
+            for body in ["", " \n\t\u{2003} "] {
+                *controller.page_fixture.lock().unwrap() = Some((body.into(), mime.into()));
+                let error = controller
+                    .read_page(
+                        "https://example.com/",
+                        &known,
+                        &DomainFilter::default(),
+                        None,
+                        &|| false,
+                    )
+                    .map_err(super::super::SearchError::browser)
+                    .unwrap_err();
+                assert_eq!(error.kind, super::super::SearchErrorKind::NoResults);
+                assert!(!controller.status().busy);
+            }
+        }
+    }
+
+    #[test]
     fn rejects_structurally_excessive_page_html() {
         let html = format!(
             "<body>{}text{}</body>",
@@ -478,6 +502,9 @@ fn extract_checked(
     }
     if mime == "text/plain" {
         let (text, truncated) = bounded_text_checked(std::iter::once(body), check)?;
+        if text.is_empty() {
+            return Err("The page has no readable text.".into());
+        }
         return Ok(("Page text".into(), text, truncated));
     }
     if !matches!(mime, "text/html" | "application/xhtml+xml") {

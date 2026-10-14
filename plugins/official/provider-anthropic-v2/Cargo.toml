@@ -5,7 +5,8 @@
 #
 # The translation logic is south-component-conformance's reference
 # implementation — the same code gate ② froze its fixture pack against — so
-# this shell cannot drift from the judged behavior. The vendored
+# this shell keeps that behavior except for an explicit rejection of structured
+# response formats that the reference cannot preserve. The vendored
 # wit/provider-adapter.wit is pinned byte-for-byte to
 # south_provider_api::ADAPTER_WIT by this crate's test.
 [package]
@@ -21,6 +22,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+serde_json = "1"
 south-component-conformance = { version = "=0.20.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "7afe9a5b8ce80246597c43f7dd1b285b67eef9ed", default-features = false }
 wit-bindgen = "0.59"
 

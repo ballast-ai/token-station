@@ -580,7 +580,9 @@ impl Gateway {
         let is_plan = |target: &UpstreamModel| {
             self.upstreams
                 .get(target.upstream.as_str())
-                .is_some_and(|upstream| upstream.config.provider == "chatgpt-plan")
+                .is_some_and(|upstream| {
+                    crate::config::is_subscription_provider(&upstream.config.provider)
+                })
         };
         if is_plan(&decision.chosen) {
             record.subscription_billing = true;
@@ -985,7 +987,7 @@ impl Gateway {
                 )
             })?;
 
-        let request = match payload {
+        let mut request = match payload {
             AttemptPayload::AnthropicNative {
                 body,
                 headers,
@@ -1033,6 +1035,14 @@ impl Gateway {
                 Self::request_for_attempt(upstream, target, request)
             }
         };
+        let aliases = if crate::config::is_subscription_provider(&upstream.config.provider) {
+            super::tool_names::alias_client_tools(&mut request)
+        } else {
+            BTreeMap::new()
+        };
+        // Managed search can already own a mapping. Do not replace it with
+        // an empty inner scope when its wire names are already valid.
+        let _tool_alias_scope = (!aliases.is_empty()).then(|| ctx.tool_alias_scope(aliases));
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
         ctx.capture_upstream_request(target.upstream.as_str(), &target.model, &descriptor);
 

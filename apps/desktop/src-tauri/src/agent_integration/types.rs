@@ -117,6 +117,7 @@ pub enum ConfigFormat {
     Json5,
     Toml,
     Yaml,
+    CordisYaml,
     Dotenv,
 }
 

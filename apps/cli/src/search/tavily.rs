@@ -39,10 +39,14 @@ pub(super) fn search(
             _ => SearchError::new(K::Unavailable, "Cannot reach Tavily search."),
         })?;
     if cancelled() {
-        return Err(SearchError::new(K::Cancelled, "Search was cancelled."));
+        return Err(
+            SearchError::new(K::Cancelled, "Search was cancelled.").observed("tavily", None)
+        );
     }
     let status = response.status().as_u16();
-    if status != 200 {
+    let status_error = if status == 200 {
+        None
+    } else {
         let (kind, message) = match status {
             400 | 422 => (
                 K::InvalidArguments,
@@ -60,8 +64,8 @@ pub(super) fn search(
                 "Tavily returned an unexpected status. Redirects are not followed.",
             ),
         };
-        return Err(SearchError::new(kind, message));
-    }
+        Some(SearchError::new(kind, message).observed("tavily", None))
+    };
     let mut bytes = Vec::new();
     response
         .into_body()
@@ -70,7 +74,10 @@ pub(super) fn search(
         .reader()
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::TimedOut
+            if let Some(error) = &status_error {
+                return error.clone();
+            }
+            let error = if error.kind() == std::io::ErrorKind::TimedOut
                 || error
                     .get_ref()
                     .and_then(|inner| inner.downcast_ref::<ureq::Error>())
@@ -79,14 +86,26 @@ pub(super) fn search(
                 SearchError::new(K::Timeout, "Tavily search timed out.")
             } else {
                 SearchError::new(K::Protocol, "Cannot read the bounded Tavily response.")
-            }
+            };
+            error.observed("tavily", None)
         })?;
+    let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        status_error.clone().unwrap_or_else(|| {
+            SearchError::new(K::Protocol, "Tavily returned invalid JSON.").observed("tavily", None)
+        })
+    })?;
+    let credits = document["usage"]["credits"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok());
     if cancelled() {
-        return Err(SearchError::new(K::Cancelled, "Search was cancelled."));
+        return Err(
+            SearchError::new(K::Cancelled, "Search was cancelled.").observed("tavily", credits)
+        );
     }
-    let document: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| SearchError::new(K::Protocol, "Tavily returned invalid JSON."))?;
-    parse_response(&document, filter, start)
+    if let Some(error) = status_error {
+        return Err(error.observed("tavily", credits));
+    }
+    parse_response(&document, filter, start).map_err(|error| error.observed("tavily", credits))
 }
 
 fn parse_response(

@@ -336,3 +336,133 @@ fn tool_argument_events_reject_conflicting_or_unknown_identifiers() {
         }
     }
 }
+
+#[test]
+fn exact_reasoning_effort_rejection_has_a_fixed_client_recovery_message() {
+    use token_station_protocol::HttpResponseParts;
+    const SAFE: &str = "Unsupported value for reasoning_effort. The selected model does not support this reasoning effort.";
+    for message in [
+        Value::Null,
+        json!("REFLECTED_USER_TEXT secret_access_token model-private arbitrary-allowed-values"),
+    ] {
+        let parts=HttpResponseParts {status:400,headers:Default::default(),extensions:Default::default(),body:json!({"error":{"code":"unsupported_value","param":"reasoning.effort","message":message},"model":"private-model","token":"secret_access_token"}).to_string()};
+        let error = ChatGptPlan.map_provider_error(&parts).unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.http_status, 400);
+        assert_eq!(error.message, SAFE);
+        let serialized = serde_json::to_string(&error).unwrap();
+        for secret in [
+            "REFLECTED_USER_TEXT",
+            "secret_access_token",
+            "private-model",
+            "arbitrary-allowed-values",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        assert_eq!(
+            ChatGptPlan.parse_response(&parts).unwrap_err().message,
+            SAFE
+        );
+    }
+}
+
+#[test]
+fn near_miss_reasoning_errors_keep_the_generic_redacted_mapping() {
+    use token_station_protocol::HttpResponseParts;
+    for (status, code, param) in [
+        (422, "unsupported_value", "reasoning.effort"),
+        (401, "unsupported_value", "reasoning.effort"),
+        (400, "invalid_value", "reasoning.effort"),
+        (400, "unsupported_value", "reasoning_effort"),
+        (400, "unsupported_value", "reasoning.effort.extra"),
+        (400, "unsupported_value", "reasoning.effort "),
+        (400, "Unsupported_Value", "reasoning.effort"),
+        (400, "unsupported_value", "text.format"),
+    ] {
+        let parts=HttpResponseParts {status,headers:Default::default(),extensions:Default::default(),body:json!({"error":{"code":code,"param":param,"message":"unsupported reasoning_effort secret-reflection"}}).to_string()};
+        let error = ChatGptPlan.map_provider_error(&parts).unwrap();
+        assert!(!error.message.contains("reasoning_effort"));
+        assert!(!serde_json::to_string(&error)
+            .unwrap()
+            .contains("secret-reflection"));
+        if status == 400 {
+            assert_eq!(
+                error.message,
+                "The ChatGPT plan endpoint rejected the request."
+            );
+        }
+    }
+}
+
+#[test]
+fn sse_reasoning_rejection_is_exact_redacted_and_terminal() {
+    use token_station_protocol::HttpResponseParts;
+    const SAFE: &str = "Unsupported value for reasoning_effort. The selected model does not support this reasoning effort.";
+    for (kind, code, param, expected) in [
+        (
+            "error",
+            "unsupported_value",
+            "reasoning.effort",
+            ErrorCode::InvalidRequest,
+        ),
+        (
+            "error",
+            "unsupported_value",
+            "reasoning_effort",
+            ErrorCode::ProviderProtocolError,
+        ),
+        (
+            "error",
+            "unsupported_value",
+            "text.format",
+            ErrorCode::ProviderProtocolError,
+        ),
+        (
+            "error",
+            "invalid_value",
+            "reasoning.effort",
+            ErrorCode::ProviderProtocolError,
+        ),
+        (
+            "response.failed",
+            "unsupported_value",
+            "reasoning.effort",
+            ErrorCode::ProviderProtocolError,
+        ),
+    ] {
+        let event = json!({"type":kind,"error":{"code":code,"param":param,"message":"secret-reflected-model-token"}});
+        let bytes = frame(event);
+        for size in [1, 7, bytes.len()] {
+            let mut parser = ChatGptPlan.stream_parser();
+            let events: Vec<_> = bytes
+                .chunks(size)
+                .flat_map(|chunk| parser.parse_chunk(chunk).unwrap())
+                .collect();
+            let [StreamEvent::Error { error }] = events.as_slice() else {
+                panic!("Expected terminal error: {events:?}")
+            };
+            assert_eq!(error.code, expected);
+            assert_eq!(
+                error.http_status,
+                if expected == ErrorCode::InvalidRequest {
+                    400
+                } else {
+                    502
+                }
+            );
+            assert!(!error.message.contains("secret-reflected"));
+            assert_eq!(error.message == SAFE, expected == ErrorCode::InvalidRequest);
+            assert_eq!(parser.finish().unwrap_err().code, expected);
+        }
+        let parts = HttpResponseParts {
+            status: 200,
+            headers: Default::default(),
+            extensions: Default::default(),
+            body: String::from_utf8(bytes).unwrap(),
+        };
+        assert_eq!(
+            ChatGptPlan.parse_response(&parts).unwrap_err().code,
+            expected
+        );
+    }
+}

@@ -105,6 +105,7 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             provider: spec.provider.to_owned(),
             base_url,
             auth,
+            codex_identity: None,
             local: spec.local,
             managed_route: false,
             access_tier: AccessTier::default(),
@@ -452,6 +453,7 @@ fn parse_model_spec(raw: &str) -> Result<ModelCapability, String> {
 fn parse_auth_spec(source: &str, slot: &str) -> Result<AuthConfig, String> {
     let mut auth = AuthConfig {
         chatgpt_account: None,
+        codex_account: None,
         slot: slot.to_owned(),
         store: false,
         env: None,

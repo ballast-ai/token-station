@@ -328,9 +328,11 @@ impl ResponsesStream {
                     "The provider refused the request.",
                 ))
             }
-            "response.failed" | "error" => {
-                return Err(protocol("The ChatGPT plan response failed"))
+            "error" => {
+                return Err(reasoning_rejection(&v["error"])
+                    .unwrap_or_else(|| protocol("The ChatGPT plan response failed")))
             }
+            "response.failed" => return Err(protocol("The ChatGPT plan response failed")),
             "response.incomplete" => {
                 return Err(ErrorEnvelope::new(
                     ErrorCode::TransportTruncated,

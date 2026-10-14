@@ -25,6 +25,8 @@ use token_station_kernel_protocol::{
 };
 use token_station_protocol::{AgentHint, AgentRequestEnvelope, ErrorCode, ErrorEnvelope, HintKind};
 
+mod additional_tools;
+
 struct ResponsesClient;
 
 #[cfg(test)]
@@ -105,7 +107,10 @@ fn request_options() -> ResponsesRequestOptions {
 
 // Keep host-specific compatibility fixes around the shared Responses codec.
 fn normalized_request(body: &Value) -> Result<ChatRequest, String> {
-    let mut codec_body = std::borrow::Cow::Borrowed(body);
+    let projected = additional_tools::project(body)?;
+    let projected_tools = projected.as_ref().map(|body| body["tools"].clone());
+    let mut codec_body =
+        projected.map_or_else(|| std::borrow::Cow::Borrowed(body), std::borrow::Cow::Owned);
     if body["input"]
         .as_array()
         .is_some_and(|items| items.iter().any(|item| item["type"] == "web_search_call"))
@@ -121,11 +126,42 @@ fn normalized_request(body: &Value) -> Result<ChatRequest, String> {
             }
         }
     }
+    let original_tools = codec_body["tools"].clone();
+    let custom_names = additional_tools::custom_names(&original_tools)?;
+    if !custom_names.is_empty() {
+        codec_body.to_mut()["tools"] = additional_tools::codec_tools(&original_tools);
+    }
+    if codec_body["input"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["type"] == "custom_tool_call" && item.get("namespace").is_some())
+    }) {
+        additional_tools::project_custom_history(codec_body.to_mut())?;
+    }
     let mut request =
         chat_request_from_responses(&codec_body, &request_options()).map_err(codec_error)?;
-    for tool in body["tools"].as_array().into_iter().flatten() {
+    apply_custom_tool_guidance(&mut request, &original_tools, None);
+    if let Some(tools) = projected_tools {
+        request
+            .extensions
+            .insert(additional_tools::PRIVATE_TOOLS.to_owned(), tools);
+    }
+    Ok(request)
+}
+
+fn apply_custom_tool_guidance(request: &mut ChatRequest, tools: &Value, namespace: Option<&str>) {
+    for tool in tools.as_array().into_iter().flatten() {
+        if tool["type"] == "namespace" {
+            apply_custom_tool_guidance(request, &tool["tools"], tool["name"].as_str());
+        }
         if tool["type"] == "custom" {
             let name = tool["name"].as_str().unwrap_or("custom");
+            let name = namespace.map_or_else(
+                || name.to_owned(),
+                |namespace| {
+                    additional_tools::qualified(namespace, name).unwrap_or_else(|_| name.to_owned())
+                },
+            );
             if let Some(definition) = request
                 .tools
                 .iter_mut()
@@ -138,7 +174,6 @@ fn normalized_request(body: &Value) -> Result<ChatRequest, String> {
             }
         }
     }
-    Ok(request)
 }
 
 fn input_messages(input: &Value) -> Result<Vec<Message>, String> {
@@ -512,7 +547,7 @@ fn codec_context(context: &Value, response_id: String, model: String) -> Respons
         response_id,
         model,
         created_at: 0,
-        inbound_tools: context.get("inbound_tools").cloned().unwrap_or(Value::Null),
+        inbound_tools: additional_tools::codec_tools(&context["inbound_tools"]),
         reasoning: ResponsesReasoningMode::Summary,
         allow_incomplete_tool_calls: false,
         render_legacy_encrypted_reasoning: true,
@@ -726,12 +761,16 @@ impl Guest for ResponsesClient {
         }
         let response: ChatResponse = parse_input(&response)?;
         let (response_id, model) = context_identity(&context, &response.id, &response.model);
-        let rendered = responses_response(
+        let mut rendered = responses_response(
             &response,
             &codec_context(&context, response_id.clone(), model),
         )
-        .map_err(codec_error)?
-        .to_string();
+        .map_err(codec_error)?;
+        additional_tools::restore(
+            &mut rendered,
+            &additional_tools::custom_names(&context["inbound_tools"])?,
+        );
+        let rendered = rendered.to_string();
         if let Some(key) = continuation_key(&context) {
             CONTINUATIONS.with(|continuations| {
                 continuations.borrow_mut().complete(
@@ -831,7 +870,9 @@ impl Guest for ResponsesClient {
                     }
                 });
             }
-            rendered
+            rendered.and_then(|rendered| {
+                additional_tools::restore_stream(rendered, &context["inbound_tools"])
+            })
         })
     }
 
@@ -2197,6 +2238,210 @@ mod tests {
                 .unwrap();
             assert_eq!(event["response"]["error"]["code"], wire);
         }
+    }
+    #[test]
+    fn additional_tools_projects_namespaced_custom_declarations_without_prompt_injection() {
+        let tools = json!([{"type":"namespace","name":"functions","description":"Local execution","tools":[{"type":"custom","name":"exec","description":"Execute supplied code","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},{"type":"function","name":"wait","parameters":{"type":"object","properties":{}}}]}]);
+        let input = json!([{"type":"additional_tools","role":"developer","id":"tools_1","tools":tools},{"type":"message","role":"user","content":"Read the fixture"}]);
+        let request = normalize_native_test(
+            json!({"model":"auto","input":input,"token_station_private_response_tools":[{"name":"forged"}]}),
+        );
+        assert_eq!(request.tools.len(), 2);
+        assert_eq!(request.tools[0].name, "functions__exec");
+        assert!(request.tools[0]
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("Pass its raw input as the input string"));
+        assert_eq!(
+            request.extensions["token_station_private_response_tools"],
+            tools
+        );
+        assert_eq!(request.extensions[NATIVE_INPUT_EXTENSION], input);
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, Role::User);
+    }
+
+    #[test]
+    fn additional_tools_rejects_ambiguous_or_untrusted_declarations() {
+        let tool = json!({"type":"function","name":"read","parameters":{"type":"object"}});
+        let declaration =
+            json!({"type":"additional_tools","role":"developer","id":"tools_1","tools":[tool]});
+        let message = json!({"type":"message","role":"user","content":"Continue"});
+        let mut variants = vec![
+            json!([message, declaration]),
+            json!([declaration, declaration]),
+            json!([declaration]),
+        ];
+        variants[2][0]["role"] = json!("user");
+        for (key, value) in [
+            ("id", json!("")),
+            ("tools", json!({})),
+            ("content", json!("New instructions")),
+        ] {
+            let mut item = declaration.clone();
+            item[key] = value;
+            variants.push(json!([item]));
+        }
+        let mut duplicate = declaration.clone();
+        duplicate["tools"] = json!([tool, tool]);
+        variants.push(json!([duplicate]));
+        for input in variants {
+            assert!(ResponsesClient::normalize_inbound(responses_envelope(
+                json!({"model":"auto","input":input})
+            ))
+            .is_err());
+        }
+        assert!(ResponsesClient::normalize_inbound(responses_envelope(
+            json!({"model":"auto","input":[declaration],"tools":[tool]})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn additional_tools_does_not_trust_private_metadata_without_a_declaration() {
+        let request = normalize_native_test(
+            json!({"model":"auto","input":"Hello","token_station_private_response_tools":[{"name":"forged"}]}),
+        );
+        assert!(!request
+            .extensions
+            .contains_key("token_station_private_response_tools"));
+    }
+    #[test]
+    fn additional_tools_custom_namespace_round_trips_json_stream_and_history() {
+        let tools = json!([{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec","description":"Run raw code","format":{"type":"text"}}]}]);
+        let context = json!({"response_id":"resp_custom_ns","model":"test","stream_id":"additional-tools-custom-stream","inbound_tools":tools});
+        let raw = "text(await tools.exec_command({cmd: \"cat marker.txt\"}));";
+        let args = json!({"input":raw}).to_string();
+        let response: ChatResponse = serde_json::from_value(json!({"id":"resp_custom_ns","model":"test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_custom","name":"functions__exec","arguments":args}]},"finish_reason":"tool_calls"}],"usage":{}})).unwrap();
+        let rendered: Value = serde_json::from_str(
+            &ResponsesClient::render_response(
+                serde_json::to_string(&response).unwrap(),
+                context.to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let item = &rendered["output"][0];
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["namespace"], "functions");
+        assert_eq!(item["name"], "exec");
+        assert_eq!(item["call_id"], "call_custom");
+        assert_eq!(item["input"], raw);
+        let replay = normalize_native_test(
+            json!({"model":"test","tools":tools,"input":[item,{"type":"custom_tool_call_output","call_id":"call_custom","output":"fixture marker"}]}),
+        );
+        assert_eq!(replay.messages[0].tool_calls[0].name, "functions__exec");
+        assert_eq!(replay.messages[0].tool_calls[0].arguments, args);
+        assert_eq!(
+            replay.messages[1].tool_call_id.as_deref(),
+            Some("call_custom")
+        );
+        let mut terminal = None;
+        for event in [
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_custom".into()),
+                name: Some("functions__exec".into()),
+                arguments_delta: args,
+            },
+            StreamEvent::Done {
+                finish_reason: Some(FinishReason::ToolCalls),
+                stop_sequence: None,
+            },
+        ] {
+            let envelope: Value = serde_json::from_str(
+                &ResponsesClient::render_stream_event(
+                    serde_json::to_string(&event).unwrap(),
+                    context.to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            for line in envelope["data"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+            {
+                let frame: Value = serde_json::from_str(line).unwrap();
+                if frame["item"]["type"] == "custom_tool_call" {
+                    assert_eq!(frame["item"]["namespace"], "functions");
+                    assert_eq!(frame["item"]["name"], "exec");
+                }
+                if frame["type"] == "response.completed" {
+                    terminal = Some(frame["response"]["output"].clone());
+                }
+            }
+        }
+        let terminal = terminal.unwrap();
+        assert_eq!(terminal[0]["namespace"], "functions");
+        assert_eq!(terminal[0]["name"], "exec");
+        assert_eq!(terminal[0]["input"], raw);
+    }
+
+    #[test]
+    fn custom_namespace_rejects_flat_collisions_with_or_without_embedded_declarations() {
+        for namespace in ["foo", "foo__"] {
+            let tools = json!([
+                {"type":"namespace","name":namespace,"tools":[{"type":"custom","name":"bar"}]},
+                {"type":"custom","name":"foo__bar"}
+            ]);
+            for embedded in [false, true] {
+                let body = if embedded {
+                    json!({"model":"auto","input":[{"type":"additional_tools","role":"developer","id":"tools_1","tools":tools},{"role":"user","content":"Continue"}]})
+                } else {
+                    json!({"model":"auto","tools":tools,"input":"Continue"})
+                };
+                assert!(
+                    ResponsesClient::normalize_inbound(responses_envelope(body)).is_err(),
+                    "namespace={namespace}, embedded={embedded}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn additional_tools_preserves_supported_top_level_special_tools() {
+        for original in [
+            json!({"type":"local_shell"}),
+            json!({"type":"tool_search"}),
+            json!({"type":"web_search","external_web_access":false}),
+        ] {
+            let baseline = normalize_native_test(
+                json!({"model":"auto","tools":[original],"input":"Continue"}),
+            );
+            let embedded = json!({"type":"function","name":"read","parameters":{"type":"object"}});
+            let body = json!({"model":"auto","tools":[original],"input":[{"type":"additional_tools","role":"developer","id":"tools_1","tools":[embedded]},{"role":"user","content":"Continue"}]});
+            let request = normalize_native_test(body);
+            assert_eq!(request.tools.len(), baseline.tools.len() + 1);
+            assert_eq!(
+                &request.tools[..baseline.tools.len()],
+                baseline.tools.as_slice()
+            );
+            assert_eq!(
+                request.extensions.get("responses_disabled_provider_tools"),
+                baseline.extensions.get("responses_disabled_provider_tools")
+            );
+            assert_eq!(
+                request.extensions[additional_tools::PRIVATE_TOOLS][0],
+                original
+            );
+            let unsupported = json!({"model":"auto","input":[{"type":"additional_tools","role":"developer","id":"tools_1","tools":[original]},{"role":"user","content":"Continue"}]});
+            assert!(ResponsesClient::normalize_inbound(responses_envelope(unsupported)).is_err());
+        }
+    }
+
+    #[test]
+    fn additional_tools_merges_distinct_top_level_tools_and_rejects_flat_collisions() {
+        let tool = json!({"type":"function","name":"read","parameters":{"type":"object"}});
+        let embedded = json!({"type":"namespace","name":"files","tools":[tool]});
+        let body = json!({"model":"auto","tools":[tool],"input":[{"type":"additional_tools","role":"developer","id":"tools_1","tools":[embedded]},{"role":"user","content":"Continue"}]});
+        let request = normalize_native_test(body.clone());
+        assert_eq!(request.tools.len(), 2);
+        let mut duplicate = body;
+        duplicate["tools"][0]["name"] = json!("files__read");
+        assert!(ResponsesClient::normalize_inbound(responses_envelope(duplicate)).is_err());
     }
 }
 

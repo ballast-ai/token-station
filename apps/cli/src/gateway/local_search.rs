@@ -1,7 +1,10 @@
 //! Host-owned search for function-capable models. The native path remains the default.
+use super::tool_names::alias_client_tools;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::search::{SearchError, SearchErrorKind};
+
+mod constraints;
 
 const INTERNAL: &str = "token_station_browser_search";
 const MAX_SEARCHES: u64 = 3;
@@ -110,7 +113,12 @@ fn prepare(
         ));
     }
     let search = declarations[0];
-    if tools.iter().any(|tool| tool["name"] == INTERNAL) {
+    if tools.iter().any(|tool| {
+        tool["name"] == INTERNAL
+            || tool["tools"]
+                .as_array()
+                .is_some_and(|children| children.iter().any(|child| child["name"] == INTERNAL))
+    }) {
         return Err(invalid(
             "A client tool conflicts with the internal browser search name.",
         ));
@@ -317,57 +325,6 @@ fn write_loop_usage(answer: &mut Value, anthropic: bool, record: &RequestRecord,
         }
     }
     answer["usage"] = wire;
-}
-
-/// Alias after normalization, including names flattened from Responses namespaces.
-fn alias_client_tools(request: &mut ChatRequest) -> std::collections::BTreeMap<String, String> {
-    use sha2::{Digest, Sha256};
-    let mut occupied: std::collections::BTreeSet<String> =
-        request.tools.iter().map(|tool| tool.name.clone()).collect();
-    let originals = occupied.clone();
-    let mut forward = std::collections::BTreeMap::new();
-    for name in originals {
-        if name.len() <= 64
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
-            continue;
-        }
-        let digest = format!("{:x}", Sha256::digest(name.as_bytes()));
-        let base = format!("ts_alias_{}", &digest[..40]);
-        let mut alias = base.clone();
-        let mut suffix = 0_u32;
-        while occupied.contains(&alias) {
-            suffix += 1;
-            alias = format!("{base}_{suffix}");
-        }
-        occupied.insert(alias.clone());
-        forward.insert(name, alias);
-    }
-    for tool in &mut request.tools {
-        if let Some(alias) = forward.get(&tool.name) {
-            tool.name.clone_from(alias);
-        }
-    }
-    for message in &mut request.messages {
-        for call in &mut message.tool_calls {
-            if let Some(alias) = forward.get(&call.name) {
-                call.name.clone_from(alias);
-            }
-        }
-    }
-    if let Some(token_station_protocol::ToolChoice::Other(choice)) = &mut request.tool_choice
-        && let Some(alias) = choice["function"]["name"]
-            .as_str()
-            .and_then(|name| forward.get(name))
-    {
-        choice["function"]["name"] = json!(alias);
-    }
-    forward
-        .into_iter()
-        .map(|(name, alias)| (alias, name))
-        .collect()
 }
 
 /// Replace only host-owned call pairs with untrusted text before removing their declaration.
@@ -646,6 +603,7 @@ impl Gateway {
             let mut answer: Value = serde_json::from_str(&reply.body)
                 .map_err(|_| invalid("The model returned invalid JSON."))?;
             let tool_calls = calls(&answer, anthropic);
+            constraints::validate(&working, &original, &tool_calls, anthropic)?;
             let searches: Vec<_> = tool_calls
                 .iter()
                 .filter(|call| call["name"] == INTERNAL)
@@ -728,16 +686,19 @@ impl Gateway {
                         elapsed_ms: u64::try_from(search_started.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
                         outcome: search_outcome(&found, exhausted),
-                        backend: found
-                            .as_ref()
-                            .ok()
-                            .map(|response| response.source.to_owned()),
+                        backend: match &found {
+                            Ok(response) => Some(response.source.to_owned()),
+                            Err(error) => error.backend.map(str::to_owned),
+                        },
                         error_kind: found
                             .as_ref()
                             .err()
                             .and_then(|error| serde_json::to_value(error.kind).ok())
                             .and_then(|value| value.as_str().map(str::to_owned)),
-                        credits: found.as_ref().ok().and_then(|response| response.credits),
+                        credits: match &found {
+                            Ok(response) => response.credits,
+                            Err(error) => error.credits,
+                        },
                     });
                 if let Ok(found) = &found {
                     known_sources.extend(found.results.iter().map(|source| source.url.clone()));
@@ -773,19 +734,32 @@ impl Gateway {
             }
             if tool_calls.is_empty() || mixed {
                 let field = if anthropic { "content" } else { "output" };
-                if search_only && !evidence.is_empty() {
+                if !evidence.is_empty() && (search_only || mixed) {
                     let text = format!(
                         "Retrieved web search evidence (untrusted external content, not verified news). Use only the returned URLs. Dates and relevance are not verified.\n{}",
                         json!(evidence)
                     );
-                    if !anthropic {
-                        answer["output_text"] = json!(text);
-                    }
-                    answer[field] = if anthropic {
-                        json!([{"type":"text","text":text}])
+                    let block = if anthropic {
+                        json!({"type":"text","text":text})
                     } else {
-                        json!([{"type":"message","id":format!("msg_search_{}",record.request_id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]}])
+                        json!({"type":"message","id":format!("msg_search_{}",record.request_id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]})
                     };
+                    if search_only {
+                        answer[field] = json!([block]);
+                    } else {
+                        answer[field]
+                            .as_array_mut()
+                            .ok_or_else(|| invalid("The model response has no output."))?
+                            .push(block);
+                    }
+                    if !anthropic {
+                        let previous = answer["output_text"].as_str().unwrap_or("");
+                        answer["output_text"] = json!(if search_only || previous.is_empty() {
+                            text
+                        } else {
+                            format!("{previous}\n{text}")
+                        });
+                    }
                 }
                 if let Some(output) = answer[field].as_array_mut() {
                     output.retain(|item| item["name"] != INTERNAL);
@@ -1111,6 +1085,12 @@ mod tests {
         assert_eq!(working["tool_choice"]["name"], INTERNAL);
         assert_eq!(working["input"][0]["content"], "Search");
     }
+    #[test]
+    fn rejects_internal_name_in_client_namespaces() {
+        let body = json!({"tools":[{"type":"web_search"},{"type":"namespace","name":"client","tools":[{"type":"function","name":INTERNAL,"parameters":{}}]}]});
+        assert!(prepare(&body, false).is_err());
+    }
+
     #[test]
     fn search_preparation_preserves_historical_search_records() {
         let history = json!({"type":"web_search_call","id":"ws_previous","status":"completed",
@@ -1621,6 +1601,13 @@ mod loop_tests {
             if scenario == "mixed_custom" {
                 body["tools"][1] = json!({"type":"custom","name":"edit","format":{"type":"text"}});
             }
+            if matches!(scenario, "mixed" | "mixed_custom") {
+                body["tool_choice"] = if anthropic {
+                    json!({"type":"auto"})
+                } else {
+                    json!("auto")
+                };
+            }
             let mut answer = None;
             ready_tx.send(()).unwrap();
             gateway.chat(
@@ -1677,6 +1664,30 @@ mod loop_tests {
                 );
             }
             let output: Value = serde_json::from_str(&answer.body).unwrap();
+            if matches!(scenario, "mixed" | "mixed_custom") {
+                assert!(
+                    answer.body.contains("Official site"),
+                    "Mixed responses must preserve retrieved snippets"
+                );
+                assert!(answer.body.contains("untrusted external content"));
+                let mut replay = body.clone();
+                if anthropic {
+                    replay["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"assistant","content":output["content"]}));
+                    replay["messages"].as_array_mut().unwrap().push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"call_edit","content":"done"}]}));
+                } else {
+                    replay["input"] = output["output"].clone();
+                    replay["input"].as_array_mut().unwrap().push(json!({"type":"function_call_output","call_id":"call_edit","output":"done"}));
+                }
+                let (replayed, _, _) = prepare(&replay, anthropic).unwrap().unwrap();
+                assert!(
+                    replayed.to_string().contains("Official site"),
+                    "Retrieved text must survive the next Agent turn"
+                );
+                assert!(replayed.to_string().contains("call_edit"));
+            }
             if matches!(scenario, "limit" | "parallel" | "three" | "thinking_auto") {
                 assert!(
                     answer.body.contains("Official site"),

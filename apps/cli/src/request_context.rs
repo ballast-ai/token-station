@@ -40,7 +40,7 @@ struct AttemptAccounting {
     reported_terminal_usage: bool,
 }
 
-/// A buffered host-tool round owns this mapping. It never enters provider extensions.
+/// One provider attempt or host-tool round owns this map. It never enters provider extensions.
 pub(crate) struct ToolAliasScope<'a>(&'a RequestContext);
 impl Drop for ToolAliasScope<'_> {
     fn drop(&mut self) {
@@ -183,6 +183,16 @@ impl RequestContext {
                     call.name.clone_from(name);
                 }
             }
+        }
+    }
+
+    pub(crate) fn restore_tool_event(&self, event: &mut token_station_protocol::StreamEvent) {
+        if let token_station_protocol::StreamEvent::ToolCallDelta {
+            name: Some(name), ..
+        } = event
+            && let Some(original) = self.tool_aliases.lock().unwrap().get(name)
+        {
+            name.clone_from(original);
         }
     }
 

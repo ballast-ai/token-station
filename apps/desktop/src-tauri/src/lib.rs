@@ -24,6 +24,7 @@ mod recovery;
 mod serve_lifecycle;
 
 mod chatgpt_commands;
+mod codex_commands;
 mod config_draft;
 mod desktop_update_commands;
 mod dock_icon;
@@ -500,6 +501,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            codex_commands::codex_accounts_list,
+            codex_commands::codex_account_discover,
+            codex_commands::codex_account_models,
+            codex_commands::codex_account_disconnect,
+            codex_commands::codex_connect_provider,
             chatgpt_commands::chatgpt_accounts_list,
             chatgpt_commands::chatgpt_login_start,
             chatgpt_commands::chatgpt_login_status,

@@ -18,7 +18,7 @@ use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
     ErrorEnvelope, Extensions, FinishReason, Message, Role, Sampling, StreamEvent, ToolCall,
-    ToolDef,
+    ToolChoice, ToolDef,
 };
 
 struct GeminiClient;
@@ -258,6 +258,13 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
         .ok_or_else(|| invalid("tools must be an array"))?;
     let mut definitions = Vec::new();
     for group in tools {
+        if group.get("functionDeclarations").is_some()
+            && group
+                .as_object()
+                .is_some_and(|fields| fields.keys().any(|key| key != "functionDeclarations"))
+        {
+            return Err(capability("Gemini function declarations cannot share a group with hosted tools or other constraints"));
+        }
         let declarations = match group.get("functionDeclarations").and_then(Value::as_array) {
             Some(declarations) => declarations,
             None => {
@@ -306,8 +313,6 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
 }
 
 fn function_parameters(declaration: &Value) -> Result<Value, String> {
-    // New Gemini clients use JSON Schema. An empty fallback would erase tool
-    // argument names and constraints before the upstream sees the request.
     match (
         declaration.get("parameters"),
         declaration.get("parametersJsonSchema"),
@@ -315,11 +320,236 @@ fn function_parameters(declaration: &Value) -> Result<Value, String> {
         (Some(_), Some(_)) => Err(invalid(
             "function declaration must not combine parameters and parametersJsonSchema",
         )),
-        (Some(schema), None) | (None, Some(schema)) if schema.is_object() => Ok(schema.clone()),
-        (None, None) => Ok(json!({"type": "object"})),
+        (Some(schema), None) if schema.is_object() => {
+            // Older clients also put standard JSON Schema in parameters. Keep
+            // that schema intact unless it contains legacy-only vocabulary.
+            if uses_legacy_schema(schema) {
+                legacy_schema(schema, 0)
+            } else {
+                Ok(schema.clone())
+            }
+        }
+        (None, Some(schema)) if schema.is_object() => Ok(schema.clone()),
+        (None, None) => Ok(json!({"type":"object"})),
         _ => Err(invalid(
             "function declaration parameters must be a schema object",
         )),
+    }
+}
+
+fn uses_legacy_schema(schema: &Value) -> bool {
+    let Some(fields) = schema.as_object() else {
+        return false;
+    };
+    if fields.contains_key("nullable")
+        || fields.contains_key("propertyOrdering")
+        || fields
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| {
+                !matches!(
+                    kind,
+                    "object" | "array" | "string" | "integer" | "number" | "boolean" | "null"
+                )
+            })
+        || [
+            "minItems",
+            "maxItems",
+            "minLength",
+            "maxLength",
+            "minProperties",
+            "maxProperties",
+        ]
+        .iter()
+        .any(|key| fields.get(*key).is_some_and(Value::is_string))
+    {
+        return true;
+    }
+    for key in ["properties", "$defs", "definitions", "dependentSchemas"] {
+        if fields
+            .get(key)
+            .and_then(Value::as_object)
+            .is_some_and(|children| children.values().any(uses_legacy_schema))
+        {
+            return true;
+        }
+    }
+    for key in [
+        "items",
+        "additionalProperties",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+    ] {
+        if fields.get(key).is_some_and(uses_legacy_schema) {
+            return true;
+        }
+    }
+    ["anyOf", "allOf", "oneOf", "prefixItems"]
+        .iter()
+        .any(|key| {
+            fields
+                .get(*key)
+                .and_then(Value::as_array)
+                .is_some_and(|children| children.iter().any(uses_legacy_schema))
+        })
+}
+
+/// Convert only modeled legacy OpenAPI semantics. JSON Schema declarations
+/// use a separate field and remain unchanged.
+fn legacy_schema(schema: &Value, depth: u8) -> Result<Value, String> {
+    if depth >= 64 {
+        return Err(invalid(
+            "function schema nesting exceeds the supported depth",
+        ));
+    }
+    let fields = schema
+        .as_object()
+        .ok_or_else(|| invalid("legacy function schema must be an object"))?;
+    let mut result = Map::new();
+    for (key, value) in fields {
+        let converted = match key.as_str() {
+            "type" => {
+                let kind = value
+                    .as_str()
+                    .ok_or_else(|| invalid("legacy schema type must be a string"))?;
+                let kind = match kind {
+                    "OBJECT" | "object" => "object",
+                    "ARRAY" | "array" => "array",
+                    "STRING" | "string" => "string",
+                    "INTEGER" | "integer" => "integer",
+                    "NUMBER" | "number" => "number",
+                    "BOOLEAN" | "boolean" => "boolean",
+                    "NULL" | "null" => "null",
+                    _ => return Err(capability("legacy schema type is not supported")),
+                };
+                json!(kind)
+            }
+            "properties" => {
+                let properties = value
+                    .as_object()
+                    .ok_or_else(|| invalid("schema properties must be an object"))?;
+                let mut mapped = Map::new();
+                for (name, child) in properties {
+                    mapped.insert(name.clone(), legacy_schema(child, depth + 1)?);
+                }
+                Value::Object(mapped)
+            }
+            "items" => legacy_schema(value, depth + 1)?,
+            "additionalProperties" if value.is_boolean() => value.clone(),
+            "additionalProperties" => legacy_schema(value, depth + 1)?,
+            "anyOf" => {
+                let children = value
+                    .as_array()
+                    .filter(|items| !items.is_empty())
+                    .ok_or_else(|| invalid("schema anyOf must be a nonempty array"))?;
+                Value::Array(
+                    children
+                        .iter()
+                        .map(|child| legacy_schema(child, depth + 1))
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            "minItems" | "maxItems" | "minLength" | "maxLength" | "minProperties"
+            | "maxProperties" => {
+                let number = value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|number| number.parse::<u64>().ok()))
+                    .ok_or_else(|| invalid("schema size limits must be nonnegative integers"))?;
+                json!(number)
+            }
+            "minimum" | "maximum" if value.is_number() => value.clone(),
+            "minimum" | "maximum" => return Err(invalid("schema numeric bounds must be numbers")),
+            "title" | "description" | "format" | "pattern" if value.is_string() => value.clone(),
+            "title" | "description" | "format" | "pattern" => {
+                return Err(invalid("schema text fields must be strings"))
+            }
+            "required" => {
+                string_array(Some(value), "schema required")?;
+                value.clone()
+            }
+            "enum" if value.is_array() => value.clone(),
+            "enum" => return Err(invalid("schema enum must be an array")),
+            "default" | "example" => value.clone(),
+            "nullable" if value.is_boolean() => continue,
+            "nullable" => return Err(invalid("schema nullable must be a boolean")),
+            _ => {
+                return Err(capability(
+                    "legacy schema contains an unsupported constraint",
+                ))
+            }
+        };
+        result.insert(key.clone(), converted);
+    }
+    let schema = Value::Object(result);
+    // A union preserves enum and nested constraints for non-null values.
+    Ok(if fields.get("nullable") == Some(&Value::Bool(true)) {
+        json!({"anyOf":[schema,{"type":"null"}]})
+    } else {
+        schema
+    })
+}
+
+fn function_choice(body: &Value, tools: &mut Vec<ToolDef>) -> Result<Option<ToolChoice>, String> {
+    let Some(config) = body.get("toolConfig").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let config = config
+        .as_object()
+        .ok_or_else(|| invalid("toolConfig must be an object"))?;
+    if config.keys().any(|key| key != "functionCallingConfig") {
+        return Err(capability("toolConfig contains an unsupported constraint"));
+    }
+    let Some(calling) = config.get("functionCallingConfig") else {
+        return Ok(None);
+    };
+    let calling = calling
+        .as_object()
+        .ok_or_else(|| invalid("functionCallingConfig must be an object"))?;
+    if calling
+        .keys()
+        .any(|key| !matches!(key.as_str(), "mode" | "allowedFunctionNames"))
+    {
+        return Err(capability(
+            "functionCallingConfig contains an unsupported constraint",
+        ));
+    }
+    let mode = match calling.get("mode") {
+        None => "AUTO",
+        Some(Value::String(mode)) => mode.as_str(),
+        _ => return Err(invalid("functionCallingConfig mode must be a string")),
+    };
+    if let Some(allowed) = calling.get("allowedFunctionNames") {
+        if mode != "ANY" {
+            return Err(invalid("allowedFunctionNames requires ANY mode"));
+        }
+        let names = string_array(Some(allowed), "allowedFunctionNames")?;
+        let unique: std::collections::BTreeSet<_> = names.iter().map(String::as_str).collect();
+        if unique.is_empty()
+            || unique.len() != names.len()
+            || unique
+                .iter()
+                .any(|name| !tools.iter().any(|tool| tool.name == *name))
+        {
+            return Err(invalid(
+                "allowedFunctionNames must contain unique declared function names",
+            ));
+        }
+        // Restrict executable declarations only. Historical calls still retain
+        // their names and IDs in parse_messages, even when outside this subset.
+        tools.retain(|tool| unique.contains(tool.name.as_str()));
+    }
+    match mode {
+        "AUTO" | "MODE_UNSPECIFIED" => Ok(Some(ToolChoice::Auto)),
+        "NONE" => Ok(Some(ToolChoice::None)),
+        "ANY" if !tools.is_empty() => Ok(Some(ToolChoice::Required)),
+        "ANY" => Err(invalid("ANY mode requires at least one declared function")),
+        _ => Err(capability("functionCallingConfig mode is not supported")),
     }
 }
 
@@ -390,7 +620,11 @@ fn response_parts(message: &Message) -> Result<Vec<Value>, String> {
     for call in &message.tool_calls {
         let args: Value = serde_json::from_str(&call.arguments)
             .map_err(|_| invalid("tool call arguments are not complete JSON"))?;
-        parts.push(json!({"functionCall": {"name": call.name, "args": args}}));
+        let mut function = json!({"name": call.name, "args": args});
+        if !call.id.is_empty() {
+            function["id"] = json!(call.id);
+        }
+        parts.push(json!({"functionCall": function}));
     }
     Ok(parts)
 }
@@ -405,6 +639,7 @@ fn stream_id(context: &Value) -> String {
 
 #[derive(Default)]
 struct PendingCall {
+    id: Option<String>,
     name: Option<String>,
     arguments: String,
 }
@@ -478,6 +713,23 @@ impl Guest for GeminiClient {
             .get("generationConfig")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        if generation.get("responseSchema").is_some()
+            || generation.get("responseJsonSchema").is_some()
+        {
+            return Err(capability(
+                "Gemini response schemas are not supported by this adapter",
+            ));
+        }
+        if let Some(mime) = generation.get("responseMimeType") {
+            let mime = mime
+                .as_str()
+                .ok_or_else(|| invalid("responseMimeType must be a string"))?;
+            if mime != "text/plain" {
+                return Err(capability(
+                    "Gemini structured response MIME types are not supported by this adapter",
+                ));
+            }
+        }
         let max_output_tokens = generation
             .get("maxOutputTokens")
             .map(|value| {
@@ -487,13 +739,14 @@ impl Guest for GeminiClient {
                     .ok_or_else(|| invalid("maxOutputTokens must be an unsigned 32-bit integer"))
             })
             .transpose()?;
+        let mut tools = parse_tools(&envelope.body)?;
+        let tool_choice = function_choice(&envelope.body, &mut tools)?;
         encode(&ChatRequest {
             model: model.to_owned(),
             messages: parse_messages(&envelope.body)?,
-            tools: parse_tools(&envelope.body)?,
+            tools,
             response_format: None,
-            // Gemini's toolConfig modes have no Canonical IR mapping yet.
-            tool_choice: None,
+            tool_choice,
             sampling: Sampling {
                 temperature: generation.get("temperature").and_then(Value::as_f64),
                 top_p: generation.get("topP").and_then(Value::as_f64),
@@ -567,9 +820,9 @@ impl Guest for GeminiClient {
             }))?,
             StreamEvent::ToolCallDelta {
                 index,
+                id: call_id,
                 name,
                 arguments_delta,
-                ..
             } => {
                 STREAM_CALLS.with(|streams| {
                     let mut streams = streams.borrow_mut();
@@ -578,11 +831,25 @@ impl Guest for GeminiClient {
                         .or_default()
                         .entry(index)
                         .or_default();
-                    if name.is_some() {
-                        pending.name = name;
+                    if let Some(call_id) = call_id.filter(|value| !value.is_empty()) {
+                        if pending.id.as_ref().is_some_and(|id| id != &call_id) {
+                            return Err(invalid("streamed function call changed its ID"));
+                        }
+                        pending.id = Some(call_id);
+                    }
+                    if let Some(name) = name {
+                        if pending
+                            .name
+                            .as_ref()
+                            .is_some_and(|current| current != &name)
+                        {
+                            return Err(invalid("streamed function call changed its name"));
+                        }
+                        pending.name = Some(name);
                     }
                     pending.arguments.push_str(&arguments_delta);
-                });
+                    Ok(())
+                })?;
                 String::new()
             }
             StreamEvent::Usage { usage } => sse(&json!({
@@ -627,7 +894,11 @@ impl Guest for GeminiClient {
                         let args: Value = serde_json::from_str(&call.arguments).map_err(|_| {
                             invalid("streamed tool arguments are not complete JSON")
                         })?;
-                        parts.push(json!({"functionCall": {"name": name, "args": args}}));
+                        let mut function = json!({"name": name, "args": args});
+                        if let Some(id) = call.id {
+                            function["id"] = json!(id);
+                        }
+                        parts.push(json!({"functionCall": function}));
                     }
                 }
                 sse(&json!({
@@ -687,6 +958,239 @@ impl Guest for GeminiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn normalized(body: Value) -> Result<ChatRequest, String> {
+        GeminiClient::normalize_inbound(json!({
+            "protocol":"google-gemini-generate-content", "principal":{"subject":"fixture"}, "headers":{"names":[],"values":{}},
+            "transport_path":"/v1beta/models/test:generateContent", "body":body
+        }).to_string()).map(|encoded| serde_json::from_str(&encoded).unwrap())
+    }
+
+    fn tool_body() -> Value {
+        json!({"contents":[{"role":"user","parts":[{"text":"test"}]}],"tools":[{"functionDeclarations":[
+            {"name":"read","parametersJsonSchema":{"type":"object"}},
+            {"name":"write","parametersJsonSchema":{"type":"object"}},
+            {"name":"delete","parametersJsonSchema":{"type":"object"}}
+        ]}]})
+    }
+
+    #[test]
+    fn structured_response_constraints_are_rejected_before_translation() {
+        for generation in [
+            json!({"responseSchema":{"type":"OBJECT"}}),
+            json!({"responseJsonSchema":{"type":"object"}}),
+            json!({"responseMimeType":"application/json"}),
+            json!({"responseMimeType":"text/x.enum"}),
+            json!({"responseMimeType":"text/plain","responseJsonSchema":{"type":"string"}}),
+        ] {
+            let mut body = tool_body();
+            body["generationConfig"] = generation;
+            let error: ErrorEnvelope =
+                serde_json::from_str(&normalized(body).unwrap_err()).unwrap();
+            assert_eq!(error.code, ErrorCode::Capability);
+            assert_eq!(error.http_status, 400);
+        }
+        let mut body = tool_body();
+        body["generationConfig"] = json!({"responseMimeType":"text/plain"});
+        let request = normalized(body).unwrap();
+        assert_eq!(request.tools.len(), 3);
+        assert_eq!(request.tools[0].parameters, json!({"type":"object"}));
+    }
+
+    #[test]
+    fn buffered_tool_calls_preserve_available_ids() {
+        let message = Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: vec![
+                ToolCall {
+                    id: "call-one".into(),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+                ToolCall {
+                    id: "call-two".into(),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            ],
+            tool_call_id: None,
+            name: None,
+            extensions: Extensions::new(),
+        };
+        let parts = response_parts(&message).unwrap();
+        assert_eq!(parts[0]["functionCall"]["id"], "call-one");
+        assert_eq!(parts[1]["functionCall"]["id"], "call-two");
+    }
+
+    #[test]
+    fn streaming_tool_ids_survive_interleaved_fragments() {
+        let context = json!({"stream_id":"ids-regression","model":"test"}).to_string();
+        for event in [
+            json!({"type":"tool_call_delta","index":0,"id":"call-one","name":"read","arguments_delta":"{\"n\":"}),
+            json!({"type":"tool_call_delta","index":1,"id":"call-two","name":"read","arguments_delta":"{\"n\":"}),
+            json!({"type":"tool_call_delta","index":1,"arguments_delta":"2}"}),
+            json!({"type":"tool_call_delta","index":0,"arguments_delta":"1}"}),
+        ] {
+            GeminiClient::render_stream_event(event.to_string(), context.clone()).unwrap();
+        }
+        let output = GeminiClient::render_stream_event(
+            json!({"type":"done","finish_reason":"tool_calls"}).to_string(),
+            context,
+        )
+        .unwrap();
+        let rendered: Value = serde_json::from_str(&output).unwrap();
+        let body: Value = serde_json::from_str(
+            rendered["data"]
+                .as_str()
+                .unwrap()
+                .trim()
+                .strip_prefix("data: ")
+                .unwrap(),
+        )
+        .unwrap();
+        let parts = &body["candidates"][0]["content"]["parts"];
+        assert_eq!(
+            parts[0]["functionCall"],
+            json!({"id":"call-one","name":"read","args":{"n":1}})
+        );
+        assert_eq!(
+            parts[1]["functionCall"],
+            json!({"id":"call-two","name":"read","args":{"n":2}})
+        );
+    }
+
+    #[test]
+    fn legacy_schema_converts_types_limits_and_nullable_without_changing_enum_values() {
+        let schema = function_parameters(&json!({"parameters":{
+            "type":"OBJECT","properties":{
+                "values":{"type":"ARRAY","minItems":"1","items":{"type":"INTEGER","minimum":0}},
+                "mode":{"type":"STRING","enum":["FAST","SAFE"],"nullable":true},
+                "choice":{"anyOf":[{"type":"BOOLEAN"},{"type":"NUMBER"}]}
+            },"required":["values"],"additionalProperties":false
+        }}))
+        .unwrap();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["values"]["minItems"], 1);
+        assert_eq!(schema["properties"]["values"]["items"]["type"], "integer");
+        assert_eq!(
+            schema["properties"]["mode"]["anyOf"][0]["enum"],
+            json!(["FAST", "SAFE"])
+        );
+        assert_eq!(
+            schema["properties"]["mode"]["anyOf"][1],
+            json!({"type":"null"})
+        );
+        assert_eq!(
+            schema["properties"]["choice"]["anyOf"][0]["type"],
+            "boolean"
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        let native = json!({"type":"object","$defs":{"leaf":{"type":["string","null"]}},"properties":{"x":{"$ref":"#/$defs/leaf"}}});
+        assert_eq!(
+            function_parameters(&json!({"parametersJsonSchema":native})).unwrap(),
+            native
+        );
+        assert_eq!(
+            function_parameters(&json!({"parameters":native})).unwrap(),
+            native
+        );
+    }
+
+    #[test]
+    fn unsupported_or_malformed_legacy_schema_is_not_forwarded_as_json_schema() {
+        for schema in [
+            json!({"type":"TYPE_UNSPECIFIED"}),
+            json!({"type":"OBJECT","propertyOrdering":["x"]}),
+            json!({"type":"ARRAY","items":false}),
+            json!({"type":"STRING","nullable":"yes"}),
+            json!({"type":"ARRAY","maxItems":"-1"}),
+            json!({"type":"OBJECT","properties":{"x":{"type":"UNKNOWN"}}}),
+        ] {
+            let error = function_parameters(&json!({"parameters":schema}))
+                .expect_err("unsupported legacy schema");
+            assert_eq!(
+                serde_json::from_str::<ErrorEnvelope>(&error)
+                    .unwrap()
+                    .http_status,
+                400
+            );
+        }
+    }
+
+    #[test]
+    fn function_config_maps_modes_and_restricts_single_or_multiple_allowed_names() {
+        for (mode, expected) in [("NONE", "none"), ("AUTO", "auto"), ("ANY", "required")] {
+            let mut body = tool_body();
+            body["toolConfig"] = json!({"functionCallingConfig":{"mode":mode}});
+            let request = normalized(body).unwrap();
+            assert_eq!(serde_json::to_value(request.tool_choice).unwrap(), expected);
+        }
+        for names in [json!(["read"]), json!(["read", "write"])] {
+            let mut body = tool_body();
+            body["toolConfig"] =
+                json!({"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":names}});
+            body["contents"].as_array_mut().unwrap().extend([
+                json!({"role":"model","parts":[{"functionCall":{"id":"old-call","name":"delete","args":{}}}]}),
+                json!({"role":"user","parts":[{"functionResponse":{"id":"old-call","name":"delete","response":{"ok":true}}}]})
+            ]);
+            let request = normalized(body).unwrap();
+            assert_eq!(
+                request
+                    .tools
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>(),
+                names
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(request.messages[1].tool_calls[0].name, "delete");
+            assert_eq!(
+                request.messages[2].tool_call_id.as_deref(),
+                Some("old-call")
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_function_constraints_fail_before_normalization() {
+        for config in [
+            json!({"functionCallingConfig":{"mode":"VALIDATED"}}),
+            json!({"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["missing"]}}),
+            json!({"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["read"]}}),
+            json!({"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":[]}}),
+            json!({"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read","read"]}}),
+            json!({"functionCallingConfig":{"mode":"ANY","futureConstraint":true}}),
+            json!({"retrievalConfig":{}}),
+        ] {
+            let mut body = tool_body();
+            body["toolConfig"] = config;
+            let error = normalized(body).expect_err("constraint must not disappear");
+            assert_eq!(
+                serde_json::from_str::<ErrorEnvelope>(&error)
+                    .unwrap()
+                    .http_status,
+                400
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_hosted_and_function_tool_groups_fail_closed() {
+        let mut body = tool_body();
+        body["tools"][0]["google_search"] = json!({});
+        let error = normalized(body).expect_err("hosted semantics must not disappear");
+        assert_eq!(
+            serde_json::from_str::<ErrorEnvelope>(&error)
+                .unwrap()
+                .http_status,
+            400
+        );
+    }
 
     #[test]
     fn function_responses_keep_their_explicit_call_id() {

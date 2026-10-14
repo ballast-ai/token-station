@@ -19,7 +19,8 @@ use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, Extensions, HintKind, Message, Role, Sampling, StreamEvent, ToolCall, ToolDef,
+    ErrorEnvelope, Extensions, HintKind, Message, ResponseFormat, Role, Sampling, StreamEvent,
+    ToolCall, ToolDef,
 };
 
 struct OpenAiClient;
@@ -131,27 +132,85 @@ fn reasoning_to_json(content: Option<&Content>) -> Option<Value> {
     (!reasoning.is_empty()).then(|| json!(reasoning))
 }
 
-fn validate_response_format(body: &Value) -> Result<(), String> {
-    let Some(format) = body.get("response_format").filter(|value| !value.is_null()) else {
-        return Ok(());
+fn response_format(body: &Value) -> Result<Option<ResponseFormat>, String> {
+    let Some(raw) = body.get("response_format").filter(|value| !value.is_null()) else {
+        return Ok(None);
     };
-    let format = format
+    let format = raw
         .as_object()
         .ok_or_else(|| invalid("response_format must be an object"))?;
     let kind = format
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("response_format declares no string type"))?;
-
-    match kind {
-        "text" => Ok(()),
-        "json_schema" | "json_object" => Err(capability(
-            "Chat Completions structured output requires an approved Canonical IR/provider mapping",
-        )),
-        kind => Err(capability(format!(
-            "unsupported Chat Completions response_format type {kind}"
-        ))),
+    let allowed: &[&str] = match kind {
+        "text" | "json_object" => &["type"],
+        "json_schema" => &["type", "json_schema"],
+        _ => {
+            return Err(capability(format!(
+                "unsupported Chat Completions response_format type {kind}"
+            )))
+        }
+    };
+    if format.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(capability("response_format contains unsupported fields"));
     }
+    let result = match kind {
+        "text" => ResponseFormat::Text,
+        "json_object" => ResponseFormat::JsonObject,
+        "json_schema" => {
+            let schema = format
+                .get("json_schema")
+                .and_then(Value::as_object)
+                .ok_or_else(|| invalid("response_format.json_schema must be an object"))?;
+            if schema
+                .keys()
+                .any(|key| !["name", "description", "schema", "strict"].contains(&key.as_str()))
+            {
+                return Err(capability(
+                    "response_format.json_schema contains unsupported fields",
+                ));
+            }
+            if schema
+                .get("name")
+                .and_then(Value::as_str)
+                .is_none_or(|name| {
+                    name.is_empty()
+                        || name.len() > 64
+                        || !name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                })
+            {
+                return Err(invalid(
+                    "JSON schema format requires a valid name of at most 64 characters",
+                ));
+            }
+            if schema
+                .get("schema")
+                .is_none_or(|schema| !schema.is_object())
+            {
+                return Err(invalid("JSON schema format requires an object schema"));
+            }
+            if schema
+                .get("description")
+                .is_some_and(|value| !value.is_string())
+            {
+                return Err(invalid("JSON schema description must be a string"));
+            }
+            if schema
+                .get("strict")
+                .is_some_and(|value| !value.is_boolean() && !value.is_null())
+            {
+                return Err(invalid("JSON schema strict must be a boolean or null"));
+            }
+            ResponseFormat::JsonSchema {
+                json_schema: Value::Object(schema.clone()),
+            }
+        }
+        _ => unreachable!(),
+    };
+    Ok(Some(result))
 }
 
 /// Cursor Agent has been observed sending a Responses-shaped body to the
@@ -282,7 +341,7 @@ impl Guest for OpenAiClient {
         } else {
             envelope.body.clone()
         };
-        validate_response_format(&body)?;
+        let response_format = response_format(&body)?;
 
         let model = body["model"]
             .as_str()
@@ -343,7 +402,7 @@ impl Guest for OpenAiClient {
             model,
             messages,
             tools,
-            response_format: None,
+            response_format,
             tool_choice: body
                 .get("tool_choice")
                 .map(|v| serde_json::from_value(v.clone()).expect("ToolChoice accepts any value")),
@@ -576,6 +635,48 @@ impl Guest for OpenAiClient {
 mod tests {
     use super::*;
     use token_station_protocol::{HeaderDigest, Principal};
+
+    #[test]
+    fn structured_formats_preserve_constraints_and_reject_invalid_fields() {
+        let schema = json!({"name":"session_title","description":"A title","strict":true,"schema":{"type":"object","properties":{"title":{"type":"string","maxLength":80}},"required":["title"],"additionalProperties":false,"$defs":{"bound":{"type":"integer","maximum":12}}}});
+        for format in [
+            json!({"type":"text"}),
+            json!({"type":"json_object"}),
+            json!({"type":"json_schema","json_schema":schema}),
+        ] {
+            assert_eq!(
+                serde_json::to_value(response_format(&json!({"response_format":format})).unwrap())
+                    .unwrap(),
+                format
+            );
+        }
+        assert_eq!(response_format(&json!({})).unwrap(), None);
+        assert_eq!(
+            response_format(&json!({"response_format":null})).unwrap(),
+            None
+        );
+        for format in [
+            json!({}),
+            json!("json_object"),
+            json!({"type":3}),
+            json!({"type":"future"}),
+            json!({"type":"text","strict":true}),
+            json!({"type":"json_object","json_schema":{}}),
+            json!({"type":"json_schema"}),
+            json!({"type":"json_schema","json_schema":[]}),
+            json!({"type":"json_schema","json_schema":{"schema":{}}}),
+            json!({"type":"json_schema","json_schema":{"name":"bad name","schema":{}}}),
+            json!({"type":"json_schema","json_schema":{"name":"answer","schema":false}}),
+            json!({"type":"json_schema","json_schema":{"name":"answer","schema":{},"strict":"true"}}),
+            json!({"type":"json_schema","json_schema":{"name":"answer","schema":{},"description":3}}),
+            json!({"type":"json_schema","json_schema":{"name":"answer","schema":{},"future":true}}),
+        ] {
+            assert!(
+                response_format(&json!({"response_format":format})).is_err(),
+                "{format}"
+            );
+        }
+    }
 
     #[test]
     fn opencode_logical_model_reaches_canonical_request_unchanged() {

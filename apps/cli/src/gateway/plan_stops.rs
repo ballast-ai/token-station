@@ -6,7 +6,7 @@ use token_station_protocol::{
 };
 
 fn active(provider: &str, request: &ChatRequest) -> bool {
-    provider == "chatgpt-plan" && !request.sampling.stop.is_empty()
+    crate::config::is_subscription_provider(provider) && !request.sampling.stop.is_empty()
 }
 
 pub(super) fn prepare<'a>(
