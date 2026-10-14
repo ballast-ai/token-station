@@ -1,0 +1,25 @@
+[package]
+name = "provider-claude-plan-v2"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: stops cargo from walking up into the main workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json = "1"
+south-component-conformance = { version = "=0.20.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "7afe9a5b8ce80246597c43f7dd1b285b67eef9ed", default-features = false }
+wit-bindgen = "0.59"
+
+[dev-dependencies]
+token-station-protocol = { version = "0.3.0", git = "https://github.com/ballast-ai/token-station-kernel.git", rev = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35" }
+south-provider-api = { version = "=0.20.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "7afe9a5b8ce80246597c43f7dd1b285b67eef9ed" }
+
+[profile.release]
+lto = "thin"
+opt-level = "s"
+strip = true

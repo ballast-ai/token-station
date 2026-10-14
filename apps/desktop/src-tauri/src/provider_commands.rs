@@ -287,6 +287,29 @@ pub(crate) fn south_header_auth_v1_unavailable_reason(
 ) -> Option<&'static str> {
     let provider = upstream["provider"].as_str().unwrap_or_default();
     if token_station_cli::config::is_subscription_provider(provider) {
+        let local_package = match provider {
+            "claude-plan" => Some("provider-claude-plan"),
+            "copilot-plan" => Some("provider-copilot-plan"),
+            "gemini-cli-plan" | "antigravity-plan" => Some("provider-codeassist"),
+            _ => None,
+        };
+        if let Some(package) = local_package {
+            if !package_verified
+                || !draft["plugins"]["providers"][provider]
+                    .as_str()
+                    .is_some_and(|name| name == package || name == format!("{package}-v2"))
+            {
+                return Some("provider_package");
+            }
+            if !upstream["auth"]["local_subscription"].is_object() {
+                return Some("auth");
+            }
+            return if provider == "claude-plan" {
+                Some("provider_call")
+            } else {
+                None
+            };
+        }
         if !package_verified
             || draft["plugins"]["providers"][provider].as_str() != Some("provider-chatgpt-plan")
         {

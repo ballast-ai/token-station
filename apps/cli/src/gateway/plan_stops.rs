@@ -6,7 +6,7 @@ use token_station_protocol::{
 };
 
 fn active(provider: &str, request: &ChatRequest) -> bool {
-    crate::config::is_subscription_provider(provider) && !request.sampling.stop.is_empty()
+    matches!(provider, "chatgpt-plan" | "codex-plan") && !request.sampling.stop.is_empty()
 }
 
 pub(super) fn prepare<'a>(

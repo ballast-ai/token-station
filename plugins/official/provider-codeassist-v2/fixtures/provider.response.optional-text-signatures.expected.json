@@ -1,0 +1,36 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "fixture",
+        "role": "assistant",
+        "codeassist_optional_text_signatures": {
+          "model": "gemini-fixture",
+          "parts": [
+            {
+              "part_index": 0,
+              "text": "fixture",
+              "thoughtSignature": "optional-text-fixture"
+            },
+            {
+              "part_index": 1,
+              "text": "",
+              "thoughtSignature": "optional-trailer-fixture"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "id": "",
+  "model": "gemini-fixture",
+  "usage": {
+    "cache_read_tokens": 3,
+    "cache_write_tokens": 0,
+    "input_tokens": 9,
+    "output_tokens": 6,
+    "reasoning_tokens": 2
+  }
+}

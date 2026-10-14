@@ -1,0 +1,17 @@
+{
+  "provider": "claude-plan",
+  "base_url": "http://127.0.0.1:9/claude-plan",
+  "auth": "local_subscription_token",
+  "models": [
+    {
+      "model": "claude-fixture",
+      "tool": true,
+      "vision": false,
+      "json_schema": false,
+      "supported_parameters": [
+        "max_output_tokens"
+      ],
+      "context_window": 0
+    }
+  ]
+}

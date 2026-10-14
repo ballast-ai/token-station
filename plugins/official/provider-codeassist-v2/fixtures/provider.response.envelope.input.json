@@ -1,0 +1,5 @@
+{
+  "body": "{\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"fixture\"}]},\"finishReason\":\"STOP\"}],\"modelVersion\":\"gemini-fixture\",\"usageMetadata\":{\"cachedContentTokenCount\":3,\"candidatesTokenCount\":4,\"promptTokenCount\":9,\"thoughtsTokenCount\":2}}}",
+  "headers": {},
+  "status": 200
+}

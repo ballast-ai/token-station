@@ -1,0 +1,9 @@
+[
+  {
+    "context_window": 128000,
+    "json_schema": true,
+    "model": "gemini-fixture",
+    "tool": true,
+    "vision": true
+  }
+]

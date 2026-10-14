@@ -26,7 +26,7 @@ function renderShell(
   modelCount = 0,
 ) {
   const onNavigate = vi.fn();
-  const onConnectPlan = vi.fn();
+  const onConnectSubscriptions = vi.fn();
   function ShellHarness() {
     const [modelEntryOpen, setModelEntryOpen] = useState(false);
     return (
@@ -41,7 +41,7 @@ function renderShell(
         onModelEntryOpenChange={setModelEntryOpen}
         onNavigate={onNavigate}
         onToggleServe={vi.fn()}
-        onConnectPlan={onConnectPlan}
+        onConnectSubscriptions={onConnectSubscriptions}
       >
         <div>content</div>
       </AppShell>
@@ -55,7 +55,7 @@ function renderShell(
   return {
     navigation: within(document.querySelector(`[aria-label="${navigationName}"]`)!),
     onNavigate,
-    onConnectPlan,
+    onConnectSubscriptions,
   };
 }
 
@@ -148,18 +148,17 @@ describe("AppShell Agent and routing navigation", () => {
 });
 
 
-it.each([
-  ["本机 Codex 登录", "codex"],
-  ["ChatGPT 套餐", "chatgpt"],
-])("opens %s from the existing model chooser without navigating to API setup", async (label, kind) => {
+it("opens subscriptions from the model chooser and retains both API setup paths", async () => {
   const user = userEvent.setup();
-  const { navigation, onNavigate, onConnectPlan } = renderShell("overview");
+  const { navigation, onNavigate, onConnectSubscriptions } = renderShell("overview");
   await user.click(navigation.getByRole("button", { name: "模型" }));
   const dialog = screen.getByRole("dialog", { name: "选择模型接入方式" });
   expect(within(dialog).getByRole("button", { name: "先选供应商" })).toBeInTheDocument();
   expect(within(dialog).getByRole("button", { name: "先搜模型" })).toBeInTheDocument();
-  await user.click(within(dialog).getByRole("button", { name: label }));
-  expect(onConnectPlan).toHaveBeenCalledWith(kind);
+  expect(within(dialog).queryByRole("button", { name: "本机 Codex 登录" })).toBeNull();
+  expect(within(dialog).queryByRole("button", { name: "ChatGPT 套餐" })).toBeNull();
+  await user.click(within(dialog).getByRole("button", { name: "订阅" }));
+  expect(onConnectSubscriptions).toHaveBeenCalledOnce();
   expect(onNavigate).toHaveBeenCalledTimes(1);
   expect(onNavigate).toHaveBeenCalledWith("providers");
   expect(screen.queryByRole("dialog", { name: "选择模型接入方式" })).toBeNull();

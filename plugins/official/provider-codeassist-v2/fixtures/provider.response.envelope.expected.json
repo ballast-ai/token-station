@@ -1,0 +1,21 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "fixture",
+        "role": "assistant"
+      }
+    }
+  ],
+  "id": "",
+  "model": "gemini-fixture",
+  "usage": {
+    "cache_read_tokens": 3,
+    "cache_write_tokens": 0,
+    "input_tokens": 9,
+    "output_tokens": 6,
+    "reasoning_tokens": 2
+  }
+}

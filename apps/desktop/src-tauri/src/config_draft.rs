@@ -772,7 +772,9 @@ impl AppInner {
                     catalog_revision,
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
-                    credential_source: if up["auth"]["codex_account"].is_string() {
+                    credential_source: if up["auth"]["local_subscription"].is_object() {
+                        "local_subscription"
+                    } else if up["auth"]["codex_account"].is_string() {
                         "codex_account"
                     } else if up["auth"]["chatgpt_account"].is_string() {
                         "chatgpt_account"
@@ -791,6 +793,7 @@ impl AppInner {
                         .or_else(|| up["auth"]["file"].as_str())
                         .or_else(|| up["auth"]["chatgpt_account"].as_str())
                         .or_else(|| up["auth"]["codex_account"].as_str())
+                        .or_else(|| up["auth"]["local_subscription"]["id"].as_str())
                         .unwrap_or_default()
                         .to_owned(),
                     provider_call: up

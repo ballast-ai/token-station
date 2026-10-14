@@ -1,12 +1,8 @@
 import type { ReactNode } from "react";
-import { Activity, Boxes, ChevronRight, Monitor, Search, Settings, X } from "lucide-react";
+import { Activity, Boxes, ChevronRight, CreditCard, Search, Settings, X } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { hasManagedInstallation } from "../agentManagement";
 import { useLanguage } from "./LanguageProvider";
-import { ProviderIcon } from "../brandIcons";
-import type { PlanConnectionKind } from "../planConnections";
-import { planConnectionTitle } from "../planConnections";
-import { Badge } from "./ui/badge";
 import { Separator } from "./ui/separator";
 import TokenStationMark from "./TokenStationMark";
 import { usePageTransition } from "./use-page-transition";
@@ -49,7 +45,7 @@ interface AppShellProps {
   onModelEntryOpenChange: (open: boolean) => void;
   onNavigate: (view: AppView) => void;
   onToggleServe: () => void;
-  onConnectPlan?: (kind: PlanConnectionKind) => void;
+  onConnectSubscriptions?: () => void;
   children: ReactNode;
 }
 
@@ -83,7 +79,7 @@ export default function AppShell({
   onModelEntryOpenChange,
   onNavigate,
   onToggleServe,
-  onConnectPlan,
+  onConnectSubscriptions,
   children,
 }: AppShellProps) {
   const { t, copy } = useLanguage();
@@ -265,19 +261,15 @@ export default function AppShell({
           </div>
           <div className="model-entry-plan-heading"><span>{copy("Use an existing plan", "使用已有套餐", "使用現有方案", "既存のプランを使用")}</span><Separator /></div>
           <div className="model-entry-plan-options">
-            {(["codex", "chatgpt"] as const).map((kind) => (
-              <button type="button" key={kind} aria-label={planConnectionTitle(kind, copy)}
-                onClick={() => { onModelEntryOpenChange(false); onConnectPlan?.(kind); }}>
-                <span className="model-entry-plan-icon">{kind === "codex" ? <Monitor aria-hidden="true" /> : <ProviderIcon id="openai" label="ChatGPT" size={25} />}</span>
-                <span className="model-entry-plan-copy">
-                  <strong>{planConnectionTitle(kind, copy)}{kind === "chatgpt" && <Badge variant="secondary">{copy("Experimental", "实验性", "實驗性", "試験的")}</Badge>}</strong>
-                  <small>{kind === "codex"
-                    ? copy("Reuse your local login without another authorization.", "复用本机已有登录，无需重新授权。", "重用本機現有登入，無需重新授權。", "ローカルのサインインを再認証せずに再利用します。")
-                    : copy("Authorize in your browser to use your ChatGPT plan allowance.", "通过浏览器授权，使用 ChatGPT 套餐额度。", "透過瀏覽器授權，使用 ChatGPT 方案額度。", "ブラウザーで認証し、ChatGPT プラン枠を使用します。")}</small>
-                </span>
-                <ChevronRight aria-hidden="true" />
-              </button>
-            ))}
+            <button type="button" aria-label={copy("Subscriptions", "订阅", "訂閱", "サブスクリプション")}
+              onClick={() => { onModelEntryOpenChange(false); onConnectSubscriptions?.(); }}>
+              <span className="model-entry-plan-icon"><CreditCard aria-hidden="true" /></span>
+              <span className="model-entry-plan-copy">
+                <strong>{copy("Subscriptions", "订阅", "訂閱", "サブスクリプション")}</strong>
+                <small>{copy("Connect Claude, ChatGPT, Copilot, Gemini CLI, and Antigravity accounts.", "接入 Claude、ChatGPT、Copilot、Gemini CLI 和 Antigravity 账号。", "接入 Claude、ChatGPT、Copilot、Gemini CLI 和 Antigravity 帳號。", "Claude、ChatGPT、Copilot、Gemini CLI、Antigravity のアカウントを接続します。")}</small>
+              </span>
+              <ChevronRight aria-hidden="true" />
+            </button>
           </div>
           <p className="model-entry-plan-note">{copy("Plan connections share account allowance, not API credit.", "套餐接入共享账号额度，不使用 API 余额。", "方案接入共用帳號額度，不使用 API 餘額。", "プラン接続はアカウントの利用枠を共有します。API クレジットではありません。")}</p>
         </DialogContent>

@@ -1,0 +1,7 @@
+{
+  "status": 429,
+  "headers": {
+    "retry-after": "2"
+  },
+  "body": "{\"type\": \"error\", \"error\": {\"type\": \"rate_limit_error\", \"message\": \"Number of requests has exceeded your rate limit\"}}"
+}

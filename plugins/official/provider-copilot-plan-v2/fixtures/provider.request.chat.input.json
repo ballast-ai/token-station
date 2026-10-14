@@ -1,0 +1,40 @@
+{
+  "provider_config": {
+    "provider": "copilot-plan",
+    "base_url": "https://api.githubcopilot.com",
+    "auth": "local_subscription_token",
+    "models": [
+      {
+        "model": "gpt-5.5",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 400000,
+        "supported_parameters": [
+          "stop",
+          "temperature",
+          "top_p"
+        ]
+      }
+    ],
+    "copilot_source_kind": "editor",
+    "copilot_model_endpoints": {
+      "gpt-5.5": [
+        "/chat/completions"
+      ]
+    }
+  },
+  "chat_request": {
+    "model": "gpt-5.5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "sampling": {
+      "temperature": 0.2
+    },
+    "stream": true
+  }
+}

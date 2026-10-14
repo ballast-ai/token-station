@@ -1,0 +1,141 @@
+// Provider component ABI, version 2 — the South-owned southbound half.
+//
+// Lineage: `token-station:adapter@1.0.0` defined both adapter roles inside the
+// community host. Version 2 carries the provider (southbound) role only — the
+// agent role stays with the community host — and is owned by this repository,
+// so one component serves every adopting host. The v1 world remains in the
+// community host through its announced transition window and retires there.
+//
+// Payloads are JSON documents rather than WIT records, exactly as in v1. The
+// Canonical IR is defined once, in the community `crates/protocol`, where exact
+// `parse -> serialize` fixtures pin its wire format; the kernel mirror
+// distributes it at fixed revisions. Mirroring the IR here would give two
+// definitions that drift, and WIT cannot express the open JSON values the IR
+// carries (`tool.parameters`, request bodies, every `extensions` bag). Each
+// `json` parameter names the canonical type it carries; that name is the
+// contract, and the component's manifest `schema_id` names the IR revision the
+// component was built against — admission is where a mismatch dies, not
+// per-call stamping.
+//
+// One deliberate departure from v1 (S0 ruling D2): stream chunks cross the
+// boundary as raw bounded bytes, not JSON strings. A `v1` `StreamChunk` is a
+// UTF-8 `data` string, which cannot carry binary eventstream frames (AWS
+// Bedrock), and base64 would tax every SSE chunk for the sake of the one
+// binary dialect. The bytes are bounded by the host-side transport contract;
+// the component's output stays JSON.
+//
+// The world imports neither `wasi:filesystem` nor `wasi:sockets`. A component
+// has no file system and no network, which is what makes the host's routing,
+// budget, billing and audit impossible to bypass. It imports `host` only to
+// *name* a credential it can never read.
+
+package token-station:adapter@2.0.0;
+
+/// Identity and liveness.
+interface common {
+    record adapter-metadata {
+        name: string,
+        version: string,
+        /// Must equal the world this component was built against:
+        /// `provider-adapter-v2`.
+        api-version: string,
+    }
+
+    enum health-status {
+        ready,
+        degraded,
+        unavailable,
+    }
+
+    record adapter-health {
+        status: health-status,
+        detail: option<string>,
+    }
+}
+
+/// Credential operations the host performs on a provider component's behalf.
+///
+/// The component passes the *name* of a credential; the host resolves it.
+/// Every function here returns something that is not a credential.
+///
+/// This interface is orthogonal to the host-signed request finalizer
+/// (`HostSigned` + `RequestFinalizer`, its own auth slice): `sign` serves
+/// signatures a component places in the body or an ordinary header, while the
+/// finalizer serves signatures bound to the final request bytes and written
+/// into reserved headers. A component must not imitate SigV4 through `sign`.
+interface host {
+    /// `secret-ref` is a name declared in the component's manifest under
+    /// `permissions.secrets`. Signing a name the manifest did not declare
+    /// fails.
+    ///
+    /// The signature is not a credential, so the component may place it in an
+    /// ordinary header or the body. It may *not* place it in `authorization`
+    /// or any other credential header: the descriptor's safe-header rule
+    /// refuses those names.
+    sign: func(secret-ref: string, payload: list<u8>, algorithm: string) -> result<list<u8>, string>;
+}
+
+/// Southbound: translates the Canonical IR into one provider's HTTP dialect
+/// and that dialect's responses back into the IR.
+interface provider-adapter {
+    use common.{adapter-metadata, adapter-health};
+
+    /// A JSON document. The doc comment on each use names its canonical type.
+    type json = string;
+
+    metadata: func() -> adapter-metadata;
+    healthcheck: func() -> adapter-health;
+
+    /// `provider-config`: `protocol::ProviderConfig` (the policy-fenced
+    /// four-field subset: `provider`, `base_url`, `auth`, `models`)
+    /// -> `list<protocol::ModelCapability>`.
+    ///
+    /// A component has no network, so it cannot ask a self-hosted upstream
+    /// what it serves. `provider-config.models` is where that upstream's
+    /// operator says so; the component may enrich it from what it knows of
+    /// the provider. Hosts with their own model catalogs may ignore the
+    /// result — using it is host policy, honouring the call is not.
+    model-capabilities: func(provider-config: json) -> result<json, json>;
+
+    /// `chat-request`: `protocol::ChatRequest`,
+    /// `provider-config`: `protocol::ProviderConfig`
+    /// -> `protocol::HttpRequestDescriptor`.
+    ///
+    /// The descriptor says which credential to attach and how to present it
+    /// (`protocol::Auth`), never what it is. The host authorizes the
+    /// descriptor against the configured endpoint, resolves the name, injects
+    /// the value (front-loading any minting), and sends the request.
+    build-http-request: func(chat-request: json, provider-config: json) -> result<json, json>;
+
+    /// `response-parts`: `protocol::HttpResponseParts` -> `protocol::ChatResponse`.
+    ///
+    /// The response's `usage` is funds evidence (S0 ruling D1): the component
+    /// normalizes the dialect's complete report — every bucket, in the
+    /// dialect's native cache convention — and a 2xx whose body cannot yield
+    /// exact usage is an error (`provider_protocol_error`), never a zero.
+    parse-response: func(response-parts: json) -> result<json, json>;
+
+    /// `chunk`: raw bounded body bytes -> `list<protocol::StreamEvent>` (json).
+    ///
+    /// A chunk is not guaranteed to be a whole frame — SSE or binary
+    /// eventstream alike. The component must carry partial-frame state and
+    /// must not buffer the body to await completeness. Usage events are
+    /// emitted exactly as often as the dialect reports usage (S0 ruling D1);
+    /// the host folds them and applies its own funds discipline.
+    parse-stream-chunk: func(chunk: list<u8>) -> result<json, json>;
+
+    /// `response-parts`: `protocol::HttpResponseParts` -> `protocol::ErrorEnvelope`.
+    ///
+    /// Must map onto the closed `protocol::ErrorCode` catalog: the host
+    /// branches on it to decide whether another upstream may be tried. An
+    /// unmappable failure is `internal`, never an invented code.
+    map-provider-error: func(response-parts: json) -> result<json, json>;
+}
+
+/// World name doubles as the manifest's `api_version`.
+///
+/// Imports `host` so it can name credentials. Exports no way to read one.
+world provider-adapter-v2 {
+    import host;
+    export provider-adapter;
+}

@@ -1,4 +1,3 @@
-import type { PlanConnectionKind } from "../planConnections";
 import { planConnectionTitle } from "../planConnections";
 import { useLocalizedCopy } from "./LanguageProvider";
 import ChatGPTPlanPanel from "./ChatGPTPlanPanel";
@@ -6,7 +5,7 @@ import LocalCodexPanel from "./LocalCodexPanel";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 
 export default function PlanConnectionDialog({ kind, onClose, onChanged, onConnected }: {
-  kind: PlanConnectionKind | null;
+  kind: "codex" | "chatgpt" | null;
   onClose: () => void;
   onChanged: () => Promise<void>;
   onConnected: () => void;

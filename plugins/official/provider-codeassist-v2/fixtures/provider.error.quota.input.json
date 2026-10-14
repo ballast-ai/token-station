@@ -1,0 +1,7 @@
+{
+  "body": "{\"error\":{\"message\":\"fixture quota\",\"status\":\"RESOURCE_EXHAUSTED\"}}",
+  "headers": {
+    "retry-after": "2"
+  },
+  "status": 429
+}

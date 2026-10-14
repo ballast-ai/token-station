@@ -44,6 +44,7 @@ mod self_test;
 mod semantic_commands;
 mod serve_supervisor;
 mod stats_commands;
+mod subscription_commands;
 mod views;
 mod vision_probe;
 
@@ -502,6 +503,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            subscription_commands::subscription_discover,
+            subscription_commands::subscription_accounts_list,
+            subscription_commands::subscription_models,
+            subscription_commands::subscription_disconnect,
+            subscription_commands::subscription_connect_provider,
             codex_commands::codex_accounts_list,
             codex_commands::codex_account_discover,
             codex_commands::codex_account_models,

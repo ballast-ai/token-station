@@ -25,7 +25,7 @@ On a fresh installation, the first discovered model becomes the initial default 
 Existing routes, model selections, and Codex account bindings remain unchanged. Discovery does not start the gateway or connect Agents.
 If unsaved edits exist, automatic registration waits until a later launch with a clean configuration.
 Deleting a provider or disconnecting its reference prevents automatic reconnection.
-To retry or reconnect manually, select **Add model**, then **Local Codex login** under **Use an existing plan**.
+To retry or reconnect manually, select **Add model**, then **Subscriptions**, then **ChatGPT**.
 Select the intended account or **Use local Codex login**, then wait for validation and model discovery.
 
 Token Station reads `CODEX_HOME/auth.json`, or `~/.codex/auth.json` when `CODEX_HOME` is unset.
@@ -48,7 +48,7 @@ Existing ChatGPT plan registrations remain separate and continue to work.
 ## Connect a separate ChatGPT registration
 
 1. Open **Models** in Token Station.
-2. Select **Add model**, then **ChatGPT plan** under **Use an existing plan**.
+2. Select **Add model**, then **Subscriptions**, then **ChatGPT API**.
 3. Select an existing account or **Continue with ChatGPT**.
 4. Complete the OpenAI browser authorization for Token Station.
 5. Wait for the account's model catalog and provider connection.

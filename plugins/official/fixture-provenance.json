@@ -16,6 +16,24 @@
       "files": 46,
       "fixtures": "fixtures",
       "sha256": "c0a23f2fe0024020012cc47a51a3e5330258a10e00c6c14ccc7526bcdae08164"
+    },
+    "provider-claude-plan-v2": {
+      "fixtures": "fixtures",
+      "source": "repository",
+      "files": 36,
+      "sha256": "bcbd950bdcdd76621449afdab3f0d24ded368f0aab45d23256a623f39c173f04"
+    },
+    "provider-copilot-plan-v2": {
+      "fixtures": "fixtures",
+      "source": "repository",
+      "files": 12,
+      "sha256": "ef7779d943ec2b3f0a5a6c733660bde3c375810972d3f5055ffefb5a97d64237"
+    },
+    "provider-codeassist-v2": {
+      "fixtures": "fixtures",
+      "source": "repository",
+      "files": 16,
+      "sha256": "7efad7f8f7f70f075cbf1d220823c1314c8a4d2f461542011e46df2323611ccb"
     }
   },
   "south_revision": "efbb9b6"

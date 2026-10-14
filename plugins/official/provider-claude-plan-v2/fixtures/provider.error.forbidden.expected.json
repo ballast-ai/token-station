@@ -1,0 +1,6 @@
+{
+  "code": "auth",
+  "http_status": 403,
+  "message": "the upstream rejected the credential",
+  "provider_message": "subscription access denied"
+}

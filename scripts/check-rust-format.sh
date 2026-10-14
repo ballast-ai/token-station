@@ -22,6 +22,9 @@ readonly plugin_manifests=(
   plugins/official/provider-openai-compatible-v2/Cargo.toml
   plugins/official/provider-anthropic-v2/Cargo.toml
   plugins/official/provider-chatgpt-plan-v2/Cargo.toml
+  plugins/official/provider-claude-plan-v2/Cargo.toml
+  plugins/official/provider-copilot-plan-v2/Cargo.toml
+  plugins/official/provider-codeassist-v2/Cargo.toml
 )
 
 cd "$root"

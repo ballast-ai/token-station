@@ -41,6 +41,8 @@ mod search_policy_tests;
 mod search_stream;
 #[cfg(test)]
 mod semantic_tests;
+#[cfg(test)]
+mod subscription_tests;
 mod tool_names;
 mod web_search;
 
@@ -1284,6 +1286,9 @@ fn assemble_upstreams(
                 json!(identity.client_version),
             );
         }
+        if let Some(identity) = &entry.subscription_identity {
+            provider_config.extensions.extend(identity.clone());
+        }
         provider_config.models = entry
             .models
             .iter()
@@ -2076,6 +2081,14 @@ pub fn classify_layers(signal: &ProbeSignal) -> Vec<StageResult> {
         .collect()
 }
 
+fn validate_provider_health_content(content: &Content) -> Result<(), String> {
+    let text = content_text(content).collect::<String>();
+    if text.trim().is_empty() {
+        return Err("Provider returned no structured text".to_owned());
+    }
+    validate_provider_health_json(&text)
+}
+
 fn validate_provider_health_json(text: &str) -> Result<(), String> {
     let value: Value = serde_json::from_str(text)
         .map_err(|_| "Provider structured output was not valid JSON".to_owned())?;
@@ -2617,7 +2630,9 @@ impl Gateway {
             if self.local_upstreams.contains(name)
                 || crate::config::is_subscription_provider(&upstream.config.provider)
                 || upstream.auth_config.as_ref().is_some_and(|auth| {
-                    auth.codex_account.is_some() || auth.chatgpt_account.is_some()
+                    auth.codex_account.is_some()
+                        || auth.chatgpt_account.is_some()
+                        || auth.local_subscription.is_some()
                 })
             {
                 continue;
@@ -3128,16 +3143,12 @@ impl Gateway {
             }),
         });
         let response = self.probe_request(upstream_name, upstream, &request, http)?;
-        let text = response
+        let content = response
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_ref())
-            .and_then(|content| match content {
-                Content::Text(text) => Some(text.as_str()),
-                Content::Parts(_) => None,
-            })
             .ok_or_else(|| "Provider returned no structured text".to_owned())?;
-        validate_provider_health_json(text)
+        validate_provider_health_content(content)
     }
 
     fn probe_stream_feature(
@@ -4694,7 +4705,31 @@ mod layered_health_tests {
 
 #[cfg(test)]
 mod feature_probe_tests {
-    use super::validate_provider_health_json;
+    use super::{validate_provider_health_content, validate_provider_health_json};
+    use token_station_protocol::{Content, ContentPart};
+
+    #[test]
+    fn structured_probe_reads_split_visible_text_without_using_thinking() {
+        let content = Content::Parts(vec![
+            ContentPart::Thinking {
+                thinking: "Internal reasoning".into(),
+                signature: None,
+            },
+            ContentPart::Text {
+                text: r#"{"ok":"#.into(),
+            },
+            ContentPart::Text {
+                text: "true}".into(),
+            },
+        ]);
+        assert!(validate_provider_health_content(&content).is_ok());
+        let reasoning_only = Content::Parts(vec![ContentPart::Thinking {
+            thinking: r#"{"ok":true}"#.into(),
+            signature: None,
+        }]);
+        assert!(validate_provider_health_content(&reasoning_only).is_err());
+        assert!(validate_provider_health_content(&Content::Parts(vec![])).is_err());
+    }
 
     #[test]
     fn structured_probe_requires_the_exact_requested_shape() {

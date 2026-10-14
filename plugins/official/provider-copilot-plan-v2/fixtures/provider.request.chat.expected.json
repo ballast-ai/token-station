@@ -1,0 +1,32 @@
+{
+  "auth": {
+    "scheme": "bearer",
+    "secret": "local_subscription_token"
+  },
+  "body": {
+    "messages": [
+      {
+        "content": "Weather in Beijing?",
+        "role": "user"
+      }
+    ],
+    "model": "gpt-5.5",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "temperature": 0.2
+  },
+  "headers": {
+    "content-type": "application/json",
+    "copilot-integration-id": "vscode-chat",
+    "editor-plugin-version": "copilot-chat/0.68.0",
+    "editor-version": "vscode/1.140.0",
+    "openai-intent": "conversation-panel",
+    "user-agent": "GitHubCopilotChat/0.68.0",
+    "x-github-api-version": "2026-01-09",
+    "x-initiator": "user"
+  },
+  "method": "POST",
+  "url": "https://api.githubcopilot.com/chat/completions"
+}

@@ -38,8 +38,7 @@ import {
   type TierSlot,
 } from "./api";
 import { DraftNavigationBoundary, useDraftNavigation } from "./components/DraftNavigation";
-import PlanConnectionDialog from "./components/PlanConnectionDialog";
-import type { PlanConnectionKind } from "./planConnections";
+import SubscriptionsDialog from "./components/SubscriptionsDialog";
 import AppShell, { type AppView } from "./components/AppShell";
 import FirstRunGuide, {
   FirstRunCompletionDialog,
@@ -284,7 +283,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const confirmNavigation = useDraftNavigation();
   const [view, setView] = useState<AppView>("overview");
   const [modelEntryOpen, setModelEntryOpen] = useState(false);
-  const [planConnection, setPlanConnection] = useState<PlanConnectionKind | null>(null);
+  const [subscriptionsOpen, setSubscriptionsOpen] = useState(false);
   const [directRouteDraftDirty, setDirectRouteDraftDirty] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<AppView | null>(null);
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
@@ -1095,13 +1094,13 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       modelEntryOpen={modelEntryOpen}
       suppressModelEntryAutoOpen={firstRunGuideOpen}
       onModelEntryOpenChange={setModelEntryOpen}
-      onConnectPlan={setPlanConnection}
+      onConnectSubscriptions={() => setSubscriptionsOpen(true)}
       onNavigate={navigate}
       onToggleServe={() => void toggleServe()}
     >
-      <PlanConnectionDialog kind={planConnection} onClose={() => setPlanConnection(null)}
+      <SubscriptionsDialog open={subscriptionsOpen} onClose={() => setSubscriptionsOpen(false)}
         onChanged={async () => { showState(await getState()); }}
-        onConnected={() => { setPlanConnection(null); navigate("providers"); }} />
+        onConnected={() => { setSubscriptionsOpen(false); navigate("providers"); }} />
       <Suspense fallback={<div role="status" className="page-stack">{copy("Loading page…", "正在加载页面…", "正在載入頁面…", "ページを読み込み中…")}</div>}>
       {view === "overview" && (
         <OverviewPage

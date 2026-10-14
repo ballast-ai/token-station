@@ -114,3 +114,16 @@ fn the_packaged_openai_compatible_component_passes_its_packaged_fixtures() {
 fn the_packaged_chatgpt_plan_component_passes_its_packaged_fixtures() {
     run("provider-chatgpt-plan-v2", "provider_chatgpt_plan_v2");
 }
+
+#[test]
+fn the_packaged_copilot_component_passes_its_packaged_fixtures() {
+    run("provider-copilot-plan-v2", "provider_copilot_plan_v2");
+}
+#[test]
+fn the_packaged_google_component_passes_its_packaged_fixtures() {
+    run("provider-codeassist-v2", "provider_codeassist_v2");
+}
+#[test]
+fn the_packaged_claude_component_passes_its_packaged_fixtures() {
+    run("provider-claude-plan-v2", "provider_claude_plan_v2");
+}

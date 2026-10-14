@@ -6,6 +6,9 @@ import { planConnectionTitle, providerPlanKind } from "../planConnections";
 import { usePlanAccountSummaries } from "./usePlanAccountSummaries";
 import ChatGPTPlanPanel from "./ChatGPTPlanPanel";
 import LocalCodexPanel from "./LocalCodexPanel";
+import LocalSubscriptionPanel from "./LocalSubscriptionPanel";
+import { localSubscriptionKind } from "../subscriptions";
+import { SubscriptionIcon } from "./SubscriptionsDialog";
 import { cn } from "../lib/utils";
 import ProviderModelManager from "./ProviderModelManager";
 import { useVisionVerificationTasks } from "./useVisionVerificationTasks";
@@ -168,13 +171,13 @@ export default function ProviderList({
             >
               <div className="provider-card-head provider-identity-bar">
                 <div className="provider-monogram" aria-hidden="true">
-                  <ProviderIcon id={kind ? "openai" : provider.brand_id} label={displayName} size={34} />
+                  {kind && kind !== "codex" && kind !== "chatgpt" ? <SubscriptionIcon channel={kind} /> : <ProviderIcon id={kind ? "openai" : provider.brand_id} label={displayName} size={34} />}
                 </div>
                 <div className="provider-main provider-identity">
                   <small>{kind ? copy("Plan connection", "套餐接入", "方案接入", "プラン接続") : copy("Provider", "供应商", "供應商", "プロバイダー")}</small>
                   <strong className="provider-identity-name">{displayName}</strong>
                   <div className={cn("provider-url", kind && "provider-account-summary")}>{kind
-                    ? <>{summary?.account?.email || summary?.account?.label || copy("Account unavailable", "账号暂不可用", "帳號暫時無法使用", "アカウントを利用できません")} · {kind === "codex"
+                    ? <>{summary?.account?.email || summary?.account?.label || copy("Account unavailable", "账号暂不可用", "帳號暫時無法使用", "アカウントを利用できません")} · {kind !== "chatgpt"
                       ? copy("Reuse local login", "复用本机登录", "重用本機登入", "ローカルのサインインを再利用")
                       : copy("Browser authorization", "浏览器授权", "瀏覽器授權", "ブラウザー認証")}</>
                     : provider.base_url}</div>
@@ -275,6 +278,8 @@ export default function ProviderList({
                 <ChatGPTPlanPanel key={activeProvider.name} provider={activeProvider} onChanged={async () => onStateChange(await getState())} />
               ) : activeProvider.provider === "codex-plan" ? (
                 <LocalCodexPanel key={activeProvider.name} provider={activeProvider} onChanged={async () => onStateChange(await getState())} />
+              ) : localSubscriptionKind(activeProvider.provider) ? (
+                <LocalSubscriptionPanel key={activeProvider.name} kind={localSubscriptionKind(activeProvider.provider)!} provider={activeProvider} onChanged={async () => onStateChange(await getState())} />
               ) : activeProvider.access_tier === "free" ? (
                 <div className="free-provider-managed-note">
                   {copy(

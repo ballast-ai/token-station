@@ -1,0 +1,11 @@
+{
+  "chunks": [
+    "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_1\", \"model\": \"claude-sonnet-4\", \"usage\": {\"input_tokens\": 42, \"cache_read_input_tokens\": 30}}}\n\n",
+    "event: content_block_start\ndata: {\"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
+    "event: content_block_delta\ndata: {\"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"18C \"}}\n\n",
+    "event: content_block_delta\ndata: {\"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"and sunny.\"}}\n\n",
+    "event: content_block_stop\ndata: {\"index\": 0}\n\n",
+    "event: message_delta\ndata: {\"delta\": {\"stop_reason\": \"end_turn\"}, \"usage\": {\"output_tokens\": 9}}\n\n",
+    "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
+  ]
+}

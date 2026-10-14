@@ -193,6 +193,7 @@ impl AuthConfig {
             + usize::from(self.file.is_some())
             + usize::from(self.chatgpt_account.is_some())
             + usize::from(self.codex_account.is_some())
+            + usize::from(self.local_subscription.is_some())
     }
 }
 
@@ -279,7 +280,8 @@ impl EgressConfig {
                 || auth.username.chars().any(char::is_control)
                 || auth.credential.source_count() != 1
                 || auth.credential.chatgpt_account.is_some()
-                || auth.credential.codex_account.is_some())
+                || auth.credential.codex_account.is_some()
+                || auth.credential.local_subscription.is_some())
         {
             return Err(
                 "egress proxy auth requires a safe username and exactly one credential source"
@@ -659,6 +661,9 @@ pub struct UpstreamConfig {
     /// Non-secret identity for the bound local Codex session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_identity: Option<CodexIdentity>,
+    /// Safe metadata for a bound local subscription transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_identity: Option<BTreeMap<String, serde_json::Value>>,
     /// This upstream runs on the local machine (a local Ollama / LM Studio, say).
     /// The router honors `router.local_only` by keeping traffic on these; without
     /// it a request may not leave the box. Default false, so an ordinary cloud
@@ -759,6 +764,9 @@ pub struct AuthConfig {
     /// Reference to a local Codex session. Never a token value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_account: Option<String>,
+    /// Opaque reference to a local subscription login. Never a credential value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_subscription: Option<LocalSubscriptionReference>,
 }
 /// Drops the per-upstream `south_component` setting a v1.2.4 file may carry.
 ///
@@ -1330,13 +1338,14 @@ impl ClientConfig {
                 let sources = auth.source_count();
                 if sources != 1 {
                     return Err(format!(
-                        "upstream `{name}` auth for slot `{}` must name exactly one source (store / env / file / chatgpt_account / codex_account), found {sources}",
+                        "upstream `{name}` auth for slot `{}` must name exactly one source (store / env / file / chatgpt_account / codex_account / local_subscription), found {sources}",
                         auth.slot
                     ));
                 }
             }
             validate_chatgpt_reference(upstream)?;
             validate_codex_reference(upstream)?;
+            validate_local_subscription(upstream)?;
             for capability in &upstream.models {
                 if capability.max_output_tokens > 0
                     && capability.context_window > 0
@@ -1399,7 +1408,15 @@ fn validate_api_dialect(name: &str, upstream: &UpstreamConfig) -> Result<(), Str
 /// Whether a provider uses subscription allowance rather than API pricing.
 #[must_use]
 pub fn is_subscription_provider(provider: &str) -> bool {
-    matches!(provider, "chatgpt-plan" | "codex-plan")
+    matches!(
+        provider,
+        "chatgpt-plan"
+            | "codex-plan"
+            | "claude-plan"
+            | "copilot-plan"
+            | "gemini-cli-plan"
+            | "antigravity-plan"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1407,6 +1424,126 @@ pub fn is_subscription_provider(provider: &str) -> bool {
 pub struct CodexIdentity {
     pub account_id: String,
     pub client_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalSubscriptionReference {
+    pub kind: crate::local_subscriptions::Kind,
+    pub id: String,
+}
+
+fn validate_local_subscription(upstream: &UpstreamConfig) -> Result<(), String> {
+    use crate::local_subscriptions::Kind;
+    let reference = upstream
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.local_subscription.as_ref());
+    let kind = match upstream.provider.as_str() {
+        "claude-plan" => Some(Kind::Claude),
+        "copilot-plan" => Some(Kind::Copilot),
+        "gemini-cli-plan" => Some(Kind::GeminiCli),
+        "antigravity-plan" => Some(Kind::Antigravity),
+        _ => None,
+    };
+    let Some(kind) = kind else {
+        if reference.is_some() || upstream.subscription_identity.is_some() {
+            return Err(
+                "Local subscription references require their matching plan provider".into(),
+            );
+        }
+        return Ok(());
+    };
+    if upstream.local
+        || upstream.quota_plan.is_some()
+        || upstream.native_search.is_some()
+        || upstream.api_dialect != ApiDialect::Translated
+    {
+        return Err("Subscription providers cannot use local-only routing, quota rotation, or native passthrough".into());
+    }
+    let fixed = local_subscription_destination(upstream, kind)?;
+    let fixture = upstream.base_url.is_loopback()
+        && upstream
+            .auth
+            .as_ref()
+            .is_some_and(|auth| auth.store && auth.slot == "local_subscription_token")
+        && reference.is_none()
+        && kind != Kind::Claude;
+    if !fixture
+        && (!fixed
+            || reference.is_none_or(|value| {
+                value.kind != kind
+                    || value.id.is_empty()
+                    || value.id.len() > 128
+                    || !value
+                        .id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            || upstream
+                .auth
+                .as_ref()
+                .is_none_or(|auth| auth.slot != "local_subscription_token"))
+    {
+        return Err(
+            "Subscription credentials require a bound account and the fixed provider endpoint"
+                .into(),
+        );
+    }
+    let metadata = upstream
+        .subscription_identity
+        .as_ref()
+        .ok_or("Subscription transport metadata is missing")?;
+    if serde_json::to_vec(metadata)
+        .map_err(|_| "Invalid subscription metadata")?
+        .len()
+        > 65536
+        || metadata.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "google_project"
+                    | "google_client_version"
+                    | "copilot_source_kind"
+                    | "copilot_model_endpoints"
+                    | "claude_client_version"
+                    | "claude_transport"
+                    | "claude_history_mode"
+            )
+        })
+    {
+        return Err("Subscription transport metadata is invalid".into());
+    }
+    Ok(())
+}
+
+fn local_subscription_destination(
+    upstream: &UpstreamConfig,
+    kind: crate::local_subscriptions::Kind,
+) -> Result<bool, String> {
+    use crate::local_subscriptions::Kind;
+    let endpoint = url::Url::parse(&upstream.base_url.as_str())
+        .map_err(|_| "Invalid subscription endpoint")?;
+    Ok(match kind {
+        Kind::Claude => upstream.base_url.as_str() == "http://127.0.0.1:9/claude-plan",
+        Kind::GeminiCli => upstream.base_url.as_str() == "https://cloudcode-pa.googleapis.com",
+        Kind::Antigravity => {
+            upstream.base_url.as_str() == "https://daily-cloudcode-pa.googleapis.com"
+        }
+        Kind::Copilot => {
+            endpoint.scheme() == "https"
+                && endpoint.port().is_none()
+                && matches!(
+                    endpoint.host_str(),
+                    Some(
+                        "api.githubcopilot.com"
+                            | "api.individual.githubcopilot.com"
+                            | "api.business.githubcopilot.com"
+                            | "api.enterprise.githubcopilot.com"
+                    )
+                )
+                && endpoint.path() == "/"
+        }
+    })
 }
 
 fn validate_codex_reference(upstream: &UpstreamConfig) -> Result<(), String> {

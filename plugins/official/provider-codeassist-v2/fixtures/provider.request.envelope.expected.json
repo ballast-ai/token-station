@@ -1,0 +1,29 @@
+{
+  "auth": {
+    "scheme": "bearer",
+    "secret": "local_subscription_token"
+  },
+  "body": {
+    "model": "gemini-fixture",
+    "project": "fixture-project",
+    "request": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "fixture"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    },
+    "user_prompt_id": "f1d9af33014c51ecb5bad11b"
+  },
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GeminiCLI/0.61.0/gemini-fixture (Token Station; terminal)"
+  },
+  "method": "POST",
+  "url": "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+}

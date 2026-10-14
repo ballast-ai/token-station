@@ -14170,3 +14170,12 @@ samp {
   .quota-plan-editor .quota-plan-controls > .quota-plan-field:first-child { grid-column: 1 / -1; }
   .quota-plan-editor .quota-plan-shared-controls { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Subscription selection shares the account dialog's bounded scroll surface. */
+.subscription-channel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; margin-bottom: 20px; }
+.subscription-channel-grid > button { display: flex; align-items: center; gap: 14px; min-height: 65px; padding: 14px 12px; border: 1px solid transparent; border-radius: 8px; color: var(--ink); background: var(--surface-2); text-align: left; cursor: pointer; }
+.subscription-channel-grid > button > span { flex: 0 0 32px; display: grid; place-items: center; }
+.subscription-channel-grid > button > strong { font-size: 14px; font-weight: 500; }
+.subscription-channel-grid > button:hover, .subscription-channel-grid > button:focus-visible { background: var(--signal-soft); outline: 2px solid var(--signal); outline-offset: -2px; }
+.subscription-back { align-self: start; justify-self: start; width: fit-content; margin-bottom: 10px; }
+@media (max-width: 420px) { .subscription-channel-grid { grid-template-columns: minmax(0, 1fr); gap: 7px; } }

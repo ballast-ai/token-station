@@ -29,6 +29,7 @@ pub mod config;
 pub mod filelog;
 pub mod gateway;
 pub mod jev;
+pub mod local_subscriptions;
 pub mod manage;
 pub mod native_search;
 pub mod plugins;

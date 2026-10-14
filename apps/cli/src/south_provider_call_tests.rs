@@ -125,6 +125,7 @@ fn auth_config() -> AuthConfig {
     AuthConfig {
         chatgpt_account: None,
         codex_account: None,
+        local_subscription: None,
         slot: "provider_api_key".to_owned(),
         store: true,
         env: None,
@@ -473,6 +474,7 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
     let file_auth = AuthConfig {
         chatgpt_account: None,
         codex_account: None,
+        local_subscription: None,
         slot: "provider_api_key".to_owned(),
         store: false,
         env: None,
@@ -649,6 +651,7 @@ fn adapter_debug_surfaces_only_shape_and_counts() {
     let auth = AuthConfig {
         chatgpt_account: None,
         codex_account: None,
+        local_subscription: None,
         slot: slot_sentinel.to_owned(),
         store: true,
         env: None,
@@ -1719,6 +1722,7 @@ fn prepare_header_auth_conformance_fixture(
     let auth = AuthConfig {
         chatgpt_account: None,
         codex_account: None,
+        local_subscription: None,
         slot: input.bound_credential_slot().to_owned(),
         store: true,
         env: None,
@@ -2022,6 +2026,7 @@ fn prepare_stream_conformance_input(
     let auth = AuthConfig {
         chatgpt_account: None,
         codex_account: None,
+        local_subscription: None,
         slot: input.bound_credential_slot().to_owned(),
         store: true,
         env: None,
@@ -2181,6 +2186,7 @@ fn prepare_conformance_input(
     let auth = AuthConfig {
         chatgpt_account: None,
         codex_account: None,
+        local_subscription: None,
         slot: input.bound_credential_slot().to_owned(),
         store: true,
         env: None,

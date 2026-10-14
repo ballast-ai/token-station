@@ -1,0 +1,61 @@
+{
+  "provider_config": {
+    "provider": "claude-plan",
+    "base_url": "http://127.0.0.1:9/claude-plan",
+    "auth": "local_subscription_token",
+    "models": [
+      {
+        "model": "claude-sonnet-4",
+        "tool": true,
+        "vision": false,
+        "json_schema": false,
+        "context_window": 200000,
+        "supported_parameters": [
+          "max_output_tokens"
+        ]
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "claude-sonnet-4",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      },
+      {
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "toolu_1",
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Beijing\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "toolu_1",
+        "content": "18C"
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Look up weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "sampling": {
+      "max_output_tokens": 64
+    }
+  }
+}

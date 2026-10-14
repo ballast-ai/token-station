@@ -3,12 +3,10 @@ import type { ProviderView } from "../api";
 import { listChatGPTAccounts } from "../chatgptPlanApi";
 import { listCodexAccounts } from "../codexAccountsApi";
 import { providerPlanKind, type PlanConnectionKind } from "../planConnections";
+import { listSubscriptions } from "../localSubscriptionsApi";
 
 interface AccountSummary { id: string; label: string; email: string | null; state: string }
-interface Summaries {
-  codex: AccountSummary[] | null;
-  chatgpt: AccountSummary[] | null;
-}
+type Summaries = Partial<Record<PlanConnectionKind, AccountSummary[] | null>>;
 
 /** Read safe account metadata only. Never infer a live session from configured credentials. */
 export function usePlanAccountSummaries(providers: ProviderView[]) {
@@ -16,9 +14,9 @@ export function usePlanAccountSummaries(providers: ProviderView[]) {
   useEffect(() => {
     let stopped = false;
     setSummaries({ codex: null, chatgpt: null });
-    for (const kind of ["codex", "chatgpt"] as const) {
+    for (const kind of ["codex", "chatgpt", "claude", "copilot", "gemini-cli", "antigravity"] as const) {
       if (!providers.some(provider => providerPlanKind(provider) === kind)) continue;
-      const read = kind === "codex" ? listCodexAccounts : listChatGPTAccounts;
+      const read = kind === "codex" ? listCodexAccounts : kind === "chatgpt" ? listChatGPTAccounts : () => listSubscriptions(kind);
       void read().then(accounts => {
         if (!stopped) setSummaries(current => ({ ...current, [kind]: accounts }));
       }).catch(() => { /* Keep the connection state unknown if metadata cannot be loaded. */ });
@@ -27,6 +25,6 @@ export function usePlanAccountSummaries(providers: ProviderView[]) {
   }, [providers]);
   return (kind: PlanConnectionKind, accountId: string | undefined) => ({
     account: summaries[kind]?.find(account => account.id === accountId),
-    loaded: summaries[kind] !== null,
+    loaded: summaries[kind] != null,
   });
 }

@@ -1,0 +1,7 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": "{\"id\": \"msg_6\", \"model\": \"claude-sonnet-4\", \"content\": [{\"type\": \"tool_use\", \"id\": \"toolu_9\", \"name\": \"f\", \"input\": {}}], \"stop_reason\": \"tool_use\", \"usage\": {\"input_tokens\": 2, \"output_tokens\": 2}}"
+}

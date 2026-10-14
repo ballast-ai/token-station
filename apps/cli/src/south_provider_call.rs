@@ -672,7 +672,8 @@ fn has_supported_secret_source(auth_config: &AuthConfig) -> bool {
         + usize::from(auth_config.env.is_some())
         + usize::from(auth_config.file.is_some())
         + usize::from(auth_config.chatgpt_account.is_some())
-        + usize::from(auth_config.codex_account.is_some());
+        + usize::from(auth_config.codex_account.is_some())
+        + usize::from(auth_config.local_subscription.is_some());
     auth_config.file.is_none() && source_count == 1
 }
 

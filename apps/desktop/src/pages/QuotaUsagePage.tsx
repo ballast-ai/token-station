@@ -1,3 +1,4 @@
+import { isSubscriptionProvider } from "../subscriptions";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getQuotaSnapshot,
@@ -86,8 +87,8 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
   const shown = (snapshot?.accounts ?? []).filter((account) => {
     const provider = providers.find((entry) => entry.name === account.upstream);
     return !provider || (
-      provider.provider !== "codex-plan" && provider.provider !== "chatgpt-plan"
-      && provider.credential_source !== "codex_account" && provider.credential_source !== "chatgpt_account"
+      !isSubscriptionProvider(provider.provider)
+      && provider.credential_source !== "codex_account" && provider.credential_source !== "chatgpt_account" && provider.credential_source !== "local_subscription"
     );
   });
 

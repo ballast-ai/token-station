@@ -1,0 +1,4 @@
+{
+  "chat_request": {"model":"claude-fixture","messages":[{"role":"user","content":"Hello"}],"stream":false},
+  "provider_config": {"provider":"claude-plan","base_url":"http://127.0.0.1:9/claude-plan","auth":"local_subscription_token"}
+}

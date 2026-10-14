@@ -39,6 +39,9 @@ jobs:
             plugins/official/provider-openai-compatible-v2
             plugins/official/provider-anthropic-v2
             plugins/official/provider-chatgpt-plan-v2
+            plugins/official/provider-claude-plan-v2
+            plugins/official/provider-copilot-plan-v2
+            plugins/official/provider-codeassist-v2
       - run: node tests/south-dependency-policy.mjs
       - name: Prepare official plugins for gateway tests
         run: scripts/prepare-desktop-test-plugins.sh
@@ -48,13 +51,23 @@ jobs:
           for manifest in \
             plugins/official/provider-openai-compatible-v2/Cargo.toml \
             plugins/official/provider-anthropic-v2/Cargo.toml \
-            plugins/official/provider-chatgpt-plan-v2/Cargo.toml; do
+            plugins/official/provider-chatgpt-plan-v2/Cargo.toml \
+            plugins/official/provider-claude-plan-v2/Cargo.toml \
+            plugins/official/provider-copilot-plan-v2/Cargo.toml \
+            plugins/official/provider-codeassist-v2/Cargo.toml; do
             cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
           done
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --locked --manifest-path plugins/official/provider-chatgpt-plan-v2/Cargo.toml
+      - name: Test local subscription components
+        shell: bash
+        run: |
+          for component in provider-claude-plan-v2 provider-copilot-plan-v2 provider-codeassist-v2; do
+            cargo test --locked --manifest-path "plugins/official/$component/Cargo.toml"
+            cargo clippy --locked --manifest-path "plugins/official/$component/Cargo.toml" --all-targets -- -D warnings
+          done
       - run: python3 tests/provider-fixture-provenance.py
       - name: Test builtin official South paths
         run: >-
@@ -85,6 +98,9 @@ jobs:
             plugins/official/provider-openai-compatible-v2
             plugins/official/provider-anthropic-v2
             plugins/official/provider-chatgpt-plan-v2
+            plugins/official/provider-claude-plan-v2
+            plugins/official/provider-copilot-plan-v2
+            plugins/official/provider-codeassist-v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7
@@ -96,7 +112,10 @@ jobs:
           for manifest in \
             plugins/official/provider-openai-compatible-v2/Cargo.toml \
             plugins/official/provider-anthropic-v2/Cargo.toml \
-            plugins/official/provider-chatgpt-plan-v2/Cargo.toml; do
+            plugins/official/provider-chatgpt-plan-v2/Cargo.toml \
+            plugins/official/provider-claude-plan-v2/Cargo.toml \
+            plugins/official/provider-copilot-plan-v2/Cargo.toml \
+            plugins/official/provider-codeassist-v2/Cargo.toml; do
             cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
           done
       - run: >-

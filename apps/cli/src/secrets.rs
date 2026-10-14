@@ -209,6 +209,10 @@ enum Source {
     Env(String),
     File(PathBuf),
     ChatGpt(String),
+    LocalSubscription {
+        reference: crate::config::LocalSubscriptionReference,
+        manager: crate::local_subscriptions::AccountManager,
+    },
     Codex {
         reference: String,
         account_id: String,
@@ -266,7 +270,17 @@ impl Drop for SecretStore {
     }
 }
 
-fn source_of(auth: &AuthConfig, identity: Option<&crate::config::CodexIdentity>) -> Option<Source> {
+fn source_of(
+    auth: &AuthConfig,
+    identity: Option<&crate::config::CodexIdentity>,
+    data_dir: &Path,
+) -> Option<Source> {
+    if let Some(reference) = &auth.local_subscription {
+        return Some(Source::LocalSubscription {
+            reference: reference.clone(),
+            manager: crate::local_subscriptions::AccountManager::new(data_dir, reference.kind),
+        });
+    }
     if let Some(reference) = &auth.codex_account {
         return Some(Source::Codex {
             reference: reference.clone(),
@@ -301,6 +315,9 @@ fn resolve_codex_token(
 }
 
 impl SecretStore {
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
     /// Resolve each configured Provider and egress slot once into immutable memory.
     /// No files or environment variables are written. Unconfigured slots stay unavailable.
     ///
@@ -311,7 +328,12 @@ impl SecretStore {
         data_dir: &Path,
     ) -> Result<SecretSnapshot, String> {
         let live = Self::from_config(config, data_dir);
-        let mut frozen = Self::default();
+        let mut frozen = Self {
+            sources: BTreeMap::new(),
+            store: BTreeMap::new(),
+            store_error: None,
+            data_dir: data_dir.to_path_buf(),
+        };
         let slots = config
             .upstreams
             .iter()
@@ -329,6 +351,7 @@ impl SecretStore {
                 + usize::from(auth.file.is_some())
                 + usize::from(auth.chatgpt_account.is_some())
                 + usize::from(auth.codex_account.is_some())
+                + usize::from(auth.local_subscription.is_some())
                 != 1
             {
                 return Err("A snapshot credential must have exactly one source".to_owned());
@@ -367,13 +390,13 @@ impl SecretStore {
         let mut sources = BTreeMap::new();
         for (upstream, entry) in &config.upstreams {
             if let Some(auth) = &entry.auth
-                && let Some(source) = source_of(auth, entry.codex_identity.as_ref())
+                && let Some(source) = source_of(auth, entry.codex_identity.as_ref(), data_dir)
             {
                 sources.insert((upstream.clone(), auth.slot.clone()), source);
             }
         }
         if let Some(egress_auth) = &config.egress.auth
-            && let Some(source) = source_of(&egress_auth.credential, None)
+            && let Some(source) = source_of(&egress_auth.credential, None, data_dir)
         {
             sources.insert(
                 (
@@ -400,7 +423,7 @@ impl SecretStore {
     pub fn from_egress_config(egress: &EgressConfig, data_dir: &Path) -> Self {
         let mut sources = BTreeMap::new();
         if let Some(egress_auth) = &egress.auth
-            && let Some(source) = source_of(&egress_auth.credential, None)
+            && let Some(source) = source_of(&egress_auth.credential, None, data_dir)
         {
             sources.insert(
                 (
@@ -465,6 +488,7 @@ impl SecretStore {
             Source::Codex { reference, account_id } => {
                 resolve_codex_token(&self.data_dir, reference, account_id)
             }
+            Source::LocalSubscription { reference, manager } => manager.access_token(&reference.id),
             Source::ChatGpt(account) => crate::chatgpt_accounts::AccountManager::new(&self.data_dir)
                 .access_token(account),
         }?;
@@ -483,6 +507,15 @@ impl SecretStore {
     /// # Errors
     /// Credential renewal or the configured source can fail.
     pub async fn resolve_async(&self, upstream: &str, slot: &str) -> Result<String, String> {
+        if let Some(Source::LocalSubscription { reference, manager }) =
+            self.sources.get(&(upstream.to_owned(), slot.to_owned()))
+        {
+            let manager = manager.clone();
+            let reference = reference.clone();
+            return tokio::task::spawn_blocking(move || manager.access_token(&reference.id))
+                .await
+                .map_err(|_| "Subscription credential worker failed".to_owned())?;
+        }
         if let Some(Source::ChatGpt(account)) =
             self.sources.get(&(upstream.to_owned(), slot.to_owned()))
         {

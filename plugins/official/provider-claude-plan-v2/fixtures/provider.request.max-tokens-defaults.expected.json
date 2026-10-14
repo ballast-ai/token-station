@@ -1,0 +1,22 @@
+{
+  "method": "POST",
+  "url": "http://127.0.0.1:9/claude-plan/v1/messages",
+  "headers": {
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json"
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "local_subscription_token"
+  },
+  "body": {
+    "model": "claude-sonnet-4",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ],
+    "max_tokens": 4096
+  }
+}

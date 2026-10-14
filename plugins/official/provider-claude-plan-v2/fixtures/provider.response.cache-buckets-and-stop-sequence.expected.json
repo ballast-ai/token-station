@@ -1,0 +1,22 @@
+{
+  "id": "msg_4",
+  "model": "claude-sonnet-4",
+  "choices": [
+    {
+      "index": 0,
+      "stop_sequence": "\n\nHuman:",
+      "message": {
+        "role": "assistant",
+        "content": "cut"
+      },
+      "finish_reason": "stop_sequence"
+    }
+  ],
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 3,
+    "cache_read_tokens": 90,
+    "cache_write_tokens": 30,
+    "reasoning_tokens": 0
+  }
+}

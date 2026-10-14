@@ -1,3 +1,4 @@
+import { isSubscriptionProvider } from "../subscriptions";
 import { useEffect, useId, useState } from "react";
 import type { ProviderView, QuotaAccount, QuotaPlanView, SaveQuotaPlan } from "../api";
 import { ProviderIcon } from "../brandIcons";
@@ -55,8 +56,8 @@ export default function QuotaPriorityPanel({
 }: QuotaPriorityPanelProps) {
   const { copy } = useLocalizedCopy();
   const providers = allProviders.filter((provider) =>
-    provider.provider !== "codex-plan" && provider.provider !== "chatgpt-plan"
-    && provider.credential_source !== "codex_account" && provider.credential_source !== "chatgpt_account");
+    !isSubscriptionProvider(provider.provider)
+    && provider.credential_source !== "codex_account" && provider.credential_source !== "chatgpt_account" && provider.credential_source !== "local_subscription");
   // Ordered account list; row order is the tie-break priority. Initialize from persisted accounts.
   const [entries, setEntries] = useState<QuotaEntry[]>(() =>
     accounts.map((account) => ({ upstream: account.upstream, model: account.model })),
