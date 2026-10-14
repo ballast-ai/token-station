@@ -259,3 +259,22 @@ The Codex backend can report a parameter error inside an HTTP 200 SSE stream.
 The bridge recognizes only the exact unsupported `reasoning.effort` error and returns a fixed safe parameter error.
 It preserves the requested schema and lets the client decide whether to retry.
 All other failed or truncated streams remain explicit failures.
+
+### Installed OpenCode desktop acceptance
+
+On 2026-10-14, OpenCode desktop 1.18.29 passed the persistent connector path through the installed Token Station App.
+The App encrypted the original configuration before taking ownership of `provider.tokenstation`.
+The desktop session selected `tokenstation/power` and reached the local Codex model on the existing independent route.
+
+- Two native reads, one write, one edit, and one shell command completed. Output files matched an unknown random marker byte-for-byte.
+- Native WebFetch returned page content and a source URL.
+- A real HTTP 404 reached the model. The same turn then fetched a valid page and returned its title.
+- Native WebSearch was initially absent. Enabling the client's search environment exposed the tool.
+- Exa returned a free MCP rate-limit error. The model reported the failure without inventing search results.
+- The supported Parallel backend returned sources. The desktop final answer cited a URL present in the actual tool result.
+- OpenCode CLI 1.18.35 also passed Parallel search using the managed global provider and `tokenstation/auto`.
+
+All 17 recorded model requests used the local Codex subscription with HTTP 200, no API cost estimate, and zero fallbacks.
+Fourteen came from the desktop workflow. Search backend errors remain separate from model request success.
+See [desktop search activation](../agent-capabilities.md#opencode-desktop-activation-on-macos) for the client setup and service limits.
+This acceptance covers the tested versions and bounded workflows. It does not certify every tool or external service.

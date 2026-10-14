@@ -52,7 +52,7 @@ If you stop the Gateway, capability application does not start it again.
 | Hermes Agent | Configure a supported search service in Hermes and enable web tools. Missing credentials can hide the tools. |
 | OpenClaw | Configure and enable a search provider in OpenClaw. Supply provider-specific credentials when required. |
 | WorkBuddy | The client provides search separately from the model endpoint. Check its session and service access when search authentication fails. |
-| OpenCode | Compatible CLI versions can enable Exa search with `OPENCODE_ENABLE_EXA=1`. Check tool permissions separately. |
+| OpenCode | Compatible clients can enable native Exa or Parallel search. Check startup environment and tool permissions separately. |
 
 These requirements are setup guidance. Token Station does not mark external search services as available without a runtime check.
 Model API fees and separate search service fees can differ.
@@ -73,6 +73,30 @@ cmd /c "set OPENCODE_ENABLE_EXA=1&&opencode"
 
 The environment setting ends with that process. These commands do not configure the OpenCode desktop App or shell startup files.
 Search queries go to Exa. Confirm the service terms and credentials required by your installed client version.
+
+### OpenCode desktop activation on macOS
+
+OpenCode desktop 1.18.29 imports the login shell environment before starting its model server.
+Its custom providers do not expose native `websearch` by default. WebFetch does not need this search setting.
+
+For a zsh login shell, back up `~/.zprofile` before editing it.
+Add these lines to enable the supported Parallel backend:
+
+```sh
+export OPENCODE_ENABLE_PARALLEL=1
+export OPENCODE_WEBSEARCH_PROVIDER=parallel
+```
+
+Use the OpenCode menu's **Restart** action. Start a session with a `tokenstation` model.
+Ask for a search and inspect the native **Parallel web search** result and final source URL.
+Existing terminal sessions need a new login shell or explicit environment settings.
+
+These settings are user setup, separate from Token Station's connector ownership of `provider.tokenstation`.
+The connector does not edit shell profiles or select the user's default model.
+The search backend receives search queries. Model inference continues through the selected Token Station route.
+Search limits and credentials remain separate from Codex plan usage.
+Exa returned a free MCP rate-limit error during desktop acceptance. Parallel completed the same acceptance workflow.
+Neither result guarantees future search service availability.
 
 ## Verify a connection
 
