@@ -3,6 +3,7 @@ import {
   type DirectRouteTarget,
   type ProviderView,
   type QuotaAccount,
+  type SaveQuotaPlan,
   type RoutingMode,
   type TierSlot,
   type TierView,
@@ -31,12 +32,7 @@ interface HomePageProps {
   onDirectDraftChange?: (hasUnappliedTarget: boolean) => void;
   quotaAccounts: QuotaAccount[];
   onSaveQuota: (accounts: QuotaAccount[]) => void;
-  onSaveQuotaPlan: (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void;
+  onSaveQuotaPlan: SaveQuotaPlan;
   onViewQuotaUsage: () => void;
   busy: boolean;
   applying: boolean;

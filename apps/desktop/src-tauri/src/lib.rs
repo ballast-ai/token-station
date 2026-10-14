@@ -545,6 +545,7 @@ pub fn run() {
             set_direct_route,
             set_quota_accounts,
             set_quota_plan,
+            set_quota_plan_full,
             get_quota_snapshot,
             edit_provider,
             edit_provider_with_credential,

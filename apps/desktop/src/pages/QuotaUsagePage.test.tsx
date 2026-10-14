@@ -124,3 +124,44 @@ it("does not present unknown token settlements as measured full allowance", asyn
   render(<QuotaUsagePage providers={[]} onBack={vi.fn()} />);
   expect(await screen.findByText("本地历史中有 3 次请求缺少 Token 用量，估算余量可能偏高。")).toBeInTheDocument();
 });
+
+
+it("shows unknown accounts instead of hiding missing quota coverage", async () => {
+  vi.mocked(getQuotaSnapshot).mockResolvedValue({ now_ms: 0, accounts: [account({ upstream: "unknown-plan" })] });
+  render(<QuotaUsagePage providers={[]} onBack={vi.fn()} />);
+  expect(await screen.findByText("unknown-plan")).toBeInTheDocument();
+  expect(screen.getByText("无窗口数据")).toBeInTheDocument();
+});
+
+it("labels an expired provider reading and keeps its last known exhaustion visible", async () => {
+  vi.mocked(getQuotaSnapshot).mockResolvedValue({ now_ms: 600000, accounts: [account({
+    source: "stale", provider_observed_at_ms: 0, provider_age_ms: 600000, exhausted: true,
+    windows: [{ len_ms: 3600000, limit: 1000, used: 1000, remaining_permille: 0, ms_until_reset: 3000000 }],
+  })] });
+  render(<QuotaUsagePage providers={[]} onBack={vi.fn()} />);
+  expect(await screen.findByText("供应商读数已过期")).toBeInTheDocument();
+  expect(screen.getByText(/10m 0s.*供应商/)).toBeInTheDocument();
+  expect(screen.getByText("已耗尽")).toBeInTheDocument();
+});
+
+
+it("shows a finite annual estimate as a reset window rather than a permanent balance", async () => {
+  vi.mocked(getQuotaSnapshot).mockResolvedValue({ now_ms: 0, accounts: [account({
+    source: "estimated", windows: [{ len_ms: 31536000000, limit: 1000, used: 0, remaining_permille: 1000, ms_until_reset: 31536000000 }],
+  })] });
+  render(<QuotaUsagePage providers={[]} onBack={vi.fn()} />);
+  expect(await screen.findByText(/8760h/)).toBeInTheDocument();
+  expect(screen.queryByText("余额 · 不刷新")).not.toBeInTheDocument();
+});
+
+it("excludes subscription connections that cannot participate in quota rotation", async () => {
+  vi.mocked(getQuotaSnapshot).mockResolvedValue({ now_ms: 0, accounts: [
+    account({ upstream: "codex-plan" }), account({ upstream: "api-key-account" }),
+  ] });
+  render(<QuotaUsagePage providers={[{
+    name: "codex-plan", provider: "codex-plan", base_url: "https://chatgpt.com/backend-api/codex",
+    models: ["fixture-model"], has_auth: true, credential_source: "codex_account",
+  }]} onBack={vi.fn()} />);
+  expect(await screen.findByText("api-key-account")).toBeInTheDocument();
+  expect(screen.queryByText("codex-plan")).not.toBeInTheDocument();
+});

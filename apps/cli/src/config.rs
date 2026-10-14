@@ -1307,6 +1307,10 @@ impl ClientConfig {
                 .map_err(|error| error.to_string())?;
             validate_local_identity(name, upstream)?;
             validate_api_dialect(name, upstream)?;
+            if let Some(plan) = &upstream.quota_plan {
+                plan.validate()
+                    .map_err(|error| format!("upstream `{name}`: {error}"))?;
+            }
             if let Some(profile) = &upstream.native_search {
                 profile.validate(upstream)?;
             }

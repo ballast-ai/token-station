@@ -6338,8 +6338,8 @@ fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
         .find(|account| account["upstream"] == "mock_primary")
         .unwrap();
     assert_eq!(
-        primary["source"], "none",
-        "a response without quota headers invalidates the older authoritative reading"
+        primary["source"], "authoritative",
+        "omitted quota headers preserve the last known provider reading"
     );
 }
 
@@ -11587,3 +11587,50 @@ fn image_format_rejection_does_not_poison_the_next_valid_image_request() {
 
 #[path = "proxy/audit_hardening.rs"]
 mod audit_hardening;
+
+#[test]
+fn quota_plan_exhaustion_rotates_and_stops_when_selected_accounts_are_spent() {
+    let ok = json!({
+        "id": "quota-plan-fixture", "object": "chat.completion", "model": "gpt-5.5",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "fixture"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+    });
+    let spent = || {
+        vec![http_json_with_headers(
+            200,
+            &ok.to_string(),
+            &[
+                ("x-ratelimit-limit-tokens", "1000"),
+                ("x-ratelimit-remaining-tokens", "0"),
+                ("x-ratelimit-reset-tokens", "3600"),
+            ],
+        )]
+    };
+    let primary = MockUpstream::start(vec![spent()]);
+    let fallback = MockUpstream::start(vec![spent()]);
+    let key = key_file("quota-plan-exhaustion", "synthetic-key");
+    let proxy = start_quota_proxy_two(&primary, &fallback, &key);
+    let request =
+        json!({"model": "auto", "messages": [{"role": "user", "content": "quota acceptance"}]});
+    assert_eq!(post_chat(&proxy, &request, None).0, 200);
+    assert_eq!(primary.hits(), 1);
+    assert_eq!(fallback.hits(), 0);
+    assert_eq!(post_chat(&proxy, &request, None).0, 200);
+    assert_eq!(primary.hits(), 1, "the spent primary is skipped");
+    assert_eq!(fallback.hits(), 1);
+    assert!(post_chat(&proxy, &request, None).0 >= 400);
+    assert_eq!(
+        primary.hits() + fallback.hits(),
+        2,
+        "no request reaches a spent account"
+    );
+    let stale = proxy.gateway.quota_snapshot(quota_audit_now_ms() + 600_000);
+    for account in stale["accounts"].as_array().unwrap() {
+        assert_eq!(account["source"], "stale");
+        assert_eq!(
+            account["exhausted"], true,
+            "TTL expiry must not refill a plan"
+        );
+    }
+    std::fs::remove_file(key).unwrap();
+}

@@ -811,6 +811,8 @@ impl AppInner {
                     access_tier: access_tier.to_owned(),
                     quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
                         QuotaPlanView {
+                            windows: serde_json::from_value(up["quota_plan"]["windows"].clone())
+                                .unwrap_or_default(),
                             len_ms: window["len_ms"].as_u64().unwrap_or(0),
                             limit: window["limit"].as_u64().unwrap_or(0),
                             unit: up["quota_plan"]["unit"]

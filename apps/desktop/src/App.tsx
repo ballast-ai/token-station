@@ -24,7 +24,7 @@ import {
   setDirectRoute,
   setLocalRouting,
   setQuotaAccounts,
-  setQuotaPlan,
+  setQuotaPlanFull,
   setRoutingMode,
   setTier,
   verifyEnterpriseRoute,
@@ -1044,12 +1044,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     }, undefined, true);
 
   // Store provider quota plans in the draft for local estimates; the next Save and Apply activates them.
-  const saveQuotaPlan = (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void run(() => setQuotaPlan(upstream, lenMs, limit, unit, null));
+  const saveQuotaPlan = (upstream: string, plan: import("./api").QuotaPlanInput) =>
+    run(() => setQuotaPlanFull(upstream, plan), copy("Quota plan saved to draft.", "额度计划已保存到草稿。", "額度計畫已儲存到草稿。", "クォータプランを下書きに保存しました。"));
 
   const handleProviderAdded = (next: StateView, message: string) => {
     const defaultTarget = firstProviderDefaultTarget(state.providers.length, next);

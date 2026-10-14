@@ -19,8 +19,8 @@ interface QuotaUsagePageProps {
 /** Refresh interval for lightweight polling that keeps runtime quota data current. */
 const REFRESH_MS = 5000;
 
-/** Values above this threshold mean no reset, such as OpenRouter prepaid balance with u64::MAX. */
-const NO_RESET_MS = 100 * 24 * 60 * 60 * 1000;
+/** JSON represents the u64::MAX balance sentinel as the nearest JavaScript number. */
+const NO_RESET_MS = Number("18446744073709551615");
 
 function permilleToPercent(permille: number): number {
   return Math.round((permille / 1000) * 1000) / 10;
@@ -71,6 +71,8 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
     switch (source) {
       case "authoritative":
         return { text: copy("Provider-reported", "供应商权威", "供應商報告", "プロバイダー報告"), tone: "authoritative" };
+      case "stale":
+        return { text: copy("Provider reading expired", "供应商读数已过期", "供應商讀數已過期", "プロバイダーの読み取り期限切れ"), tone: "none" };
       case "estimated":
         return { text: copy("Local estimate", "本地估算", "本地估算", "ローカル推定"), tone: "estimated" };
       default:
@@ -81,15 +83,13 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
   const displayName = (upstream: string): string =>
     providers.find((provider) => provider.name === upstream)?.name ?? upstream;
 
-  const accounts = snapshot?.accounts ?? [];
-  const shown = accounts.filter(
-    (account) =>
-      account.source !== "none" || account.history === "unavailable" || (account.unknown_usage_requests ?? 0) > 0 ||
-      account.windows.length > 0 ||
-      account.cooling_ms_remaining > 0 ||
-      account.rate_pressured ||
-      account.inflight > 0,
-  );
+  const shown = (snapshot?.accounts ?? []).filter((account) => {
+    const provider = providers.find((entry) => entry.name === account.upstream);
+    return !provider || (
+      provider.provider !== "codex-plan" && provider.provider !== "chatgpt-plan"
+      && provider.credential_source !== "codex_account" && provider.credential_source !== "chatgpt_account"
+    );
+  });
 
   return (
     <div className="page-stack quota-usage-page">
@@ -142,8 +142,8 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
         </svg>
         <span>
           {copy(
-            "“Provider-reported” figures come from the provider’s own response headers and count all of the key’s usage. “Local estimate” only counts traffic through this gateway, so if you use the same key elsewhere the real remaining may be lower.",
-            "「供应商权威」来自供应商自己的响应头,统计该密钥的全部用量;「本地估算」只统计经过本网关的流量,若你在别处也用同一密钥,真实剩余可能更少。", "「供應商報告」來自供應商自己的回應頭部，統計該金鑰的全部用量；「本地估算」只統計經過此閘道器的流量，若你在別處也使用同一金鑰，真實剩餘可能更少。", "「プロバイダー報告」はプロバイダー自身のレスポンスヘッダーから取得され、該当のキーの全使用量を統計します。「ローカル推定」はこのゲートウェイを通るトラフィックのみを統計するため、他の場所でも同じキーを使用している場合、実際の残量はさらに少なくなる可能性があります。"
+            "“Provider-reported” figures come from provider response headers or quota APIs. Their scope follows the provider’s plan. “Local estimate” only counts traffic through this gateway, so if you use the same key elsewhere the real remaining may be lower.",
+            "「供应商权威」来自响应头或额度查询接口，统计范围以供应商套餐为准；过期读数仅供参考，已知耗尽会保留至刷新；「本地估算」只统计经过本网关的流量,若你在别处也用同一密钥,真实剩余可能更少。", "「供應商報告」來自供應商自己的回應頭部，統計該金鑰的全部用量；「本地估算」只統計經過此閘道器的流量，若你在別處也使用同一金鑰，真實剩餘可能更少。", "「プロバイダー報告」はプロバイダー自身のレスポンスヘッダーから取得され、該当のキーの全使用量を統計します。「ローカル推定」はこのゲートウェイを通るトラフィックのみを統計するため、他の場所でも同じキーを使用している場合、実際の残量はさらに少なくなる可能性があります。"
           )}
         </span>
       </p>
@@ -196,7 +196,13 @@ function QuotaAccountCard({
         </div>
       </div>
 
-      {historyNote && <p role="status" className="quota-window-none">{historyNote}</p>}
+      {account.provider_age_ms != null && <p role="status" className="quota-window-none">{copy(
+        `${formatDuration(account.provider_age_ms)} since the last provider reading.`,
+        `距上次供应商读数 ${formatDuration(account.provider_age_ms)}。${account.source === "stale" ? "供应商额度等待更新，当前数值仅供参考。" : ""}`,
+        `距上次供應商讀數 ${formatDuration(account.provider_age_ms)}。`,
+        `前回のプロバイダー読み取りから ${formatDuration(account.provider_age_ms)}。`,
+      )}</p>}
+      {historyNote && (account.source === "estimated" || history === "unavailable") && <p role="status" className="quota-window-none">{historyNote}</p>}
       {(account.unknown_usage_requests ?? 0) > 0 && <p role="status" className="quota-window-none">{copy(
         `${account.unknown_usage_requests} requests in local history have no token usage. Estimated remaining quota may be too high.`,
         `本地历史中有 ${account.unknown_usage_requests} 次请求缺少 Token 用量，估算余量可能偏高。`,
@@ -220,6 +226,8 @@ function QuotaAccountCard({
                   <span>
                     {window.ms_until_reset >= NO_RESET_MS
                       ? copy("no reset (balance)", "余额 · 不刷新", "不重新整理 · 餘額", "リセットなし · おつり")
+                      : window.ms_until_reset <= 0
+                        ? copy("Awaiting provider refresh", "等待供应商更新", "等待供應商更新", "プロバイダー更新待ち")
                       : `${copy("resets in", "距刷新", "距重新整理", "リセットまで")} ${formatDuration(window.ms_until_reset)}`}
                   </span>
                 </div>

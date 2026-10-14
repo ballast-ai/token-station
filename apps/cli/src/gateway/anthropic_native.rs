@@ -764,8 +764,8 @@ impl Gateway {
         }
 
         // L2 authoritative quota: harvest remaining/reset headers, never the body.
-        let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
-        self.quota.lock().expect("quota lock").note_authoritative(
+        let windows = crate::quota_headers::parse_quota_reports(&response.headers, unix_millis());
+        self.quota.lock().expect("quota lock").note_header_reports(
             target.upstream.as_str(),
             unix_millis(),
             windows,

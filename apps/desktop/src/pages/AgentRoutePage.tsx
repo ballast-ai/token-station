@@ -40,6 +40,7 @@ import {
   type AgentView,
   type ProviderView,
   type QuotaAccount,
+  type SaveQuotaPlan,
   type RoutingMode,
   type StateView,
   type TierSlot,
@@ -102,12 +103,7 @@ interface AgentRoutePageProps {
   onRefreshAgents: () => void | Promise<void>;
   onConnectInFlightChange?: (inFlight: boolean) => void;
   onSaveQuota: (accounts: QuotaAccount[]) => void;
-  onSaveQuotaPlan: (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void;
+  onSaveQuotaPlan: SaveQuotaPlan;
   onViewQuotaUsage: () => void;
   onSetRoutingMode?: (mode: RoutingMode) => void;
   onApplyDirect?: (upstream: string, model: string) => void | Promise<boolean>;

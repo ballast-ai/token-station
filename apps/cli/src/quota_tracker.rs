@@ -29,10 +29,8 @@ use crate::quota_lease::{DEFAULT_LEASE_MS, InflightLeases, LeaseId, apply_inflig
 use crate::quota_ledger::{AccountLedger, RATE_PRESSURE_PERMILLE, SlidingWindow, WindowSnapshot};
 
 /// How long a provider-reported (authoritative) quota reading is trusted before
-/// it goes stale and the local ledger estimate takes over again. Providers stamp
-/// their limits on every response, so a live account refreshes this well within
-/// the window; a quiet account falls back to the estimate rather than showing an
-/// old absolute number as if it were current.
+/// it goes stale and the local ledger estimate resumes. Retain known exhaustion
+/// until the reported reset or a new reading. Mark expired viewer data as stale.
 pub const AUTHORITATIVE_TTL_MS: u64 = 5 * 60 * 1000;
 
 /// Where an account's window figures came from — surfaced to the viewer so a
@@ -43,6 +41,8 @@ pub const AUTHORITATIVE_TTL_MS: u64 = 5 * 60 * 1000;
 pub enum QuotaSource {
     /// Provider-reported via response headers (no local blind spot).
     Authoritative,
+    /// Last known provider reading. It is no longer current.
+    Stale,
     /// Locally counted from traffic through this gateway only (a lower bound on
     /// real usage — the user may spend the same key elsewhere).
     Estimated,
@@ -76,6 +76,8 @@ pub struct QuotaAccountSnapshot {
     /// refusal); `0` when not cooling.
     pub cooling_ms_remaining: u64,
     pub source: QuotaSource,
+    pub provider_observed_at_ms: Option<u64>,
+    pub provider_age_ms: Option<u64>,
 }
 
 /// One window in a [`QuotaAccountSnapshot`], serialization-ready for the viewer.
@@ -163,6 +165,31 @@ pub struct QuotaPlan {
     /// The unit the windows count in.
     #[serde(default)]
     pub unit: PlanUnit,
+}
+
+impl QuotaPlan {
+    /// Validate the local estimate before creating its ledger.
+    ///
+    /// # Errors
+    /// Rejects zero limits, duplicate periods, or plans above the storage limit.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.windows.len() > MAX_PLAN_WINDOWS {
+            return Err("Quota plan exceeds the window limit.".into());
+        }
+        let mut periods = std::collections::BTreeSet::new();
+        for window in &self.windows {
+            if window.len_ms == 0 || window.limit == 0 {
+                return Err("Quota windows require a positive period and allowance.".into());
+            }
+            if !periods.insert(window.len_ms) {
+                return Err("Quota windows cannot repeat a period.".into());
+            }
+        }
+        if self.rate_limit_per_min == Some(0) {
+            return Err("Quota rate limit must be positive.".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -435,6 +462,8 @@ pub struct QuotaTracker {
     /// while fresh (within [`AUTHORITATIVE_TTL_MS`]). This is the L2 layer: no
     /// local blind spot, because the provider counts all of the key's usage.
     authoritative: HashMap<String, Authoritative>,
+    polled: std::collections::BTreeMap<(String, u64), Authoritative>,
+    header_reports: std::collections::BTreeMap<(String, String), Authoritative>,
 }
 
 impl QuotaTracker {
@@ -457,6 +486,8 @@ impl QuotaTracker {
             session_capacity: DEFAULT_SESSION_CAPACITY.max(1),
             cooling_until_ms: HashMap::new(),
             authoritative: HashMap::new(),
+            polled: std::collections::BTreeMap::new(),
+            header_reports: std::collections::BTreeMap::new(),
         }
     }
 
@@ -472,6 +503,9 @@ impl QuotaTracker {
                 .any(|(name, plan)| name.len() > 1024 || plan.windows.len() > MAX_PLAN_WINDOWS)
         {
             return Err("Quota plans exceed the state limits.".into());
+        }
+        for plan in plans.values() {
+            plan.validate()?;
         }
         let mut tracker = Self::new(plans);
         if tracker.accounts.is_empty() {
@@ -528,24 +562,102 @@ impl QuotaTracker {
 
     /// Fresh provider-reported windows for `upstream`, or `None` if there is no
     /// reading or it has aged past [`AUTHORITATIVE_TTL_MS`].
-    fn fresh_authoritative(&self, upstream: &str, now_ms: u64) -> Option<Vec<WindowSnapshot>> {
-        let reading = self.authoritative.get(upstream)?;
-        let elapsed = now_ms.checked_sub(reading.observed_at_ms)?;
-        if elapsed >= AUTHORITATIVE_TTL_MS {
+    fn provider_readings(&self, upstream: &str) -> Vec<&Authoritative> {
+        // Plan API readings describe the budget. Response headers can describe
+        // separate rate windows and must not overwrite that budget.
+        let polled: Vec<_> = self
+            .polled
+            .iter()
+            .filter(|((name, _), _)| name == upstream)
+            .map(|(_, reading)| reading)
+            .collect();
+        if !polled.is_empty() {
+            return polled;
+        }
+        if let Some(reading) = self.authoritative.get(upstream) {
+            return vec![reading];
+        }
+        self.header_reports
+            .iter()
+            .filter(|((name, _), _)| name == upstream)
+            .map(|(_, reading)| reading)
+            .collect()
+    }
+
+    fn provider_windows(
+        &self,
+        upstream: &str,
+        now_ms: u64,
+        fresh: bool,
+    ) -> Option<Vec<WindowSnapshot>> {
+        let readings = self.provider_readings(upstream);
+        if readings.is_empty() {
             return None;
         }
-        let windows: Vec<_> = reading
-            .windows
-            .iter()
-            .filter_map(|window| {
-                let remaining = window.ms_until_reset.checked_sub(elapsed)?;
-                (remaining > 0).then_some(WindowSnapshot {
+        let mut windows = Vec::new();
+        for reading in readings {
+            let elapsed = if fresh {
+                now_ms.checked_sub(reading.observed_at_ms)?
+            } else {
+                now_ms.saturating_sub(reading.observed_at_ms)
+            };
+            if fresh && elapsed >= AUTHORITATIVE_TTL_MS {
+                return None;
+            }
+            for window in &reading.windows {
+                let remaining = if window.ms_until_reset == u64::MAX {
+                    u64::MAX
+                } else {
+                    window.ms_until_reset.saturating_sub(elapsed)
+                };
+                // A partial reset does not confirm the whole report is current.
+                if fresh && remaining == 0 {
+                    return None;
+                }
+                windows.push(WindowSnapshot {
                     ms_until_reset: remaining,
                     ..*window
+                });
+            }
+        }
+        Some(windows)
+    }
+
+    fn fresh_authoritative(&self, upstream: &str, now_ms: u64) -> Option<Vec<WindowSnapshot>> {
+        self.provider_windows(upstream, now_ms, true)
+    }
+
+    fn provider_observed_at(&self, upstream: &str) -> Option<u64> {
+        self.provider_readings(upstream)
+            .iter()
+            .map(|r| r.observed_at_ms)
+            .min()
+    }
+
+    fn reported_exhaustion(&self, upstream: &str, now_ms: u64) -> bool {
+        self.authoritative
+            .get(upstream)
+            .into_iter()
+            .chain(
+                self.polled
+                    .iter()
+                    .filter(|((name, _), _)| name == upstream)
+                    .map(|(_, reading)| reading),
+            )
+            .chain(
+                self.header_reports
+                    .iter()
+                    .filter(|((name, _), _)| name == upstream)
+                    .map(|(_, reading)| reading),
+            )
+            .any(|reading| {
+                // A clock correction must not reopen a known exhausted account.
+                let elapsed = now_ms.saturating_sub(reading.observed_at_ms);
+                reading.windows.iter().any(|window| {
+                    window.remaining_permille == 0
+                        && (window.ms_until_reset == u64::MAX || elapsed < window.ms_until_reset)
                 })
             })
-            .collect();
-        (!windows.is_empty()).then_some(windows)
     }
 
     /// Whether `upstream` is cooling from a real rate/quota refusal at `now_ms`.
@@ -583,7 +695,8 @@ impl QuotaTracker {
         // Ground-truth override: while the upstream is cooling from a real
         // quota/rate refusal, the account is exhausted no matter what the ledger
         // or authoritative reading said. Nothing routes to it until it elapses.
-        if self.is_cooling(upstream, now_ms)
+        if self.reported_exhaustion(upstream, now_ms)
+            || self.is_cooling(upstream, now_ms)
             || (self.persistence_failed.get() && self.accounts.contains_key(upstream))
         {
             state.exhausted = true;
@@ -606,16 +719,20 @@ impl QuotaTracker {
     }
 
     /// Record a provider-reported (authoritative) quota reading for `upstream`,
-    /// parsed from response headers. Preferred over the local estimate while
-    /// fresh; an empty `windows` clears any stale reading. This is the L2 layer.
+    /// parsed from response headers or a plan API. Prefer it while fresh.
+    /// Omitted headers or an empty poll do not erase a last known reading.
     pub fn note_authoritative(
         &mut self,
         upstream: &str,
         now_ms: u64,
         windows: Vec<WindowSnapshot>,
     ) {
-        if windows.is_empty() {
-            self.authoritative.remove(upstream);
+        if windows.is_empty()
+            || self
+                .authoritative
+                .get(upstream)
+                .is_some_and(|reading| reading.observed_at_ms > now_ms)
+        {
             return;
         }
         self.authoritative.insert(
@@ -627,10 +744,59 @@ impl QuotaTracker {
         );
     }
 
+    /// Store a full plan report separately from token-rate response headers.
+    pub fn note_polled(&mut self, upstream: &str, now_ms: u64, windows: Vec<WindowSnapshot>) {
+        // The period identifies each plan window. A partial report cannot erase
+        // a longer budget or a known exhaustion gate from a previous report.
+        for window in windows {
+            let key = (upstream.to_owned(), window.len_ms);
+            if self
+                .polled
+                .get(&key)
+                .is_some_and(|r| r.observed_at_ms > now_ms)
+            {
+                continue;
+            }
+            self.polled.insert(
+                key,
+                Authoritative {
+                    windows: vec![window],
+                    observed_at_ms: now_ms,
+                },
+            );
+        }
+    }
+
+    /// Update only the header families present in this response.
+    pub fn note_header_reports(
+        &mut self,
+        upstream: &str,
+        now_ms: u64,
+        reports: Vec<(String, WindowSnapshot)>,
+    ) {
+        for (family, window) in reports {
+            let key = (upstream.to_owned(), family);
+            if self
+                .header_reports
+                .get(&key)
+                .is_some_and(|r| r.observed_at_ms > now_ms)
+            {
+                continue;
+            }
+            self.header_reports.insert(
+                key,
+                Authoritative {
+                    windows: vec![window],
+                    observed_at_ms: now_ms,
+                },
+            );
+        }
+    }
+
     /// Full per-account picture for the quota viewer, one entry per requested
     /// upstream (so callers control which accounts appear), with figures tagged
-    /// by [`QuotaSource`]. Windowed detail prefers a fresh provider reading, then
-    /// the local ledger estimate; rate/in-flight/cooling are always live.
+    /// by [`QuotaSource`]. Retain expired provider figures with an explicit stale
+    /// tag. Rate, in-flight load, and exhaustion use the current routing state.
     #[must_use]
     pub fn snapshot(&self, upstreams: &[String], now_ms: u64) -> Vec<QuotaAccountSnapshot> {
         upstreams
@@ -639,6 +805,8 @@ impl QuotaTracker {
                 let (windows, source) = if let Some(w) = self.fresh_authoritative(upstream, now_ms)
                 {
                     (w, QuotaSource::Authoritative)
+                } else if let Some(windows) = self.provider_windows(upstream, now_ms, false) {
+                    (windows, QuotaSource::Stale)
                 } else if let Some(account) = self.accounts.get(upstream) {
                     let w = self
                         .current_ledger(upstream, account)
@@ -653,7 +821,6 @@ impl QuotaTracker {
                     (Vec::new(), QuotaSource::None)
                 };
 
-                let (_, window_exhausted) = binding_of(&windows);
                 let rate_limit = self
                     .accounts
                     .get(upstream)
@@ -688,11 +855,13 @@ impl QuotaTracker {
                     rate_headroom_permille,
                     rate_pressured: rate_headroom_permille <= RATE_PRESSURE_PERMILLE,
                     inflight,
-                    exhausted: window_exhausted
-                        || self.is_cooling(upstream, now_ms)
-                        || history == QuotaHistory::Unavailable,
+                    exhausted: self.quota_state(upstream, now_ms).exhausted,
                     cooling_ms_remaining: cooling,
                     source,
+                    provider_observed_at_ms: self.provider_observed_at(upstream),
+                    provider_age_ms: self
+                        .provider_observed_at(upstream)
+                        .map(|observed| now_ms.saturating_sub(observed)),
                 }
             })
             .collect()
@@ -828,7 +997,7 @@ mod tests {
         assert!(!tracker.quota_state("a", 61_000).exhausted);
         assert!(matches!(
             tracker.snapshot(&["a".into()], 61_000)[0].source,
-            QuotaSource::None
+            QuotaSource::Stale
         ));
     }
 
@@ -1269,5 +1438,110 @@ mod tests {
         t.remember("conv-3", account.clone()); // evicts conv-1
         assert!(t.last_account("conv-1").is_none());
         assert!(t.last_account("conv-3").is_some());
+    }
+    #[test]
+    fn omitted_headers_preserve_the_last_provider_reading() {
+        let mut t = tracker("acct", token_plan(1000));
+        t.note_authoritative("acct", 100, vec![window(0, FIVE_H)]);
+        t.note_authoritative("acct", 200, vec![]);
+        assert!(t.quota_state("acct", 300).exhausted);
+        assert_eq!(
+            t.snapshot(&["acct".into()], 300)[0].source,
+            QuotaSource::Authoritative
+        );
+    }
+
+    #[test]
+    fn stale_exhaustion_stays_closed_until_the_reported_reset() {
+        let mut t = tracker("acct", token_plan(1000));
+        t.note_authoritative("acct", 0, vec![window(0, FIVE_H)]);
+        assert!(t.quota_state("acct", AUTHORITATIVE_TTL_MS).exhausted);
+        assert!(t.snapshot(&["acct".into()], AUTHORITATIVE_TTL_MS)[0].exhausted);
+        assert!(!t.quota_state("acct", FIVE_H).exhausted);
+        t.note_authoritative("acct", FIVE_H, vec![window(800, FIVE_H)]);
+        assert!(!t.quota_state("acct", FIVE_H).exhausted);
+    }
+
+    #[test]
+    fn a_partial_reset_does_not_make_an_incomplete_report_fresh() {
+        let mut t = tracker("acct", token_plan(1000));
+        t.note_authoritative("acct", 0, vec![window(0, 1000), window(500, FIVE_H)]);
+        assert!(t.fresh_authoritative("acct", 1000).is_none());
+        assert!(!t.quota_state("acct", 1000).exhausted);
+    }
+
+    #[test]
+    fn a_zero_prepaid_balance_does_not_reopen_after_the_reading_ttl() {
+        let mut t = QuotaTracker::new(HashMap::new());
+        t.note_authoritative("acct", 0, vec![window(0, u64::MAX)]);
+        assert!(t.quota_state("acct", AUTHORITATIVE_TTL_MS * 10).exhausted);
+    }
+
+    #[test]
+    fn invalid_local_plans_are_rejected_before_ledger_creation() {
+        let mut plan = token_plan(1000);
+        plan.windows[0].len_ms = 0;
+        assert!(plan.validate().is_err());
+        plan.windows[0].len_ms = FIVE_H;
+        plan.windows.push(plan.windows[0]);
+        assert!(plan.validate().is_err());
+        plan.windows.pop();
+        plan.rate_limit_per_min = Some(0);
+        assert!(plan.validate().is_err());
+        plan.rate_limit_per_min = Some(30);
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn an_older_provider_response_cannot_overwrite_a_newer_reading() {
+        let mut t = QuotaTracker::new(HashMap::new());
+        t.note_authoritative("acct", 2000, vec![window(0, FIVE_H)]);
+        t.note_authoritative("acct", 1000, vec![window(900, FIVE_H)]);
+        assert!(t.quota_state("acct", 2000).exhausted);
+    }
+
+    #[test]
+    fn token_rate_headers_cannot_replace_a_spent_plan_budget() {
+        let mut t = QuotaTracker::new(HashMap::new());
+        t.note_polled("acct", 100, vec![window(0, FIVE_H * 10)]);
+        t.note_header_reports("acct", 200, vec![("tokens".into(), window(900, 60000))]);
+        assert!(t.quota_state("acct", 300).exhausted);
+        assert_eq!(
+            t.snapshot(&["acct".into()], 300)[0].windows[0].remaining_permille,
+            0
+        );
+        t.note_polled("acct", 400, vec![window(900, FIVE_H * 10)]);
+        assert!(!t.quota_state("acct", 400).exhausted);
+    }
+
+    #[test]
+    fn partial_header_reports_preserve_other_families_until_their_reset() {
+        let mut t = QuotaTracker::new(HashMap::new());
+        t.note_header_reports(
+            "acct",
+            0,
+            vec![
+                ("input".into(), window(0, 60000)),
+                ("output".into(), window(800, 60000)),
+            ],
+        );
+        t.note_header_reports("acct", 1000, vec![("output".into(), window(900, 60000))]);
+        assert!(t.quota_state("acct", 2000).exhausted);
+        assert!(!t.quota_state("acct", 60000).exhausted);
+    }
+
+    #[test]
+    fn partial_plan_polls_preserve_a_missing_exhausted_window() {
+        let mut t = QuotaTracker::new(HashMap::new());
+        let mut short = window(0, FIVE_H);
+        short.len_ms = FIVE_H;
+        let mut long = window(800, FIVE_H * 10);
+        long.len_ms = FIVE_H * 10;
+        t.note_polled("acct", 0, vec![short, long]);
+        t.note_polled("acct", 1000, vec![long]);
+        assert!(t.quota_state("acct", 2000).exhausted);
+        short.remaining_permille = 800;
+        t.note_polled("acct", 3000, vec![short, long]);
+        assert!(!t.quota_state("acct", 3000).exhausted);
     }
 }

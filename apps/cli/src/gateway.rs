@@ -106,13 +106,12 @@ use south_core::raw::BoundedResolverV1;
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
 pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 
-/// Per-request timeout for a background quota-balance poll. Short: it must never
+/// Per-request timeout for a background quota poll. Short: it must never
 /// hold up shutdown or pile up behind a slow endpoint.
-const QUOTA_POLL_TIMEOUT_SECS: u64 = 10;
+const QUOTA_POLL_TIMEOUT_SECS: u64 = 3;
 
-/// How often the background poller refreshes balance endpoints. Balances change
-/// slowly and the endpoints are rate-limited, so a few minutes is plenty.
-pub const QUOTA_POLL_INTERVAL_SECS: u64 = 300;
+/// Refresh before authoritative readings reach their five-minute freshness TTL.
+pub const QUOTA_POLL_INTERVAL_SECS: u64 = 60;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_mins(2);
 const CANCEL_READ_POLL: Duration = Duration::from_millis(100);
@@ -2592,12 +2591,12 @@ impl Gateway {
         json!({ "now_ms": now_ms, "accounts": accounts })
     }
 
-    /// One pass of active quota polling: for each upstream with a balance
-    /// endpoint we understand (currently `OpenRouter`'s `/key`), fetch its
-    /// remaining credits and record them as an authoritative reading. This is
+    /// One pass of active quota polling: query recognized official API-key
+    /// endpoints for balances or plan windows and retain complete reports. This is
     /// the L2 path for providers that do not stamp their allowance on chat
     /// responses. Best-effort: any upstream that errors is skipped, never
-    /// failing the pass; it touches only the balance endpoint, never chat.
+    /// failing the pass. Failed or incomplete readings preserve the last report.
+    /// It touches only read-only quota endpoints, never chat.
     ///
     /// # Panics
     ///
@@ -2614,10 +2613,26 @@ impl Gateway {
                 return;
             }
         };
-        let now_ms = unix_millis();
         for (name, upstream) in &self.upstreams {
+            if self.local_upstreams.contains(name)
+                || crate::config::is_subscription_provider(&upstream.config.provider)
+                || upstream.auth_config.as_ref().is_some_and(|auth| {
+                    auth.codex_account.is_some() || auth.chatgpt_account.is_some()
+                })
+            {
+                continue;
+            }
             let base = String::from(upstream.config.base_url.clone());
-            if !crate::quota_fetch::is_openrouter(&base) {
+            let Some(endpoint) = crate::quota_fetch::quota_endpoint(&base) else {
+                continue;
+            };
+            if !endpoint.accepts_models(
+                upstream
+                    .config
+                    .models
+                    .iter()
+                    .map(|model| model.model.as_str()),
+            ) {
                 continue;
             }
             let Some(auth) = upstream.config.auth.as_ref() else {
@@ -2626,24 +2641,35 @@ impl Gateway {
             let Ok(key) = self.secrets.resolve(name, auth.as_str()) else {
                 continue;
             };
-            let url = format!("{}/key", base.trim_end_matches('/'));
-            let authorization = format!("Bearer {key}");
+            // Order readings by request start. A slow old poll cannot replace
+            // a newer report, and its reset delta uses this same clock anchor.
+            let now_ms = unix_millis();
+            let authorization = endpoint.authorization(&key);
             let Ok(response) = agent
-                .get(&url)
+                .get(&endpoint.url)
                 .header("authorization", authorization.as_str())
+                .header("accept", "application/json")
                 .call()
             else {
                 continue;
             };
-            let Ok(body) = response.into_body().read_to_string() else {
+            let status = response.status().as_u16();
+            if !(200..300).contains(&status) {
+                continue;
+            }
+            let Ok(body) = response
+                .into_body()
+                .into_with_config()
+                .limit(1 << 20)
+                .read_to_string()
+            else {
                 continue;
             };
-            if let Some(window) = crate::quota_fetch::parse_openrouter_key(&body) {
-                self.quota.lock().expect("quota lock").note_authoritative(
-                    name.as_str(),
-                    now_ms,
-                    vec![window],
-                );
+            if let Some(windows) = endpoint.parse_response(status, &body, now_ms) {
+                self.quota
+                    .lock()
+                    .expect("quota lock")
+                    .note_polled(name.as_str(), now_ms, windows);
             }
         }
     }

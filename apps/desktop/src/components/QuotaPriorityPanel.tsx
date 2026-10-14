@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import type { ProviderView, QuotaAccount, QuotaPlanView } from "../api";
+import type { ProviderView, QuotaAccount, QuotaPlanView, SaveQuotaPlan } from "../api";
 import { ProviderIcon } from "../brandIcons";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
 import { useLocalizedCopy, type LocalizedCopy } from "./LanguageProvider";
@@ -27,15 +27,10 @@ interface QuotaPriorityPanelProps {
   /** Navigate to the live quota page. */
   onViewUsage: () => void;
   /** Declare or clear a provider quota plan for local estimates. */
-  onSavePlan: (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void;
+  onSavePlan: SaveQuotaPlan;
 }
 
-/** Quota-window presets covering common subscription reset periods. */
+/** Local estimate period presets. Provider reset alignment remains unknown. */
 const WINDOW_PRESETS: { label: [string, string, string, string]; ms: number }[] = [
   { label: ["5 hours", "5 小时", "5 小時", "5 時間"], ms: 5 * 60 * 60 * 1000 },
   { label: ["1 day", "1 天", "1 天", "1 日"], ms: 24 * 60 * 60 * 1000 },
@@ -50,7 +45,7 @@ type QuotaEntry = QuotaAccount;
  * it expires. Row order breaks ties. Keyword and local-only routing are hidden in this mode.
  */
 export default function QuotaPriorityPanel({
-  providers,
+  providers: allProviders,
   accounts,
   busy,
   applying,
@@ -59,6 +54,9 @@ export default function QuotaPriorityPanel({
   onSavePlan,
 }: QuotaPriorityPanelProps) {
   const { copy } = useLocalizedCopy();
+  const providers = allProviders.filter((provider) =>
+    provider.provider !== "codex-plan" && provider.provider !== "chatgpt-plan"
+    && provider.credential_source !== "codex_account" && provider.credential_source !== "chatgpt_account");
   // Ordered account list; row order is the tie-break priority. Initialize from persisted accounts.
   const [entries, setEntries] = useState<QuotaEntry[]>(() =>
     accounts.map((account) => ({ upstream: account.upstream, model: account.model })),
@@ -112,10 +110,10 @@ export default function QuotaPriorityPanel({
 
   // Deduplicated providers in the rotation; plans belong to providers, not individual models.
   const planProviders = Array.from(
-    new Set(entries.map((entry) => entry.upstream).filter(Boolean)),
+    new Set(entries.map((entry) => entry.upstream).filter((name) => providers.some((p) => p.name === name))),
   );
   const hasCompleteEntry = entries.some((entry) => entry.upstream && entry.model);
-  const hasIncompleteEntry = entries.some((entry) => !entry.upstream || !entry.model);
+  const hasIncompleteEntry = entries.some((entry) => !entry.upstream || !entry.model || !providers.some((p) => p.name === entry.upstream));
   const canApply = hasCompleteEntry && !hasIncompleteEntry;
   const applyHint = entries.length === 0
     ? copy("Add at least one provider and model before applying.", "至少添加一个供应商和模型后才能应用。", "應用前請至少新增一個供應商和模型。", "適用する前に少なくとも1つのプロバイダーとモデルを追加してください。")
@@ -161,11 +159,11 @@ export default function QuotaPriorityPanel({
         </svg>
         <span>
           {copy(
-            "When two accounts have similar quota left, requests follow the ",
-            "当两家剩余额度相近时，将按下方", "當兩家剩餘額度相近時，請求會依照下方", "2つのアカウントの残りクォータが似ている場合、リクエストは以下の順序で"
+            "Accounts with quota use the earliest reset first. Within the same reset-time bucket, conversation affinity, rate headroom, and the order below break ties.",
+            "有余量的账户按最早刷新时间优先。刷新时间相近时，依次考虑对话亲和、速率余量和下方序号。",
+            "有餘量的帳號按最早重新整理時間優先。重新整理時間相近時，依次考慮對話親和、速率餘量和下方序號。",
+            "残量のあるアカウントはリセットが早い順に使います。リセット時刻が近い場合は会話の継続性、レート余裕、下の順序で選びます。"
           )}
-          <strong>{copy("order below", "优先级顺序", "優先順序順序", "優先順位")}</strong>
-          {copy(" — number 1 is tried first.", "调用，序号 1 最先使用。", " — 序號 1 最先使用。", " — 1番が最初に使用されます。")}
         </span>
       </p>
 
@@ -255,8 +253,8 @@ export default function QuotaPriorityPanel({
                 "填写供应商的额度上限和刷新周期后，Token Station 会在本机估算剩余额度。", "當您在輸入供應商的額度上限與重新整理週期後，Token Station 會在本機估算剩餘額度。", "プロバイダーのクォータ上限とリセット周期を入力した後、Token Station はローカルで残りクォータを推定します。"
               )}</span>
               <span>{copy(
-                "If the provider reports quota automatically, leave this blank.",
-                "若供应商会自动上报额度，则无需填写。", "若供應商會自動上報額度，請留空。", "プロバイダーがクォータを自動的に報告する場合、この項目は空にします。"
+                "If the provider reports quota automatically, leave this blank. Local windows count only this gateway and do not identify actual provider reset times.",
+                "若供应商会自动上报额度，则无需填写。本地窗口仅统计经过本网关的用量，不代表供应商的真实重置时刻。", "若供應商會自動上報額度，請留空。本機視窗僅統計經過此閘道的用量，不代表供應商的真實重置時刻。", "プロバイダーが自動報告する場合は空にします。ローカルウィンドウはこのゲートウェイの使用量のみを数え、実際のリセット時刻とは異なります。"
               )}</span>
             </div>
           </div>
@@ -282,132 +280,109 @@ export default function QuotaPriorityPanel({
   );
 }
 
-/** Provider quota-plan row with reset window, limit, and unit; an empty limit clears the plan. */
-function QuotaPlanRow({
-  upstream,
-  plan,
-  busy,
-  copy,
-  onSavePlan,
-}: {
+/** Explicit full-plan editor. Draft edits never save on blur. */
+function QuotaPlanRow({ upstream, plan, busy, copy, onSavePlan }: {
   upstream: string;
   plan: QuotaPlanView | null;
   busy: boolean;
   copy: LocalizedCopy;
-  onSavePlan: (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void;
+  onSavePlan: SaveQuotaPlan;
 }) {
-  const presetOf = (lenMs: number | undefined): number =>
-    lenMs && WINDOW_PRESETS.some((preset) => preset.ms === lenMs) ? lenMs : WINDOW_PRESETS[0].ms;
-  const [lenMs, setLenMs] = useState(presetOf(plan?.len_ms));
-  const [limit, setLimit] = useState(plan?.limit ? String(plan.limit) : "");
+  type DraftWindow = { len: string; limit: string; custom: boolean };
+  const fromPlan = (): DraftWindow[] => (plan?.windows ?? (plan ? [{ len_ms: plan.len_ms, limit: plan.limit }] : []))
+    .map((window) => ({ len: String(window.len_ms), limit: String(window.limit), custom: !WINDOW_PRESETS.some((p) => p.ms === window.len_ms) }));
+  const [windows, setWindows] = useState<DraftWindow[]>(fromPlan);
   const [unit, setUnit] = useState<"tokens" | "requests">(plan?.unit ?? "tokens");
-  const windowId = useId();
-  const limitId = useId();
-  const unitId = useId();
-
-  // Resynchronize local fields when an external plan changes after saved state refreshes.
+  const [rate, setRate] = useState(plan?.rate_limit_per_min ? String(plan.rate_limit_per_min) : "");
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const id = useId();
+  const planKey = JSON.stringify(plan);
   useEffect(() => {
-    setLenMs(presetOf(plan?.len_ms));
-    setLimit(plan?.limit ? String(plan.limit) : "");
+    setWindows(fromPlan());
     setUnit(plan?.unit ?? "tokens");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan?.len_ms, plan?.limit, plan?.unit]);
-
-  const commit = (nextLen: number, nextLimit: string, nextUnit: "tokens" | "requests") => {
-    const parsed = Number.parseInt(nextLimit, 10);
-    onSavePlan(upstream, nextLen, Number.isFinite(parsed) ? Math.max(0, parsed) : 0, nextUnit);
+    setRate(plan?.rate_limit_per_min ? String(plan.rate_limit_per_min) : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- planKey covers every persisted field.
+  }, [planKey]);
+  const positiveInteger = (value: string) => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
+  const valid = windows.every((window) => positiveInteger(window.len) && positiveInteger(window.limit))
+    && new Set(windows.map((window) => Number(window.len))).size === windows.length
+    && windows.length <= 16 && (rate === "" || positiveInteger(rate));
+  const locked = busy || saving;
+  const update = (index: number, patch: Partial<DraftWindow>) => {
+    setWindows((previous) => previous.map((window, i) => i === index ? { ...window, ...patch } : window));
+    setFeedback("");
   };
-
+  const save = async () => {
+    if (!valid || locked) return;
+    setSaving(true);
+    setFeedback("");
+    try {
+      const result = await onSavePlan(upstream, {
+        windows: windows.map((window) => ({ len_ms: Number(window.len), limit: Number(window.limit) })),
+        unit, rate_limit_per_min: rate === "" ? null : Number(rate),
+      });
+      setFeedback(result === false
+        ? copy("Save failed. Your edits remain.", "保存失败，已保留编辑内容。", "儲存失敗，已保留編輯內容。", "保存に失敗しました。編集内容は保持されます。")
+        : copy("Plan saved to draft. Save & apply to activate it.", "计划已保存到草稿，点击保存并应用后生效。", "計畫已儲存到草稿，點擊儲存並應用後生效。", "プランを下書きに保存しました。保存して適用で有効になります。"));
+    } catch {
+      setFeedback(copy("Save failed. Your edits remain.", "保存失败，已保留编辑内容。", "儲存失敗，已保留編輯內容。", "保存に失敗しました。編集内容は保持されます。"));
+    } finally { setSaving(false); }
+  };
   return (
     <div className="quota-plan-row">
       <span className="quota-plan-name" title={upstream}>{upstream}</span>
-      <FieldGroup className="quota-plan-controls">
-        <Field className="quota-plan-field" data-disabled={busy ? true : undefined}>
-          <FieldLabel className="sr-only" htmlFor={windowId}>
-            {copy(`${upstream} reset window`, `${upstream} 刷新窗口`, `${upstream} 重新整理視窗`, `${upstream} リセットウィンドウ`)}
-          </FieldLabel>
-          <Select
-            value={String(lenMs)}
-            disabled={busy}
-            onValueChange={(value) => {
-              const next = Number(value);
-              setLenMs(next);
-              commit(next, limit, unit);
-            }}
-          >
-            <SelectTrigger
-              id={windowId}
-              className="quota-plan-select-trigger"
-              size="sm"
-              aria-label={copy(`${upstream} reset window`, `${upstream} 刷新窗口`, `${upstream} 重新整理視窗`, `${upstream} リセットウィンドウ`)}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="end">
-              <SelectGroup>
-                {WINDOW_PRESETS.map((preset) => (
-                  <SelectItem key={preset.ms} value={String(preset.ms)}>
-                    {copy(...preset.label)}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </Field>
-
-        <Field className="quota-plan-field" data-disabled={busy ? true : undefined}>
-          <FieldLabel className="sr-only" htmlFor={limitId}>
-            {copy(`${upstream} allowance`, `${upstream} 额度上限`, `${upstream} 額度上限`, `${upstream} クォータ上限`)}
-          </FieldLabel>
-          <Input
-            id={limitId}
-            className="quota-plan-limit-input"
-            type="number"
-            min={0}
-            aria-label={copy(`${upstream} allowance`, `${upstream} 额度上限`, `${upstream} 額度上限`, `${upstream} クォータ上限`)}
-            placeholder={copy("Limit", "额度上限", "額度上限", "クォータ上限")}
-            value={limit}
-            disabled={busy}
-            onChange={(event) => setLimit(event.target.value)}
-            onBlur={() => commit(lenMs, limit, unit)}
-          />
-        </Field>
-
-        <Field className="quota-plan-field" data-disabled={busy ? true : undefined}>
-          <FieldLabel className="sr-only" htmlFor={unitId}>
-            {copy(`${upstream} unit`, `${upstream} 单位`, `${upstream} 單位`, `${upstream} 単位`)}
-          </FieldLabel>
-          <Select
-            value={unit}
-            disabled={busy}
-            onValueChange={(value) => {
-              const next = value as "tokens" | "requests";
-              setUnit(next);
-              commit(lenMs, limit, next);
-            }}
-          >
-            <SelectTrigger
-              id={unitId}
-              className="quota-plan-select-trigger"
-              size="sm"
-              aria-label={copy(`${upstream} unit`, `${upstream} 单位`, `${upstream} 單位`, `${upstream} 単位`)}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="end">
-              <SelectGroup>
+      <div className="quota-plan-editor">
+        {windows.map((window, index) => {
+          const prefix = copy(`${upstream} window ${index + 1}`, `${upstream} 窗口 ${index + 1}`, `${upstream} 視窗 ${index + 1}`, `${upstream} ウィンドウ ${index + 1}`);
+          return <FieldGroup className="quota-plan-controls" key={index}>
+            <Field className="quota-plan-field">
+              <FieldLabel htmlFor={`${id}-${index}-period`}>{copy("Reset period", "刷新周期", "重新整理週期", "リセット周期")}</FieldLabel>
+              <Select value={window.custom ? "custom" : window.len} disabled={locked} onValueChange={(value) => update(index, value === "custom" ? { custom: true } : { len: value, custom: false })}>
+                <SelectTrigger id={`${id}-${index}-period`} size="sm" aria-label={`${prefix} ${copy("reset period", "刷新周期", "重新整理週期", "リセット周期")}`}><SelectValue /></SelectTrigger>
+                <SelectContent><SelectGroup>
+                  {WINDOW_PRESETS.map((preset) => <SelectItem key={preset.ms} value={String(preset.ms)}>{copy(...preset.label)}</SelectItem>)}
+                  <SelectItem value="custom">{copy("Custom", "自定义", "自訂", "カスタム")}</SelectItem>
+                </SelectGroup></SelectContent>
+              </Select>
+              {window.custom && <>
+                <Input type="number" min={1} step={1} disabled={locked} value={window.len} aria-invalid={!positiveInteger(window.len)} aria-label={`${prefix} ${copy("custom period (ms)", "自定义周期（毫秒）", "自訂週期（毫秒）", "カスタム周期（ミリ秒）")}`} onChange={(event) => update(index, { len: event.target.value })} />
+                <span className="text-xs text-muted-foreground">{copy("1 hour = 3,600,000 ms", "1 小时 = 3,600,000 毫秒", "1 小時 = 3,600,000 毫秒", "1時間 = 3,600,000ミリ秒")}</span>
+              </>}
+            </Field>
+            <Field className="quota-plan-field">
+              <FieldLabel htmlFor={`${id}-${index}-limit`}>{copy("Allowance", "额度上限", "額度上限", "クォータ上限")}</FieldLabel>
+              <Input id={`${id}-${index}-limit`} type="number" min={1} step={1} disabled={locked} value={window.limit} aria-label={`${prefix} ${copy("allowance", "额度上限", "額度上限", "クォータ上限")}`} aria-invalid={!positiveInteger(window.limit)} onChange={(event) => update(index, { limit: event.target.value })} />
+            </Field>
+            <Button type="button" variant="ghost" disabled={locked} aria-label={copy(`Remove ${upstream} window ${index + 1}`, `移除 ${upstream} 窗口 ${index + 1}`, `移除 ${upstream} 視窗 ${index + 1}`, `${upstream} ウィンドウ ${index + 1} を削除`)} onClick={() => { setWindows((previous) => previous.filter((_, i) => i !== index)); setFeedback(""); }}>×</Button>
+          </FieldGroup>;
+        })}
+        <FieldGroup className="quota-plan-controls quota-plan-shared-controls">
+          <Field className="quota-plan-field">
+            <FieldLabel htmlFor={`${id}-unit`}>{copy("Unit", "单位", "單位", "単位")}</FieldLabel>
+            <Select value={unit} disabled={locked} onValueChange={(value) => { setUnit(value as "tokens" | "requests"); setFeedback(""); }}>
+              <SelectTrigger id={`${id}-unit`} size="sm" aria-label={copy(`${upstream} unit`, `${upstream} 单位`, `${upstream} 單位`, `${upstream} 単位`)}><SelectValue /></SelectTrigger>
+              <SelectContent><SelectGroup>
                 <SelectItem value="tokens">{copy("tokens", "Token", "Token", "トークン")}</SelectItem>
                 <SelectItem value="requests">{copy("requests", "请求", "請求", "リクエスト")}</SelectItem>
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </Field>
-      </FieldGroup>
+              </SelectGroup></SelectContent>
+            </Select>
+          </Field>
+          <Field className="quota-plan-field">
+            <FieldLabel htmlFor={`${id}-rate`}>{copy("Requests/min (optional)", "每分钟请求上限（可选）", "每分鐘請求上限（可選）", "毎分リクエスト上限（任意）")}</FieldLabel>
+            <Input id={`${id}-rate`} type="number" min={1} step={1} disabled={locked} value={rate} placeholder={copy("No limit", "不限", "不限", "制限なし")} aria-label={`${upstream} RPM`} aria-invalid={rate !== "" && !positiveInteger(rate)} onChange={(event) => { setRate(event.target.value); setFeedback(""); }} />
+          </Field>
+        </FieldGroup>
+        <div className="quota-plan-actions">
+          <Button type="button" variant="outline" disabled={locked || windows.length >= 16} aria-label={copy(`Add ${upstream} window`, `添加 ${upstream} 窗口`, `新增 ${upstream} 視窗`, `${upstream} ウィンドウを追加`)} onClick={() => {
+            const preset = WINDOW_PRESETS.find((preset) => !windows.some((window) => Number(window.len) === preset.ms));
+            setWindows((previous) => [...previous, { len: String(preset?.ms ?? 3_600_000), limit: "", custom: !preset }]);
+            setFeedback("");
+          }}>{copy("+ Add window", "+ 添加窗口", "+ 新增視窗", "+ ウィンドウを追加")}</Button>
+          <Button type="button" disabled={locked || !valid} aria-label={copy(`Save ${upstream} quota plan`, `保存 ${upstream} 额度计划`, `儲存 ${upstream} 額度計畫`, `${upstream} クォータプランを保存`)} onClick={() => void save()}>{windows.length ? copy("Save plan", "保存计划", "儲存計畫", "プランを保存") : copy("Clear plan", "清空计划", "清空計畫", "プランを消去")}</Button>
+        </div>
+        <p role="status" aria-live="polite" className="foot-hint">{!valid ? copy("Use positive safe integers and distinct periods. Maximum: 16 windows.", "请填写正安全整数，周期不能重复，最多 16 个窗口。", "請填寫正安全整數，週期不能重複，最多 16 個視窗。", "正の安全な整数と異なる周期を入力してください。最大16ウィンドウです。") : feedback}</p>
+      </div>
     </div>
   );
 }

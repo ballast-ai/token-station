@@ -41,10 +41,24 @@ const FAMILIES: &[(&str, &str, &str)] = &[
 /// Empty when the provider stamped none we understand.
 #[must_use]
 pub fn parse_quota_windows(headers: &BTreeMap<String, String>, now_ms: u64) -> Vec<WindowSnapshot> {
+    parse_quota_reports(headers, now_ms)
+        .into_iter()
+        .map(|(_, window)| window)
+        .collect()
+}
+
+/// Keep each response-header family's identity so a partial response updates
+/// only that family instead of deleting independent exhaustion gates.
+#[must_use]
+pub fn parse_quota_reports(
+    headers: &BTreeMap<String, String>,
+    now_ms: u64,
+) -> Vec<(String, WindowSnapshot)> {
     FAMILIES
         .iter()
         .filter_map(|(limit_key, remaining_key, reset_key)| {
             window_from(headers, limit_key, remaining_key, reset_key, now_ms)
+                .map(|window| ((*limit_key).to_owned(), window))
         })
         .collect()
 }
@@ -63,8 +77,7 @@ fn window_from(
     let remaining = get_u64(headers, remaining_key)?.min(limit);
     let ms_until_reset = headers
         .get(reset_key)
-        .and_then(|value| parse_reset_ms(value, now_ms))
-        .unwrap_or(0);
+        .and_then(|value| parse_reset_ms(value, now_ms))?;
     let used = limit - remaining;
     let remaining_permille =
         u16::try_from(u128::from(remaining) * 1000 / u128::from(limit)).unwrap_or(1000);
@@ -138,39 +151,11 @@ fn parse_duration_ms(value: &str) -> Option<u64> {
     saw_component.then(|| total_ms.max(0.0) as u64)
 }
 
-/// An RFC3339 timestamp (`2026-07-29T12:34:56Z`, offsets and fractions ignored,
-/// treated as UTC) → epoch milliseconds. Compact and crate-free.
+/// An RFC3339 timestamp with its stated offset and fractional seconds.
 fn parse_rfc3339_ms(value: &str) -> Option<u64> {
-    if value.len() < 19 {
-        return None;
-    }
-    let year: i64 = value.get(0..4)?.parse().ok()?;
-    let month: i64 = value.get(5..7)?.parse().ok()?;
-    let day: i64 = value.get(8..10)?.parse().ok()?;
-    let hour: i64 = value.get(11..13)?.parse().ok()?;
-    let minute: i64 = value.get(14..16)?.parse().ok()?;
-    let second: i64 = value.get(17..19)?.parse().ok()?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
-        return None;
-    }
-    let secs = days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second;
-    u64::try_from(secs).ok()?.checked_mul(1_000)
-}
-
-/// Days since the Unix epoch for a civil (proleptic Gregorian) date. Howard
-/// Hinnant's `days_from_civil`.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    let timestamp =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()?;
+    u64::try_from(timestamp.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
 #[cfg(test)]
@@ -247,5 +232,48 @@ mod tests {
         ]);
         let windows = parse_quota_windows(&h, 0);
         assert_eq!(windows.len(), 2);
+    }
+
+    #[test]
+    fn provider_reset_honors_offsets_fractions_and_real_calendar_dates() {
+        let h = headers(&[
+            ("anthropic-ratelimit-tokens-limit", "1000"),
+            ("anthropic-ratelimit-tokens-remaining", "250"),
+            (
+                "anthropic-ratelimit-tokens-reset",
+                "1970-01-01T08:01:00.125+08:00",
+            ),
+        ]);
+        assert_eq!(parse_quota_windows(&h, 0)[0].ms_until_reset, 60_125);
+        for reset in [
+            "2030-02-30T00:00:00Z",
+            "2030-01-01T00:00:00",
+            "2030-01-01T00:00:00+25:00",
+        ] {
+            let h = headers(&[
+                ("anthropic-ratelimit-tokens-limit", "1000"),
+                ("anthropic-ratelimit-tokens-remaining", "250"),
+                ("anthropic-ratelimit-tokens-reset", reset),
+            ]);
+            assert!(parse_quota_windows(&h, 0).is_empty(), "{reset}");
+        }
+    }
+
+    #[test]
+    fn quota_reports_keep_distinct_header_family_identifiers() {
+        let h = headers(&[
+            ("x-ratelimit-limit-tokens", "1000"),
+            ("x-ratelimit-remaining-tokens", "0"),
+            ("x-ratelimit-reset-tokens", "60"),
+            ("anthropic-ratelimit-tokens-limit", "2000"),
+            ("anthropic-ratelimit-tokens-remaining", "500"),
+            ("anthropic-ratelimit-tokens-reset", "120"),
+        ]);
+        let reports = parse_quota_reports(&h, 0);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].0, "x-ratelimit-limit-tokens");
+        assert_eq!(reports[1].0, "anthropic-ratelimit-tokens-limit");
+        assert_eq!(reports[0].1.remaining_permille, 0);
+        assert_eq!(reports[1].1.remaining_permille, 250);
     }
 }

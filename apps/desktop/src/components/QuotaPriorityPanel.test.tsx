@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ const providers: ProviderView[] = [
     models: ["deepseek-v4-flash"],
     has_auth: true,
     quota_plan: {
+      windows: [{ len_ms: fiveHoursMs, limit: 5000 }],
       len_ms: fiveHoursMs,
       limit: 5000,
       unit: "tokens",
@@ -138,7 +139,7 @@ describe("QuotaPriorityPanel quota plans", () => {
 
     expect(planSection.querySelector("select")).not.toBeInTheDocument();
     expect(planSection.querySelectorAll('[data-slot="select-trigger"]')).toHaveLength(2);
-    expect(planSection.querySelectorAll('[data-slot="input"]')).toHaveLength(1);
+    expect(planSection.querySelectorAll('[data-slot="input"]')).toHaveLength(2);
     expect(planSection.querySelectorAll('[data-slot="separator"]')).toHaveLength(1);
   });
 
@@ -150,42 +151,108 @@ describe("QuotaPriorityPanel quota plans", () => {
     expect(row).toBeInTheDocument();
     expect(within(row as HTMLElement).getByText("deepseek")).toHaveClass("quota-plan-name");
     expect(controls).toBeInTheDocument();
-    expect(controls?.querySelectorAll(".quota-plan-field")).toHaveLength(3);
+    expect(row?.querySelectorAll(".quota-plan-field")).toHaveLength(4);
   });
 
-  it("commits reset-window and unit changes with the existing quota plan parameters", async () => {
+  it("saves all windows and rate limits only after an explicit save", async () => {
     const user = userEvent.setup();
-    const { onSavePlan, planSection } = renderPanel();
-
-    await user.click(within(planSection).getByRole("combobox", { name: "deepseek 刷新窗口" }));
-    await user.click(await screen.findByRole("option", { name: "1 天" }));
-    await waitFor(() => expect(onSavePlan).toHaveBeenLastCalledWith(
-      "deepseek",
-      oneDayMs,
-      5000,
-      "tokens",
-    ));
-
-    await user.click(within(planSection).getByRole("combobox", { name: "deepseek 单位" }));
-    await user.click(await screen.findByRole("option", { name: "请求" }));
-    await waitFor(() => expect(onSavePlan).toHaveBeenLastCalledWith(
-      "deepseek",
-      oneDayMs,
-      5000,
-      "requests",
-    ));
-  });
-
-  it("keeps allowance edits local until blur, then commits the parsed limit", async () => {
-    const user = userEvent.setup();
-    const { onSavePlan, planSection } = renderPanel();
-    const limit = within(planSection).getByRole("spinbutton", { name: "deepseek 额度上限" });
-
+    const { onSavePlan, planSection } = renderPanel({ providers: [{ ...providers[0], quota_plan: {
+      len_ms: fiveHoursMs, limit: 5000, unit: "tokens", rate_limit_per_min: 60,
+      windows: [{ len_ms: fiveHoursMs, limit: 5000 }, { len_ms: oneDayMs, limit: 24000 }],
+    } }] });
+    const limit = within(planSection).getByRole("spinbutton", { name: "deepseek 窗口 1 额度上限" });
     await user.clear(limit);
-    await user.type(limit, "24000");
-    expect(onSavePlan).not.toHaveBeenCalled();
-
+    await user.type(limit, "8000");
     await user.tab();
-    expect(onSavePlan).toHaveBeenCalledWith("deepseek", fiveHoursMs, 24000, "tokens");
+    expect(onSavePlan).not.toHaveBeenCalled();
+    await user.click(within(planSection).getByRole("button", { name: "保存 deepseek 额度计划" }));
+    expect(onSavePlan).toHaveBeenCalledWith("deepseek", {
+      windows: [{ len_ms: fiveHoursMs, limit: 8000 }, { len_ms: oneDayMs, limit: 24000 }],
+      unit: "tokens", rate_limit_per_min: 60,
+    });
+  });
+
+  it("blocks invalid limits and duplicate windows and supports clearing", async () => {
+    const user = userEvent.setup();
+    const { onSavePlan, planSection } = renderPanel();
+    const save = within(planSection).getByRole("button", { name: "保存 deepseek 额度计划" });
+    const limit = within(planSection).getByRole("spinbutton", { name: "deepseek 窗口 1 额度上限" });
+    await user.clear(limit);
+    await user.type(limit, "1.5");
+    expect(save).toBeDisabled();
+    expect(onSavePlan).not.toHaveBeenCalled();
+    await user.click(within(planSection).getByRole("button", { name: "移除 deepseek 窗口 1" }));
+    expect(save).toBeEnabled();
+    await user.click(save);
+    expect(onSavePlan).toHaveBeenCalledWith("deepseek", { windows: [], unit: "tokens", rate_limit_per_min: null });
+  });
+
+  it("adds and saves a custom window without changing the first window", async () => {
+    const user = userEvent.setup();
+    const { onSavePlan, planSection } = renderPanel();
+    await user.click(within(planSection).getByRole("button", { name: "添加 deepseek 窗口" }));
+    await user.click(within(planSection).getByRole("combobox", { name: "deepseek 窗口 2 刷新周期" }));
+    await user.click(screen.getByRole("option", { name: "自定义" }));
+    const duration = within(planSection).getByRole("spinbutton", { name: "deepseek 窗口 2 自定义周期（毫秒）" });
+    await user.clear(duration);
+    await user.type(duration, "7200000");
+    await user.type(within(planSection).getByRole("spinbutton", { name: "deepseek 窗口 2 额度上限" }), "9000");
+    await user.click(within(planSection).getByRole("button", { name: "保存 deepseek 额度计划" }));
+    expect(onSavePlan).toHaveBeenCalledWith("deepseek", {
+      windows: [{ len_ms: fiveHoursMs, limit: 5000 }, { len_ms: 7200000, limit: 9000 }],
+      unit: "tokens", rate_limit_per_min: null,
+    });
+  });
+
+
+  it("rejects duplicate periods and invalid RPM without saving", async () => {
+    const user = userEvent.setup();
+    const { onSavePlan, planSection } = renderPanel();
+    const save = within(planSection).getByRole("button", { name: "保存 deepseek 额度计划" });
+    await user.click(within(planSection).getByRole("button", { name: "添加 deepseek 窗口" }));
+    await user.type(within(planSection).getByRole("spinbutton", { name: "deepseek 窗口 2 额度上限" }), "9000");
+    await user.click(within(planSection).getByRole("combobox", { name: "deepseek 窗口 2 刷新周期" }));
+    await user.click(screen.getByRole("option", { name: "5 小时" }));
+    expect(save).toBeDisabled();
+    await user.click(within(planSection).getByRole("button", { name: "移除 deepseek 窗口 2" }));
+    await user.type(within(planSection).getByRole("spinbutton", { name: "deepseek RPM" }), "0");
+    expect(save).toBeDisabled();
+    expect(onSavePlan).not.toHaveBeenCalled();
+  });
+
+  it("retains a saved custom period and edits RPM on explicit save", async () => {
+    const user = userEvent.setup();
+    const { onSavePlan, planSection } = renderPanel({ providers: [{ ...providers[0], quota_plan: {
+      len_ms: 1234567, limit: 5000, unit: "requests", rate_limit_per_min: 90,
+      windows: [{ len_ms: 1234567, limit: 5000 }],
+    } }] });
+    expect(within(planSection).getByRole("spinbutton", { name: "deepseek 窗口 1 自定义周期（毫秒）" })).toHaveValue(1234567);
+    const rate = within(planSection).getByRole("spinbutton", { name: "deepseek RPM" });
+    await user.clear(rate);
+    await user.type(rate, "120");
+    await user.click(within(planSection).getByRole("button", { name: "保存 deepseek 额度计划" }));
+    expect(onSavePlan).toHaveBeenCalledWith("deepseek", {
+      windows: [{ len_ms: 1234567, limit: 5000 }], unit: "requests", rate_limit_per_min: 120,
+    });
+  });
+
+
+  it("keeps edits and shows failure when a plan save fails", async () => {
+    const user = userEvent.setup();
+    const onSavePlan = vi.fn().mockResolvedValue(false);
+    const { planSection } = renderPanel({ onSavePlan });
+    const limit = within(planSection).getByRole("spinbutton", { name: "deepseek 窗口 1 额度上限" });
+    await user.clear(limit);
+    await user.type(limit, "8000");
+    await user.click(within(planSection).getByRole("button", { name: "保存 deepseek 额度计划" }));
+    expect(await within(planSection).findByText("保存失败，已保留编辑内容。")).toBeInTheDocument();
+    expect(limit).toHaveValue(8000);
+  });
+
+  it("excludes subscription providers from quota rotation", async () => {
+    const user = userEvent.setup();
+    renderQuotaPanel({ providers: [...providers, { ...providers[0], name: "codex", provider: "codex-plan", credential_source: "codex_account" }] });
+    await user.click(screen.getByRole("combobox", { name: "账户 1 供应商" }));
+    expect(screen.queryByRole("option", { name: "codex" })).not.toBeInTheDocument();
   });
 });

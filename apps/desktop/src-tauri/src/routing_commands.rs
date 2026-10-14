@@ -230,6 +230,14 @@ pub(crate) fn set_quota_accounts(
         if upstream.is_empty() || model.is_empty() {
             return Err(format!("额度优先账户 #{} 缺少供应商或模型", index + 1));
         }
+        let provider = &inner.draft["upstreams"][upstream];
+        if token_station_cli::config::is_subscription_provider(
+            provider["provider"].as_str().unwrap_or_default(),
+        ) || provider["auth"]["chatgpt_account"].is_string()
+            || provider["auth"]["codex_account"].is_string()
+        {
+            return Err("订阅账户不支持额度轮换".to_owned());
+        }
         inner.validate_route_target(upstream, model)?;
         if seen.insert((upstream.to_owned(), model.to_owned())) {
             clean.push(json!({ "upstream": upstream, "model": model }));
@@ -245,11 +253,95 @@ pub(crate) fn set_quota_accounts(
     Ok(inner.snapshot())
 }
 
-/// Declares (or clears) a provider's quota plan for local estimation: one reset
-/// window (`len_ms` + `limit`), the unit it counts in, and an optional
-/// requests-per-minute rate limit. A zero limit or window clears the plan (the
-/// account falls back to non-windowed / authoritative-only). Written under
-/// `upstreams[name].quota_plan`, feeding the account ledger's estimate.
+const MAX_QUOTA_WINDOWS: usize = 16;
+const MAX_SAFE_QUOTA_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn validate_quota_plan(
+    windows: &[token_station_cli::quota_tracker::QuotaWindowSpec],
+    unit: &str,
+    rate_limit_per_min: Option<u64>,
+) -> Result<(), String> {
+    let unit = match unit {
+        "tokens" => token_station_cli::quota_tracker::PlanUnit::Tokens,
+        "requests" => token_station_cli::quota_tracker::PlanUnit::Requests,
+        _ => return Err(format!("未知额度单位：{unit}")),
+    };
+    if windows.iter().any(|window| {
+        window.len_ms > MAX_SAFE_QUOTA_INTEGER || window.limit > MAX_SAFE_QUOTA_INTEGER
+    }) || rate_limit_per_min.is_some_and(|rate| rate > MAX_SAFE_QUOTA_INTEGER)
+    {
+        return Err("额度计划数值必须是安全整数".to_owned());
+    }
+    token_station_cli::quota_tracker::QuotaPlan {
+        windows: windows.to_vec(),
+        unit,
+        rate_limit_per_min,
+    }
+    .validate()
+}
+
+fn write_quota_plan(
+    inner: &mut AppInner,
+    upstream: &str,
+    windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec>,
+    unit: String,
+    rate_limit_per_min: Option<u64>,
+) -> Result<StateView, String> {
+    inner.ensure_editable()?;
+    let provider = &inner.draft["upstreams"][upstream];
+    if !provider.is_object() {
+        return Err(format!("未知供应商 `{upstream}`"));
+    }
+    if token_station_cli::config::is_subscription_provider(
+        provider["provider"].as_str().unwrap_or_default(),
+    ) || provider["auth"]["chatgpt_account"].is_string()
+        || provider["auth"]["codex_account"].is_string()
+    {
+        return Err("订阅账户不支持额度轮换计划".to_owned());
+    }
+    validate_quota_plan(&windows, &unit, rate_limit_per_min)?;
+    let previous = provider.clone();
+    if windows.is_empty() {
+        inner.draft["upstreams"][upstream]
+            .as_object_mut()
+            .unwrap()
+            .remove("quota_plan");
+    } else {
+        inner.draft["upstreams"][upstream]["quota_plan"] = json!({
+            "windows": windows, "unit": unit, "rate_limit_per_min": rate_limit_per_min,
+        });
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][upstream] = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+/// Save a complete local estimate plan. An empty window list clears the plan.
+#[tauri::command]
+pub(crate) fn set_quota_plan_full(
+    state: State<'_, AppStateManaged>,
+    upstream: String,
+    windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec>,
+    unit: String,
+    rate_limit_per_min: Option<u64>,
+) -> Result<StateView, String> {
+    if windows.len() > MAX_QUOTA_WINDOWS {
+        return Err("额度计划最多支持 16 个窗口".to_owned());
+    }
+    let mut inner = state.0.lock().unwrap();
+    write_quota_plan(
+        &mut inner,
+        upstream.trim(),
+        windows,
+        unit,
+        rate_limit_per_min,
+    )
+}
+
+/// Legacy single-window edit. Keep other windows and preserve an omitted rate.
+/// A zero limit or period retains the legacy plan-clearing behavior.
 #[tauri::command]
 pub(crate) fn set_quota_plan(
     state: State<'_, AppStateManaged>,
@@ -259,36 +351,23 @@ pub(crate) fn set_quota_plan(
     unit: String,
     rate_limit_per_min: Option<u64>,
 ) -> Result<StateView, String> {
-    let upstream = upstream.trim().to_owned();
-    if unit != "tokens" && unit != "requests" {
-        return Err(format!("未知额度单位：{unit}"));
-    }
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    if !inner.draft["upstreams"][&upstream].is_object() {
-        return Err(format!("未知供应商 `{upstream}`"));
-    }
-
-    let previous = inner.draft["upstreams"][&upstream].clone();
-    if limit == 0 || len_ms == 0 {
-        if let Some(up) = inner.draft["upstreams"][&upstream].as_object_mut() {
-            up.remove("quota_plan");
-        }
+    let upstream = upstream.trim();
+    let previous = &inner.draft["upstreams"][upstream]["quota_plan"];
+    let rate = rate_limit_per_min.or_else(|| previous["rate_limit_per_min"].as_u64());
+    let mut windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec> =
+        serde_json::from_value(previous["windows"].clone()).unwrap_or_default();
+    if len_ms == 0 || limit == 0 {
+        windows.clear();
     } else {
-        let mut plan = json!({
-            "windows": [{ "len_ms": len_ms, "limit": limit }],
-            "unit": unit,
-        });
-        if let Some(rate) = rate_limit_per_min.filter(|rate| *rate > 0) {
-            plan["rate_limit_per_min"] = json!(rate);
+        let first = token_station_cli::quota_tracker::QuotaWindowSpec { len_ms, limit };
+        if windows.is_empty() {
+            windows.push(first);
+        } else {
+            windows[0] = first;
         }
-        inner.draft["upstreams"][&upstream]["quota_plan"] = plan;
     }
-    if let Err(error) = inner.observe_draft() {
-        inner.draft["upstreams"][&upstream] = previous;
-        return Err(error);
-    }
-    Ok(inner.snapshot())
+    write_quota_plan(&mut inner, upstream, windows, unit, rate)
 }
 
 /// Live quota snapshot for the viewer: queries the running gateway's

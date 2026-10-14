@@ -8835,6 +8835,181 @@ fn quota_accounts_persist_validate_dedupe_and_reject_invalid_input() {
 }
 
 #[test]
+fn full_quota_plan_round_trips_validates_and_preserves_legacy_fields() {
+    let root = scratch_home("full-quota-plan");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+    add_provider(
+        app.state(),
+        "deepseek".to_owned(),
+        "https://api.deepseek.com/v1".to_owned(),
+        vec!["deepseek-v4-flash".to_owned()],
+        None,
+        false,
+    )
+    .unwrap();
+    let windows = vec![
+        token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 18_000_000,
+            limit: 1_000_000,
+        },
+        token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 86_400_000,
+            limit: 3_000_000,
+        },
+    ];
+    let view = set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        windows.clone(),
+        "tokens".to_owned(),
+        Some(60),
+    )
+    .unwrap();
+    let plan = view
+        .providers
+        .iter()
+        .find(|p| p.name == "deepseek")
+        .unwrap()
+        .quota_plan
+        .as_ref()
+        .unwrap();
+    assert_eq!(plan.windows, windows);
+    assert_eq!(plan.len_ms, windows[0].len_ms);
+    assert_eq!(plan.limit, windows[0].limit);
+    assert_eq!(plan.rate_limit_per_min, Some(60));
+    let invalid_windows = [
+        vec![token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 0,
+            limit: 1,
+        }],
+        vec![token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 1,
+            limit: 0,
+        }],
+        vec![token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 1,
+            limit: 9_007_199_254_740_992,
+        }],
+        vec![windows[0], windows[0]],
+        (1..=17)
+            .map(|len_ms| token_station_cli::quota_tracker::QuotaWindowSpec { len_ms, limit: 1 })
+            .collect(),
+    ];
+    for invalid in invalid_windows {
+        assert!(set_quota_plan_full(
+            app.state(),
+            "deepseek".to_owned(),
+            invalid,
+            "tokens".to_owned(),
+            Some(60)
+        )
+        .is_err());
+    }
+    assert!(set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        windows.clone(),
+        "tokens".to_owned(),
+        Some(0)
+    )
+    .is_err());
+    let unchanged = get_state(app.state());
+    assert_eq!(
+        unchanged
+            .providers
+            .iter()
+            .find(|p| p.name == "deepseek")
+            .unwrap()
+            .quota_plan
+            .as_ref()
+            .unwrap()
+            .windows,
+        windows
+    );
+    let legacy = set_quota_plan(
+        app.state(),
+        "deepseek".to_owned(),
+        18_000_000,
+        900_000,
+        "requests".to_owned(),
+        None,
+    )
+    .unwrap();
+    let plan = legacy
+        .providers
+        .iter()
+        .find(|p| p.name == "deepseek")
+        .unwrap()
+        .quota_plan
+        .as_ref()
+        .unwrap();
+    assert_eq!(plan.windows.len(), 2);
+    assert_eq!(plan.windows[1], windows[1]);
+    assert_eq!(plan.rate_limit_per_min, Some(60));
+    let no_rate = set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        windows,
+        "requests".to_owned(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        no_rate
+            .providers
+            .iter()
+            .find(|p| p.name == "deepseek")
+            .unwrap()
+            .quota_plan
+            .as_ref()
+            .unwrap()
+            .rate_limit_per_min,
+        None
+    );
+    let cleared = set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        vec![],
+        "tokens".to_owned(),
+        None,
+    )
+    .unwrap();
+    assert!(cleared
+        .providers
+        .iter()
+        .find(|p| p.name == "deepseek")
+        .unwrap()
+        .quota_plan
+        .is_none());
+    {
+        let state = app.state::<AppStateManaged>();
+        state.0.lock().unwrap().draft["upstreams"]["deepseek"]["provider"] = json!("codex-plan");
+    }
+    assert!(set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        vec![],
+        "tokens".to_owned(),
+        None
+    )
+    .is_err());
+    assert!(set_quota_accounts(
+        app.state(),
+        vec![QuotaAccountArg {
+            upstream: "deepseek".to_owned(),
+            model: "deepseek-v4-flash".to_owned()
+        }]
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn quota_plan_declares_a_window_validates_and_clears() {
     let root = scratch_home("quota-plan");
     let inner = AppInner::new(

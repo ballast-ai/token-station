@@ -30,10 +30,10 @@ pub(crate) struct ProviderView {
     pub(crate) quota_plan: Option<QuotaPlanView>,
 }
 
-/// A provider's declared quota plan, flattened to its primary reset window for
-/// the UI (the common case is one window, e.g. a token allowance per 5 hours).
+/// Complete local estimate plan. Single-window fields remain for older clients.
 #[derive(Serialize)]
 pub(crate) struct QuotaPlanView {
+    pub(crate) windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec>,
     pub(crate) len_ms: u64,
     pub(crate) limit: u64,
     pub(crate) unit: String,

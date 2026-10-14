@@ -6,6 +6,7 @@ import {
   addManagedEnterpriseRoute,
   addFreeProvider,
   setLocalRouting,
+  setQuotaPlanFull,
   applyHomeRouteToAllAgents,
   applyAgentPlan,
   applySnapshotRestore,
@@ -594,5 +595,24 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
     setAdminEndpoint(serveFixture({ phase: "starting", app_runtime: "running", virtual_key: "stale" }));
     await expect(getPlugins()).rejects.toThrow("无法连接本地代理");
+  });
+});
+
+
+describe("full quota plan contract", () => {
+  it("sends every window, the unit, and nullable RPM to the full-plan command", async () => {
+    const plan = {
+      windows: [{ len_ms: 18000000, limit: 5000 }, { len_ms: 86400000, limit: 24000 }],
+      unit: "tokens" as const,
+      rate_limit_per_min: 60,
+    };
+    await setQuotaPlanFull("deepseek", plan);
+    expect(invoke).toHaveBeenCalledWith("set_quota_plan_full", {
+      upstream: "deepseek", windows: plan.windows, unit: "tokens", rateLimitPerMin: 60,
+    });
+    await setQuotaPlanFull("deepseek", { windows: [], unit: "tokens", rate_limit_per_min: null });
+    expect(invoke).toHaveBeenLastCalledWith("set_quota_plan_full", {
+      upstream: "deepseek", windows: [], unit: "tokens", rateLimitPerMin: null,
+    });
   });
 });

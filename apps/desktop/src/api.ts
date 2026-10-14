@@ -41,7 +41,22 @@ export type ProviderCallEngine =
 
 export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth";
 
+export interface QuotaWindowSpec {
+  len_ms: number;
+  limit: number;
+}
+
+export interface QuotaPlanInput {
+  windows: QuotaWindowSpec[];
+  unit: "tokens" | "requests";
+  rate_limit_per_min: number | null;
+}
+
+export type SaveQuotaPlan = (upstream: string, plan: QuotaPlanInput) => void | Promise<boolean>;
+
 export interface QuotaPlanView {
+  /** All windows. Optional only for compatibility with older desktop hosts. */
+  windows?: QuotaWindowSpec[];
   len_ms: number;
   limit: number;
   unit: "tokens" | "requests";
@@ -490,7 +505,7 @@ export interface QuotaAccount {
 }
 
 /** Runtime quota source: authoritative provider headers, local ledger estimate, or no data. */
-export type QuotaSource = "authoritative" | "estimated" | "none";
+export type QuotaSource = "authoritative" | "stale" | "estimated" | "none";
 
 export interface QuotaWindowSnapshot {
   len_ms: number;
@@ -501,6 +516,8 @@ export interface QuotaWindowSnapshot {
 }
 
 export interface QuotaAccountSnapshot {
+  provider_observed_at_ms?: number | null;
+  provider_age_ms?: number | null;
   /** Completed requests with missing token usage in retained local history. */
   unknown_usage_requests?: number;
   history?: "new" | "recovered" | "plan_changed" | "unavailable";
@@ -1107,6 +1124,15 @@ export const setQuotaPlan = (
     limit,
     unit,
     rateLimitPerMin,
+  });
+
+/** Save every local estimate window and RPM. Empty windows clear the plan. */
+export const setQuotaPlanFull = (upstream: string, plan: QuotaPlanInput) =>
+  invoke<StateView>("set_quota_plan_full", {
+    upstream,
+    windows: plan.windows,
+    unit: plan.unit,
+    rateLimitPerMin: plan.rate_limit_per_min,
   });
 
 /**
