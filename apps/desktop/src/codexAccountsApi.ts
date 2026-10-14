@@ -15,3 +15,6 @@ export const discoverCodexAccount = () => invoke<LocalCodexAccount>("codex_accou
 export const getCodexModels = (accountId: string) => invoke<ChatGPTPlanModel[]>("codex_account_models", { accountId });
 export const disconnectCodexAccount = (accountId: string) => invoke<void>("codex_account_disconnect", { accountId });
 export const connectCodexProvider = (accountId?: string) => invoke<string>("codex_connect_provider", { accountId: accountId ?? null });
+
+/** Adds and saves a provider only when a usable local login is newly discovered. */
+export const autoConnectCodexProvider = () => invoke<boolean>("codex_auto_connect_provider");

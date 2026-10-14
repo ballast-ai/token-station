@@ -20,6 +20,8 @@ Do not use Quota first when the workload must stay on the device. That path does
 
 The Models page offers **Local Codex login** and **ChatGPT plan** as separate experimental subscription connections.
 Local Codex reuses an existing file-backed login without browser authorization. The separate ChatGPT login remains available.
+At startup, a supported local Codex login automatically creates its provider and current model catalog.
+Existing routes remain unchanged. Explicitly deleted or disconnected local Codex connections are not restored automatically.
 Both use subscription accounting, exclude quota rotation, and stop instead of falling back to paid APIs.
 See [subscription setup and verification](guides/chatgpt-plan.md).
 

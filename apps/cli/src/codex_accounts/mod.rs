@@ -168,6 +168,32 @@ impl AccountManager {
         }
         Ok(self.root.join(format!("{id}.json")))
     }
+    fn suppression_path(&self, id: &str) -> Result<PathBuf> {
+        self.path(id)?;
+        Ok(self.root.join(format!("{id}.auto-disabled")))
+    }
+    fn auto_connect_allowed_locked(&self, id: &str) -> Result<bool> {
+        let path = self.suppression_path(id)?;
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(local_error(error)),
+            Ok(_) => {}
+        }
+        verify_private_file(&path).map_err(local_error)?;
+        verify_single_link_file(&path).map_err(local_error)?;
+        if source::bytes(&path, 16)? != b"1\n" {
+            return Err("Local Codex automatic connection state is invalid.".into());
+        }
+        Ok(false)
+    }
+    /// Checks persistent automatic-connection suppression without reading credentials.
+    /// # Errors
+    /// The account identifier or protected suppression state is invalid.
+    pub fn auto_connect_allowed(&self, id: &str) -> Result<bool> {
+        self.path(id)?;
+        let _lock = self.lock()?;
+        self.auto_connect_allowed_locked(id)
+    }
     fn load(&self, id: &str) -> Result<Reference> {
         let path = self.path(id)?;
         verify_private_dir(&self.root).map_err(local_error)?;
@@ -224,6 +250,15 @@ impl AccountManager {
     /// # Errors
     /// The source is unavailable, unsupported, or cannot be refreshed safely.
     pub fn connect(&self) -> Result<AccountView> {
+        self.connect_impl(false)
+    }
+    /// Connects only if the user has not explicitly disconnected this source.
+    /// # Errors
+    /// The account is suppressed or the source cannot be connected safely.
+    pub fn connect_automatically(&self) -> Result<AccountView> {
+        self.connect_impl(true)
+    }
+    fn connect_impl(&self, automatic: bool) -> Result<AccountView> {
         let _lock = self.lock()?;
         let view = self.discover()?;
         if !matches!(view.state.as_str(), "ready" | "expired") {
@@ -233,6 +268,10 @@ impl AccountManager {
             ));
         }
         let snapshot = Snapshot::read(&self.home)?;
+        let allowed = self.auto_connect_allowed_locked(&snapshot.id())?;
+        if automatic && !allowed {
+            return Err("Automatic Codex connection is disabled for this account.".into());
+        }
         let r = Reference {
             id: snapshot.id(),
             source: snapshot.source.clone(),
@@ -249,7 +288,12 @@ impl AccountManager {
         let path = self.path(&r.id)?;
         write_atomic_private(&path, &serde_json::to_vec(&r).map_err(local_error)?)
             .map_err(local_error)?;
-        self.account(&r.id)
+        let view = self.account(&r.id)?;
+        if !automatic && !allowed {
+            // Clear the explicit opt-out only after a successful manual registration.
+            fs::remove_file(self.suppression_path(&r.id)?).map_err(local_error)?;
+        }
+        Ok(view)
     }
     /// Lists local references and safe source states. Does not refresh accounts.
     /// # Errors
@@ -355,10 +399,23 @@ impl AccountManager {
     /// # Errors
     /// The local reference cannot be removed safely.
     pub fn disconnect(&self, id: &str) -> Result<()> {
+        self.path(id)?;
         let _lock = self.lock()?;
         let p = self.path(id)?;
-        if p.exists() {
+        let registered = match fs::symlink_metadata(&p) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(local_error(error)),
+        };
+        if registered {
             verify_private_file(&p).map_err(local_error)?;
+            verify_single_link_file(&p).map_err(local_error)?;
+        }
+        if self.auto_connect_allowed_locked(id)? {
+            // Commit the opt-out first. A crash must not permit automatic reconnection.
+            write_atomic_private(&self.suppression_path(id)?, b"1\n").map_err(local_error)?;
+        }
+        if registered {
             fs::remove_file(p).map_err(local_error)?;
         }
         Ok(())

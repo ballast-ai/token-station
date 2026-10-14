@@ -13,13 +13,20 @@ See the [OpenAI Sign in with ChatGPT documentation](https://developers.openai.co
 
 ## Reuse an existing Codex login
 
-1. Open **Models** in Token Station.
-2. Select **Add model**, then **Local Codex login** under **Use an existing plan**.
-3. Select the intended account or **Use local Codex login**.
-4. Wait for account validation and model discovery.
-5. Select the local Codex provider and a discovered model in the desired route.
-6. Save and apply the configuration.
-7. Connect the Agent through its existing connection workflow.
+At startup, Token Station detects a supported local Codex login and automatically adds its provider and current model catalog.
+No connect click or browser authorization is required. Installing Codex without signing in does not provide subscription access.
+
+1. Open **Models** and wait for automatic discovery.
+2. Select the local Codex provider and a discovered model in the desired route.
+3. Save and apply the configuration.
+4. Connect the Agent through its existing connection workflow.
+
+On a fresh installation, the first discovered model becomes the initial default target.
+Existing routes, model selections, and Codex account bindings remain unchanged. Discovery does not start the gateway or connect Agents.
+If unsaved edits exist, automatic registration waits until a later launch with a clean configuration.
+Deleting a provider or disconnecting its reference prevents automatic reconnection.
+To retry or reconnect manually, select **Add model**, then **Local Codex login** under **Use an existing plan**.
+Select the intended account or **Use local Codex login**, then wait for validation and model discovery.
 
 Token Station reads `CODEX_HOME/auth.json`, or `~/.codex/auth.json` when `CODEX_HOME` is unset.
 This version supports Codex file storage. Keyring, auto, and ephemeral storage modes are not supported.

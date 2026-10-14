@@ -23,6 +23,8 @@ impl Drop for Scratch {
     }
 }
 fn reply(mut socket: TcpStream) {
+    // macOS can inherit nonblocking mode from the fixture listener.
+    socket.set_nonblocking(false).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();

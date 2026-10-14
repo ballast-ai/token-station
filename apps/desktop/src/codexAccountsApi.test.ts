@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { connectCodexProvider, discoverCodexAccount, disconnectCodexAccount, getCodexModels, listCodexAccounts } from "./codexAccountsApi";
+import { autoConnectCodexProvider, connectCodexProvider, discoverCodexAccount, disconnectCodexAccount, getCodexModels, listCodexAccounts } from "./codexAccountsApi";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 beforeEach(() => vi.mocked(invoke).mockReset());
 it("passes only opaque reference IDs across the IPC boundary", async () => {
@@ -11,4 +11,10 @@ it("passes only opaque reference IDs across the IPC boundary", async () => {
     ["codex_connect_provider", { accountId: "local-1" }], ["codex_account_models", { accountId: "local-1" }],
     ["codex_account_disconnect", { accountId: "local-1" }],
   ]);
+});
+
+it("requests automatic discovery without transmitting credentials or source paths", async () => {
+  vi.mocked(invoke).mockResolvedValueOnce(true);
+  expect(await autoConnectCodexProvider()).toBe(true);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("codex_auto_connect_provider");
 });

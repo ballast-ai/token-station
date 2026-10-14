@@ -24,6 +24,7 @@ mod recovery;
 mod serve_lifecycle;
 
 mod chatgpt_commands;
+mod codex_auto;
 mod codex_commands;
 mod config_draft;
 mod desktop_update_commands;
@@ -506,6 +507,7 @@ pub fn run() {
             codex_commands::codex_account_models,
             codex_commands::codex_account_disconnect,
             codex_commands::codex_connect_provider,
+            codex_auto::codex_auto_connect_provider,
             chatgpt_commands::chatgpt_accounts_list,
             chatgpt_commands::chatgpt_login_start,
             chatgpt_commands::chatgpt_login_status,

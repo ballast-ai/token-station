@@ -84,6 +84,7 @@ const UsageWorkspace = lazy(() => import("./pages/UsageWorkspace"));
 const BudgetPricingPage = lazy(() => import("./pages/BudgetPricingPage"));
 import "./App.css";
 import { humanizeAppError } from "./errors";
+import { autoConnectCodexProvider } from "./codexAccountsApi";
 import { resolveStatusMenuNavigation } from "./statusMenuNavigation";
 import {
   AlertDialog,
@@ -339,7 +340,17 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const pendingApplyRevisionRef = useRef<number | null>(null);
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
   const firstRunGuideCheckedRef = useRef(false);
-  const startupLoadStartedRef = useRef(false);
+  const startupRequestsRef = useRef<{
+    state: Promise<StateView>;
+    discovery: Promise<
+      { ok: true; value: [AgentUiMetadataView[], AgentView[]] }
+      | { ok: false; caught: unknown }
+    >;
+  } | null>(null);
+  const startupStateAppliedRef = useRef(false);
+  const startupAgentsAppliedRef = useRef(false);
+  const codexDiscoveryRef = useRef<Promise<StateView | null> | null>(null);
+  const codexDiscoveryAppliedRef = useRef(false);
   const startupSettledRef = useRef(false);
   const agentRevealTimerRef = useRef<number | null>(null);
 
@@ -543,31 +554,36 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   }, [refreshCachedAgents]);
 
   useEffect(() => {
-    if (startupLoadStartedRef.current) return undefined;
-    startupLoadStartedRef.current = true;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    const load = async () => {
-      const discoveryLoad = Promise.all([
-        listAgentRegistry(),
-        scanAgents(),
-      ]).then(
+    // Keep requests across effect replay, but attach a live subscriber each time.
+    // StrictMode must not discard the only startup response after cleanup.
+    startupRequestsRef.current ??= {
+      state: getState(),
+      discovery: Promise.all([listAgentRegistry(), scanAgents()]).then(
         (value) => ({ ok: true as const, value }),
         (caught: unknown) => ({ ok: false as const, caught }),
-      );
+      ),
+    };
+    const requests = startupRequestsRef.current;
+    const load = async () => {
       try {
-        const nextState = await getState();
+        const nextState = await requests.state;
         if (disposed) return;
-        const effectiveServe = pendingServeRef.current ?? nextState.serve;
-        observedServeRef.current = {
-          ready: effectiveServe.app_runtime === "running" && effectiveServe.listener_reachable,
-          instanceId: effectiveServe.instance_id,
-          phase: effectiveServe.phase,
-        };
-        setState(pendingServeRef.current ? { ...nextState, serve: effectiveServe } : nextState);
+        if (!startupStateAppliedRef.current) {
+          startupStateAppliedRef.current = true;
+          const effectiveServe = pendingServeRef.current ?? nextState.serve;
+          observedServeRef.current = {
+            ready: effectiveServe.app_runtime === "running" && effectiveServe.listener_reachable,
+            instanceId: effectiveServe.instance_id,
+            phase: effectiveServe.phase,
+          };
+          setState(pendingServeRef.current ? { ...nextState, serve: effectiveServe } : nextState);
+        }
 
-        const discoveryResult = await discoveryLoad;
-        if (disposed) return;
+        const discoveryResult = await requests.discovery;
+        if (disposed || startupAgentsAppliedRef.current) return;
+        startupAgentsAppliedRef.current = true;
         if (!discoveryResult.ok) {
           setError(errorText(discoveryResult.caught));
           return;
@@ -605,6 +621,37 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       unlisten?.();
     };
   }, [observeServeRuntime, revealAgents, showError]);
+
+  const coreStateReady = state !== null;
+  useEffect(() => {
+    if (!coreStateReady || codexDiscoveryAppliedRef.current) return;
+    let disposed = false;
+    // Registration and its configuration read run once, without blocking startup.
+    codexDiscoveryRef.current ??= autoConnectCodexProvider().then(
+      (added) => added ? getState() : null,
+    );
+    void codexDiscoveryRef.current.then((next) => {
+      if (disposed) return;
+      codexDiscoveryAppliedRef.current = true;
+      if (!next) return;
+      setState((current) => {
+        if (!current) return current;
+        // A user command may have published a newer draft while IPC was pending.
+        if (current.draft_revision > next.draft_revision || current.saved_revision > next.saved_revision) return current;
+        return { ...next, serve: pendingServeRef.current ?? current.serve };
+      });
+    }).catch(() => {
+      if (disposed) return;
+      codexDiscoveryAppliedRef.current = true;
+      showError(copy(
+        "Could not connect local Codex automatically. Use Add model to check the local login and retry.",
+        "无法自动接入本机 Codex。请通过“添加模型”检查本机登录并重试。",
+        "無法自動接入本機 Codex。請透過「新增模型」檢查本機登入並重試。",
+        "ローカル Codex を自動接続できません。モデル追加でサインインを確認して再試行してください。",
+      ), "codex-auto-discovery");
+    });
+    return () => { disposed = true; };
+  }, [coreStateReady, copy, showError]);
 
   useEffect(() => {
     let disposed = false;

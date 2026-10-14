@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
@@ -39,6 +40,13 @@ function mockInvokeImplementation(implementation: InvokeMockImplementation) {
       }
       return result;
     } catch (error) {
+      if (
+        args[0] === "codex_auto_connect_provider"
+        && error instanceof Error
+        && error.message.startsWith("unexpected IPC command:")
+      ) {
+        return false as never;
+      }
       if (
         args[0] === "get_runtime_state"
         && error instanceof Error
@@ -354,6 +362,150 @@ beforeEach(() => {
     if (command === "scan_agents") return detectedAgentsFixture;
     if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
     throw new Error(`unexpected IPC command: ${command}`);
+  });
+});
+
+describe("automatic local Codex discovery", () => {
+  const connected = stateFixture({
+    draft_revision: 1,
+    saved_revision: 1,
+    providers: [{
+      name: "codex_local",
+      provider: "codex-plan",
+      base_url: "https://chatgpt.com/backend-api/codex",
+      models: ["gpt-6.1-sol"],
+      has_auth: true,
+      credential_source: "codex_account",
+      credential_reference: "local-account",
+    }],
+  });
+
+  function arrange(discovery: Promise<boolean>, refreshed = Promise.resolve(connected)) {
+    let stateCalls = 0;
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return ++stateCalls === 1 ? stateFixture() : refreshed;
+      if (command === "codex_auto_connect_provider") return discovery;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") return new Promise(() => undefined);
+      if (command === "codex_accounts_list") return [];
+      if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+  }
+
+  it("keeps startup interactive and displays an automatically saved provider", async () => {
+    let finish!: (added: boolean) => void;
+    arrange(new Promise((resolve) => { finish = resolve; }));
+    const settled = vi.fn();
+    const user = userEvent.setup();
+    render(<App onStartupSettled={settled} />);
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(settled).toHaveBeenCalledWith("ready");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("codex_auto_connect_provider"));
+    await user.click(navigation().getByRole("button", { name: "模型" }));
+    await act(async () => finish(true));
+    expect(await screen.findByText("gpt-6.1-sol")).toBeInTheDocument();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "codex_auto_connect_provider")).toHaveLength(1);
+    expect(invokeMock).not.toHaveBeenCalledWith("set_direct_route", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
+  });
+
+  it("runs once under StrictMode and publishes the discovered provider", async () => {
+    arrange(Promise.resolve(true));
+    const user = userEvent.setup();
+    render(<StrictMode><App /></StrictMode>);
+    await screen.findByRole("heading", { name: "主页" });
+    await user.click(navigation().getByRole("button", { name: "模型" }));
+    expect(await screen.findByText("gpt-6.1-sol")).toBeInTheDocument();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "codex_auto_connect_provider")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_state")).toHaveLength(2);
+  });
+
+  it("waits for core state before starting automatic discovery", async () => {
+    let finish!: (state: StateView) => void;
+    const pending = new Promise<StateView>((resolve) => { finish = resolve; });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return pending;
+      if (command === "codex_auto_connect_provider") return false;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") return new Promise(() => undefined);
+      if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+    expect(invokeMock).toHaveBeenCalledWith("get_state");
+    expect(invokeMock).not.toHaveBeenCalledWith("codex_auto_connect_provider");
+    await act(async () => finish(stateFixture()));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("codex_auto_connect_provider"));
+  });
+
+  it("does not replace a newer user draft with a delayed provider snapshot", async () => {
+    const user = userEvent.setup();
+    let finish!: (state: StateView) => void;
+    const refresh = new Promise<StateView>((resolve) => { finish = resolve; });
+    let calls = 0;
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return ++calls === 1 ? stateFixture({ local_only: true }) : refresh;
+      if (command === "codex_auto_connect_provider") return true;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") return new Promise(() => undefined);
+      if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
+      if (command === "set_local_routing") return { ...connected, local_only: false, draft_revision: 2, config_dirty: true };
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "主页" });
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await user.click(within(await screen.findByRole("navigation", { name: "设置分类" })).getByRole("button", { name: /代理/ }));
+    const localOnly = screen.getByRole("switch", { name: /只使用本地模型/ });
+    await user.click(localOnly);
+    expect(localOnly).not.toBeChecked();
+    await act(async () => finish({ ...connected, local_only: true }));
+    expect(localOnly).not.toBeChecked();
+  });
+
+  it("keeps missing-login no-op silent without reloading configuration", async () => {
+    arrange(Promise.resolve(false));
+    render(<App />);
+    await screen.findByRole("heading", { name: "主页" });
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("codex_auto_connect_provider"));
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_state")).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("reports fixed retry guidance without disclosing backend error data", async () => {
+    let fail!: (error: Error) => void;
+    arrange(new Promise((_resolve, reject) => { fail = reject; }));
+    render(<App />);
+    await screen.findByRole("heading", { name: "主页" });
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("codex_auto_connect_provider"));
+    await act(async () => fail(new Error("private-source-path access_token=secret")));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法自动接入本机 Codex。请通过“添加模型”检查本机登录并重试。");
+    expect(document.body).not.toHaveTextContent("private-source-path");
+    expect(document.body).not.toHaveTextContent("access_token");
+  });
+
+  it("keeps newer gateway events when the provider refresh returns an older runtime", async () => {
+    let finish!: (state: StateView) => void;
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (eventName, handler) => {
+      if (eventName === "serve-state-changed") emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    arrange(Promise.resolve(true), new Promise((resolve) => { finish = resolve; }));
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", { name: "主页" });
+    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_state")).toHaveLength(2));
+    await act(async () => emitServe?.(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 9, instance_id: "new-runtime" })));
+    await act(async () => finish(connected));
+    await user.click(navigation().getByRole("button", { name: "模型" }));
+    expect(await screen.findByText("gpt-6.1-sol")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /代理运行中.*rev 9/ })).toBeInTheDocument();
   });
 });
 

@@ -47,7 +47,10 @@ pub(crate) async fn codex_account_disconnect(
     blocking(move || manager.disconnect(&account_id)).await
 }
 
-fn upstream_document(account: &AccountView, models: &[PlanModel]) -> Result<Value, String> {
+pub(crate) fn upstream_document(
+    account: &AccountView,
+    models: &[PlanModel],
+) -> Result<Value, String> {
     let safe_identity = |value: &str| {
         !value.is_empty()
             && value.len() <= 128

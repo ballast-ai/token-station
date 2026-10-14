@@ -460,3 +460,109 @@ fn malformed_oversize_and_expired_without_refresh_fail_without_secret_text() {
         "Codex session expired. Sign in with Codex again."
     );
 }
+
+#[test]
+fn automatic_catalog_failure_then_disconnect_stays_disconnected_until_manual_reconnect() {
+    let mut f = Fixture::new();
+    f.auth();
+    let original = fs::read(f.manager.home.join("auth.json")).unwrap();
+    let account = f.manager.connect_automatically().unwrap();
+    let s = server(&mut f, 503, json!({"error":"fixture unavailable"}), || {});
+    assert!(f.manager.models(&account.id).is_err());
+    s.join().unwrap();
+    f.manager.disconnect(&account.id).unwrap();
+    assert!(!f.manager.auto_connect_allowed(&account.id).unwrap());
+    assert!(f.manager.connect_automatically().is_err());
+    assert!(f.manager.list().unwrap().is_empty());
+    assert_eq!(
+        original,
+        fs::read(f.manager.home.join("auth.json")).unwrap()
+    );
+    let reconnected = f.manager.connect().unwrap();
+    assert_eq!(reconnected.id, account.id);
+    assert!(f.manager.auto_connect_allowed(&account.id).unwrap());
+    assert_eq!(f.manager.connect_automatically().unwrap().id, account.id);
+}
+
+#[test]
+fn disconnect_serializes_after_inflight_automatic_registration() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let mut f = Fixture::new();
+    f.auth();
+    let id = f.manager.discover().unwrap().id;
+    expire(&f);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let s = server(&mut f, 200, refreshed(), move || {
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let automatic = f.manager.clone();
+    let connect = std::thread::spawn(move || automatic.connect_automatically());
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let disconnecting = f.manager.clone();
+    let disconnected_id = id.clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let disconnect = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        disconnecting.disconnect(&disconnected_id)
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    release_tx.send(()).unwrap();
+    connect.join().unwrap().unwrap();
+    disconnect.join().unwrap().unwrap();
+    s.join().unwrap();
+    assert!(f.manager.list().unwrap().is_empty());
+    assert!(!f.manager.auto_connect_allowed(&id).unwrap());
+    assert!(f.manager.connect_automatically().is_err());
+    assert_eq!(f.manager.discover().unwrap().state, "ready");
+}
+
+#[test]
+fn automatic_registration_checks_disconnect_before_refresh_or_source_registration() {
+    let f = Fixture::new();
+    f.auth();
+    let id = f.manager.discover().unwrap().id;
+    f.manager.disconnect(&id).unwrap();
+    expire(&f);
+    let original = fs::read(f.manager.home.join("auth.json")).unwrap();
+    let mut automatic = f.manager.clone();
+    automatic.endpoints.token = "https://attacker.invalid/never-call".into();
+    let error = std::thread::spawn(move || automatic.connect_automatically())
+        .join()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "Automatic Codex connection is disabled for this account."
+    );
+    assert!(!f.manager.path(&id).unwrap().exists());
+    assert_eq!(
+        original,
+        fs::read(f.manager.home.join("auth.json")).unwrap()
+    );
+    assert!(f.manager.auto_connect_allowed("../invalid").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn automatic_suppression_rejects_unsafe_files_without_following_links() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let f = Fixture::new();
+    f.auth();
+    let id = f.manager.discover().unwrap().id;
+    f.manager.disconnect(&id).unwrap();
+    let marker = f.manager.root.join(format!("{id}.auto-disabled"));
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(f.manager.auto_connect_allowed(&id).is_err());
+    fs::remove_file(&marker).unwrap();
+    let outside = f.dir.join("outside");
+    fs::write(&outside, "preserve").unwrap();
+    symlink(&outside, &marker).unwrap();
+    assert!(f.manager.auto_connect_allowed(&id).is_err());
+    assert!(f.manager.connect().is_err());
+    assert!(f.manager.disconnect(&id).is_err());
+    assert_eq!(fs::read_to_string(outside).unwrap(), "preserve");
+}
