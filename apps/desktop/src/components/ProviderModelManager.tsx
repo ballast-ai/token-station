@@ -257,7 +257,12 @@ export default function ProviderModelManager({
   const fixedHeaderAuthReason = reportedHeaderAuthReason === "auth" ? null : reportedHeaderAuthReason;
   const headerAuthUnavailableReason = fixedHeaderAuthReason
     ?? ((credentialSource === "store" || credentialSource === "env") ? null : "auth");
+  const hostTransportCopy = {
+    provider_call: copy("This connection uses its dedicated Host transport.", "此连接使用专用 Host 传输。", "此連線使用專用 Host 傳輸。", "この接続は専用の Host 転送を使用します。"),
+    root_rpc_path: copy("This Google connection uses Host HTTP transport for its RPC endpoints.", "此 Google 连接通过 Host HTTP 传输调用 RPC 端点。", "此 Google 連線透過 Host HTTP 傳輸呼叫 RPC 端點。", "この Google 接続は RPC エンドポイントに Host HTTP 転送を使用します。"),
+  };
   const southUnavailableCopy = {
+    ...hostTransportCopy,
     provider_package: copy(
       "South requires the verified official OpenAI-compatible provider package.",
       "South 需要已验证的官方 OpenAI-compatible Provider 包。", "South 需要已驗證的官方 OpenAI 相容供應商套件。", "South には検証済みの公式 OpenAI 互換プロバイダーパッケージが必要です。"
@@ -276,6 +281,7 @@ export default function ProviderModelManager({
     ),
   } as const;
   const headerAuthUnavailableCopy = {
+    ...hostTransportCopy,
     provider_package: copy(
       "South Header Auth requires the verified official package for this Provider dialect.",
       "South Header Auth 需要该 Provider dialect 对应的已验证官方包。", "South Header Auth 需要與此供應商方言相符的已驗證官方套件。", "South Header Auth には、このプロバイダー方言に対応する検証済み公式パッケージが必要です。"

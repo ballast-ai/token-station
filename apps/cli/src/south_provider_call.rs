@@ -56,6 +56,7 @@ pub(crate) enum IneligibleV1 {
     Body,
     SecretSource,
     Headers,
+    RootRpcPath,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,6 +284,28 @@ fn prepare_provider_call_for_mode_v1(
         auth_config,
         descriptor,
     )?;
+
+    // Code Assist requires a colon in the first path segment. South rejects
+    // scheme-like relative paths, and Google rejects an encoded separator.
+    // Admit only the component's exact actions to the existing Host transport.
+    if matches!(
+        provider.provider.as_str(),
+        "gemini-cli-plan" | "antigravity-plan"
+    ) {
+        let base = provider.base_url.as_str();
+        let base = base.trim_end_matches('/');
+        if ["generateContent", "streamGenerateContent?alt=sse"]
+            .iter()
+            .any(|action| descriptor.url == format!("{base}/v1internal:{action}"))
+        {
+            provider
+                .authorize(descriptor)
+                .map_err(|error| map_legacy_authorization(&error))?;
+            return Err(PrepareProviderCallErrorV1::Ineligible(
+                IneligibleV1::RootRpcPath,
+            ));
+        }
+    }
 
     let endpoint = ProviderEndpointV1::parse(&provider.base_url.as_str())?;
     let relative_path = project_relative_path(&endpoint, &descriptor.url)?;

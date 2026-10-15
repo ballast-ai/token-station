@@ -57,6 +57,32 @@ fn signed_id(id: &str, sig: &str, model: &str) -> String {
         URL_SAFE_NO_PAD.encode(json!([id, sig, model]).to_string())
     )
 }
+// Client reasoning presets and returned modelVersion labels can name the same
+// underlying model differently. Retain version, family, Lite, and image identity.
+fn tool_model_identity(model: &str) -> &str {
+    for suffix in [
+        "-extra-low",
+        "-thinking",
+        "-medium",
+        "-high",
+        "-low",
+        "-tiered",
+        "-agent",
+        "-n",
+        "-h",
+        "-l",
+    ] {
+        if let Some(base) = model.strip_suffix(suffix) {
+            if base.starts_with("gemini-") && (base.ends_with("-flash") || base.ends_with("-pro")) {
+                return base;
+            }
+            if suffix == "-thinking" && base.starts_with("claude-") {
+                return base;
+            }
+        }
+    }
+    model
+}
 fn decode_id(id: &str, model: &str) -> ComponentResultV1<(String, String)> {
     let raw = URL_SAFE_NO_PAD
         .decode(id.strip_prefix("ca1_").ok_or_else(|| {
@@ -68,7 +94,7 @@ fn decode_id(id: &str, model: &str) -> ComponentResultV1<(String, String)> {
     }
     let v: Value =
         serde_json::from_slice(&raw).map_err(|_| capability("Invalid Google tool identity."))?;
-    if v[2].as_str() != Some(model) {
+    if v[2].as_str().map(tool_model_identity) != Some(tool_model_identity(model)) {
         return Err(capability("Google tool history belongs to another model."));
     }
     Ok((

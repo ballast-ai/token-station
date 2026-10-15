@@ -196,3 +196,66 @@ fn signed_visible_stream_and_empty_signature_trailer_are_normal_text() {
         1
     );
 }
+
+#[test]
+fn reasoning_alias_tool_signatures_replay_in_buffered_and_streamed_rounds() {
+    let value = json!({"response":{"modelVersion":"gemini-3.8-flash-n","candidates":[{"content":{"parts":[{"functionCall":{"id":"wire-call","name":"check","args":{}},"thoughtSignature":"exact-signature"}]},"finishReason":"STOP"}]}});
+    let buffered = CodeAssist
+        .parse_response(&response(value.clone()))
+        .unwrap()
+        .choices[0]
+        .message
+        .tool_calls[0]
+        .clone();
+    let mut parser = CodeAssist.stream_parser();
+    let events = parser
+        .parse_chunk(format!("data: {value}\n\n").as_bytes())
+        .unwrap();
+    let streamed_id = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::ToolCallDelta { id: Some(id), .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    for id in [buffered.id.clone(), streamed_id] {
+        let mut call = buffered.clone();
+        call.id = id;
+        let request = |model: &str| {
+            req(
+                json!({"model":model,"messages":[{"role":"assistant","tool_calls":[call]},{"role":"tool","tool_call_id":call.id,"content":"{\"ok\":true}"}]}),
+            )
+        };
+        let descriptor = CodeAssist
+            .build_http_request(
+                &request("gemini-3.8-flash-medium"),
+                &config("antigravity-plan"),
+            )
+            .unwrap();
+        let body = descriptor.body.unwrap();
+        assert_eq!(body["model"], "gemini-3.8-flash-medium");
+        assert_eq!(
+            body["request"]["contents"][0]["parts"][0]["thoughtSignature"],
+            "exact-signature"
+        );
+        assert_eq!(
+            body["request"]["contents"][0]["parts"][0]["functionCall"]["id"],
+            "wire-call"
+        );
+        for other in [
+            "gemini-3.5-flash-medium",
+            "gemini-3.8-flash-lite",
+            "gemini-3.8-flash-image",
+            "gemini-3.8-pro",
+            "claude-sonnet-4-6",
+            "gemini-3.8-flash-unrecognized",
+        ] {
+            assert!(
+                CodeAssist
+                    .build_http_request(&request(other), &config("antigravity-plan"))
+                    .is_err(),
+                "reject history for {other}"
+            );
+        }
+    }
+}

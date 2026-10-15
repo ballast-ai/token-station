@@ -39,7 +39,7 @@ export type ProviderCallEngine =
   | "south_v1_buffered_streaming"
   | "south_v1_buffered_streaming_header_auth";
 
-export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth";
+export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth" | "provider_call" | "root_rpc_path";
 
 export interface QuotaWindowSpec {
   len_ms: number;

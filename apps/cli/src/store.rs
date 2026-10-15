@@ -537,6 +537,43 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE requests ADD COLUMN subscription_billing INTEGER NOT NULL DEFAULT 0
                 CHECK (subscription_billing IN (0, 1));",
     },
+    Migration {
+        // v18 -> v19: preserve all attempts while admitting one explicit RPC transport reason.
+        to: 19,
+        sql: "
+CREATE TABLE attempts_v19 (
+    request_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    upstream TEXT NOT NULL,
+    model TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    http_status INTEGER,
+    error_code TEXT,
+    stream_outcome TEXT CHECK (
+        stream_outcome IS NULL OR stream_outcome IN (
+            'complete', 'failed_after_partial', 'failed_before_output', 'client_cancelled'
+        )
+    ),
+    provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (provider_call_engine IN (
+            'legacy', 'south_v1_buffered', 'south_v1_streaming', 'native', 'unknown'
+        )),
+    south_fallback_reason TEXT
+        CHECK (south_fallback_reason IS NULL OR south_fallback_reason IN (
+            'configured_legacy', 'buffered_mode_cannot_stream', 'unauthenticated_upstream',
+            'no_provider_runtime', 'credential_resolver', 'provider_dialect',
+            'provider_package_unapproved', 'api_dialect', 'egress', 'streaming', 'method',
+            'auth', 'body', 'secret_source', 'response_metadata', 'headers', 'root_rpc_path'
+        )),
+    fallback_allowed INTEGER NOT NULL,
+    PRIMARY KEY (request_id, ordinal)
+);
+            INSERT INTO attempts_v19 SELECT * FROM attempts;
+            DROP TABLE attempts;
+            ALTER TABLE attempts_v19 RENAME TO attempts;
+        ",
+    },
+
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -676,7 +713,7 @@ CREATE TABLE IF NOT EXISTS attempts (
             'configured_legacy', 'buffered_mode_cannot_stream', 'unauthenticated_upstream',
             'no_provider_runtime', 'credential_resolver', 'provider_dialect',
             'provider_package_unapproved', 'api_dialect', 'egress', 'streaming', 'method',
-            'auth', 'body', 'secret_source', 'response_metadata', 'headers'
+            'auth', 'body', 'secret_source', 'response_metadata', 'headers', 'root_rpc_path'
         )),
     fallback_allowed INTEGER NOT NULL,
     PRIMARY KEY (request_id, ordinal)
@@ -2414,6 +2451,55 @@ mod tests {
         drop(store);
         std::fs::remove_file(path.with_extension("v16.bak")).ok();
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn v18_receipts_survive_root_rpc_reason_migration() {
+        let path = scratch("root-rpc-v19");
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("v18.bak")).ok();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../tests/fixtures/metrics-v18.sql"))
+            .unwrap();
+        connection.execute_batch("INSERT INTO requests (request_id,started_at_ms,latency_ms,protocol,requested_model,stream,status,attempts) VALUES ('old-rpc-history',1,12,'openai-chat-completions','auto',0,200,1);
+            INSERT INTO attempts (request_id,ordinal,upstream,model,latency_ms,http_status,stream_outcome,provider_call_engine,south_fallback_reason,fallback_allowed) VALUES ('old-rpc-history',1,'historical-upstream','historical-model',12,200,'complete','legacy','headers',0);").unwrap();
+        let before = super::read_attempts(&connection, "old-rpc-history").unwrap();
+        drop(connection);
+        let store = SqliteStore::open(&path).unwrap();
+        let old_rows = store.read_recent(5).unwrap();
+        assert_eq!(old_rows.len(), 1);
+        assert_eq!(old_rows[0].attempt_records, before);
+        let mut new = receipt("new-rpc-history", 2);
+        new.attempt_records[0].south_fallback_reason =
+            Some(token_station_metrics::SouthFallbackReason::RootRpcPath);
+        store.record(&new);
+        let rows = store.read_recent(5).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the new reason must not discard the whole request transaction"
+        );
+        assert_eq!(
+            rows[0].attempt_records[0].south_fallback_reason,
+            Some(token_station_metrics::SouthFallbackReason::RootRpcPath)
+        );
+        assert_eq!(&rows[1..], old_rows.as_slice());
+        assert!(path.with_extension("v18.bak").exists());
+        assert!(
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE attempts SET south_fallback_reason='unknown-new-reason'",
+                    []
+                )
+                .is_err()
+        );
+        drop(store);
+        std::fs::remove_file(path.with_extension("v18.bak")).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {

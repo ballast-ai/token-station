@@ -10345,3 +10345,16 @@ fn verify_image_transport_fixture(responses: bool) {
     fixture.join().unwrap();
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn google_subscription_health_uses_the_actual_root_rpc_transport() {
+    let draft = json!({"plugins":{"providers":{"gemini-cli-plan":"provider-codeassist-v2","antigravity-plan":"provider-codeassist-v2"}}});
+    for provider in ["gemini-cli-plan", "antigravity-plan"] {
+        let upstream = json!({"provider":provider,"auth":{"slot":"local_subscription_token","local_subscription":{"kind":if provider == "gemini-cli-plan" { "gemini-cli" } else { "antigravity" },"id":"fixture-account"}}});
+        assert_eq!(
+            south_header_auth_v1_unavailable_reason(&draft, &upstream, true),
+            Some("root_rpc_path")
+        );
+        assert!(!provider_health_uses_south(&draft, &upstream, true));
+    }
+}

@@ -10,6 +10,7 @@ Requests and streaming replies use the Code Assist envelope.
 
 Caller tools remain caller-owned. Google function-call signatures travel in opaque call IDs.
 Tool history from another model returns a capability error.
+Recognized reasoning-preset aliases share their underlying model identity. Version, family, Lite, and image differences remain distinct.
 Unsupported continuation, hosted tools, opaque thinking, and serial-only tool constraints return explicit errors.
 Low and high reasoning effort are supported for Gemini model families.
 Generated images are not supported.

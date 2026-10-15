@@ -34,6 +34,7 @@ Catalog presence does not prove that every model has remaining allowance.
 - Copilot supports fixed public GitHub inference destinations. Custom GitHub Enterprise hosts are not supported.
 - Copilot CLI system credentials are supported on macOS. Other CLI keyrings and JSONC configuration are not supported.
 - Google account access, project permissions, and model availability are checked by Code Assist.
+- Google subscription calls use Host HTTP transport. Receipts record `root_rpc_path` because South cannot represent these root RPC actions.
 - Google signed tool state stays bound to its model. Unsupported continuation and foreign opaque state return capability errors.
 - Google optional text signatures are retained in buffered response metadata. Stock translated clients and streams do not replay them.
 - Windows Antigravity credential support has deterministic parser coverage. Real Windows credential access remains unverified.

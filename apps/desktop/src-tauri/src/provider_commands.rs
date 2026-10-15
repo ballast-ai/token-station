@@ -304,10 +304,10 @@ pub(crate) fn south_header_auth_v1_unavailable_reason(
             if !upstream["auth"]["local_subscription"].is_object() {
                 return Some("auth");
             }
-            return if provider == "claude-plan" {
-                Some("provider_call")
-            } else {
-                None
+            return match provider {
+                "claude-plan" => Some("provider_call"),
+                "gemini-cli-plan" | "antigravity-plan" => Some("root_rpc_path"),
+                _ => None,
             };
         }
         if !package_verified

@@ -2922,3 +2922,69 @@ async fn south_quota_projection_is_fail_soft_for_absent_partial_and_malformed_fi
         "only the complete Anthropic token family may create a quota window"
     );
 }
+
+#[test]
+fn codeassist_root_rpc_uses_an_explicit_host_transport_boundary() {
+    for provider in ["gemini-cli-plan", "antigravity-plan"] {
+        for action in ["generateContent", "streamGenerateContent?alt=sse"] {
+            let mut config = provider_config();
+            config.provider = provider.to_owned();
+            config.base_url = ProviderEndpoint::try_new("https://api.example.test").unwrap();
+            let mut candidate = descriptor();
+            candidate.url = format!("https://api.example.test/v1internal:{action}");
+            let result =
+                prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate);
+            assert!(
+                matches!(
+                    result,
+                    Err(PrepareProviderCallErrorV1::Ineligible(
+                        IneligibleV1::RootRpcPath
+                    ))
+                ),
+                "{provider} {action}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn root_rpc_boundary_cannot_bypass_binding_or_admit_unknown_actions() {
+    let mut config = provider_config();
+    config.provider = "antigravity-plan".to_owned();
+    config.base_url = ProviderEndpoint::try_new("https://api.example.test").unwrap();
+    for url in [
+        "https://other.example.test/v1internal:generateContent",
+        "https://api.example.test/v1internal:delete",
+        "https://api.example.test/v1internal:generateContent?key=secret",
+        "https://api.example.test/v1internal:streamGenerateContent?alt=sse&key=secret",
+        "https://api.example.test/v1internal:generateContent#fragment",
+    ] {
+        let mut candidate = descriptor();
+        candidate.url = url.to_owned();
+        let result =
+            prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate);
+        assert!(
+            matches!(
+                result,
+                Err(PrepareProviderCallErrorV1::Contract(_)
+                    | PrepareProviderCallErrorV1::Preparation(_))
+            ),
+            "reject {url}: {result:?}"
+        );
+    }
+    let mut candidate = descriptor();
+    candidate.url = "https://api.example.test/v1internal:generateContent".to_owned();
+    candidate.auth = Some(Auth::bearer(SecretRef::new("wrong_slot")));
+    assert!(matches!(
+        prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate),
+        Err(PrepareProviderCallErrorV1::Preparation(
+            PreparationErrorV1::CredentialBindingMismatch
+        ))
+    ));
+    config.provider = "openai-compatible".to_owned();
+    candidate.auth = Some(Auth::bearer(SecretRef::new("provider_api_key")));
+    assert!(matches!(
+        prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate),
+        Err(PrepareProviderCallErrorV1::Contract(_))
+    ));
+}

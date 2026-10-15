@@ -67,6 +67,7 @@ const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
         IneligibleV1::Body => SouthFallbackReason::Body,
         IneligibleV1::SecretSource => SouthFallbackReason::SecretSource,
         IneligibleV1::Headers => SouthFallbackReason::Headers,
+        IneligibleV1::RootRpcPath => SouthFallbackReason::RootRpcPath,
     }
 }
 

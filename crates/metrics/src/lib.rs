@@ -61,7 +61,8 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v16: records request-scoped classifier input handling without content.
 /// - v17: preserves optional task-scoped heuristic counts for replay.
 /// - v18: marks subscription allowance so API prices cannot backfill its receipts.
-pub const SCHEMA_VERSION: u32 = 18;
+/// - v19: records the explicit Host transport boundary for root RPC action paths.
+pub const SCHEMA_VERSION: u32 = 19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -362,6 +363,8 @@ pub enum SouthFallbackReason {
     SecretSource,
     /// A descriptor header fails the safe-header contract.
     Headers,
+    /// The provider requires a root RPC action path that South cannot represent.
+    RootRpcPath,
     /// The provider dialect is outside the South slice.
     ///
     /// Retired: eligibility stopped matching a provider's *name* against a
@@ -397,6 +400,7 @@ impl SouthFallbackReason {
             Self::Body => "body",
             Self::SecretSource => "secret_source",
             Self::Headers => "headers",
+            Self::RootRpcPath => "root_rpc_path",
             Self::ProviderDialect => "provider_dialect",
             Self::ProviderPackageUnapproved => "provider_package_unapproved",
             Self::ResponseMetadata => "response_metadata",
@@ -411,7 +415,7 @@ impl SouthFallbackReason {
     /// `None` for a retired token and the row read failed, so `stats` and the
     /// desktop usage view errored for exactly the users who had history worth
     /// looking at. The three in [`Self::RETIRED`] stay here for that reason.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::ConfiguredLegacy,
         Self::BufferedModeCannotStream,
         Self::UnauthenticatedUpstream,
@@ -425,6 +429,7 @@ impl SouthFallbackReason {
         Self::Body,
         Self::SecretSource,
         Self::Headers,
+        Self::RootRpcPath,
         Self::ProviderDialect,
         Self::ProviderPackageUnapproved,
         Self::ResponseMetadata,
