@@ -11393,6 +11393,11 @@ samp {
   max-width: 520px;
   max-height: min(720px, calc(100vh - 40px));
   grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.provider-removal-dialog [data-slot="dialog-description"] {
+  overflow-wrap: anywhere;
 }
 
 .provider-removal-dialog .provider-removal-preview {
@@ -11400,6 +11405,7 @@ samp {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  overflow-wrap: anywhere;
 }
 
 .request-detail-dialog[data-slot="dialog-content"] {

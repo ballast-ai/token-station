@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import CompactCombobox from "./CompactCombobox";
@@ -11,6 +11,47 @@ const OPTIONS = [
 ];
 
 describe("CompactCombobox", () => {
+  it("keeps searchable options visible at the bottom when scrolling cannot move the trigger", async () => {
+    const user = userEvent.setup();
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    const options = Array.from({ length: 14 }, (_, index) => ({
+      value: `model-${index}`,
+      label: `model-${index}`,
+    }));
+    render(<CompactCombobox ariaLabel="Model" value="model-0" options={options} onChange={vi.fn()} />);
+    const trigger = screen.getByRole("combobox", { name: "Model" });
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
+      DOMRect.fromRect({ x: 32, y: 520, width: 440, height: 40 }),
+    );
+
+    try {
+      await user.click(trigger);
+      expect(scrollSpy).toHaveBeenCalled();
+      const popover = screen.getByRole("listbox").parentElement!;
+      expect(Number.parseFloat(popover.style.maxHeight)).toBeGreaterThanOrEqual(120);
+      expect(popover).toHaveStyle({ top: "auto", bottom: "86px", maxHeight: "360px", transformOrigin: "bottom" });
+      expect(screen.getByRole("option", { name: "model-0" })).toHaveFocus();
+
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: 960 });
+      fireEvent(window, new Event("resize"));
+      expect(popover).toHaveStyle({ top: "566px", bottom: "auto", maxHeight: "360px", transformOrigin: "top" });
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
+      fireEvent(window, new Event("scroll"));
+      expect(popover).toHaveStyle({ top: "auto", bottom: "86px", maxHeight: "360px" });
+
+      await user.click(screen.getByRole("searchbox"));
+      await user.type(screen.getByRole("searchbox"), "model-13");
+      expect(screen.getAllByRole("option")).toHaveLength(1);
+      await user.keyboard("{Escape}");
+      expect(trigger).toHaveFocus();
+      expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+    }
+  });
+
   it("shows an optional leading icon in both the selected trigger and menu option", async () => {
     const user = userEvent.setup();
     const options = [{

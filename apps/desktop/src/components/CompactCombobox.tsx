@@ -123,13 +123,16 @@ export default function CompactCombobox({
       const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
       const spaceBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
-      const maxHeight = Math.max(0, Math.min(maximumMenuHeight, spaceBelow));
+      const spaceAbove = rect.top - viewportPadding - gap;
+      const opensAbove = spaceBelow < minimumMenuHeight && spaceAbove > spaceBelow;
+      const maxHeight = Math.max(0, Math.min(maximumMenuHeight, opensAbove ? spaceAbove : spaceBelow));
       setPopoverStyle({
         left: Math.max(viewportPadding, rect.left),
-        top: rect.bottom + gap,
-        bottom: "auto",
+        top: opensAbove ? "auto" : rect.bottom + gap,
+        bottom: opensAbove ? window.innerHeight - rect.top + gap : "auto",
         width: rect.width,
         maxHeight,
+        transformOrigin: opensAbove ? "bottom" : "top",
       });
     };
     positionPopover();
