@@ -24,6 +24,7 @@ import {
   type AgentRouteView,
   type AgentInstallationView,
   type AgentView,
+  type ProviderView,
 } from "../api";
 
 vi.mock("../api", () => ({
@@ -306,7 +307,10 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(heading?.querySelector('[data-agent-brand="claude-code"]')).toBeInTheDocument();
   });
 
-  it("distinguishes the local gateway from the effective Provider route", () => {
+  it.each([
+    { upstream: "kimi", model: "kimi-k2.6", provider: null, label: "kimi" },
+    { upstream: "antigravity_plan_" + "a".repeat(64), model: "gemini-3.8-flash-medium", provider: "antigravity-plan", label: "Antigravity-plan" },
+  ])("shows the effective $label channel without changing its route reference", ({ upstream, model, provider, label }) => {
     const found = installation("/opt/homebrew/bin/claude", "2.1.247");
     found.connected = true;
     found.managed = true;
@@ -332,6 +336,8 @@ describe("AgentRoutePage multi-install admission", () => {
       catalog_warning: null,
     };
 
+    const directTarget = { upstream, model };
+    const onStateChange = vi.fn();
     render(
       <AgentRoutePage
         metadata={agent.metadata}
@@ -346,14 +352,14 @@ describe("AgentRoutePage multi-install admission", () => {
           config_error: null,
           profile: null,
           routing_mode: "direct",
-          direct_target: { upstream: "kimi", model: "kimi-k2.6" },
+          direct_target: directTarget,
         }}
-        providers={[]}
+        providers={provider ? [{ name: upstream, provider, base_url: "https://example.test", models: [model], has_auth: true } satisfies ProviderView] : []}
         profiles={[]}
         quotaAccounts={[]}
         serveRunning
         applying={false}
-        onStateChange={vi.fn()}
+        onStateChange={onStateChange}
         onRefreshAgents={vi.fn()}
         onSaveQuota={vi.fn()}
         onSaveQuotaPlan={vi.fn()}
@@ -362,7 +368,11 @@ describe("AgentRoutePage multi-install admission", () => {
       />,
     );
 
-    expect(screen.getByText("网关正常 · kimi / kimi-k2.6")).toBeInTheDocument();
+    expect(screen.getByText(`网关正常 · ${label} / ${model}`)).toBeInTheDocument();
+    expect(screen.getAllByText(`${label} / ${model}`)).toHaveLength(2);
+    if (provider) expect(screen.queryByText(new RegExp(upstream))).not.toBeInTheDocument();
+    expect(directTarget).toEqual({ upstream, model });
+    expect(onStateChange).not.toHaveBeenCalled();
     expect(screen.queryByText("请求已通过 Token Station。")).not.toBeInTheDocument();
     const identity = screen.getByRole("heading", { name: "Claude Code" }).closest(".agent-identity");
     expect(identity).not.toBeNull();

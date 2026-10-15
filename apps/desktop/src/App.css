@@ -2533,6 +2533,7 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
   gap: 9px;
 }
 .agent-connect-status small {
+  overflow-wrap: anywhere;
   min-width: 0;
   max-width: 360px;
   overflow: visible;

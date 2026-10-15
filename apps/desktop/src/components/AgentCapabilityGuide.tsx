@@ -2,14 +2,14 @@ import type { AgentRouteView } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 import "./AgentCapabilityGuide.css";
 
-export default function AgentCapabilityGuide({ route }: { route: AgentRouteView }) {
+export default function AgentCapabilityGuide({ route, directTargetLabel }: { route: AgentRouteView; directTargetLabel?: string | null }) {
   const { copy } = useLocalizedCopy();
   const source = route.inherits_global === true
     ? copy("Follows global", "跟随全局", "跟隨全域", "グローバルに従う")
     : copy("Independent routing", "独立路由", "獨立路由", "独立ルーティング");
   const target = route.routing_mode === "direct"
     ? route.direct_target?.upstream && route.direct_target?.model
-      ? `${route.direct_target.upstream} / ${route.direct_target.model}`
+      ? directTargetLabel ?? `${route.direct_target.upstream} / ${route.direct_target.model}`
       : copy("Select a provider and model", "尚未选择供应商和模型", "尚未選擇供應商和模型", "プロバイダーとモデルを選択してください")
     : route.routing_mode === "quota_first"
       ? copy("Selected by quota policy", "按额度策略选择", "依額度策略選擇", "クォータポリシーで選択")

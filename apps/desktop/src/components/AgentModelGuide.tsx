@@ -107,10 +107,11 @@ function modelGuide(agentId: string, copy: LocalizedCopy): ModelGuide | undefine
   }
 }
 
-export default function AgentModelGuide({ metadata, connected, route }: {
+export default function AgentModelGuide({ metadata, connected, route, directTargetLabel }: {
   metadata: Pick<AgentUiMetadataView, "agent_id" | "display_name">;
   connected: boolean;
   route?: AgentRouteView;
+  directTargetLabel?: string | null;
 }) {
   const { copy } = useLocalizedCopy();
   const { showError } = useErrorToast();
@@ -193,7 +194,7 @@ export default function AgentModelGuide({ metadata, connected, route }: {
           <TooltipContent side="bottom" className="agent-model-guide-tooltip">{guide.instruction}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
-      {route && <AgentCapabilityGuide route={route} />}
+      {route && <AgentCapabilityGuide route={route} directTargetLabel={directTargetLabel} />}
       <span className="sr-only" role="status">{copied ? copy("Copied", "已复制", "已複製", "コピーしました") : ""}</span>
     </section>
   );

@@ -45,6 +45,7 @@ import {
   type StateView,
   type TierSlot,
 } from "../api";
+import { providerDisplayName } from "../providerPresentation";
 import TierRouteEditor from "../components/TierRouteEditor";
 import HarnessModelMapping from "../components/HarnessModelMapping";
 import InstallationPicker from "../components/InstallationPicker";
@@ -213,16 +214,23 @@ export function compactDiscoveryPath(path: string): string {
   return `${prefix}${start}${separator}…${separator}${end}`;
 }
 
-function connectedRouteDetail(route: AgentRouteView, copy: LocalizedCopy): string {
+function directRouteLabel(route: AgentRouteView, providers: ProviderView[]): string | null {
+  const target = route.direct_target;
+  if (!target?.upstream || !target.model) return null;
+  const provider = providers.find((item) => item.name === target.upstream);
+  const upstream = provider ? providerDisplayName(provider) : target.upstream;
+  return `${upstream} / ${target.model}`;
+}
+
+function connectedRouteDetail(route: AgentRouteView, providers: ProviderView[], copy: LocalizedCopy): string {
   if (route.routing_mode === "direct") {
-    const upstream = route.direct_target?.upstream;
-    const model = route.direct_target?.model;
-    if (upstream && model) {
+    const target = directRouteLabel(route, providers);
+    if (target) {
       return copy(
-        `Gateway ready · ${upstream} / ${model}`,
-        `网关正常 · ${upstream} / ${model}`,
-        `閘道正常 · ${upstream} / ${model}`,
-        `ゲートウェイ正常 · ${upstream} / ${model}`,
+        `Gateway ready · ${target}`,
+        `网关正常 · ${target}`,
+        `閘道正常 · ${target}`,
+        `ゲートウェイ正常 · ${target}`,
       );
     }
     return copy(
@@ -256,6 +264,7 @@ function statusCopy(
   copy: LocalizedCopy,
   language: Language,
   serveRunning: boolean,
+  providers: ProviderView[],
 ) {
   const usesCursorDatabaseIntegration = metadata.agent_id === "cursor"
     && installation?.compatibility.reason_code === "CONNECTOR_BINDING_NOT_UNIQUE";
@@ -363,7 +372,7 @@ function statusCopy(
     return {
       tone: "success",
       label: copy("Connected", "已接入", "已接入", "接続済み"),
-      detail: connectedRouteDetail(route, copy),
+      detail: connectedRouteDetail(route, providers, copy),
     };
   }
   if (metadata.agent_id === "cursor" && installation) {
@@ -517,12 +526,12 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const discoveredStatus = statusCopy(metadata, agent, installation, route, copy, language, serveRunning);
+  const discoveredStatus = statusCopy(metadata, agent, installation, route, copy, language, serveRunning, providers);
   const status = metadata.agent_id === "cursor" && cursorStatus?.state === "connected"
     ? {
       tone: "success" as const,
       label: copy("Connected", "已接入", "已接入", "接続済み"),
-      detail: connectedRouteDetail(route, copy),
+      detail: connectedRouteDetail(route, providers, copy),
     }
     : metadata.agent_id === "cursor" && cursorStatus?.state === "repair_required"
       ? {
@@ -567,10 +576,9 @@ export default function AgentRoutePage({
     : route.routing_mode === "quota_first"
       ? copy("Quota first", "额度优先", "額度優先", "クォータ優先")
       : copy("Smart tiers", "智能分档", "智慧分檔", "スマート階層");
+  const directTargetLabel = directRouteLabel(route, providers);
   const inheritedStrategyDetail = route.routing_mode === "direct"
-    ? route.direct_target?.upstream && route.direct_target.model
-      ? `${route.direct_target.upstream} / ${route.direct_target.model}`
-      : copy("Uses the global target", "使用全局目标", "使用全域目標", "グローバルターゲットを使用")
+    ? directTargetLabel ?? copy("Uses the global target", "使用全局目标", "使用全域目標", "グローバルターゲットを使用")
     : route.routing_mode === "quota_first"
       ? copy("Uses the global quota queue", "使用全局额度队列", "使用全域額度佇列", "グローバルクォータキューを使用")
       : copy("Uses the global high, mid, and low tiers", "使用全局高、中、低三档", "使用全域高、中、低三檔", "グローバルの高・中・低階層を使用");
@@ -1006,6 +1014,7 @@ export default function AgentRoutePage({
         key={metadata.agent_id}
         metadata={metadata}
         route={route}
+        directTargetLabel={directTargetLabel}
         connected={metadata.agent_id === "cursor" ? cursorStatus?.state === "connected" : installation?.connected === true}
       />
 
@@ -1134,9 +1143,7 @@ export default function AgentRoutePage({
           <span aria-hidden="true">{routeNeedsAttention ? "!" : <RouteIcon />}</span>
           <div>
             <strong>{copy("Route preview after connection", "接入后的路由预览", "接入後路由預覽", "接続後のルーティングプレビュー")}</strong>
-            <code>{route.direct_target?.upstream && route.direct_target.model
-              ? `${route.direct_target.upstream} / ${route.direct_target.model}`
-              : copy("Complete global routing before connection", "请先完成全局路由", "完成全域性路由後再進行連線", "グローバルルーティングを完了してから接続してください")}</code>
+            <code>{directTargetLabel ?? copy("Complete global routing before connection", "请先完成全局路由", "完成全域性路由後再進行連線", "グローバルルーティングを完了してから接続してください")}</code>
           </div>
         </div>
       </section>
