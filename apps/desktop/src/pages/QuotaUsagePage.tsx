@@ -1,3 +1,4 @@
+import { upstreamDisplayName } from "../providerPresentation";
 import { isSubscriptionProvider } from "../subscriptions";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -82,7 +83,7 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
   };
 
   const displayName = (upstream: string): string =>
-    providers.find((provider) => provider.name === upstream)?.name ?? upstream;
+    upstreamDisplayName(upstream, providers);
 
   const shown = (snapshot?.accounts ?? []).filter((account) => {
     const provider = providers.find((entry) => entry.name === account.upstream);

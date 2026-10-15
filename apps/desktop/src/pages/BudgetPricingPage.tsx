@@ -1,3 +1,4 @@
+import type { ProviderView } from "../api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAgentBudgets,
@@ -29,7 +30,7 @@ function localDateTime(ms: number | null): string {
   return shifted.toISOString().slice(0, 16);
 }
 
-export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
+export default function BudgetPricingPage({ onBack, providers }: { onBack: () => void; providers?: ProviderView[] }) {
   const { copy } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
@@ -224,7 +225,7 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
         </div>
         {budgetErr && <div className="banner err">{budgetErr}</div>}
       </section>
-      <PricingEditor />
+      <PricingEditor providers={providers} />
     </div>
   );
 }

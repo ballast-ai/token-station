@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
 import type { DirectRouteTarget, ProviderView } from "../api";
+import { providerDisplayName, upstreamDisplayName } from "../providerPresentation";
 import { ProviderIcon } from "../brandIcons";
 import CompactCombobox from "./CompactCombobox";
 import { useErrorToast } from "./ErrorToast";
@@ -48,6 +49,7 @@ function initialModels(providers: ProviderView[], target?: DirectRouteTarget | n
 
 interface DirectProviderRowProps {
   provider: ProviderView;
+  displayName: string;
   model: string;
   selected: boolean;
   busy: boolean;
@@ -58,6 +60,7 @@ interface DirectProviderRowProps {
 
 function DirectProviderRow({
   provider,
+  displayName,
   model,
   selected,
   busy,
@@ -89,20 +92,20 @@ function DirectProviderRow({
           name="direct-provider"
           checked={selected}
           disabled={busy || !hasModels}
-          aria-label={`${modelLabel} · ${provider.name} · ${selectionLabel}`}
+          aria-label={`${modelLabel} · ${displayName} · ${selectionLabel}`}
           onChange={onSelect}
         />
         <span className="direct-provider-brand" aria-hidden="true">
-          <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
+          <ProviderIcon id={provider.brand_id} label={displayName} size={34} />
         </span>
         <span className="direct-provider-copy">
-          <strong>{provider.name}</strong>
+          <strong>{displayName}</strong>
           <small>{hasModels
             ? copy("Provider", "供应商", "供應商", "プロバイダー")
             : copy("Manage a model before selecting", "请先添加已管理模型", "請先新增已管理模型", "まず管理済みモデルを追加してください")}</small>
         </span>
         <CompactCombobox
-          ariaLabel={copy(`${provider.name} model`, `${provider.name} 模型`, `${provider.name} 模型`, `${provider.name} モデル`)}
+          ariaLabel={copy(`${displayName} model`, `${displayName} 模型`, `${displayName} 模型`, `${displayName} モデル`)}
           value={model}
           disabled={busy || !hasModels}
           options={provider.models.map((providerModel) => ({ value: providerModel, label: providerModel }))}
@@ -253,6 +256,7 @@ export default function DirectRoutePanel({
   ));
 
   const appliedProvider = providers.find((provider) => provider.name === target?.upstream);
+  const targetName = target ? upstreamDisplayName(target.upstream, providers) : "";
   const appliedVision = appliedProvider?.model_capabilities?.find((capability) => capability.model === target?.model)?.vision;
   const imageAlternative = target?.model && !hasUnappliedTarget && !appliedProvider?.managed_route && appliedVision !== "verified"
     ? appliedProvider?.models.find((model) => model !== target.model
@@ -339,7 +343,7 @@ export default function DirectRoutePanel({
               </span>
               {hasUnappliedTarget && target.model && (
                 <span className="direct-applied-detail">
-                  {copy("Configured target: ", "当前配置：", "目前設定：", "設定した対象：")}{target.upstream} / {target.model}
+                  {copy("Configured target: ", "当前配置：", "目前設定：", "設定した対象：")}{targetName} / {target.model}
                 </span>
               )}
             </>
@@ -358,7 +362,7 @@ export default function DirectRoutePanel({
       {imageAlternative && target && (
         <div className="panel-foot direct-image-switch">
           <p className="sub">{copy(
-            `Need images? ${imageAlternative} has passed an image check on ${target.upstream}. Switching applies it to text and images, at its own pricing.`,
+            `Need images? ${imageAlternative} has passed an image check on ${targetName}. Switching applies it to text and images, at its own pricing.`,
             `需要看图？同一通道的 ${imageAlternative} 已通过看图验证。切换后，文字和图片请求都会使用该模型，并按该模型计费。`,
             `需要看圖？同一通道的 ${imageAlternative} 已通過看圖驗證。切換後，文字和圖片請求都會使用該模型，並按該模型計費。`,
             `画像を使いますか？同じチャネルの ${imageAlternative} は画像検証済みです。切替後はテキストと画像の両方に適用され、そのモデルの料金になります。`,
@@ -380,6 +384,7 @@ export default function DirectRoutePanel({
             <DirectProviderRow
               key={provider.name}
               provider={provider}
+              displayName={providerDisplayName(provider, providers)}
               model={modelByProvider[provider.name] ?? ""}
               selected={selectedProvider === provider.name}
               busy={busy || applying || switchingImageModel}
@@ -405,16 +410,16 @@ export default function DirectRoutePanel({
         <footer className="panel-foot direct-route-actions">
           <span className="foot-hint">{copy(
             target?.upstream === selectedProvider && !target.model
-              ? `Provider ${target.upstream} was preserved; select a model, then apply.`
+              ? `Provider ${targetName} was preserved; select a model, then apply.`
               : "Select a provider with an available model, then apply.",
             target?.upstream === selectedProvider && !target.model
-              ? `已保留供应商 ${target.upstream}；请选择模型后再应用。`
+              ? `已保留供应商 ${targetName}；请选择模型后再应用。`
               : "请选择一个有可用模型的供应商，再点击应用。",
             target?.upstream === selectedProvider && !target.model
-              ? `已保留供應商 ${target.upstream}；請選取模型後再套用。`
+              ? `已保留供應商 ${targetName}；請選取模型後再套用。`
               : "請選取具有可用模型的供應商，然後再套用。",
             target?.upstream === selectedProvider && !target.model
-              ? `プロバイダー ${target.upstream} を保持しました。モデルを選択してから適用してください。`
+              ? `プロバイダー ${targetName} を保持しました。モデルを選択してから適用してください。`
               : "利用可能なモデルがあるプロバイダーを選択してから適用してください。",
           )}</span>
         </footer>

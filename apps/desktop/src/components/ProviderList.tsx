@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
 import { getState, previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
-import { providerDisplayName } from "../providerPresentation";
-import { planConnectionTitle, providerPlanKind } from "../planConnections";
+import { providerDisplayName, upstreamDisplayName } from "../providerPresentation";
+import { providerPlanKind } from "../planConnections";
 import { usePlanAccountSummaries } from "./usePlanAccountSummaries";
 import ChatGPTPlanPanel from "./ChatGPTPlanPanel";
 import LocalCodexPanel from "./LocalCodexPanel";
@@ -59,10 +59,7 @@ export default function ProviderList({
   const confirmNavigation = useDraftNavigation();
   const [query, setQuery] = useState("");
   const accountSummary = usePlanAccountSummaries(providers);
-  const displayName = (provider: ProviderView) => {
-    const kind = providerPlanKind(provider);
-    return kind ? planConnectionTitle(kind, copy) : providerDisplayName(provider);
-  };
+  const displayName = (provider: ProviderView) => providerDisplayName(provider, providers);
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const matches = (text: string) => text.toLocaleLowerCase().includes(normalizedQuery);
   const visibleProviders = providers.filter((provider) => matches(displayName(provider)) || provider.models.some(matches));
@@ -160,7 +157,7 @@ export default function ProviderList({
         {visibleProviders.map((provider) => {
           const kind = providerPlanKind(provider);
           const summary = kind ? accountSummary(kind, provider.credential_reference) : null;
-          const displayName = kind ? planConnectionTitle(kind, copy) : providerDisplayName(provider);
+          const displayName = providerDisplayName(provider, providers);
           return (
             <article
               className="provider-card"
@@ -314,10 +311,10 @@ export default function ProviderList({
             <DialogHeader>
               <DialogTitle>{copy("Deletion impact preview", "删除影响预览", "刪除影響預覽", "削除影響プレビュー")}</DialogTitle>
               <DialogDescription>{copy(
-                `Review every route that references ${removal.name} before removal.`,
-                `删除 ${removal.name} 前，请检查所有引用它的路由。`,
-                `刪除 ${removal.name} 前，請檢查所有引用它的路由。`,
-                `${removal.name} を削除する前に、参照するすべてのルートを確認してください。`,
+                `Review every route that references ${upstreamDisplayName(removal.name, providers)} before removal.`,
+                `删除 ${upstreamDisplayName(removal.name, providers)} 前，请检查所有引用它的路由。`,
+                `刪除 ${upstreamDisplayName(removal.name, providers)} 前，請檢查所有引用它的路由。`,
+                `${upstreamDisplayName(removal.name, providers)} を削除する前に、参照するすべてのルートを確認してください。`,
               )}</DialogDescription>
             </DialogHeader>
             <div className="provider-removal-preview">

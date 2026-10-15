@@ -187,8 +187,8 @@ it("keeps account setup out of the managed model collection", () => {
 
 
 it.each([
-  ["chatgpt-plan", "ChatGPT 套餐", "chatgpt_account"],
-  ["codex-plan", "本机 Codex 登录", "codex_account"],
+  ["chatgpt-plan", "ChatGPT-plan", "chatgpt_account"],
+  ["codex-plan", "Codex-plan", "codex_account"],
 ] as const)("opens the bound %s account inside provider management", async (providerKind, title, source) => {
   const user = userEvent.setup();
   const account = { id: "bound-reference", label: "Bound account", email: "same@example.test", state: "ready" as const, expires_at: null, account_id: "account-a", client_version: "1.0.0" };

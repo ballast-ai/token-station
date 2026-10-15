@@ -1,3 +1,4 @@
+import { upstreamDisplayName } from "./providerPresentation";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addKeyword,
@@ -1071,8 +1072,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       await setDirectRoute(defaultTarget.upstream, defaultTarget.model);
       return serveStart();
     }, copy(
-      `Provider added. Global routing now uses ${defaultTarget.upstream} / ${defaultTarget.model}.`,
-      `供应商已添加，全局路由已默认使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`, `供應商已加入。全域性路由已預設使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`, `プロバイダーが追加されました。グローバルルーティングは ${defaultTarget.upstream} / ${defaultTarget.model} がデフォルトです。`
+      `Provider added. Global routing now uses ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model}.`,
+      `供应商已添加，全局路由已默认使用 ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model}。`, `供應商已加入。全域性路由已預設使用 ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model}。`, `プロバイダーが追加されました。グローバルルーティングは ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model} がデフォルトです。`
     ), true);
     viewHistoryRef.current = [];
     if (firstRunSetupStep === "provider") {
@@ -1293,10 +1294,10 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       )}
 
       {view === "usage" && (
-        <UsageWorkspace onOpenManagement={() => navigate("usage-management")} />
+        <UsageWorkspace providers={state.providers} onOpenManagement={() => navigate("usage-management")} />
       )}
       {view === "usage-management" && (
-        <BudgetPricingPage onBack={navigateBack} />
+        <BudgetPricingPage providers={state.providers} onBack={navigateBack} />
       )}
       {view === "quota-usage" && (
         <QuotaUsagePage providers={state.providers} onBack={navigateBack} />

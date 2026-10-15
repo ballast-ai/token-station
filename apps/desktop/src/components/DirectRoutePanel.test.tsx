@@ -37,6 +37,33 @@ beforeEach(() => {
 });
 
 describe("DirectRoutePanel", () => {
+  it.each([
+    ["codex-plan", "Codex-plan"], ["chatgpt-plan", "ChatGPT-plan"],
+    ["claude-plan", "Claude-plan"], ["copilot-plan", "Copilot-plan"],
+    ["gemini-cli-plan", "Gemini CLI-plan"], ["antigravity-plan", "Antigravity-plan"],
+  ])("applies the original account ID when selecting the short %s label", async (provider, label) => {
+    const user = userEvent.setup();
+    const name = "subscription_" + "a".repeat(64);
+    const onApply = vi.fn().mockResolvedValue(true);
+    render(<DirectRoutePanel providers={[{ name, provider, base_url: "https://example.test", models: ["test-model"], has_auth: true }]} target={null} busy={false} applying={false} onApply={onApply} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(name)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: new RegExp(label) }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
+    expect(onApply).toHaveBeenCalledWith(name, "test-model");
+  });
+
+  it("keeps duplicate subscription accounts distinct when applying a route", async () => {
+    const user = userEvent.setup();
+    const accounts = ["codex_b", "codex_a"].map(name => ({ ...providers[1], name, provider: "codex-plan" }));
+    const onApply = vi.fn().mockResolvedValue(true);
+    render(<DirectRoutePanel providers={accounts} target={null} busy={false} applying={false} onApply={onApply} />);
+    expect(screen.getByText("Codex-plan 1")).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: /Codex-plan 2/ }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
+    expect(onApply).toHaveBeenCalledWith("codex_b", "gpt-5.6");
+  });
+
   it("places the primary apply action in the card header", () => {
     render(
       <DirectRoutePanel

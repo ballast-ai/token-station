@@ -1,3 +1,4 @@
+import { providerDisplayName, upstreamDisplayName } from "../providerPresentation";
 import { useEffect, useRef, useState } from "react";
 import { Activity, ArrowUpRight, Bot, Boxes, Clock3, MessageSquareText, RefreshCw, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
@@ -85,7 +86,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
     : null;
   const modelOfferings = state.route_context.model_offerings;
   const exactModelContext = modelOfferings.length === 1
-    ? `${modelOfferings[0].upstream} / ${modelOfferings[0].model}`
+    ? `${upstreamDisplayName(modelOfferings[0].upstream, state.providers)} / ${modelOfferings[0].model}`
     : null;
   const modelContextLabel = state.routing_mode === "direct"
     ? copy("Current model", "当前模型", "目前模型", "現在のモデル")
@@ -295,7 +296,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                   )}</strong>
                   <code>{state.quota_accounts.length > 0
                     ? state.quota_accounts
-                      .map((account) => `${account.upstream}/${account.model}`)
+                      .map((account) => `${upstreamDisplayName(account.upstream, state.providers)}/${account.model}`)
                       .join(" · ")
                     : copy("Add a quota account", "待添加额度账户", "新增額度帳號", "クォータアカウントを追加")}</code>
                 </div>
@@ -308,7 +309,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
                     <div key={slot}>
                       <Badge variant="secondary">{copy(...TIER_COPY[slot])}</Badge>
                       <strong>{tier.model ?? copy("Not configured", "未配置", "未配置", "未設定")}</strong>
-                      <code>{tier.upstream ?? "—"}</code>
+                      <code>{tier.upstream ? upstreamDisplayName(tier.upstream, state.providers) : "—"}</code>
                     </div>
                   );
                 })}
@@ -333,9 +334,9 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
               <ul className="overview-summary-list overview-model-list" aria-label={copy("Top models", "模型 Top 5", "前 5 個模型", "上位5件のモデル")}>
                 {modelRows.map(({ model, provider }) => (
                   <li key={`${provider.name}:${model}`}>
-                    <ProviderIcon id={provider.brand_id} label={provider.name} size={24} />
+                    <ProviderIcon id={provider.brand_id} label={providerDisplayName(provider, state.providers)} size={24} />
                     <strong>{model}</strong>
-                    <small>{provider.name}</small>
+                    <small>{providerDisplayName(provider, state.providers)}</small>
                   </li>
                 ))}
               </ul>

@@ -45,7 +45,7 @@ import {
   type StateView,
   type TierSlot,
 } from "../api";
-import { providerDisplayName } from "../providerPresentation";
+import { upstreamDisplayName } from "../providerPresentation";
 import TierRouteEditor from "../components/TierRouteEditor";
 import HarnessModelMapping from "../components/HarnessModelMapping";
 import InstallationPicker from "../components/InstallationPicker";
@@ -217,9 +217,7 @@ export function compactDiscoveryPath(path: string): string {
 function directRouteLabel(route: AgentRouteView, providers: ProviderView[]): string | null {
   const target = route.direct_target;
   if (!target?.upstream || !target.model) return null;
-  const provider = providers.find((item) => item.name === target.upstream);
-  const upstream = provider ? providerDisplayName(provider) : target.upstream;
-  return `${upstream} / ${target.model}`;
+  return `${upstreamDisplayName(target.upstream, providers)} / ${target.model}`;
 }
 
 function connectedRouteDetail(route: AgentRouteView, providers: ProviderView[], copy: LocalizedCopy): string {
