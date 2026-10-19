@@ -302,6 +302,55 @@ fn final_response(terminal: &str) -> String {
     }
     sse(events)
 }
+
+#[test]
+fn both_plan_dialects_handle_metadata_without_changing_protocol_outcomes() {
+    for codex in [false, true] {
+        for protocol in [
+            Protocol::Anthropic,
+            Protocol::Chat,
+            Protocol::Responses,
+            Protocol::Gemini,
+        ] {
+            for stream in [false, true] {
+                for terminal in ["completed", "failed", "truncated"] {
+                    let harness = Harness::for_provider(codex, move |_, _| {
+                        let mut events = frames(&final_response(terminal));
+                        events.insert(2, json!({"type":"response.metadata","metadata":{"private":"SYNTHETIC_METADATA_ONLY","status":"completed"}}));
+                        (200, sse(events))
+                    });
+                    let (status, output) =
+                        harness.request(protocol, stream, &protocol.request(stream));
+                    assert!(!output.contains("SYNTHETIC_METADATA_ONLY"));
+                    let records = harness.records.0.lock().unwrap();
+                    let record = records.last().unwrap();
+                    if terminal == "completed" {
+                        assert_eq!(status, 200, "{codex} {protocol:?} {stream}: {output}");
+                        assert!(output.contains(FINAL), "{output}");
+                        assert_eq!(record.status, 200);
+                        let usage = record.usage.as_ref().unwrap();
+                        assert_eq!(usage.input_tokens, 10);
+                        assert_eq!(usage.output_tokens, 5);
+                    } else {
+                        assert_ne!(
+                            record.status, 200,
+                            "{codex} {protocol:?} {stream}: {output}"
+                        );
+                        if stream {
+                            assert!(output.contains("error"), "{output}");
+                        } else {
+                            assert!(status >= 400, "{output}");
+                        }
+                    }
+                    assert!(record.subscription_billing);
+                    assert_eq!(record.cost_micros, None);
+                    assert_eq!(record.attempts, 1);
+                }
+            }
+        }
+    }
+}
+
 fn frames(output: &str) -> Vec<Value> {
     output
         .lines()

@@ -395,6 +395,8 @@ impl ResponsesStream {
                 });
                 self.complete = true;
             }
+            // Response metadata is out-of-band information, not output or completion.
+            "response.metadata" => {}
             // Reasoning summaries are display hints, not replayable reasoning
             // state. Preserve the encrypted item when available instead.
             "response.reasoning_summary_text.delta"

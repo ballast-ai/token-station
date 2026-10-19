@@ -1,0 +1,8 @@
+{
+  "chunks": [
+    "data: {\"type\": \"response.created\", \"response\": {\"id\": \"resp_test\", \"model\": \"plan-model\"}}\n\n",
+    "data: {\"type\": \"response.output_text.delta\", \"output_index\": 0, \"content_index\": 0, \"delta\": \"你好\"}\n\n",
+    "data: {\"type\": \"response.metadata\", \"sequence_number\": 5, \"response_id\": \"resp_test\", \"metadata\": {\"openai_chatgpt_moderation_metadata\": {\"prompt\": {\"is_blocked\": false}}, \"private\": \"SYNTHETIC_METADATA_ONLY\"}}\n\n",
+    "data: {\"type\": \"response.completed\", \"response\": {\"id\": \"resp_test\", \"model\": \"plan-model\", \"status\": \"completed\", \"usage\": {\"input_tokens\": 4, \"output_tokens\": 2, \"input_tokens_details\": {\"cached_tokens\": 1}}}}\n\n"
+  ]
+}
