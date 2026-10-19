@@ -351,6 +351,7 @@ mod tests {
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
 use std::sync::atomic::{AtomicU64, Ordering};

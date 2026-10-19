@@ -67,6 +67,8 @@ pub(super) fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let before = fs::symlink_metadata(path).map_err(local_error)?;
     let file = File::open(path).map_err(local_error)?;
     let opened = file.metadata().map_err(local_error)?;
+    #[cfg(not(unix))]
+    let _ = &opened;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

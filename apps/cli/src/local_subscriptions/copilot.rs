@@ -128,6 +128,8 @@ fn read_source(path: &Path) -> Result<SecretJson> {
     }
     let file = File::open(path).map_err(fail)?;
     let opened = file.metadata().map_err(fail)?;
+    #[cfg(not(unix))]
+    let _ = &opened;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
