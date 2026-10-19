@@ -263,7 +263,7 @@ fn blocked_child_input_respects_deadline_and_cancellation_with_inherited_pipes()
         let script = fs::read_to_string(binary).unwrap();
         let initialize = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"initialize","response":{}}}';;"#;
         assert!(script.contains(initialize));
-        let blocked = initialize.replace(";;", "; sleep 2 <&0 & exit 0;;");
+        let blocked = initialize.replace(";;", "; exec 3<&0; sleep 2 <&3 & exit 0;;");
         fs::write(binary, script.replace(initialize, &blocked)).unwrap();
         let account = manager.connect().unwrap();
         let mut request = fixture_request();
