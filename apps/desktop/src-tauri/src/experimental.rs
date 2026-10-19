@@ -167,8 +167,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn fixture_root() -> std::path::PathBuf {
+        std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("token-station-scx-tests-{}", std::process::id()))
+            .join(SCX_BUNDLE_ID)
+    }
+
     fn fixture() -> (std::path::PathBuf, Value) {
-        let root = Path::new("/scx-test").join(SCX_BUNDLE_ID);
+        let root = fixture_root();
         let draft = json!({
             "server": {"listen": SCX_LISTEN, "auth": true},
             "data": {"dir": root.join("token-station-data")},
@@ -180,7 +188,7 @@ mod tests {
 
     #[test]
     fn experiment_rejects_stable_identity_and_roots() {
-        let root = Path::new("/scx-test").join(SCX_BUNDLE_ID);
+        let root = fixture_root();
         assert!(validate_identity_for(true, SCX_BUNDLE_ID, &root, &root).is_ok());
         assert!(validate_identity_for(true, STABLE_BUNDLE_ID, &root, &root).is_err());
         assert!(validate_identity_for(false, SCX_BUNDLE_ID, &root, &root).is_err());
