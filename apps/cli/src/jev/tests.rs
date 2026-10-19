@@ -359,6 +359,7 @@ fn latest_user_precedes_an_anchor_that_cannot_fit_and_keeps_complete_parts() {
             content: Some(Content::Parts(vec![
                 ContentPart::Text {
                     text: "first".into(),
+                    cache_control: None,
                 },
                 ContentPart::Thinking {
                     thinking: "PRIVATE".into(),
@@ -366,6 +367,7 @@ fn latest_user_precedes_an_anchor_that_cannot_fit_and_keeps_complete_parts() {
                 },
                 ContentPart::Text {
                     text: "second".into(),
+                    cache_control: None,
                 },
             ])),
             ..Message::text(Role::User, "")

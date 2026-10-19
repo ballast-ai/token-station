@@ -678,6 +678,8 @@ impl Gateway {
             name: "web_search_probe".to_owned(),
             description: None,
             parameters: json!({}),
+            cache_control: None,
+            strict: None,
         });
         let (now, session) = Self::quota_preamble(search_router, || format!("web-search:{model}"));
         let candidates = self.candidates(std::time::Instant::now(), now);
