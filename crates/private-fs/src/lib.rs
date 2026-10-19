@@ -1,12 +1,77 @@
-//! Cross-platform owner-only filesystem primitives for Token Station state.
+//! Cross-platform owner-only storage and private pipe primitives for Token Station.
 //!
 //! Unix keeps the established `0700` directory / `0600` file contract.
 //! Windows uses a protected DACL containing exactly one full-control ACE for
 //! the object owner, and verifies that ACL before sensitive bytes are renamed
 //! into their final path.
+//! Windows pipe peer checks protect local process I/O before sensitive data transfer.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Verifies that a connected local named pipe client is this process.
+/// The borrowed server handle remains live during the synchronous process query.
+#[cfg(windows)]
+pub fn verify_named_pipe_client_is_current_process(
+    handle: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+
+    let mut client_process_id = 0;
+    if unsafe { GetNamedPipeClientProcessId(handle.as_raw_handle(), &mut client_process_id) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if client_process_id != std::process::id() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "The named pipe client does not match the current process.",
+        ));
+    }
+    Ok(())
+}
+
+/// Cancels pending operations and disconnects an owned server pipe.
+/// This function requests cancellation. It does not wait for completion.
+/// The pipe library must retain its operation storage until completion.
+/// # Errors
+/// Returns an error if cancellation or disconnection fails.
+#[cfg(windows)]
+pub fn cancel_and_disconnect_named_pipe(
+    handle: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_DATA, ERROR_NOT_FOUND, ERROR_PIPE_NOT_CONNECTED,
+    };
+    use windows_sys::Win32::System::{IO::CancelIoEx, Pipes::DisconnectNamedPipe};
+
+    let cancel = || {
+        if unsafe { CancelIoEx(handle.as_raw_handle(), std::ptr::null()) } != 0 {
+            return Ok(());
+        }
+        let failure = std::io::Error::last_os_error();
+        if failure.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+            Ok(())
+        } else {
+            Err(failure)
+        }
+    };
+    let first = cancel();
+    let disconnected = if unsafe { DisconnectNamedPipe(handle.as_raw_handle()) } == 0 {
+        let failure = std::io::Error::last_os_error();
+        if matches!(failure.raw_os_error(), Some(code) if code == ERROR_PIPE_NOT_CONNECTED as i32 || code == ERROR_NO_DATA as i32)
+        {
+            Ok(())
+        } else {
+            Err(failure)
+        }
+    } else {
+        Ok(())
+    };
+    let last = cancel();
+    first.and(disconnected).and(last)
+}
 
 /// Creates or hardens a real directory for owner-only state.
 pub fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
@@ -707,6 +772,22 @@ mod tests {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         ))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_peer_verification_rejects_regular_file_handles() {
+        use std::os::windows::io::AsHandle;
+
+        let root = scratch();
+        ensure_private_dir(&root).unwrap();
+        let path = root.join("not-a-pipe");
+        create_private_file(&path, b"").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(verify_named_pipe_client_is_current_process(file.as_handle()).is_err());
+        assert!(cancel_and_disconnect_named_pipe(file.as_handle()).is_err());
+        drop(file);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

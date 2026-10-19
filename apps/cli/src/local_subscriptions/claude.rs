@@ -7,9 +7,9 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{BufRead, BufReader, Read, Write},
+    io::Read,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -135,14 +135,6 @@ impl Drop for WorkDir {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-struct Process(Child);
-impl Drop for Process {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// Remove endpoint, API-key, and provider overrides before invoking local OAuth.
 fn command(binary: &Path, source: &Path, cwd: &Path) -> Command {
     let mut command = Command::new(binary);
@@ -199,44 +191,6 @@ fn safety_args(command: &mut Command) {
         "--settings",
         r#"{"disableAllHooks":true,"enabledPlugins":{},"alwaysThinkingEnabled":false}"#,
     ]);
-}
-fn output_channel(
-    child: &mut Child,
-) -> Result<mpsc::Receiver<std::result::Result<String, String>>> {
-    let stdout = child.stdout.take().ok_or_else(|| local_error("stdout"))?;
-    let (send, receive) = mpsc::sync_channel(64);
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout.take(LIMIT + 1));
-        let mut total = 0usize;
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(count) => {
-                    total += count;
-                    if total as u64 > LIMIT {
-                        let _ =
-                            send.send(Err("Claude Code output exceeded the host limit.".into()));
-                        break;
-                    }
-                    if send.send(Ok(line)).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    let _ = send.send(Err("Cannot read the Claude Code output.".into()));
-                    break;
-                }
-            }
-        }
-    });
-    Ok(receive)
-}
-fn write_json(child: &mut Child, value: &Value) -> Result<()> {
-    let stdin = child.stdin.as_mut().ok_or_else(|| local_error("stdin"))?;
-    serde_json::to_writer(&mut *stdin, value).map_err(local_error)?;
-    stdin.write_all(b"\n").map_err(local_error)?;
-    stdin.flush().map_err(local_error)
 }
 fn parse_models(value: &Value) -> Result<Vec<Model>> {
     let entries = value["models"]
@@ -310,10 +264,17 @@ impl AccountManager {
         let work = WorkDir::new()?;
         let mut command = command(binary, &source, &work.0);
         command.args(["auth", "status", "--json"]);
-        let mut process = Process(command.spawn().map_err(|_| "missing_cli".to_owned())?);
-        let output = output_channel(&mut process.0)?;
-        drop(process.0.stdin.take());
         let deadline = deadline.min(Instant::now() + Duration::from_secs(15));
+        let mut process =
+            Process::spawn(&mut command, deadline, cancellation).map_err(|state| {
+                if matches!(state.as_str(), "timeout" | "cancelled") {
+                    state
+                } else {
+                    "missing_cli".into()
+                }
+            })?;
+        let output = output_channel(&mut process)?;
+        process.close_input();
         let mut buffer = String::new();
         loop {
             if cancellation.is_some_and(CancellationToken::is_cancelled) {
@@ -537,13 +498,15 @@ impl AccountManager {
             "--system-prompt",
             "Report initialization metadata only.",
         ]);
-        let mut process = Process(command.spawn().map_err(local_error)?);
-        let output = output_channel(&mut process.0)?;
-        write_json(
-            &mut process.0,
-            &json!({"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}),
-        )?;
         let deadline = Instant::now() + Duration::from_secs(20);
+        let mut process = Process::spawn(&mut command, deadline, None)?;
+        let output = output_channel(&mut process)?;
+        write_json(
+            &mut process,
+            &json!({"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}),
+            deadline,
+            None,
+        )?;
         loop {
             if Instant::now() >= deadline {
                 return Err("Claude Code model discovery timed out.".into());
@@ -613,8 +576,11 @@ impl AccountManager {
 
 #[path = "claude/process.rs"]
 mod process;
+#[path = "claude/io.rs"]
+mod process_io;
 #[cfg(test)]
 use process::{McpServer, prepare, response_sse};
+use process_io::{Process, output_channel, write_json};
 #[cfg(test)]
 #[path = "claude/tests.rs"]
 mod tests;

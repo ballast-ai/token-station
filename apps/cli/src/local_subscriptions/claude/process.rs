@@ -33,7 +33,7 @@ pub(super) fn execute(
             "Cannot create the isolated Claude process directory.",
         )
     })?;
-    let server = McpServer::new(prepared.tools.clone()).map_err(|_| {
+    let server = McpServer::with_deadline(prepared.tools.clone(), deadline).map_err(|_| {
         error(
             ErrorCode::Internal,
             500,
@@ -79,16 +79,19 @@ pub(super) fn execute(
         .arg(&config_path)
         .arg("--system-prompt-file")
         .arg(&system_path);
-    let mut process = Process(command.spawn().map_err(|_| {
-        error(
-            ErrorCode::UpstreamUnavailable,
-            503,
-            "Cannot start Claude Code.",
+    let mut process = Process::spawn(&mut command, deadline, cancellation).map_err(|state| {
+        io_error(
+            &state,
+            error(
+                ErrorCode::UpstreamUnavailable,
+                503,
+                "Cannot start Claude Code.",
+            ),
         )
-    })?);
-    let output = output_channel(&mut process.0)
+    })?;
+    let output = output_channel(&mut process)
         .map_err(|_| error(ErrorCode::Internal, 500, "Cannot read the Claude process."))?;
-    write_json(&mut process.0,&json!({"type":"control_request","request_id":"initialize","request":{"subtype":"initialize"}})).map_err(|_| error(ErrorCode::Internal,500,"Cannot initialize Claude Code."))?;
+    write_json(&mut process,&json!({"type":"control_request","request_id":"initialize","request":{"subtype":"initialize"}}),deadline,cancellation).map_err(|state| io_error(&state,error(ErrorCode::Internal,500,"Cannot initialize Claude Code.")))?;
     collect_response(
         &mut process,
         &output,
@@ -98,6 +101,14 @@ pub(super) fn execute(
         deadline,
         cancellation,
     )
+}
+
+fn io_error(state: &str, fallback: ErrorEnvelope) -> ErrorEnvelope {
+    match state {
+        "cancelled" => error(ErrorCode::Timeout, 499, "The Claude request was cancelled."),
+        "timeout" => error(ErrorCode::Timeout, 504, "The Claude request timed out."),
+        _ => fallback,
+    }
 }
 
 fn collect_response(
@@ -147,11 +158,11 @@ fn collect_response(
                             ));
                         }
                         initialized = true;
-                        write_json(&mut process.0,&json!({"type":"user","message":{"role":"user","content":prepared.prompt}})).map_err(|_| error(ErrorCode::UpstreamUnavailable,503,"Cannot submit the Claude request."))?;
+                        write_json(process,&json!({"type":"user","message":{"role":"user","content":prepared.prompt}}),deadline,cancellation).map_err(|state| io_error(&state,error(ErrorCode::UpstreamUnavailable,503,"Cannot submit the Claude request.")))?;
                     }
                     Some("control_request") => {
                         let request_id = &event["request_id"];
-                        write_json(&mut process.0,&json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"deny","message":"Only caller-owned tools are permitted."}}})).map_err(|_| error(ErrorCode::Internal,500,"Cannot deny a Claude permission request."))?;
+                        write_json(process,&json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"deny","message":"Only caller-owned tools are permitted."}}}),deadline,cancellation).map_err(|state| io_error(&state,error(ErrorCode::Internal,500,"Cannot deny a Claude permission request.")))?;
                     }
                     Some("assistant")
                         if event.get("parent_tool_use_id").is_none_or(Value::is_null) =>
@@ -510,7 +521,11 @@ pub(super) struct McpServer {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl McpServer {
+    #[cfg(test)]
     pub(super) fn new(tools: Vec<Value>) -> Result<Self> {
+        Self::with_deadline(tools, Instant::now() + Duration::from_secs(20))
+    }
+    pub(super) fn with_deadline(tools: Vec<Value>, deadline: Instant) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(local_error)?;
         listener.set_nonblocking(true).map_err(local_error)?;
         let address = listener.local_addr().map_err(local_error)?;
@@ -520,10 +535,11 @@ impl McpServer {
         let stopped = stop.clone();
         let (send, calls) = mpsc::sync_channel(8);
         let thread = std::thread::spawn(move || {
-            while !stopped.load(Ordering::Relaxed) {
+            while !stopped.load(Ordering::Relaxed) && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
-                        let _ = handle_mcp(&mut socket, &path, &tools, &send, &stopped);
+                        let _ =
+                            handle_mcp_until(&mut socket, &path, &tools, &send, &stopped, deadline);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -548,6 +564,7 @@ impl Drop for McpServer {
         }
     }
 }
+#[cfg(test)]
 pub(super) fn handle_mcp(
     socket: &mut TcpStream,
     path: &str,
@@ -555,24 +572,43 @@ pub(super) fn handle_mcp(
     calls: &mpsc::SyncSender<Value>,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
-    // macOS can inherit nonblocking mode from the listening socket.
-    // Request reads and complete response writes require blocking accepted sockets.
-    socket.set_nonblocking(false)?;
+    handle_mcp_until(
+        socket,
+        path,
+        tools,
+        calls,
+        stop,
+        Instant::now() + Duration::from_secs(2),
+    )
+}
+
+fn handle_mcp_until(
+    socket: &mut TcpStream,
+    path: &str,
+    tools: &[Value],
+    calls: &mpsc::SyncSender<Value>,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    socket.set_nonblocking(true)?;
     socket.set_nodelay(true)?;
-    socket.set_read_timeout(Some(Duration::from_secs(1)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(1)))?;
-    let (authorized, request) = read_mcp_request(socket, path)?;
+    let framing_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+    let (authorized, request) = read_mcp_request(socket, path, stop, framing_deadline)?;
     if !authorized {
-        socket.write_all(
+        return write_mcp_bytes(
+            socket,
             b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        )?;
-        return Ok(());
+            stop,
+            framing_deadline,
+        );
     }
     if request.get("id").is_none() {
-        socket.write_all(
+        return write_mcp_bytes(
+            socket,
             b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        )?;
-        return Ok(());
+            stop,
+            framing_deadline,
+        );
     }
     let result = match request["method"].as_str() {
         Some("initialize") => {
@@ -589,23 +625,34 @@ pub(super) fn handle_mcp(
                 return Ok(());
             };
             let _ = calls.try_send(json!({"name":name,"arguments":params["arguments"]}));
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(5));
             }
             return Ok(());
         }
         _ => {
             let body = json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"Method not found"}}).to_string();
-            return write_http_json(socket, &body);
+            return write_http_json(socket, &body, stop, framing_deadline);
         }
     };
     write_http_json(
         socket,
         &json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string(),
+        stop,
+        framing_deadline,
     )
 }
-fn read_mcp_request(socket: &TcpStream, path: &str) -> std::io::Result<(bool, Value)> {
-    let mut reader = BufReader::new(socket.try_clone()?);
+fn read_mcp_request(
+    socket: &TcpStream,
+    path: &str,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> std::io::Result<(bool, Value)> {
+    let mut reader = BufReader::new(McpReader {
+        socket,
+        stop,
+        deadline,
+    });
     let request_line = read_http_header_line(&mut reader, 16 * 1024)?;
     let parts = request_line.split_whitespace().collect::<Vec<_>>();
     if parts.len() != 3 || parts[2] != "HTTP/1.1" {
@@ -655,10 +702,7 @@ fn read_mcp_request(socket: &TcpStream, path: &str) -> std::io::Result<(bool, Va
     let request: Value = serde_json::from_slice(&bytes)?;
     Ok((authorized, request))
 }
-fn read_http_header_line(
-    reader: &mut BufReader<TcpStream>,
-    budget: usize,
-) -> std::io::Result<String> {
+fn read_http_header_line(reader: &mut impl BufRead, budget: usize) -> std::io::Result<String> {
     if budget == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -678,10 +722,67 @@ fn read_http_header_line(
     Ok(line)
 }
 
-fn write_http_json(socket: &mut TcpStream, body: &str) -> std::io::Result<()> {
+struct McpReader<'a> {
+    socket: &'a TcpStream,
+    stop: &'a AtomicBool,
+    deadline: Instant,
+}
+
+fn check_mcp(stop: &AtomicBool, deadline: Instant) -> std::io::Result<()> {
+    if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "The MCP operation stopped.",
+        ));
+    }
+    Ok(())
+}
+
+impl Read for McpReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            check_mcp(self.stop, self.deadline)?;
+            match self.socket.read(bytes) {
+                Err(failure) if failure.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(failure) if failure.kind() == std::io::ErrorKind::Interrupted => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+fn write_mcp_bytes(
+    socket: &mut TcpStream,
+    mut bytes: &[u8],
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        check_mcp(stop, deadline)?;
+        match socket.write(bytes) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(count) => bytes = &bytes[count..],
+            Err(failure) if failure.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(failure) if failure.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(failure) => return Err(failure),
+        }
+    }
+    Ok(())
+}
+
+fn write_http_json(
+    socket: &mut TcpStream,
+    body: &str,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> std::io::Result<()> {
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    socket.write_all(response.as_bytes())
+    write_mcp_bytes(socket, response.as_bytes(), stop, deadline)
 }

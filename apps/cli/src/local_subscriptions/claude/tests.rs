@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 use std::net::TcpStream;
 
 #[test]
@@ -251,6 +252,245 @@ fn child_timeout_and_cancellation_terminate_the_process() {
     thread.join().unwrap();
     assert_eq!(failure.http_status, 499);
     assert!(!failure.message.contains("fixture@example.test"));
+}
+
+#[test]
+#[cfg(unix)]
+fn blocked_child_input_respects_deadline_and_cancellation_with_inherited_pipes() {
+    for cancelled in [false, true] {
+        let (_directory, manager) = fixture_manager(text_behavior());
+        let binary = manager.executable.as_ref().unwrap();
+        let script = fs::read_to_string(binary).unwrap();
+        let initialize = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"initialize","response":{}}}';;"#;
+        assert!(script.contains(initialize));
+        let blocked = initialize.replace(";;", "; sleep 2 <&0 & exit 0;;");
+        fs::write(binary, script.replace(initialize, &blocked)).unwrap();
+        let account = manager.connect().unwrap();
+        let mut request = fixture_request();
+        request.body.as_mut().unwrap()["messages"][0]["content"] = json!("x".repeat(1024 * 1024));
+        let token = CancellationToken::new();
+        let trigger = token.clone();
+        let cancellation = std::thread::spawn(move || {
+            if cancelled {
+                std::thread::sleep(Duration::from_millis(80));
+                trigger.cancel();
+            }
+        });
+        let started = Instant::now();
+        let failure = manager
+            .execute(
+                &account.id,
+                &request,
+                if cancelled {
+                    Duration::from_secs(3)
+                } else {
+                    Duration::from_millis(120)
+                },
+                Some(&token),
+            )
+            .unwrap_err();
+        cancellation.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "Blocked stdin escaped the request deadline"
+        );
+        assert_eq!(failure.http_status, if cancelled { 499 } else { 504 });
+    }
+}
+
+#[test]
+fn mcp_shutdown_interrupts_dripping_headers_and_body() {
+    use std::net::Shutdown;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    for body in [false, true] {
+        let server = McpServer::new(vec![]).unwrap();
+        let address = server.url.strip_prefix("http://").unwrap();
+        let (host, path) = address.split_once('/').unwrap();
+        let mut socket = TcpStream::connect(host).unwrap();
+        socket.set_nodelay(true).unwrap();
+        let prefix = if body {
+            format!("POST /{path} HTTP/1.1\r\nContent-Length: 1048576\r\n\r\n{{")
+        } else {
+            "POST /unknown HTTP/1.1\r\nX-Slow: ".to_owned()
+        };
+        socket.write_all(prefix.as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        let mut sender = socket.try_clone().unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let drip = running.clone();
+        let dripper = std::thread::spawn(move || {
+            while drip.load(std::sync::atomic::Ordering::Relaxed) {
+                if sender.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let (send, done) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(server);
+            send.send(()).unwrap();
+        });
+        let completed = done.recv_timeout(Duration::from_millis(350)).is_ok();
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Err(failure) = socket.shutdown(Shutdown::Both) {
+            assert_eq!(failure.kind(), std::io::ErrorKind::NotConnected);
+        }
+        dripper.join().unwrap();
+        shutdown.join().unwrap();
+        assert!(
+            completed,
+            "MCP shutdown waited for a dripping HTTP request (body={body})"
+        );
+    }
+}
+
+#[test]
+fn mcp_framing_has_an_absolute_deadline_for_dripping_requests() {
+    for body in [false, true] {
+        let server =
+            McpServer::with_deadline(vec![], Instant::now() + Duration::from_millis(120)).unwrap();
+        let address = server.url.strip_prefix("http://").unwrap();
+        let (host, path) = address.split_once('/').unwrap();
+        let mut socket = TcpStream::connect(host).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let prefix = if body {
+            format!("POST /{path} HTTP/1.1\r\nContent-Length: 1048576\r\n\r\n{{")
+        } else {
+            "POST /unknown HTTP/1.1\r\nX-Slow: ".to_owned()
+        };
+        socket.write_all(prefix.as_bytes()).unwrap();
+        let mut sender = socket.try_clone().unwrap();
+        let dripper = std::thread::spawn(move || {
+            for _ in 0..25 {
+                if sender.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        let mut byte = [0];
+        match socket.read(&mut byte) {
+            Ok(count) => assert_eq!(count, 0),
+            Err(failure) => assert_eq!(failure.kind(), std::io::ErrorKind::ConnectionReset),
+        }
+        assert!(started.elapsed() < Duration::from_millis(400));
+        dripper.join().unwrap();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn output_reader_shutdown_does_not_require_eof_or_queue_capacity() {
+    for script in ["sleep 2", "while :; do printf '%s\\n' '{}'; done"] {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]).stderr(Stdio::null());
+        let mut process =
+            Process::spawn(&mut command, Instant::now() + Duration::from_secs(1), None).unwrap();
+        let _receive = output_channel(&mut process).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        let started = Instant::now();
+        drop(process);
+        assert!(started.elapsed() < Duration::from_millis(400));
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_pipe_child() {
+    use std::io::BufRead;
+    let Some(mode) = std::env::var_os("TOKEN_STATION_TEST_CLAUDE_IO") else {
+        return;
+    };
+    if mode == "blocked" {
+        std::thread::sleep(Duration::from_secs(10));
+    } else {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        std::io::stdout().lock().write_all(line.as_bytes()).unwrap();
+        std::io::stdout().flush().unwrap();
+    }
+    std::process::exit(0);
+}
+
+#[cfg(windows)]
+fn windows_pipe_command(mode: &str) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "local_subscriptions::claude::tests::windows_pipe_child",
+            "--nocapture",
+            "--quiet",
+            "--test-threads=1",
+        ])
+        .env("TOKEN_STATION_TEST_CLAUDE_IO", mode)
+        .stderr(Stdio::null());
+    command
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_process_pipes_preserve_large_json() {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut process = Process::spawn(&mut windows_pipe_command("echo"), deadline, None).unwrap();
+    let output = output_channel(&mut process).unwrap();
+    let payload = json!({"payload":"x".repeat(1024 * 1024)});
+    write_json(&mut process, &payload, deadline, None).unwrap();
+    loop {
+        assert!(Instant::now() < deadline);
+        let line = output
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            assert_eq!(value, payload);
+            break;
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_blocked_input_respects_deadline_and_cancellation() {
+    for cancelled in [false, true] {
+        let token = CancellationToken::new();
+        let trigger = token.clone();
+        let mut process = Process::spawn(
+            &mut windows_pipe_command("blocked"),
+            Instant::now() + Duration::from_secs(3),
+            None,
+        )
+        .unwrap();
+        let _output = output_channel(&mut process).unwrap();
+        let cancellation = std::thread::spawn(move || {
+            if cancelled {
+                std::thread::sleep(Duration::from_millis(80));
+                trigger.cancel();
+            }
+        });
+        let started = Instant::now();
+        let failure = write_json(
+            &mut process,
+            &json!({"payload":"x".repeat(1024 * 1024)}),
+            started
+                + if cancelled {
+                    Duration::from_secs(3)
+                } else {
+                    Duration::from_millis(120)
+                },
+            Some(&token),
+        )
+        .unwrap_err();
+        drop(process);
+        cancellation.join().unwrap();
+        assert_eq!(failure, if cancelled { "cancelled" } else { "timeout" });
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 }
 
 fn mcp_post(server: &McpServer, method: &str, params: &Value) -> String {
