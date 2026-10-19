@@ -9,11 +9,13 @@
 //! here. Nothing in this module opens a socket: translation and transport are
 //! separate seams (see `south_provider_call`).
 
+use std::io::Read;
 use std::path::Path;
+use std::sync::Mutex;
 
 use std::collections::BTreeSet;
 
-use south_provider_api::HostExpectationsV1;
+use south_provider_api::{ComponentManifestV1, HostExpectationsV1, compatibility_matches};
 use south_provider_runtime::{
     CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, LoadedComponentV1, NoSecretsV1,
     RuntimeLimitsV1,
@@ -134,7 +136,11 @@ pub fn host_expectations() -> HostExpectationsV1 {
 
 /// A v2 component, loaded through the South gates.
 pub struct SouthComponentAdapter {
-    component: LoadedComponentV1,
+    component: Mutex<Option<LoadedComponentV1>>,
+    runtime: ComponentRuntimeV1,
+    manifest_source: String,
+    wasm: Vec<u8>,
+    manifest: ComponentManifestV1,
 }
 
 impl SouthComponentAdapter {
@@ -156,7 +162,14 @@ impl SouthComponentAdapter {
             NoSecretsV1,
         )
         .map_err(|error| format!("south v2 component: {error}"))?;
-        Ok(Self { component })
+        let manifest = component.manifest().clone();
+        Ok(Self {
+            component: Mutex::new(Some(component)),
+            runtime: runtime.clone(),
+            manifest_source: manifest_source.to_owned(),
+            wasm: wasm.to_vec(),
+            manifest,
+        })
     }
 
     /// Loads `manifest.json` and `component.wasm` from a package directory
@@ -166,15 +179,64 @@ impl SouthComponentAdapter {
     ///
     /// The South loader's refusal, formatted with the directory.
     pub fn load_dir(runtime: &ComponentRuntimeV1, dir: &Path) -> Result<Self, String> {
-        let component = LoadedComponentV1::load(runtime, dir, &host_expectations(), NoSecretsV1)
-            .map_err(|error| format!("south v2 component at {}: {error}", dir.display()))?;
-        Ok(Self { component })
+        let snapshot = || {
+            let bytes = read_snapshot_file(&dir.join("manifest.json"), 256 * 1024)?;
+            let manifest_source = String::from_utf8(bytes)
+                .map_err(|error| format!("manifest.json is not UTF-8: {error}"))?;
+            let manifest: ComponentManifestV1 = serde_json::from_str(&manifest_source)
+                .map_err(|error| format!("manifest.json is not a manifest: {error}"))?;
+            manifest
+                .validate()
+                .map_err(|error| format!("manifest refused: {error}"))?;
+            compatibility_matches(&manifest, &host_expectations())
+                .map_err(|error| format!("component is not compatible with this host: {error}"))?;
+            let wasm = read_snapshot_file(&dir.join("component.wasm"), 64 * 1024 * 1024)?;
+            Self::load_embedded(runtime, &manifest_source, &wasm)
+        };
+        snapshot().map_err(|error| format!("south v2 component at {}: {error}", dir.display()))
+    }
+
+    fn current<'slot>(
+        &self,
+        slot: &'slot mut Option<LoadedComponentV1>,
+    ) -> AdapterResult<&'slot LoadedComponentV1> {
+        if slot.is_none() {
+            *slot = Some(
+                LoadedComponentV1::load_embedded(
+                    &self.runtime,
+                    &self.manifest_source,
+                    &self.wasm,
+                    &host_expectations(),
+                    NoSecretsV1,
+                )
+                .map_err(|error| {
+                    internal(format_args!("cannot restore provider component: {error}"))
+                })?,
+            );
+        }
+        slot.as_ref()
+            .ok_or_else(|| internal("provider component is unavailable"))
+    }
+
+    fn call(
+        &self,
+        operation: impl FnOnce(&LoadedComponentV1) -> Result<String, CallErrorV1>,
+    ) -> AdapterResult<String> {
+        let mut slot = self
+            .component
+            .lock()
+            .map_err(|_| internal("provider component lock is poisoned"))?;
+        let result = operation(self.current(&mut slot)?);
+        if result.as_ref().is_err_and(invalidates_instance) {
+            slot.take();
+        }
+        result.map_err(|error| seam_error(&error))
     }
 
     /// The provider dialect families the loaded component's manifest declares.
     #[must_use]
     pub fn dialects(&self) -> Vec<String> {
-        self.component.manifest().providers.clone()
+        self.manifest.providers.clone()
     }
 
     /// The auth shapes this component's manifest declares it can carry.
@@ -186,15 +248,55 @@ impl SouthComponentAdapter {
     /// the answer, and admission has already verified the manifest.
     #[must_use]
     pub fn auth_arms(&self) -> BTreeSet<String> {
-        self.component.manifest().auth_arms.clone()
+        self.manifest.auth_arms.clone()
     }
 
     /// The package name its manifest reports, for diagnostics that have to name
     /// which of several components is being talked about.
     #[must_use]
     pub fn package_name(&self) -> String {
-        self.component.manifest().name.clone()
+        self.manifest.name.clone()
     }
+}
+
+fn read_snapshot_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let read = || -> Result<Vec<u8>, String> {
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("package entry is not a regular file".into());
+        }
+        if metadata.len() > limit {
+            return Err(format!("file exceeds the {limit} byte limit"));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path).map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("package entry is not a regular file".into());
+        }
+        if metadata.len() > limit {
+            return Err(format!("file exceeds the {limit} byte limit"));
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+            return Err(format!("file exceeds the {limit} byte limit"));
+        }
+        Ok(bytes)
+    };
+    read().map_err(|error| format!("cannot read `{}`: {error}", path.display()))
+}
+
+fn invalidates_instance(error: &CallErrorV1) -> bool {
+    matches!(error, CallErrorV1::Trap(_) | CallErrorV1::Deadline)
 }
 
 fn internal(detail: impl std::fmt::Display) -> ErrorEnvelope {
@@ -224,10 +326,8 @@ fn from_json<T: for<'de> serde::Deserialize<'de>>(json: &str) -> AdapterResult<T
 
 impl ProviderAdapter for SouthComponentAdapter {
     fn model_capabilities(&self, config: &ProviderConfig) -> AdapterResult<Vec<ModelCapability>> {
-        let out = self
-            .component
-            .call_model_capabilities(&to_json(config)?)
-            .map_err(|error| seam_error(&error))?;
+        let config = to_json(config)?;
+        let out = self.call(|component| component.call_model_capabilities(&config))?;
         from_json(&out)
     }
 
@@ -236,35 +336,37 @@ impl ProviderAdapter for SouthComponentAdapter {
         request: &ChatRequest,
         config: &ProviderConfig,
     ) -> AdapterResult<HttpRequestDescriptor> {
-        let out = self
-            .component
-            .call_build_http_request(&to_json(request)?, &to_json(config)?)
-            .map_err(|error| seam_error(&error))?;
+        let request = to_json(request)?;
+        let config = to_json(config)?;
+        let out = self.call(|component| component.call_build_http_request(&request, &config))?;
         from_json(&out)
     }
 
     fn parse_response(&self, parts: &HttpResponseParts) -> AdapterResult<ChatResponse> {
-        let out = self
-            .component
-            .call_parse_response(&to_json(parts)?)
-            .map_err(|error| seam_error(&error))?;
+        let parts = to_json(parts)?;
+        let out = self.call(|component| component.call_parse_response(&parts))?;
         from_json(&out)
     }
 
     fn map_provider_error(&self, parts: &HttpResponseParts) -> AdapterResult<ErrorEnvelope> {
-        let out = self
-            .component
-            .call_map_provider_error(&to_json(parts)?)
-            .map_err(|error| seam_error(&error))?;
+        let parts = to_json(parts)?;
+        let out = self.call(|component| component.call_map_provider_error(&parts))?;
         from_json(&out)
     }
 
     fn stream_parser(&self) -> Box<dyn StreamParser> {
-        match self.component.open_stream() {
+        let stream = self
+            .component
+            .lock()
+            .map_err(|_| internal("provider component lock is poisoned"))
+            .and_then(|mut slot| {
+                self.current(&mut slot)?
+                    .open_stream()
+                    .map_err(|error| seam_error(&error))
+            });
+        match stream {
             Ok(stream) => Box::new(SouthComponentStreamParser { stream }),
-            Err(error) => Box::new(BrokenStreamParser {
-                envelope: seam_error(&error),
-            }),
+            Err(error) => Box::new(BrokenStreamParser { envelope: error }),
         }
     }
 }
@@ -272,7 +374,7 @@ impl ProviderAdapter for SouthComponentAdapter {
 impl std::fmt::Debug for SouthComponentAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SouthComponentAdapter")
-            .field("metadata", &self.component.metadata())
+            .field("metadata", &self.manifest.metadata())
             .finish_non_exhaustive()
     }
 }
@@ -303,5 +405,29 @@ struct BrokenStreamParser {
 impl StreamParser for BrokenStreamParser {
     fn parse_chunk(&mut self, _: &StreamChunk) -> AdapterResult<Vec<StreamEvent>> {
         Err(self.envelope.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalidates_instance;
+    use south_provider_runtime::CallErrorV1;
+
+    #[test]
+    fn only_traps_and_deadlines_invalidate_a_regular_instance() {
+        for (error, invalidated) in [
+            (CallErrorV1::Trap("synthetic".into()), true),
+            (CallErrorV1::Deadline, true),
+            (CallErrorV1::Component("{}".into()), false),
+            (
+                CallErrorV1::PayloadTooLarge {
+                    limit: 16 * 1024 * 1024,
+                },
+                false,
+            ),
+            (CallErrorV1::StreamLimit, false),
+        ] {
+            assert_eq!(invalidates_instance(&error), invalidated);
+        }
     }
 }

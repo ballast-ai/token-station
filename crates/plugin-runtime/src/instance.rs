@@ -12,8 +12,6 @@
 //! than a type parameter and forcing them through this trait would hide the
 //! differences that matter, not the ones that don't.
 
-use std::sync::Mutex;
-
 use token_station_conformance::AdapterResult;
 use token_station_plugin_api::AdapterMetadata;
 use wasmtime::Store;
@@ -48,6 +46,7 @@ pub(crate) trait AdapterWorld: Sized {
 pub(crate) struct InstanceHandle<W> {
     pub(crate) store: Store<Ctx>,
     pub(crate) instance: W,
+    pub(crate) trapped: bool,
 }
 
 /// Builds one instance with its own locked-down store, wiring the store
@@ -63,7 +62,11 @@ pub(crate) fn instantiate<W: AdapterWorld>(
     store.set_epoch_deadline(runtime.deadline_ticks());
 
     let instance = W::instantiate_world(&mut store, component, linker)?;
-    Ok(InstanceHandle { store, instance })
+    Ok(InstanceHandle {
+        store,
+        instance,
+        trapped: false,
+    })
 }
 
 impl<W: AdapterWorld> InstanceHandle<W> {
@@ -79,23 +82,23 @@ impl<W: AdapterWorld> InstanceHandle<W> {
 /// Runs one guest call with a fresh deadline, mapping a trap to the
 /// adapter-shaped error the trait promises.
 ///
-/// [`crate::AgentPlugin`] holds its live instance behind a
-/// `Mutex<InstanceHandle<W>>` — the lock, not a type parameter on `Self`, is
-/// what this needs.
+/// The caller holds the instance lifecycle lock and discards trapped instances.
 pub(crate) fn call<W, T>(
     runtime: &PluginRuntime,
-    main: &Mutex<InstanceHandle<W>>,
+    handle: &mut InstanceHandle<W>,
     operation: impl FnOnce(&mut InstanceHandle<W>) -> wasmtime::Result<Result<T, String>>,
 ) -> AdapterResult<T> {
-    let mut handle = main.lock().expect("a poisoned adapter stays poisoned");
     handle.store.set_epoch_deadline(runtime.deadline_ticks());
 
-    match operation(&mut handle) {
+    match operation(handle) {
         Ok(Ok(value)) => Ok(value),
         // The adapter answered with its own ErrorEnvelope, as JSON.
         Ok(Err(error_json)) => Err(parse_error_envelope(&error_json)),
         // The adapter trapped: deadline, memory, panic. All the same to the
         // caller — the adapter did not answer.
-        Err(trap) => Err(trap_envelope(&trap)),
+        Err(trap) => {
+            handle.trapped = true;
+            Err(trap_envelope(&trap))
+        }
     }
 }

@@ -87,6 +87,9 @@ fn runtime() -> PluginRuntime {
     .expect("engine builds")
 }
 
+#[path = "official_plugins/recovery.rs"]
+mod recovery;
+
 fn envelope(protocol: &str, body: serde_json::Value) -> AgentRequestEnvelope {
     AgentRequestEnvelope {
         protocol: protocol.to_owned(),

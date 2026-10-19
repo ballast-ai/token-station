@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -6,17 +7,17 @@ use serde_json::Value;
 use token_station_conformance::{AdapterResult, AgentAdapter, reported_identity_matches};
 use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata};
 use token_station_protocol::{
-    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorEnvelope,
+    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope,
+    StreamEvent,
 };
 use wasmtime::Store;
 use wasmtime::component::{Component, Linker};
 
 use crate::bindings::agent::AgentAdapterV1;
 use crate::bindings::agent::token_station::adapter::common as wit_common;
-use crate::instance::{AdapterWorld, InstanceHandle, call, instantiate};
+use crate::instance::{AdapterWorld, InstanceHandle, call as call_guest, instantiate};
 use crate::loader::{
     Ctx, FORBIDDEN_FOR_AGENTS, LoadError, from_json, parse_package, read_package, to_json,
-    trap_envelope,
 };
 use crate::runtime::PluginRuntime;
 
@@ -30,7 +31,68 @@ use crate::runtime::PluginRuntime;
 pub struct AgentPlugin {
     runtime: PluginRuntime,
     manifest: AdapterManifest,
-    main: Mutex<InstanceHandle<AgentAdapterV1>>,
+    component: Component,
+    linker: Linker<Ctx>,
+    main: Mutex<AgentState>,
+}
+
+const MAX_ACTIVE_STREAMS: usize = 1024;
+const MAX_STREAM_ID_BYTES: usize = 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamEpoch {
+    Current,
+    Stale,
+}
+
+struct AgentState {
+    instance: Option<InstanceHandle<AgentAdapterV1>>,
+    streams: BTreeMap<String, StreamEpoch>,
+    unidentified_stale: bool,
+}
+
+impl AgentState {
+    fn admit_stream(&mut self, id: Option<&str>, terminal: bool) -> AdapterResult<()> {
+        let lost = || {
+            ErrorEnvelope::new(
+                ErrorCode::TransportTruncated,
+                502,
+                "adapter stream state was lost after a resource failure",
+            )
+        };
+        let Some(id) = id else {
+            return if self.unidentified_stale {
+                Err(lost())
+            } else {
+                Ok(())
+            };
+        };
+        if self.streams.get(id) == Some(&StreamEpoch::Stale) {
+            if terminal {
+                self.streams.remove(id);
+            }
+            return Err(lost());
+        }
+        if !self.streams.contains_key(id) {
+            if self.streams.len() >= MAX_ACTIVE_STREAMS {
+                return Err(ErrorEnvelope::new(
+                    ErrorCode::Capability,
+                    400,
+                    "adapter reached the 1024-stream safety limit",
+                ));
+            }
+            self.streams.insert(id.to_owned(), StreamEpoch::Current);
+        }
+        Ok(())
+    }
+
+    fn invalidate(&mut self) {
+        self.instance = None;
+        self.streams
+            .values_mut()
+            .for_each(|epoch| *epoch = StreamEpoch::Stale);
+        self.unidentified_stale = true;
+    }
 }
 
 /// The host-facing result of [`AgentPlugin::match_inbound`]: whether the
@@ -88,21 +150,18 @@ impl AgentPlugin {
         let mut linker: Linker<Ctx> = Linker::new(runtime.engine());
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(LoadError::NotAnAdapter)?;
 
-        let ctx = agent_ctx(runtime);
-        let mut handle: InstanceHandle<AgentAdapterV1> =
-            instantiate(runtime, component, &linker, ctx).map_err(LoadError::Probe)?;
-        let reported = handle.call_metadata(runtime).map_err(LoadError::Probe)?;
-        if !reported_identity_matches(&reported, &manifest) {
-            return Err(LoadError::IdentityMismatch {
-                declared: Box::new(manifest.metadata()),
-                reported: Box::new(reported),
-            });
-        }
+        let handle = instantiate_identity(runtime, &manifest, component, &linker)?;
 
         Ok(Self {
             runtime: runtime.clone(),
             manifest,
-            main: Mutex::new(handle),
+            component: component.clone(),
+            linker,
+            main: Mutex::new(AgentState {
+                instance: Some(handle),
+                streams: BTreeMap::new(),
+                unidentified_stale: false,
+            }),
         })
     }
 
@@ -132,21 +191,73 @@ impl AgentPlugin {
     /// stays poisoned rather than running on it.
     pub fn match_inbound(&self, request_head: &Value) -> AdapterResult<MatchOutcome> {
         let head_json = to_json(request_head)?;
-        let mut guard = self.main.lock().expect("a poisoned adapter stays poisoned");
-        let handle: &mut InstanceHandle<AgentAdapterV1> = &mut guard;
-        handle
-            .store
-            .set_epoch_deadline(self.runtime.deadline_ticks());
-        let result = handle
-            .instance
-            .token_station_adapter_agent_adapter()
-            .call_match_inbound(&mut handle.store, &head_json)
-            .map_err(|trap| trap_envelope(&trap))?;
+        let result = self.call(|handle| {
+            handle
+                .instance
+                .token_station_adapter_agent_adapter()
+                .call_match_inbound(&mut handle.store, &head_json)
+                .map(Ok)
+        })?;
         Ok(MatchOutcome {
             matched: result.matched,
             protocol: result.protocol,
         })
     }
+
+    fn call<T>(
+        &self,
+        operation: impl FnOnce(
+            &mut InstanceHandle<AgentAdapterV1>,
+        ) -> wasmtime::Result<Result<T, String>>,
+    ) -> AdapterResult<T> {
+        let mut state = self.main.lock().expect("a poisoned adapter stays poisoned");
+        self.call_locked(&mut state, operation)
+    }
+
+    fn call_locked<T>(
+        &self,
+        state: &mut AgentState,
+        operation: impl FnOnce(
+            &mut InstanceHandle<AgentAdapterV1>,
+        ) -> wasmtime::Result<Result<T, String>>,
+    ) -> AdapterResult<T> {
+        if state.instance.is_none() {
+            let instance =
+                instantiate_identity(&self.runtime, &self.manifest, &self.component, &self.linker)
+                    .map_err(|_| {
+                        ErrorEnvelope::new(
+                            ErrorCode::Internal,
+                            500,
+                            "adapter instance recovery failed",
+                        )
+                    })?;
+            state.instance = Some(instance);
+        }
+        let handle = state.instance.as_mut().expect("instance initialized above");
+        let result = call_guest(&self.runtime, handle, operation);
+        if handle.trapped {
+            state.invalidate();
+        }
+        result
+    }
+}
+
+fn instantiate_identity(
+    runtime: &PluginRuntime,
+    manifest: &AdapterManifest,
+    component: &Component,
+    linker: &Linker<Ctx>,
+) -> Result<InstanceHandle<AgentAdapterV1>, LoadError> {
+    let mut handle: InstanceHandle<AgentAdapterV1> =
+        instantiate(runtime, component, linker, agent_ctx(runtime)).map_err(LoadError::Probe)?;
+    let reported = handle.call_metadata(runtime).map_err(LoadError::Probe)?;
+    if !reported_identity_matches(&reported, manifest) {
+        return Err(LoadError::IdentityMismatch {
+            declared: Box::new(manifest.metadata()),
+            reported: Box::new(reported),
+        });
+    }
+    Ok(handle)
 }
 
 /// The sandbox context an agent-world instance runs under.
@@ -200,7 +311,7 @@ impl AgentAdapter for AgentPlugin {
 
     fn normalize_inbound(&self, envelope: &AgentRequestEnvelope) -> AdapterResult<ChatRequest> {
         let envelope_json = to_json(envelope)?;
-        let out = call(&self.runtime, &self.main, |handle| {
+        let out = self.call(|handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
@@ -211,7 +322,7 @@ impl AgentAdapter for AgentPlugin {
 
     fn extract_agent_hint(&self, envelope: &AgentRequestEnvelope) -> AdapterResult<Vec<AgentHint>> {
         let envelope_json = to_json(envelope)?;
-        let out = call(&self.runtime, &self.main, |handle| {
+        let out = self.call(|handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
@@ -223,7 +334,7 @@ impl AgentAdapter for AgentPlugin {
     fn render_response(&self, response: &ChatResponse, context: &Value) -> AdapterResult<Value> {
         let response_json = to_json(response)?;
         let context_json = to_json(context)?;
-        let out = call(&self.runtime, &self.main, |handle| {
+        let out = self.call(|handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
@@ -232,26 +343,43 @@ impl AgentAdapter for AgentPlugin {
         from_json(&out)
     }
 
-    fn render_stream_event(
-        &self,
-        event: &token_station_protocol::StreamEvent,
-        context: &Value,
-    ) -> AdapterResult<Value> {
+    fn render_stream_event(&self, event: &StreamEvent, context: &Value) -> AdapterResult<Value> {
+        let id = context
+            .get("stream_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        if id.is_some_and(|id| id.len() > MAX_STREAM_ID_BYTES) {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::InvalidRequest,
+                400,
+                "adapter stream identifier exceeded the host limit",
+            ));
+        }
+        let terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
         let event_json = to_json(event)?;
         let context_json = to_json(context)?;
-        let out = call(&self.runtime, &self.main, |handle| {
+        let mut state = self.main.lock().expect("a poisoned adapter stays poisoned");
+        state.admit_stream(id, terminal)?;
+        let result = self.call_locked(&mut state, |handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
                 .call_render_stream_event(&mut handle.store, &event_json, &context_json)
-        })?;
-        from_json(&out)
+        });
+        let output = result.and_then(|out| from_json(&out));
+        if terminal
+            && output.is_ok()
+            && let Some(id) = id
+        {
+            state.streams.remove(id);
+        }
+        output
     }
 
     fn map_inbound_error(&self, error: &ErrorEnvelope, context: &Value) -> AdapterResult<Value> {
         let error_json = to_json(error)?;
         let context_json = to_json(context)?;
-        let out = call(&self.runtime, &self.main, |handle| {
+        let out = self.call(|handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
