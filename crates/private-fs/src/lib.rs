@@ -382,21 +382,12 @@ fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let source = windows::wide(source)?;
+    let target = windows::wide(target)?;
     // SAFETY: both owned buffers are NUL-terminated and remain alive for the
     // synchronous Win32 call.
     let result = unsafe {
@@ -523,7 +514,7 @@ mod windows {
             lpSecurityDescriptor: descriptor.0,
             bInheritHandle: 0,
         };
-        let encoded = wide(path);
+        let encoded = wide(path)?;
         // SAFETY: path and security descriptor remain alive for this call.
         // CREATE_NEW cannot open or truncate an existing file.
         let handle = unsafe {
@@ -546,7 +537,7 @@ mod windows {
 
     pub(super) fn apply_owner_only_dacl(path: &Path) -> std::io::Result<()> {
         let descriptor = owner_only_descriptor()?;
-        let encoded = wide(path);
+        let encoded = wide(path)?;
         // SAFETY: both pointers remain valid for this synchronous call.
         let applied = unsafe {
             SetFileSecurityW(
@@ -565,7 +556,7 @@ mod windows {
     }
 
     pub(super) fn verify_owner_only_dacl(path: &Path) -> std::io::Result<()> {
-        let encoded = wide(path);
+        let encoded = wide(path)?;
         let mut owner = std::ptr::null_mut();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -748,8 +739,61 @@ mod windows {
         result
     }
 
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    pub(super) fn wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        if path.as_os_str().encode_wide().any(|unit| unit == 0) {
+            return Err(super::invalid("private path contains an embedded NUL"));
+        }
+        if let Some(name) = path.file_name() {
+            validate_final_component(name)?;
+        }
+        let absolute = std::path::absolute(path)?;
+        let normalized = if let Some(name) = absolute.file_name() {
+            let parent = absolute
+                .parent()
+                .ok_or_else(|| super::invalid("private path has no parent"))?;
+            std::fs::canonicalize(parent)?.join(name)
+        } else {
+            std::fs::canonicalize(&absolute)?
+        };
+        Ok(normalized
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect())
+    }
+
+    fn validate_final_component(name: &std::ffi::OsStr) -> std::io::Result<()> {
+        let name = name.to_string_lossy();
+        if name.ends_with(['.', ' ']) || name.contains(':') {
+            return Err(super::invalid(
+                "private path has an ambiguous final component",
+            ));
+        }
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(' ')
+            .to_ascii_uppercase();
+        let numbered_device = stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                let mut digits = suffix.chars();
+                matches!(
+                    digits.next(),
+                    Some('1'..='9' | '\u{00b9}' | '\u{00b2}' | '\u{00b3}')
+                ) && digits.next().is_none()
+            });
+        if numbered_device
+            || matches!(
+                stem.as_str(),
+                "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+            )
+        {
+            return Err(super::invalid("private path uses a reserved device name"));
+        }
+        Ok(())
     }
 
     fn denied(message: &'static str) -> std::io::Error {
@@ -772,6 +816,125 @@ mod tests {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         ))
+    }
+
+    #[cfg(windows)]
+    fn assert_private_path_lifecycle(root: &Path, target: &Path) {
+        ensure_private_dir(root).unwrap();
+        verify_private_dir(root).unwrap();
+        assert!(create_private_file(target, b"first").unwrap());
+        verify_private_file(target).unwrap();
+        verify_single_link_file(target).unwrap();
+        assert!(!create_private_file(target, b"unchanged").unwrap());
+        assert_eq!(std::fs::read(target).unwrap(), b"first");
+        write_atomic_private(target, b"second").unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"second");
+        verify_private_file(target).unwrap();
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owner_private_operations_support_long_unicode_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let scratch = scratch();
+        let mut root = scratch.join("unicode-\u{03bb}-\u{1f4be}");
+        while root.as_os_str().encode_wide().count() < 280 {
+            root.push("long-owner-private-directory-component");
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("state-\u{03bb}-\u{1f4be}.json");
+        assert_private_path_lifecycle(&root, &target);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replacement_supports_a_long_temporary_name_for_a_short_target() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let root = scratch();
+        let mut name = String::from("state-\u{03bb}-\u{1f4be}.json");
+        while root.join(&name).as_os_str().encode_wide().count() < 238 {
+            name.insert(0, 'x');
+        }
+        let target = root.join(name);
+        let length = target.as_os_str().encode_wide().count();
+        if length >= 248 {
+            eprintln!(
+                "The temporary root cannot contain a short target. Validate a long target instead."
+            );
+        } else {
+            assert!((238..248).contains(&length));
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        assert_private_path_lifecycle(&root, &target);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_embedded_nul_cannot_create_a_truncated_private_file() {
+        let root = scratch();
+        ensure_private_dir(&root).unwrap();
+        let target = root.join("truncated\0suffix");
+        assert_eq!(
+            create_private_file(&target, b"synthetic-private-value")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ambiguous_final_components_cannot_create_aliases_or_change_existing_files() {
+        let root = scratch();
+        ensure_private_dir(&root).unwrap();
+        let existing = root.join("existing");
+        create_private_file(&existing, b"preserved").unwrap();
+        let mut names = vec![
+            "new.".to_owned(),
+            "new ".to_owned(),
+            "existing.".to_owned(),
+            "existing ".to_owned(),
+            "existing:stream".to_owned(),
+        ];
+        for stem in ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"] {
+            names.extend([
+                stem.into(),
+                format!("{stem}.txt"),
+                format!("{stem} .txt"),
+                format!("{stem}:stream"),
+            ]);
+        }
+        for prefix in ["COM", "LPT"] {
+            for digit in "123456789\u{00b9}\u{00b2}\u{00b3}".chars() {
+                let stem = format!("{prefix}{digit}");
+                names.extend([
+                    stem.clone(),
+                    format!("{stem}.txt"),
+                    format!("{stem} .txt"),
+                    format!("{stem}:stream"),
+                ]);
+            }
+        }
+        for name in names {
+            for spelling in [name.clone(), name.to_ascii_lowercase()] {
+                let path = root.join(spelling);
+                assert!(create_private_file(&path, b"changed").is_err(), "{name}");
+                assert!(write_atomic_private(&path, b"changed").is_err(), "{name}");
+                assert!(harden_private_file(&path).is_err(), "{name}");
+                assert!(verify_private_file(&path).is_err(), "{name}");
+                assert_eq!(std::fs::read(&existing).unwrap(), b"preserved", "{name}");
+                assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "{name}");
+            }
+        }
+        verify_private_file(&existing).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
