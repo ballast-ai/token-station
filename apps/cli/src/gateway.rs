@@ -5497,12 +5497,48 @@ mod estimation_eligibility_tests {
 mod credential_presentation_tests {
     use super::Gateway;
     use serde_json::json;
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
+    use std::net::TcpStream;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use token_station_protocol::{Auth, ErrorCode, HttpMethod, HttpRequestDescriptor, SecretRef};
 
     const KEY: &str = "sk-combined-test";
+    const MAX_MOCK_HEADER_BYTES: usize = 16 * 1024;
+    const MAX_MOCK_BODY_BYTES: usize = 64 * 1024;
+
+    struct MockSocket<'socket> {
+        stream: &'socket mut TcpStream,
+        deadline: Instant,
+    }
+
+    impl MockSocket<'_> {
+        fn remaining(&self) -> io::Result<Duration> {
+            self.deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    impl Read for MockSocket<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.stream.set_read_timeout(Some(self.remaining()?))?;
+            self.stream.read(bytes)
+        }
+    }
+
+    impl Write for MockSocket<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.stream.set_write_timeout(Some(self.remaining()?))?;
+            self.stream.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.remaining()?;
+            self.stream.flush()
+        }
+    }
 
     /// One upstream on `base_url` whose `provider_api_key` slot reads `KEY` from a file.
     fn gateway(base_url: &str) -> Gateway {
@@ -5562,23 +5598,122 @@ mod credential_presentation_tests {
             .into()
     }
 
+    fn read_mock_request(reader: &mut impl Read) -> io::Result<(String, Vec<u8>)> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let boundary = loop {
+            if let Some(boundary) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                if boundary + 4 > MAX_MOCK_HEADER_BYTES {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                break boundary + 4;
+            }
+            if bytes.len() > MAX_MOCK_HEADER_BYTES {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let count = reader.read(&mut chunk)?;
+            if count == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+        };
+        let mut body = bytes.split_off(boundary);
+        let head =
+            String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        let mut length = None;
+        for line in head.lines().skip(1).filter(|line| !line.is_empty()) {
+            let (name, value) = line
+                .split_once(':')
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if name.eq_ignore_ascii_case("content-length") {
+                if length.is_some() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                length = Some(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?,
+                );
+            }
+        }
+        let length = length
+            .filter(|length| *length <= MAX_MOCK_BODY_BYTES)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        if body.len() > length {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let prefetched = body.len();
+        body.resize(length, 0);
+        reader.read_exact(&mut body[prefetched..])?;
+        Ok((head, body))
+    }
+
+    #[test]
+    fn credential_mock_consumes_complete_bodies_across_every_request_split() {
+        let head = "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 19\r\n\r\n";
+        let body = br#"{"model":"gpt-5.5"}"#;
+        assert_eq!(body.len(), 19);
+        let bytes = [head.as_bytes(), body].concat();
+        for split in 0..=bytes.len() {
+            let mut reader =
+                std::io::Cursor::new(&bytes[..split]).chain(std::io::Cursor::new(&bytes[split..]));
+            let (received_head, received_body) = read_mock_request(&mut reader).unwrap();
+            assert_eq!(received_head, head);
+            assert_eq!(received_body, body, "split={split}");
+        }
+    }
+
+    #[test]
+    fn credential_mock_rejects_ambiguous_oversized_and_truncated_requests() {
+        for request in [
+            "POST / HTTP/1.1\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: 65537\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\n{}".to_owned(),
+            "x".repeat(MAX_MOCK_HEADER_BYTES + 1),
+        ] {
+            assert_eq!(
+                read_mock_request(&mut io::Cursor::new(request))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let truncated = "POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\n{}";
+        assert_eq!(
+            read_mock_request(&mut io::Cursor::new(truncated))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
     #[test]
     fn the_combined_arm_presents_one_secret_as_bearer_and_as_its_header() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let upstream = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut bytes = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut chunk).unwrap();
-                assert!(count > 0, "peer closed before the request head");
-                bytes.extend_from_slice(&chunk[..count]);
-            }
+            let mut stream = MockSocket {
+                stream: &mut stream,
+                deadline: Instant::now() + Duration::from_secs(5),
+            };
+            let (head, body) = read_mock_request(&mut stream).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"model":"gpt-5.5"})
+            );
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
                 .unwrap();
-            String::from_utf8(bytes).unwrap().to_ascii_lowercase()
+            stream.flush().unwrap();
+            head.to_ascii_lowercase()
         });
 
         let gateway = gateway(&base_url);
