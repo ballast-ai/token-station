@@ -3,6 +3,14 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 pub(crate) fn api(status: u16, body: &str) -> (String, std::thread::JoinHandle<String>) {
+    api_before_response(status, body, || {})
+}
+
+pub(crate) fn api_before_response(
+    status: u16,
+    body: &str,
+    before_response: impl FnOnce() + Send + 'static,
+) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/search", listener.local_addr().unwrap());
     let body = body.to_owned();
@@ -32,6 +40,7 @@ pub(crate) fn api(status: u16, body: &str) -> (String, std::thread::JoinHandle<S
                 }
             }
         }
+        before_response();
         let _ = write!(
             socket,
             "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nLocation: http://127.0.0.1:1/stolen\r\n\r\n{body}",

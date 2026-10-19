@@ -668,13 +668,6 @@ impl Gateway {
                             }
                         })
                 };
-                if ctx.is_cancelled() {
-                    return Err(ErrorEnvelope::new(
-                        ErrorCode::Timeout,
-                        504,
-                        "Search request was cancelled.",
-                    ));
-                }
                 record
                     .browser_searches
                     .push(token_station_metrics::BrowserSearchRecord {
@@ -697,6 +690,13 @@ impl Gateway {
                             Err(error) => error.credits,
                         },
                     });
+                if ctx.is_cancelled() {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCode::Timeout,
+                        504,
+                        "Search request was cancelled.",
+                    ));
+                }
                 if let Ok(found) = &found {
                     known_sources.extend(found.results.iter().map(|source| source.url.clone()));
                 }
@@ -1372,6 +1372,11 @@ mod loop_tests {
     }
 
     #[test]
+    fn cancelled_tavily_operation_remains_observable_without_retry() {
+        run_scenario("api_cancelled");
+    }
+
+    #[test]
     fn forced_search_omission_is_not_a_successful_answer() {
         run_scenario("omitted");
     }
@@ -1412,7 +1417,10 @@ mod loop_tests {
                     return;
                 }
                 let deadline = Instant::now() + Duration::from_secs(5);
-                for round in 0..if matches!(scenario, "mixed" | "mixed_custom" | "omitted") {
+                for round in 0..if matches!(
+                    scenario,
+                    "mixed" | "mixed_custom" | "omitted" | "api_cancelled"
+                ) {
                     1
                 } else if scenario == "three" {
                     4
@@ -1557,7 +1565,8 @@ mod loop_tests {
                 *gateway.search.fixture.lock().unwrap() =
                     Some(Err("Managed search timed out.".into()));
             }
-            let api_worker = if scenario == "api" {
+            let ctx = RequestContext::detached(REQUEST_DEADLINE, UPSTREAM_TIMEOUT);
+            let api_worker = if matches!(scenario, "api" | "api_cancelled") {
                 gateway.search.save_tavily_key("fixture-secret").unwrap();
                 gateway
                     .search
@@ -1568,9 +1577,15 @@ mod loop_tests {
                         ..crate::search::SearchSettings::default()
                     })
                     .unwrap();
-                let (endpoint, worker) = crate::search::backend_tests::api(
+                let cancellation = ctx.token();
+                let (endpoint, worker) = crate::search::backend_tests::api_before_response(
                     200,
                     r#"{"results":[{"title":"Rust","url":"https://www.rust-lang.org/","content":"Official site"}],"usage":{"credits":1}}"#,
+                    move || {
+                        if scenario == "api_cancelled" {
+                            cancellation.cancel();
+                        }
+                    },
                 );
                 *gateway.search.tavily_endpoint.lock().unwrap() = Some(endpoint);
                 Some(worker)
@@ -1609,7 +1624,10 @@ mod loop_tests {
             }
             let mut answer = None;
             ready_tx.send(()).unwrap();
-            gateway.chat(
+            gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
                 "POST",
                 if anthropic {
                     "/v1/messages"
@@ -1632,13 +1650,32 @@ mod loop_tests {
                 assert_eq!(payload["query"], "Rust documentation");
                 assert!(payload.get("messages").is_none());
                 let records = recorder.0.lock().unwrap();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].browser_searches.len(), 1);
                 assert_eq!(
                     records[0].browser_searches[0].backend.as_deref(),
                     Some("tavily")
                 );
-                assert_eq!(records[0].browser_searches[0].credits, Some(1));
+                if scenario == "api_cancelled" {
+                    assert_eq!(
+                        records[0].browser_searches[0].error_kind.as_deref(),
+                        Some("cancelled")
+                    );
+                    assert_eq!(records[0].browser_searches[0].credits, None);
+                    let metadata = serde_json::to_string(&records[0].browser_searches).unwrap();
+                    assert!(!metadata.contains("fixture-secret"));
+                    assert!(!metadata.contains("Rust documentation"));
+                } else {
+                    assert_eq!(records[0].browser_searches[0].credits, Some(1));
+                }
             }
             worker.join().unwrap();
+            if scenario == "api_cancelled" {
+                assert_eq!(seen.lock().unwrap().len(), 1);
+                assert!(answer.is_none_or(|reply| reply.status >= 400));
+                std::fs::remove_dir_all(&root).unwrap();
+                continue;
+            }
             let answer = answer.unwrap();
             if scenario == "omitted" {
                 assert_eq!(
