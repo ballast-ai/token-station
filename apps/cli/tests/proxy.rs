@@ -656,11 +656,57 @@ struct Proxy {
     virtual_key: String,
     control: server::ServerControl,
     gateway: Arc<Gateway>,
+    server: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.control.stop_accepting();
+        self.control.cancel_in_flight();
+        let Some(server) = self.server.take() else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !server.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !server.is_finished() {
+            assert!(
+                std::thread::panicking(),
+                "The proxy fixture server did not stop within three seconds"
+            );
+            return;
+        }
+        let joined = server.join();
+        if !std::thread::panicking() {
+            joined.expect("the proxy fixture server exits cleanly");
+        }
+    }
 }
 
 /// Starts the whole server against `upstream`, auth on — the default posture.
 fn start_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
     start_proxy_with(upstream, key_file, true)
+}
+
+#[test]
+fn dropping_a_proxy_fixture_releases_its_listener_and_runtime() {
+    let mock = MockUpstream::start_hanging();
+    let key = key_file("proxy-fixture-lifetime", "sk-test-key-abc\n");
+    let proxy = start_proxy(&mock, &key);
+    let address = proxy.url.strip_prefix("http://").unwrap().to_owned();
+    let gateway = Arc::downgrade(&proxy.gateway);
+    drop(proxy);
+    assert!(
+        gateway.upgrade().is_none(),
+        "The server must release its Gateway when the fixture is dropped"
+    );
+    assert!(
+        TcpStream::connect(address).is_err(),
+        "The fixture listener must close before teardown completes"
+    );
+    mock.finish_hanging();
+    std::fs::remove_file(key).unwrap();
 }
 
 fn start_proxy_recording_bodies(upstream: &MockUpstream, key_file: &Path) -> Proxy {
@@ -1023,7 +1069,7 @@ fn spawn_proxy_inner_with_semantic(
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
 
-    std::thread::spawn(move || {
+    let server = std::thread::spawn(move || {
         runtime.block_on(async move {
             let listener = tokio::net::TcpListener::from_std(listener).expect("listener converts");
             server::serve(state, listener).await.expect("server runs");
@@ -1036,6 +1082,7 @@ fn spawn_proxy_inner_with_semantic(
         virtual_key,
         control,
         gateway,
+        server: Some(server),
     }
 }
 
@@ -1452,7 +1499,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
-    std::thread::spawn(move || {
+    let server = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1469,6 +1516,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         virtual_key,
         control,
         gateway,
+        server: Some(server),
     }
 }
 
@@ -5993,7 +6041,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
-    std::thread::spawn(move || {
+    let server = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -6010,6 +6058,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         virtual_key,
         control,
         gateway,
+        server: Some(server),
     }
 }
 
@@ -6173,7 +6222,7 @@ fn start_quota_proxy_two(
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
-    std::thread::spawn(move || {
+    let server = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -6190,6 +6239,7 @@ fn start_quota_proxy_two(
         virtual_key,
         control,
         gateway,
+        server: Some(server),
     }
 }
 
@@ -6404,7 +6454,7 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
-    std::thread::spawn(move || {
+    let server = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -6421,6 +6471,7 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
         virtual_key,
         control,
         gateway,
+        server: Some(server),
     }
 }
 
