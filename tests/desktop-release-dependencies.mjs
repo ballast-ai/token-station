@@ -39,4 +39,24 @@ for (const [dependency, minimum] of Object.entries({
   );
 }
 
+const desktopManifest = fs.readFileSync(path.join(root, "apps/desktop/src-tauri/Cargo.toml"), "utf8");
+const updaterDependency = desktopManifest.match(/^tauri-plugin-updater\s*=\s*(.+)$/m)?.[1];
+assert.ok(updaterDependency, "Desktop updater dependency is missing");
+assert.match(
+  updaterDependency,
+  /default-features\s*=\s*false/,
+  "Manual Windows updates must not enable the updater ZIP extraction feature",
+);
+assert.match(
+  updaterDependency,
+  /features\s*=\s*\[[^\]]*"rustls-tls"/,
+  "The macOS updater must retain its rustls transport",
+);
+const desktopRustLock = fs.readFileSync(path.join(root, "apps/desktop/src-tauri/Cargo.lock"), "utf8");
+assert.doesNotMatch(
+  desktopRustLock,
+  /^name = "zip"$/m,
+  "The desktop lockfile must exclude the unused vulnerable ZIP extraction dependency",
+);
+
 console.log("desktop release dependency floor: PASS");
