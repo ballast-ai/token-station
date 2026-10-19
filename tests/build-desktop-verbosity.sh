@@ -25,11 +25,13 @@ make_fixture() {
   chmod +x "$repo/scripts/build-desktop.sh" "$repo/scripts/official-packages.py"
   printf '{\n  "version": "1.1.3"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
 
+  expected_rust_builds=1
   local plugin
   while IFS= read -r plugin; do
     mkdir -p "$repo/plugins/official/$plugin/target/wasm32-wasip2/release"
     printf '{}\n' >"$repo/plugins/official/$plugin/manifest.json"
     : >"$repo/plugins/official/$plugin/target/wasm32-wasip2/release/${plugin//-/_}.wasm"
+    expected_rust_builds=$((expected_rust_builds + 1))
   done < <("$repo/scripts/official-packages.py" --field dir)
 
   cat >"$repo/scripts/audit-desktop-artifact.sh" <<'SCRIPT'
@@ -192,11 +194,13 @@ test_all_rust_builds_remap_private_host_paths() {
   checkout_remap="--remap-path-prefix=$repo_root=/build"
   cargo_home_remap="--remap-path-prefix=$fixture/cargo-home=/cargo"
   rust_sysroot_remap="--remap-path-prefix=$fixture/rust-sysroot=/rustc"
-  [[ "$(grep -Fc -- "$checkout_remap" "$state/cargo-rustflags" || true)" == "7" ]] \
+  [[ "$(grep -c '^' "$state/cargo-rustflags" || true)" == "$expected_rust_builds" ]] \
+    || fail "Rust builds did not cover every registered plugin and the Desktop gate"
+  [[ "$(grep -Fc -- "$checkout_remap" "$state/cargo-rustflags" || true)" == "$expected_rust_builds" ]] \
     || fail "plugin and Desktop Rust builds did not share the checkout path remap"
-  [[ "$(grep -Fc -- "$cargo_home_remap" "$state/cargo-rustflags" || true)" == "7" ]] \
+  [[ "$(grep -Fc -- "$cargo_home_remap" "$state/cargo-rustflags" || true)" == "$expected_rust_builds" ]] \
     || fail "plugin and Desktop Rust builds did not share the Cargo Home path remap"
-  [[ "$(grep -Fc -- "$rust_sysroot_remap" "$state/cargo-rustflags" || true)" == "7" ]] \
+  [[ "$(grep -Fc -- "$rust_sysroot_remap" "$state/cargo-rustflags" || true)" == "$expected_rust_builds" ]] \
     || fail "plugin and Desktop Rust builds did not share the Rust sysroot path remap"
 }
 
@@ -207,7 +211,7 @@ test_windows_builds_isolate_cargo_home_but_audit_the_private_path() {
   if grep -Fxq -- "$fixture/cargo-home" "$state/cargo-homes"; then
     fail "Windows Rust compilation used the private Cargo Home"
   fi
-  [[ "$(grep -c '/runner-temp/token-station-cargo-home$' "$state/cargo-homes" || true)" == "7" ]] \
+  [[ "$(grep -c '/runner-temp/token-station-cargo-home$' "$state/cargo-homes" || true)" == "$expected_rust_builds" ]] \
     || fail "Windows Rust builds did not share the isolated Cargo Home"
   grep -Fxq -- '--private-cargo-home' "$state/audit-args" \
     || fail "desktop audit was not told to check the private Cargo Home"
