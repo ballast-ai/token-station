@@ -76,7 +76,6 @@ export default function ChatGPTPlanPanel({ provider, onChanged, onConnected }: C
               return;
             }
             if (!callbacks.current.provider) await connectChatGPTProvider(accountId);
-            if (!mounted.current) return;
             await callbacks.current.onChanged?.();
             if (!mounted.current) return;
             callbacks.current.onConnected?.();
@@ -147,7 +146,6 @@ export default function ChatGPTPlanPanel({ provider, onChanged, onConnected }: C
   const visibleAccounts = provider ? accounts.filter(account => account.id === provider.credential_reference) : accounts;
   const connectAccount = (id: string) => runAction(async () => {
     await connectChatGPTProvider(id);
-    if (!mounted.current) return;
     await onChanged?.();
     if (!mounted.current) return;
     onConnected?.();
@@ -191,11 +189,10 @@ export default function ChatGPTPlanPanel({ provider, onChanged, onConnected }: C
       canDisconnect={account.state !== "signed_out"}
       onDisconnect={() => runAction(async () => {
         const result = await signOutChatGPT(account.id);
+        await onChanged?.();
         if (!mounted.current) return;
         setCatalogs(current => { const next = { ...current }; delete next[account.id]; return next; });
         await refreshAccounts();
-        if (!mounted.current) return;
-        await onChanged?.();
         if (!mounted.current) return;
         if (!result.remote_revoked) setError(copy("Signed out locally. Remote revocation is unconfirmed. Review connected apps in ChatGPT settings.", "已在本机退出，远端撤销尚未确认。请在 ChatGPT 设置中检查已连接的应用。", "已在本機登出，遠端撤銷尚未確認。請在 ChatGPT 設定中檢查已連接的應用程式。", "ローカルでサインアウトしました。リモートの失効は未確認です。ChatGPT 設定で接続済みアプリを確認してください。"));
         else setNotice(copy("Signed out. Remote access was revoked.", "已退出，远端授权已撤销。", "已登出，遠端授權已撤銷。", "サインアウトし、リモートアクセスを失効しました。"));

@@ -77,6 +77,27 @@ struct Reference {
     email: Option<String>,
     client_version: String,
 }
+impl Reference {
+    fn matches(&self, snapshot: &Snapshot) -> bool {
+        snapshot.source == self.source
+            && snapshot.subject == self.subject
+            && snapshot.account == self.account_id
+            && snapshot.id() == self.id
+    }
+    fn view(&self) -> AccountView {
+        AccountView {
+            id: self.id.clone(),
+            label: self
+                .email
+                .clone()
+                .unwrap_or_else(|| "Local Codex account".into()),
+            email: self.email.clone(),
+            state: "ready".into(),
+            account_id: self.account_id.clone(),
+            client_version: self.client_version.clone(),
+        }
+    }
+}
 fn local_error(_: impl std::fmt::Display) -> String {
     "Cannot access the local Codex account source.".into()
 }
@@ -89,15 +110,18 @@ fn now() -> u64 {
 fn valid_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|v| v.is_ascii_hexdigit())
 }
-fn lock_file(path: &Path) -> Result<File> {
+fn open_lock_file(path: &Path) -> Result<File> {
     create_private_file(path, b"").map_err(local_error)?;
     verify_private_file(path).map_err(local_error)?;
     verify_single_link_file(path).map_err(local_error)?;
-    let file = OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
-        .map_err(local_error)?;
+        .map_err(local_error)
+}
+fn lock_file(path: &Path) -> Result<File> {
+    let file = open_lock_file(path)?;
     file.lock().map_err(local_error)?;
     Ok(file)
 }
@@ -210,11 +234,7 @@ impl AccountManager {
     }
     fn bound(&self, r: &Reference) -> Result<Snapshot> {
         let snapshot = Snapshot::read(&self.home)?;
-        if snapshot.source != r.source
-            || snapshot.subject != r.subject
-            || snapshot.account != r.account_id
-            || snapshot.id() != r.id
-        {
+        if !r.matches(&snapshot) {
             return Err("The local Codex account changed. Reconnect the intended account.".into());
         }
         Ok(snapshot)
@@ -224,17 +244,7 @@ impl AccountManager {
     /// The protected local reference is invalid or unavailable.
     pub fn account(&self, id: &str) -> Result<AccountView> {
         let r = self.load(id)?;
-        let mut view = AccountView {
-            id: r.id.clone(),
-            label: r
-                .email
-                .clone()
-                .unwrap_or_else(|| "Local Codex account".into()),
-            email: r.email.clone(),
-            state: "ready".into(),
-            account_id: r.account_id.clone(),
-            client_version: r.client_version.clone(),
-        };
+        let mut view = r.view();
         let discovered = self.discover()?;
         if discovered.state != "ready" && discovered.state != "expired" {
             view.state = discovered.state;
@@ -247,6 +257,7 @@ impl AccountManager {
         Ok(view)
     }
     /// Commits an automatic attachment only while its local account is ready.
+    /// Returns no account when another operation holds the reference lifecycle lock.
     /// Holds the reference lifecycle lock until the callback returns.
     /// The callback must not call this manager's other locking methods.
     /// # Errors
@@ -257,15 +268,26 @@ impl AccountManager {
         commit: impl FnOnce(&AccountView) -> Result<T>,
     ) -> Result<Option<T>> {
         self.path(id)?;
-        let _lock = self.lock()?;
+        ensure_private_dir(&self.root).map_err(local_error)?;
+        let file = open_lock_file(&self.root.join("references.lock"))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(error) => return Err(local_error(error)),
+        }
+        let _lock = file;
         if !self.auto_connect_allowed_locked(id)? {
             return Ok(None);
         }
-        let account = self.account(id)?;
-        if account.state != "ready" {
+        let reference = self.load(id)?;
+        if !source::storage(&self.home)? {
             return Ok(None);
         }
-        commit(&account).map(Some)
+        let snapshot = Snapshot::read(&self.home)?;
+        if !reference.matches(&snapshot) || snapshot.expiry <= now() + 60 {
+            return Ok(None);
+        }
+        commit(&reference.view()).map(Some)
     }
     /// Connects the current source idempotently. Only a source reference is persisted.
     /// # Errors

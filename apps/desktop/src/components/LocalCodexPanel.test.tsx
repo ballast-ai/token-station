@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import LocalCodexPanel from "./LocalCodexPanel";
@@ -96,4 +96,53 @@ it("keeps local setup focused on connecting the intended account", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Use this account" }));
   await waitFor(() => expect(connected).toHaveBeenCalledOnce());
   expect(invoke).toHaveBeenCalledWith("codex_connect_provider", { accountId: "local-1" });
+});
+
+it.each(["connect", "disconnect"])("refreshes the parent when Codex %s completes after dismissal without navigating", async operation => {
+  commands({ codex_accounts_list: operation === "disconnect" ? [account] : [] });
+  let finish!: () => void;
+  const completion = new Promise<void>(resolve => { finish = resolve; });
+  const target = operation === "connect" ? "codex_connect_provider" : "codex_account_disconnect";
+  const fallback = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === target) { await completion; return undefined as never; }
+    return fallback(command, args);
+  });
+  const changed = vi.fn().mockResolvedValue(undefined);
+  const connected = vi.fn();
+  const provider = operation === "disconnect" ? {
+    name: "codex_local-1", provider: "codex-plan", credential_reference: account.id,
+    base_url: "https://chatgpt.com/backend-api/codex", has_auth: true, models: ["managed-model"],
+  } : undefined;
+  const { unmount } = render(<LocalCodexPanel provider={provider} onChanged={changed} onConnected={connected} />);
+  const name = operation === "connect" ? "Use local Codex login" : "Disconnect reference";
+  const button = await screen.findByRole("button", { name });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  if (operation === "disconnect") fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith(target, expect.anything()));
+  unmount();
+  await act(async () => finish());
+  expect(changed).toHaveBeenCalledOnce();
+  expect(connected).not.toHaveBeenCalled();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "codex_accounts_list")).toHaveLength(1);
+});
+
+it("notifies the parent about a committed connection when the local account reload fails", async () => {
+  commands();
+  let accountReads = 0;
+  const fallback = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "codex_accounts_list" && ++accountReads > 1) throw new Error("fixture read failure");
+    return fallback(command, args);
+  });
+  const changed = vi.fn().mockResolvedValue(undefined);
+  const connected = vi.fn();
+  render(<LocalCodexPanel onChanged={changed} onConnected={connected} />);
+  const button = screen.getByRole("button", { name: "Use local Codex login" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not connect the local Codex account");
+  expect(changed).toHaveBeenCalledOnce();
+  expect(connected).not.toHaveBeenCalled();
 });

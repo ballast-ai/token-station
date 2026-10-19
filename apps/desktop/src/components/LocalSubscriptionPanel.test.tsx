@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import LocalSubscriptionPanel from "./LocalSubscriptionPanel";
 import { LanguageProvider } from "./LanguageProvider";
-import { connectSubscription, discoverSubscription, getSubscriptionModels, listSubscriptions } from "../localSubscriptionsApi";
+import { connectSubscription, discoverSubscription, disconnectSubscription, getSubscriptionModels, listSubscriptions } from "../localSubscriptionsApi";
 
 vi.mock("../localSubscriptionsApi", () => ({
   connectSubscription: vi.fn(), discoverSubscription: vi.fn(), listSubscriptions: vi.fn(),
@@ -66,4 +66,31 @@ it("refreshes the bound account catalog without reconnecting or replacing select
   expect(getSubscriptionModels).toHaveBeenCalledWith("copilot", "bound-account");
   expect(connectSubscription).not.toHaveBeenCalled();
   expect(provider.models).toEqual(["selected-model"]);
+});
+
+it.each(["connect", "disconnect"])("refreshes the parent when %s completes after dismissal without navigating", async operation => {
+  const user = userEvent.setup();
+  const changed = vi.fn().mockResolvedValue(undefined);
+  const connected = vi.fn();
+  let finish!: () => void;
+  const completion = new Promise<void>(resolve => { finish = resolve; });
+  vi.mocked(connectSubscription).mockImplementation(async () => { await completion; return "provider1"; });
+  vi.mocked(disconnectSubscription).mockReturnValue(completion);
+  if (operation === "disconnect") {
+    vi.mocked(listSubscriptions).mockResolvedValue([{ id: "local1", label: "Local Copilot", email: null, state: "ready" }]);
+  }
+  const provider = operation === "disconnect" ? {
+    name: "provider1", provider: "copilot-plan", base_url: "https://api.githubcopilot.com",
+    has_auth: true, credential_reference: "local1", models: ["selected-model"],
+  } : undefined;
+  const { unmount } = render(<LanguageProvider><LocalSubscriptionPanel kind="copilot" provider={provider} onChanged={changed} onConnected={connected} /></LanguageProvider>);
+  const button = await screen.findByRole("button", { name: operation === "connect" ? "使用本机登录接入" : "断开引用" });
+  await waitFor(() => expect(button).toBeEnabled());
+  await user.click(button);
+  expect(operation === "connect" ? connectSubscription : disconnectSubscription).toHaveBeenCalledOnce();
+  unmount();
+  await act(async () => finish());
+  expect(changed).toHaveBeenCalledOnce();
+  expect(connected).not.toHaveBeenCalled();
+  expect(listSubscriptions).toHaveBeenCalledOnce();
 });

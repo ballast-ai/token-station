@@ -56,10 +56,9 @@ export default function LocalCodexPanel({ provider, onChanged, onConnected }: {
       try { const next = await discoverCodexAccount(); if (mounted.current) setDetected(next); } catch { /* Keep only the safe operation error. */ }
       throw failure;
     }
+    await onChanged?.();
     if (!mounted.current) return;
     await refresh();
-    if (!mounted.current) return;
-    await onChanged?.();
     if (!mounted.current) return;
     onConnected?.();
     if (mounted.current) setDetected(null);
@@ -93,10 +92,10 @@ export default function LocalCodexPanel({ provider, onChanged, onConnected }: {
       })}
       onDisconnect={() => run(copy("Could not disconnect the Codex reference. Try again.", "无法断开 Codex 引用，请重试。", "無法中斷 Codex 參照，請重試。", "Codex の参照を解除できません。再試行してください。"), async () => {
         await disconnectCodexAccount(account.id);
+        await onChanged?.();
         if (!mounted.current) return;
         await refresh();
         if (!mounted.current) return;
-        await onChanged?.();
         if (mounted.current) {
           setCatalogs(current => { const next = { ...current }; delete next[account.id]; return next; });
           setNotice(copy("Reference disconnected. Codex remains signed in. Requests through the old provider stop until reconnected.", "引用已断开，Codex 仍保持登录。旧供应商的请求会停止，重新接入后才会恢复。", "參照已中斷，Codex 仍保持登入。舊供應商的請求會停止，重新接入後才會恢復。", "参照を解除しました。Codex はサインインしたままです。再接続まで旧プロバイダーのリクエストは停止します。"));

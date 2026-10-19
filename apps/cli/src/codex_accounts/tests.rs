@@ -582,6 +582,75 @@ fn automatic_attachment_holds_the_reference_lock_until_commit_finishes() {
 }
 
 #[test]
+fn automatic_attachment_skips_a_busy_catalog_without_waiting_for_network() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let mut fixture = Fixture::new();
+    fixture.auth();
+    let account = fixture.manager.connect_automatically().unwrap();
+    let (entered_send, entered_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
+    let catalog = server(
+        &mut fixture,
+        200,
+        json!({"models":[{"slug":"fixture-model","display_name":"Fixture model"}]}),
+        move || {
+            entered_send.send(()).unwrap();
+            release_receive
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        },
+    );
+    let catalog_manager = fixture.manager.clone();
+    let account_id = account.id.clone();
+    let pending_catalog = std::thread::spawn(move || catalog_manager.models(&account_id));
+    entered_receive
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let automatic_manager = fixture.manager.clone();
+    let (completed_send, completed_receive) = mpsc::channel();
+    let pending_attachment = std::thread::spawn(move || {
+        let result = automatic_manager.with_automatic_account(&account.id, |_| Ok(true));
+        completed_send.send(result).unwrap();
+    });
+    let early_result = completed_receive.recv_timeout(Duration::from_secs(2));
+    release_send.send(()).unwrap();
+    pending_catalog.join().unwrap().unwrap();
+    pending_attachment.join().unwrap();
+    catalog.join().unwrap();
+    assert_eq!(
+        early_result.expect("Automatic attachment waited for the catalog HTTP response"),
+        Ok(None)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn automatic_attachment_reports_unsafe_lock_and_source_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.auth();
+    let account = fixture.manager.connect_automatically().unwrap();
+    let lock = fixture.manager.root.join("references.lock");
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(
+        fixture
+            .manager
+            .with_automatic_account(&account.id, |_| Ok(true))
+            .is_err()
+    );
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+    let source = fixture.manager.home.join("auth.json");
+    fs::set_permissions(source, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(
+        fixture
+            .manager
+            .with_automatic_account(&account.id, |_| Ok(true))
+            .is_err()
+    );
+}
+
+#[test]
 fn automatic_attachment_commits_the_current_bound_account_without_source_changes() {
     let fixture = Fixture::new();
     fixture.auth();

@@ -189,3 +189,77 @@ it("refuses an authorization result for another managed registration", async () 
   expect(await screen.findByRole("alert")).toHaveTextContent("expected account");
   expect(invoke).not.toHaveBeenCalledWith("chatgpt_connect_provider", expect.anything());
 });
+
+it.each(["connect", "disconnect"])("refreshes the parent when ChatGPT %s completes after dismissal without navigating", async operation => {
+  mockCommands({ chatgpt_accounts_list: [account] });
+  let finish!: () => void;
+  const completion = new Promise<void>(resolve => { finish = resolve; });
+  const target = operation === "connect" ? "chatgpt_connect_provider" : "chatgpt_sign_out";
+  const fallback = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === target) { await completion; return { remote_revoked: false, warning: null } as never; }
+    return fallback(command, args);
+  });
+  const changed = vi.fn().mockResolvedValue(undefined);
+  const connected = vi.fn();
+  const provider = operation === "disconnect" ? {
+    name: "chatgpt_registration-a", provider: "chatgpt-plan", credential_reference: account.id,
+    base_url: "https://api.openai.com/v1", has_auth: true, models: ["model-a"],
+  } : undefined;
+  const { unmount } = render(<ChatGPTPlanPanel provider={provider} onChanged={changed} onConnected={connected} />);
+  const name = operation === "connect" ? "Use this account" : "Disconnect connection";
+  const button = await screen.findByRole("button", { name });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  if (operation === "disconnect") fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith(target, expect.anything()));
+  unmount();
+  await act(async () => finish());
+  expect(changed).toHaveBeenCalledOnce();
+  expect(connected).not.toHaveBeenCalled();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "chatgpt_accounts_list")).toHaveLength(1);
+});
+
+it("refreshes the parent when an authorized provider connection completes after dismissal", async () => {
+  mockCommands({ chatgpt_login_status: { id: attempt.id, state: "complete", account_id: account.id, error: null } });
+  let finish!: () => void;
+  const completion = new Promise<void>(resolve => { finish = resolve; });
+  const fallback = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "chatgpt_connect_provider") { await completion; return "provider1" as never; }
+    return fallback(command, args);
+  });
+  const changed = vi.fn().mockResolvedValue(undefined);
+  const connected = vi.fn();
+  const { unmount } = render(<ChatGPTPlanPanel onChanged={changed} onConnected={connected} />);
+  const button = screen.getByRole("button", { name: "Continue with ChatGPT" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("chatgpt_connect_provider", { accountId: account.id }));
+  unmount();
+  await act(async () => finish());
+  expect(changed).toHaveBeenCalledOnce();
+  expect(connected).not.toHaveBeenCalled();
+});
+
+it("does not begin a provider connection when dismissed during the completed login account reload", async () => {
+  mockCommands({ chatgpt_login_status: { id: attempt.id, state: "complete", account_id: account.id, error: null } });
+  let finish!: (value: typeof account[]) => void;
+  const completion = new Promise<typeof account[]>(resolve => { finish = resolve; });
+  let accountReads = 0;
+  const fallback = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "chatgpt_accounts_list" && ++accountReads > 1) return completion as never;
+    return fallback(command, args);
+  });
+  const connected = vi.fn();
+  const { unmount } = render(<ChatGPTPlanPanel onChanged={vi.fn()} onConnected={connected} />);
+  const button = screen.getByRole("button", { name: "Continue with ChatGPT" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  await waitFor(() => expect(accountReads).toBe(2));
+  unmount();
+  await act(async () => finish([account]));
+  expect(invoke).not.toHaveBeenCalledWith("chatgpt_connect_provider", expect.anything());
+  expect(connected).not.toHaveBeenCalled();
+});

@@ -50,7 +50,6 @@ export default function LocalSubscriptionPanel({ kind, provider, onChanged, onCo
   };
   const connect = (id?: string) => run(async active => {
     await connectSubscription(kind, id);
-    if (!active()) return;
     await onChanged();
     if (active()) onConnected?.();
   });
@@ -75,9 +74,10 @@ export default function LocalSubscriptionPanel({ kind, provider, onChanged, onCo
         })}>{copy("Refresh models", "刷新模型", "重新整理模型", "モデルを更新")}</Button>
         <Button variant="ghost" disabled={busy} onClick={() => void run(async active => {
           await disconnectSubscription(kind, account.id);
+          await onChanged();
           if (!active()) return;
           const next = await listSubscriptions(kind);
-          if (active()) { setAccounts(next); await onChanged(); }
+          if (active()) setAccounts(next);
         })}>{copy("Disconnect reference", "断开引用", "中斷參照", "参照を解除")}</Button>
       </div>
     </article>)}
