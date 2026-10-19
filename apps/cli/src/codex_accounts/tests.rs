@@ -16,14 +16,16 @@ impl Fixture {
         ));
         let home = dir.join("codex");
         ensure_private_dir(&home).unwrap();
-        fs::write(
-            home.join("models_cache.json"),
-            r#"{"client_version":"0.162.0"}"#,
-        )
-        .unwrap();
         let mut manager = AccountManager::new(dir.join("station"));
         manager.home = home;
-        Self { dir, manager }
+        let fixture = Self { dir, manager };
+        fixture.write_source("models_cache.json", r#"{"client_version":"0.162.0"}"#);
+        fixture
+    }
+    fn write_source(&self, name: &str, bytes: impl AsRef<[u8]>) {
+        let path = self.manager.home.join(name);
+        write_atomic_private(&path, bytes.as_ref()).unwrap();
+        verify_private_file(&path).unwrap();
     }
     fn auth(&self) {
         let claims = json!({"sub":"synthetic-user","email":"fixture@example.test","exp":4_000_000_000_u64,"https://api.openai.com/auth":{"chatgpt_account_id":"synthetic-account"}});
@@ -31,7 +33,7 @@ impl Fixture {
             "e30.{}.signature",
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
         );
-        fs::write(self.manager.home.join("auth.json"),json!({"auth_mode":"chatgpt","tokens":{"id_token":jwt,"access_token":jwt,"refresh_token":"synthetic-refresh-secret","account_id":"synthetic-account"},"unknown":{"keep":true}}).to_string()).unwrap();
+        self.write_source("auth.json",json!({"auth_mode":"chatgpt","tokens":{"id_token":jwt,"access_token":jwt,"refresh_token":"synthetic-refresh-secret","account_id":"synthetic-account"},"unknown":{"keep":true}}).to_string());
     }
 }
 impl Drop for Fixture {
@@ -53,15 +55,34 @@ fn discovers_existing_subscription_without_copying_credentials() {
     );
     assert!(!f.manager.root.exists());
 }
+#[cfg(windows)]
+#[test]
+fn unprotected_source_children_remain_invalid_after_private_fixture_creation() {
+    for name in ["auth.json", "config.toml"] {
+        let f = Fixture::new();
+        f.auth();
+        assert_eq!(f.manager.discover().unwrap().state, "ready");
+        let path = f.manager.home.join(name);
+        let content = if name == "auth.json" {
+            fs::read(&path).unwrap()
+        } else {
+            b"cli_auth_credentials_store='file'\n".to_vec()
+        };
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+        fs::write(&path, &content).unwrap();
+        assert!(verify_private_file(&path).is_err());
+        assert_eq!(f.manager.discover().unwrap().state, "invalid_source");
+        write_atomic_private(&path, &content).unwrap();
+        assert_eq!(f.manager.discover().unwrap().state, "ready");
+    }
+}
 #[test]
 fn explicit_keyring_mode_does_not_reuse_a_stale_file() {
     let f = Fixture::new();
     f.auth();
-    fs::write(
-        f.manager.home.join("config.toml"),
-        "cli_auth_credentials_store='keyring'\n",
-    )
-    .unwrap();
+    f.write_source("config.toml", "cli_auth_credentials_store='keyring'\n");
     assert_eq!(f.manager.discover().unwrap().state, "unsupported_storage");
 }
 fn jwt(account: &str, subject: &str, expiry: u64) -> String {
@@ -182,11 +203,10 @@ fn unsupported_modes_missing_and_api_key_sources_have_safe_states() {
     assert_eq!(f.manager.discover().unwrap().state, "missing");
     f.auth();
     for mode in ["auto", "ephemeral", "keyring", "unexpected"] {
-        fs::write(
-            f.manager.home.join("config.toml"),
+        f.write_source(
+            "config.toml",
             format!("cli_auth_credentials_store='{mode}'"),
-        )
-        .unwrap();
+        );
         assert_eq!(f.manager.discover().unwrap().state, "unsupported_storage");
         assert!(f.manager.connect().is_err());
     }
@@ -331,13 +351,12 @@ fn changed_source_path_is_not_silently_rebound() {
     f.auth();
     let a = f.manager.connect().unwrap();
     let other = f.dir.join("other");
-    fs::create_dir(&other).unwrap();
-    fs::copy(f.manager.home.join("auth.json"), other.join("auth.json")).unwrap();
-    fs::copy(
-        f.manager.home.join("models_cache.json"),
-        other.join("models_cache.json"),
-    )
-    .unwrap();
+    ensure_private_dir(&other).unwrap();
+    for name in ["auth.json", "models_cache.json"] {
+        let path = other.join(name);
+        write_atomic_private(&path, &fs::read(f.manager.home.join(name)).unwrap()).unwrap();
+        verify_private_file(&path).unwrap();
+    }
     f.manager.home = other;
     assert_eq!(f.manager.account(&a.id).unwrap().state, "account_changed");
     assert!(f.manager.access_token(&a.id).is_err());
@@ -437,17 +456,12 @@ fn concurrent_managers_share_refresh_and_only_one_rotation_occurs() {
 #[test]
 fn malformed_oversize_and_expired_without_refresh_fail_without_secret_text() {
     let f = Fixture::new();
-    fs::write(
-        f.manager.home.join("auth.json"),
-        "synthetic-private-malformed-source",
-    )
-    .unwrap();
+    f.write_source("auth.json", "synthetic-private-malformed-source");
     assert_eq!(f.manager.discover().unwrap().state, "invalid_source");
-    fs::write(
-        f.manager.home.join("auth.json"),
+    f.write_source(
+        "auth.json",
         vec![b' '; usize::try_from(source::LIMIT).unwrap() + 1],
-    )
-    .unwrap();
+    );
     assert_eq!(f.manager.discover().unwrap().state, "invalid_source");
     f.auth();
     expire(&f);
