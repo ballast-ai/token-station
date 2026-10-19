@@ -213,6 +213,9 @@ jobs:
       - name: Root advisories from the lockfile alone
         if: ${{ !cancelled() }}
         run: cargo audit
+      - name: Frontend advisories from the locked dependency graph
+        if: ${{ !cancelled() }}
+        run: npm --prefix apps/desktop audit --package-lock-only --audit-level=low
       - name: Desktop RustSec exception ledger
         if: ${{ !cancelled() }}
         run: node scripts/check-rustsec-exceptions.mjs

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
-import { Claude, OpenAI, GithubCopilot, Gemini, Antigravity } from "@lobehub/icons";
+import { Claude, OpenAI, GithubCopilot, Gemini, Antigravity } from "../localBrandIcons";
 import { SUBSCRIPTION_CHANNELS, SUBSCRIPTION_LABELS, type SubscriptionChannel } from "../subscriptions";
 import { useLocalizedCopy } from "./LanguageProvider";
 import LocalCodexPanel from "./LocalCodexPanel";

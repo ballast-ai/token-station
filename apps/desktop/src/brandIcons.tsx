@@ -43,7 +43,7 @@ import {
   Volcengine,
   XiaomiMiMo,
   Zhipu,
-} from "@lobehub/icons";
+} from "./localBrandIcons";
 
 type BrandGlyph = ComponentType<{ size: number }>;
 type BrandAvatar = ComponentType<{ size: number; iconClassName?: string }>;

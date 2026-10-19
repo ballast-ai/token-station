@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Github } from "@lobehub/icons";
+import { Github } from "../localBrandIcons";
 import {
   BookOpen,
   ExternalLink,
