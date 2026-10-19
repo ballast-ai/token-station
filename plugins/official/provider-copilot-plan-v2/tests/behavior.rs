@@ -11,6 +11,55 @@ fn request(role: &str) -> ChatRequest {
     )
     .unwrap()
 }
+
+#[test]
+fn preserves_strict_tools_on_supported_endpoints() {
+    for path in ["/responses", "/chat/completions"] {
+        for strict in [true, false] {
+            let request: ChatRequest =
+                serde_json::from_value(json!({"model":"real-model","messages":[],
+                "tools":[{"name":"read","parameters":{"type":"object"}}],
+                "responses_tool_strict":{"read":strict}}))
+                .unwrap();
+            let body = CopilotPlan
+                .build_http_request(&request, &config(json!([path])))
+                .unwrap()
+                .body
+                .unwrap();
+            let function = if path == "/responses" {
+                &body["tools"][0]
+            } else {
+                &body["tools"][0]["function"]
+            };
+            assert_eq!(function["strict"], strict, "{path}");
+        }
+    }
+    let invalid: ChatRequest = serde_json::from_value(json!({"model":"real-model","messages":[],
+        "tools":[{"name":"read","parameters":{"type":"object"}}],
+        "responses_tool_strict":{"read":"true"}}))
+    .unwrap();
+    assert!(CopilotPlan
+        .build_http_request(&invalid, &config(json!(["/responses"])))
+        .is_err());
+}
+
+#[test]
+fn messages_allows_non_strict_tools_and_rejects_required_strictness() {
+    for (controls, accepted) in [
+        (json!({}), true),
+        (json!({"read":false}), true),
+        (json!({"read":true}), false),
+        (json!({"read":"false"}), false),
+    ] {
+        let request: ChatRequest = serde_json::from_value(json!({"model":"real-model","messages":[],"tools":[{"name":"read","parameters":{"type":"object"}}],"responses_tool_strict":controls})).unwrap();
+        assert_eq!(
+            CopilotPlan
+                .build_http_request(&request, &config(json!(["/v1/messages"])))
+                .is_ok(),
+            accepted
+        );
+    }
+}
 #[test]
 fn chooses_observed_endpoint_and_preserves_subscription_identity() {
     for (path, field) in [

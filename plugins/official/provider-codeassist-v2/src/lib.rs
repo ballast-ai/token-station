@@ -6,6 +6,7 @@ use south_component_conformance::{
     reference_gemini::GeminiReferenceV1, ComponentResultV1, ProviderComponentV1, StreamParserV1,
 };
 use south_provider_api::{ComponentMetadataV1, PROVIDER_WORLD};
+use std::collections::VecDeque;
 use token_station_protocol::ResponseFormat;
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode, ErrorEnvelope, FinishReason,
@@ -51,11 +52,22 @@ fn checked(c: &ProviderConfig) -> ComponentResultV1<bool> {
     }
     Ok(ag)
 }
-fn signed_id(id: &str, sig: &str, model: &str) -> String {
-    format!(
-        "ca1_{}",
-        URL_SAFE_NO_PAD.encode(json!([id, sig, model]).to_string())
-    )
+fn signed_id(id: Option<&str>, sig: &str, model: &str) -> ComponentResultV1<String> {
+    if id.is_some_and(str::is_empty) || model.is_empty() {
+        return Err(protocol("Code Assist returned an invalid tool identity."));
+    }
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce)
+        .map_err(|_| protocol("Cannot create a unique Google tool identity."))?;
+    let nonce = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let raw = json!([id, sig, model, nonce]).to_string();
+    if raw.len() > 64 * 1024 {
+        return Err(protocol("Google tool identity exceeds its size limit."));
+    }
+    Ok(format!("ca2_{}", URL_SAFE_NO_PAD.encode(raw)))
 }
 // Client reasoning presets and returned modelVersion labels can name the same
 // underlying model differently. Retain version, family, Lite, and image identity.
@@ -83,28 +95,127 @@ fn tool_model_identity(model: &str) -> &str {
     }
     model
 }
-fn decode_id(id: &str, model: &str) -> ComponentResultV1<(String, String)> {
+fn decode_id(id: &str, model: &str) -> ComponentResultV1<(Option<String>, String)> {
+    let (encoded, legacy) = if let Some(encoded) = id.strip_prefix("ca2_") {
+        (encoded, false)
+    } else if let Some(encoded) = id.strip_prefix("ca1_") {
+        (encoded, true)
+    } else {
+        return Err(capability(
+            "Foreign tool history cannot preserve Google thought signatures.",
+        ));
+    };
+    if encoded.len() > 88 * 1024 {
+        return Err(capability("Google tool identity exceeds its size limit."));
+    }
     let raw = URL_SAFE_NO_PAD
-        .decode(id.strip_prefix("ca1_").ok_or_else(|| {
-            capability("Foreign tool history cannot preserve Google thought signatures.")
-        })?)
+        .decode(encoded)
         .map_err(|_| capability("Invalid Google tool identity."))?;
     if raw.len() > 64 * 1024 {
         return Err(capability("Google tool identity exceeds its size limit."));
     }
     let v: Value =
         serde_json::from_slice(&raw).map_err(|_| capability("Invalid Google tool identity."))?;
+    if v.as_array()
+        .is_none_or(|parts| parts.len() != if legacy { 3 } else { 4 })
+        || (!legacy
+            && v[3].as_str().is_none_or(|nonce| {
+                nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }))
+    {
+        return Err(capability("Invalid Google tool identity."));
+    }
     if v[2].as_str().map(tool_model_identity) != Some(tool_model_identity(model)) {
         return Err(capability("Google tool history belongs to another model."));
     }
     Ok((
-        v[0].as_str()
-            .ok_or_else(|| capability("Invalid Google tool identity."))?
-            .into(),
+        if !legacy && v[0].is_null() {
+            None
+        } else {
+            Some(
+                v[0].as_str()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| capability("Invalid Google tool identity."))?
+                    .into(),
+            )
+        },
         v[1].as_str()
             .ok_or_else(|| capability("Invalid Google tool identity."))?
             .into(),
     ))
+}
+fn validate_thought_part(part: &Value) -> ComponentResultV1<()> {
+    if part.as_object().is_none_or(|fields| {
+        fields
+            .keys()
+            .any(|key| !["text", "thought", "thoughtSignature"].contains(&key.as_str()))
+    }) || part["thought"] != true
+        || part.get("text").is_some_and(|text| !text.is_string())
+        || part
+            .get("thoughtSignature")
+            .is_some_and(|signature| !signature.is_string())
+        || (part.get("text").is_none() && part.get("thoughtSignature").is_none())
+    {
+        return Err(protocol("Code Assist returned an invalid thinking part."));
+    }
+    Ok(())
+}
+fn thinking_signature(parts: &[Value], model: &str) -> ComponentResultV1<String> {
+    if model.is_empty() {
+        return Err(protocol("Code Assist thinking has no model identity."));
+    }
+    for part in parts {
+        validate_thought_part(part)?;
+    }
+    let raw = json!([model, parts]).to_string();
+    if raw.len() > LIMIT {
+        return Err(protocol("Code Assist thinking exceeds its size limit."));
+    }
+    Ok(format!("ca_th1_{}", URL_SAFE_NO_PAD.encode(raw)))
+}
+fn decode_thinking(signature: &str, thinking: &str, model: &str) -> ComponentResultV1<Vec<Value>> {
+    let encoded = signature.strip_prefix("ca_th1_").ok_or_else(|| {
+        capability("Foreign opaque thinking cannot be transferred into Code Assist.")
+    })?;
+    if encoded.len() > LIMIT.div_ceil(3) * 4 {
+        return Err(capability(
+            "Google thinking history exceeds its size limit.",
+        ));
+    }
+    let raw = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| capability("Invalid Google thinking history."))?;
+    if raw.len() > LIMIT {
+        return Err(capability(
+            "Google thinking history exceeds its size limit.",
+        ));
+    }
+    let value: Value =
+        serde_json::from_slice(&raw).map_err(|_| capability("Invalid Google thinking history."))?;
+    if value.as_array().is_none_or(|fields| fields.len() != 2)
+        || value[0].as_str().map(tool_model_identity) != Some(tool_model_identity(model))
+    {
+        return Err(capability(
+            "Google thinking history belongs to another model.",
+        ));
+    }
+    let parts = value[1]
+        .as_array()
+        .filter(|parts| !parts.is_empty())
+        .ok_or_else(|| capability("Invalid Google thinking history."))?;
+    let mut text = String::new();
+    for part in parts {
+        validate_thought_part(part).map_err(|_| capability("Invalid Google thinking history."))?;
+        if let Some(part_text) = part["text"].as_str() {
+            text.push_str(part_text);
+        }
+    }
+    if text != thinking {
+        return Err(capability(
+            "Google thinking text does not match its preserved state.",
+        ));
+    }
+    Ok(parts.clone())
 }
 fn unwrap_response(parts: &HttpResponseParts) -> ComponentResultV1<HttpResponseParts> {
     if parts.body.len() > LIMIT {
@@ -158,21 +269,56 @@ impl ProviderComponentV1 for CodeAssist {
                 return Err(capability("This Google subscription cannot preserve the requested native state or generation constraint."));
             }
         }
+        if let Some(value) = r
+            .extensions
+            .get("responses_tool_strict")
+            .filter(|value| !value.is_null())
+        {
+            let controls = value
+                .as_object()
+                .filter(|controls| controls.values().all(Value::is_boolean))
+                .ok_or_else(|| capability("Tool strictness must contain boolean values"))?;
+            if controls.values().any(|strict| strict == true) {
+                return Err(capability(
+                    "Code Assist cannot preserve strict function tool constraints.",
+                ));
+            }
+        }
+        let mut thinking_parts = VecDeque::new();
         for m in &r.messages {
             if let Some(Content::Parts(ps)) = &m.content {
-                if ps.iter().any(|p| {
-                    matches!(
-                        p,
-                        ContentPart::RedactedThinking { .. }
-                            | ContentPart::Thinking {
-                                signature: Some(_),
-                                ..
-                            }
-                    )
-                }) {
+                if matches!(
+                    m.role,
+                    token_station_protocol::Role::System | token_station_protocol::Role::Tool
+                ) && ps
+                    .iter()
+                    .any(|part| !matches!(part, ContentPart::Text { .. }))
+                {
                     return Err(capability(
-                        "Opaque thinking state cannot be transferred into Code Assist.",
+                        "Code Assist requires text system instructions and tool results.",
                     ));
+                }
+                for part in ps {
+                    match part {
+                        ContentPart::RedactedThinking { .. } => {
+                            return Err(capability(
+                                "Opaque thinking state cannot be transferred into Code Assist.",
+                            ));
+                        }
+                        ContentPart::Thinking {
+                            thinking,
+                            signature,
+                        } => {
+                            let preserved = signature.as_deref().map(|signature| {
+                                if m.role != token_station_protocol::Role::Assistant {
+                                    return Err(capability("Google thinking history requires an assistant message."));
+                                }
+                                decode_thinking(signature, thinking, &r.model)
+                            }).transpose()?;
+                            thinking_parts.push_back(preserved);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -182,6 +328,29 @@ impl ProviderComponentV1 for CodeAssist {
             .build_http_request(r, &gc)?
             .body
             .ok_or_else(|| protocol("Gemini translation produced no body."))?;
+        for content in body["contents"].as_array_mut().into_iter().flatten() {
+            if let Some(parts) = content["parts"].as_array_mut() {
+                let mut restored = Vec::new();
+                for part in std::mem::take(parts) {
+                    if part["thought"] == true {
+                        if let Some(original) = thinking_parts
+                            .pop_front()
+                            .ok_or_else(|| protocol("Google thinking history is inconsistent."))?
+                        {
+                            restored.extend(original);
+                        } else {
+                            restored.push(part);
+                        }
+                    } else {
+                        restored.push(part);
+                    }
+                }
+                *parts = restored;
+            }
+        }
+        if !thinking_parts.is_empty() {
+            return Err(protocol("Google thinking history is inconsistent."));
+        }
         if let Some(format) = &r.response_format {
             if !matches!(format, ResponseFormat::Text) {
                 if body.get("generationConfig").is_none() {
@@ -220,9 +389,10 @@ impl ProviderComponentV1 for CodeAssist {
             body["generationConfig"]["thinkingConfig"] = thinking;
         }
         for call in r.messages.iter().flat_map(|m| &m.tool_calls) {
-            if serde_json::from_str::<Value>(&call.arguments).is_err() {
+            if !serde_json::from_str::<Value>(&call.arguments).is_ok_and(|value| value.is_object())
+            {
                 return Err(capability(
-                    "Google tool arguments must contain complete JSON.",
+                    "Google tool arguments must contain a complete JSON object.",
                 ));
             }
         }
@@ -254,7 +424,9 @@ impl ProviderComponentV1 for CodeAssist {
                         .get(call_index)
                         .ok_or_else(|| protocol("Google tool history is inconsistent."))?;
                     let (id, sig) = decode_id(&call.id, &r.model)?;
-                    p["functionCall"]["id"] = json!(id);
+                    if let Some(id) = id {
+                        p["functionCall"]["id"] = json!(id);
+                    }
                     if !sig.is_empty() {
                         p["thoughtSignature"] = json!(sig);
                     }
@@ -266,7 +438,9 @@ impl ProviderComponentV1 for CodeAssist {
                         .ok_or_else(|| protocol("Google tool results are inconsistent."))?;
                     let (id, _) = decode_id(source_id, &r.model)?;
                     result_index += 1;
-                    resp["id"] = json!(id);
+                    if let Some(id) = id {
+                        resp["id"] = json!(id);
+                    }
                     let old = resp["response"]
                         .get("content")
                         .cloned()
@@ -352,6 +526,21 @@ impl ProviderComponentV1 for CodeAssist {
         let inner = unwrap_response(p)?;
         let raw: Value = serde_json::from_str(&inner.body)
             .map_err(|_| protocol("Invalid Code Assist response."))?;
+        for part in raw["candidates"][0]["content"]["parts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if part
+                .get("functionCall")
+                .and_then(|call| call.get("args"))
+                .is_some_and(|arguments| !arguments.is_object())
+            {
+                return Err(protocol(
+                    "Google tool arguments must contain a JSON object.",
+                ));
+            }
+        }
         let mut out = GeminiReferenceV1.parse_response(&inner)?;
         let parts = raw["candidates"][0]["content"]["parts"].as_array();
         if parts
@@ -362,6 +551,35 @@ impl ProviderComponentV1 for CodeAssist {
             return Err(capability(
                 "Code Assist returned content that the current response contract cannot preserve.",
             ));
+        }
+        let thoughts = parts
+            .into_iter()
+            .flatten()
+            .filter(|part| part["thought"] == true && part.get("functionCall").is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        if !thoughts.is_empty() {
+            let signature = thinking_signature(&thoughts, &out.model)?;
+            let thinking = thoughts
+                .iter()
+                .filter_map(|part| part["text"].as_str())
+                .collect::<String>();
+            let mut content = match out.choices[0].message.content.take() {
+                Some(Content::Text(text)) => vec![ContentPart::Text { text }],
+                Some(Content::Parts(parts)) => parts
+                    .into_iter()
+                    .filter(|part| !matches!(part, ContentPart::Thinking { .. }))
+                    .collect(),
+                None => Vec::new(),
+            };
+            content.insert(
+                0,
+                ContentPart::Thinking {
+                    thinking,
+                    signature: Some(signature),
+                },
+            );
+            out.choices[0].message.content = Some(Content::Parts(content));
         }
         // Non-function text signatures are optional transport metadata. Preserve
         // their exact values in buffered IR without mislabeling visible text as thinking.
@@ -402,10 +620,10 @@ impl ProviderComponentV1 for CodeAssist {
         for (i, call) in out.choices[0].message.tool_calls.iter_mut().enumerate() {
             let wire = wires[i];
             call.id = signed_id(
-                wire["functionCall"]["id"].as_str().unwrap_or(&call.id),
+                wire["functionCall"]["id"].as_str(),
                 wire["thoughtSignature"].as_str().unwrap_or_default(),
                 &out.model,
-            );
+            )?;
         }
         adjust_usage(&mut out.usage);
         Ok(out)

@@ -246,6 +246,27 @@ impl AccountManager {
         }
         Ok(view)
     }
+    /// Commits an automatic attachment only while its local account is ready.
+    /// Holds the reference lifecycle lock until the callback returns.
+    /// The callback must not call this manager's other locking methods.
+    /// # Errors
+    /// The protected account state is invalid or the attachment cannot be saved.
+    pub fn with_automatic_account<T>(
+        &self,
+        id: &str,
+        commit: impl FnOnce(&AccountView) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.path(id)?;
+        let _lock = self.lock()?;
+        if !self.auto_connect_allowed_locked(id)? {
+            return Ok(None);
+        }
+        let account = self.account(id)?;
+        if account.state != "ready" {
+            return Ok(None);
+        }
+        commit(&account).map(Some)
+    }
     /// Connects the current source idempotently. Only a source reference is persisted.
     /// # Errors
     /// The source is unavailable, unsupported, or cannot be refreshed safely.

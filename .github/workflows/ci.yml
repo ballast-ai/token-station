@@ -52,6 +52,12 @@ jobs:
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Test northbound Agent adapters
+        shell: bash
+        run: |
+          for adapter in agent-anthropic agent-openai agent-openai-responses agent-gemini; do
+            cargo test --locked --manifest-path "plugins/official/$adapter/Cargo.toml"
+          done
       - run: cargo test --locked --manifest-path plugins/official/provider-chatgpt-plan-v2/Cargo.toml
       - name: Test local subscription components
         shell: bash
@@ -99,5 +105,6 @@ jobs:
       - run: npm --prefix apps/desktop ci
       - run: node tests/agent-sensitive-boundary.mjs
       - run: node --test tests/desktop-build-info.mjs
+      - run: node --test tests/dev-desktop-packages.mjs
       - run: npm --prefix apps/desktop test -- --run
       - run: npm --prefix apps/desktop run build

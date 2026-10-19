@@ -15,6 +15,25 @@ fn frame(v: Value) -> Vec<u8> {
 }
 
 #[test]
+fn preserves_each_responses_tool_strictness() {
+    for strict in [true, false] {
+        let request = request(json!({"model":"plan-model","messages":[],
+            "tools":[{"name":"read","parameters":{"type":"object"}}],
+            "responses_tool_strict":{"read":strict}}));
+        let body = ChatGptPlan
+            .build_http_request(&request, &config())
+            .unwrap()
+            .body
+            .unwrap();
+        assert_eq!(body["tools"][0]["tools"][0]["strict"], strict);
+    }
+    let invalid = request(json!({"model":"plan-model","messages":[],
+        "tools":[{"name":"read","parameters":{"type":"object"}}],
+        "responses_tool_strict":{"read":"true"}}));
+    assert!(ChatGptPlan.build_http_request(&invalid, &config()).is_err());
+}
+
+#[test]
 fn translates_history_images_and_tool_namespaces_without_codex_identity() {
     let r = request(json!({"model":"plan-model", "stream":false,
       "sampling":{"temperature":0.2,"top_p":0.8,"max_output_tokens":4096},

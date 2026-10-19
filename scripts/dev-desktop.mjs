@@ -1,24 +1,16 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const wasmTarget = "wasm32-wasip2";
 const output = join(root, "plugins-dist");
-const plugins = [
-  ["agent-openai", "adapter.wasm"],
-  ["agent-anthropic", "adapter.wasm"],
-  ["agent-openai-responses", "adapter.wasm"],
-  ["agent-gemini", "adapter.wasm"],
-  // The South provider components ship beside the agents under the South
-  // loader's file name.
-  ["provider-openai-compatible-v2", "component.wasm"],
-  ["provider-anthropic-v2", "component.wasm"],
-  ["provider-chatgpt-plan-v2", "component.wasm"],
-];
+const plugins = JSON.parse(
+  readFileSync(join(root, "plugins", "official", "packages.json"), "utf8"),
+).packages;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -53,7 +45,7 @@ if (!installedTargets.stdout.split(/\r?\n/u).includes(wasmTarget)) {
   process.exit(1);
 }
 
-for (const [plugin, wasmFile] of plugins) {
+for (const { dir: plugin, wasm: wasmFile } of plugins) {
   const source = join(root, "plugins", "official", plugin);
   run("cargo", [
     "build",

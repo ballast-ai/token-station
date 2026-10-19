@@ -11,7 +11,9 @@ Requests and streaming replies use the Code Assist envelope.
 Caller tools remain caller-owned. Google function-call signatures travel in opaque call IDs.
 Tool history from another model returns a capability error.
 Recognized reasoning-preset aliases share their underlying model identity. Version, family, Lite, and image differences remain distinct.
-Unsupported continuation, hosted tools, opaque thinking, and serial-only tool constraints return explicit errors.
+Google thinking parts replay through a bounded opaque carrier bound to the same model and unchanged thinking text.
+Local tool identifiers use random nonces. The adapter restores the original Google identifiers and signatures during replay.
+Unsupported continuation, hosted tools, foreign opaque thinking, strict schemas, and serial-only tool constraints return explicit errors.
 Low and high reasoning effort are supported for Gemini model families.
 Generated images are not supported.
 

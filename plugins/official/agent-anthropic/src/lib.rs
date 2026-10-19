@@ -261,7 +261,7 @@ fn system_message(system: &Value) -> Result<Option<Message>, String> {
                 .iter()
                 .map(parse_plain_block)
                 .collect::<Result<Vec<_>, _>>()?;
-            parts.retain(|part| !matches!(part, ContentPart::Text { text } if text.is_empty()));
+            parts.retain(|part| !matches!(part, ContentPart::Text { text, cache_control: None } if text.is_empty()));
             if parts
                 .iter()
                 .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
@@ -1233,7 +1233,7 @@ export!(AnthropicClient);
 mod tests {
     use super::{fresh_input_tokens, AnthropicClient, Guest};
     use serde_json::{json, Value};
-    use token_station_protocol::{ErrorCode, ErrorEnvelope, Usage};
+    use token_station_protocol::{ErrorCode, ErrorEnvelope, ReasoningEffort, Usage};
 
     #[test]
     fn structured_response_constraints_are_rejected_without_affecting_effort_or_tools() {
@@ -1265,7 +1265,8 @@ mod tests {
         let mut body = base;
         body["output_config"] = json!({"effort":"low"});
         let request: super::ChatRequest = serde_json::from_str(&normalize(body).unwrap()).unwrap();
-        assert_eq!(request.extensions["reasoning_effort"], "low");
+        assert_eq!(request.reasoning.effort, Some(ReasoningEffort::Low));
+        assert!(!request.extensions.contains_key("reasoning_effort"));
         assert_eq!(request.tools[0].parameters, json!({"type":"object"}));
     }
 

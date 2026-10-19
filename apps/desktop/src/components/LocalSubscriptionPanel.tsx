@@ -71,7 +71,7 @@ export default function LocalSubscriptionPanel({ kind, provider, onChanged, onCo
         <Button variant="secondary" disabled={busy || account.state !== "ready"} onClick={() => void run(async active => {
           const models = await getSubscriptionModels(kind, account.id);
           if (active()) setCatalogs(current => ({ ...current, [account.id]: models }));
-          if (provider && active()) { await connectSubscription(kind, account.id); if (active()) await onChanged(); }
+          if (provider && active()) await onChanged();
         })}>{copy("Refresh models", "刷新模型", "重新整理模型", "モデルを更新")}</Button>
         <Button variant="ghost" disabled={busy} onClick={() => void run(async active => {
           await disconnectSubscription(kind, account.id);

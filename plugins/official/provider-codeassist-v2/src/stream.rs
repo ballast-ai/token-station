@@ -4,6 +4,8 @@ pub(crate) struct Parser {
     tail: Vec<u8>,
     calls: u32,
     model: String,
+    thoughts: Vec<Value>,
+    thought_bytes: usize,
     finish: Option<FinishReason>,
     terminal: bool,
     failed: bool,
@@ -44,36 +46,34 @@ impl Parser {
                 if self.model.is_empty() {
                     return Err(protocol("Code Assist tool stream has no model identity."));
                 }
-                let id = call["id"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("call_{}_{}", self.calls, name));
+                let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
+                if !arguments.is_object() {
+                    return Err(protocol(
+                        "Google tool arguments must contain a JSON object.",
+                    ));
+                }
                 events.push(StreamEvent::ToolCallDelta {
                     index: self.calls,
                     id: Some(signed_id(
-                        &id,
+                        call["id"].as_str(),
                         part["thoughtSignature"].as_str().unwrap_or_default(),
                         &self.model,
-                    )),
+                    )?),
                     name: Some(name.into()),
-                    arguments_delta: call
-                        .get("args")
-                        .cloned()
-                        .unwrap_or_else(|| json!({}))
-                        .to_string(),
+                    arguments_delta: arguments.to_string(),
                 });
                 self.calls += 1;
             } else if part["thought"].as_bool() == Some(true) {
+                validate_thought_part(part)?;
+                self.thought_bytes = self.thought_bytes.saturating_add(part.to_string().len());
+                if self.thought_bytes > LIMIT {
+                    return Err(protocol("Code Assist thinking exceeds its size limit."));
+                }
+                self.thoughts.push(part.clone());
                 if let Some(text) = part["text"].as_str() {
                     events.push(StreamEvent::ThinkingDelta {
                         index: 0,
                         thinking_delta: text.into(),
-                    });
-                }
-                if let Some(sig) = part["thoughtSignature"].as_str() {
-                    events.push(StreamEvent::ThinkingSignatureDelta {
-                        index: 0,
-                        signature_delta: sig.into(),
                     });
                 }
             } else if let Some(text) = part["text"].as_str() {
@@ -137,8 +137,14 @@ impl StreamParserV1 for Parser {
                 return Err(protocol("Code Assist stream ended inside an SSE frame."));
             }
             if let Some(finish) = self.finish.take() {
-                self.terminal = true;
-                return Ok(vec![
+                let mut events = Vec::new();
+                if !self.thoughts.is_empty() {
+                    events.push(StreamEvent::ThinkingSignatureDelta {
+                        index: 0,
+                        signature_delta: thinking_signature(&self.thoughts, &self.model)?,
+                    });
+                }
+                events.extend([
                     StreamEvent::Finish {
                         finish_reason: Some(finish),
                         stop_sequence: None,
@@ -148,6 +154,8 @@ impl StreamParserV1 for Parser {
                         stop_sequence: None,
                     },
                 ]);
+                self.terminal = true;
+                return Ok(events);
             }
             return Err(protocol(
                 "Code Assist stream ended without a finish reason.",

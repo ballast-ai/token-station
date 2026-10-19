@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import LocalSubscriptionPanel from "./LocalSubscriptionPanel";
 import { LanguageProvider } from "./LanguageProvider";
-import { connectSubscription, discoverSubscription, listSubscriptions } from "../localSubscriptionsApi";
+import { connectSubscription, discoverSubscription, getSubscriptionModels, listSubscriptions } from "../localSubscriptionsApi";
 
 vi.mock("../localSubscriptionsApi", () => ({
   connectSubscription: vi.fn(), discoverSubscription: vi.fn(), listSubscriptions: vi.fn(),
@@ -39,4 +39,31 @@ it("keeps a failed connection open without rendering raw backend data", async ()
   await waitFor(() => expect(button).toBeEnabled()); await user.click(button);
   expect(await screen.findByRole("alert")).toHaveTextContent("无法连接 Copilot");
   expect(screen.queryByText(/fixture-secret/)).toBeNull(); expect(connected).not.toHaveBeenCalled();
+});
+it("refreshes the bound account catalog without reconnecting or replacing selected models", async () => {
+  const user = userEvent.setup();
+  const changed = vi.fn().mockResolvedValue(undefined);
+  const provider = {
+    name: "custom-copilot", provider: "copilot-plan", base_url: "https://api.githubcopilot.com",
+    has_auth: true, credential_reference: "bound-account", models: ["selected-model"],
+  };
+  vi.mocked(listSubscriptions).mockResolvedValue([
+    { id: "other-account", label: "Other account", email: null, state: "ready" },
+    { id: "bound-account", label: "Bound account", email: null, state: "ready" },
+  ]);
+  vi.mocked(getSubscriptionModels).mockResolvedValue([
+    { id: "new-model", name: "New available model", context_window: null, supports_images: null, supports_tools: null },
+  ]);
+  render(<LanguageProvider><LocalSubscriptionPanel kind="copilot" provider={provider} onChanged={changed} /></LanguageProvider>);
+  expect(await screen.findByText("Bound account")).toBeInTheDocument();
+  expect(screen.queryByText("Other account")).toBeNull();
+  expect(screen.getByText("selected-model")).toBeInTheDocument();
+  const refresh = screen.getByRole("button", { name: "刷新模型" });
+  await waitFor(() => expect(refresh).toBeEnabled());
+  await user.click(refresh);
+  expect(await screen.findByText("New available model")).toBeInTheDocument();
+  await waitFor(() => expect(changed).toHaveBeenCalledOnce());
+  expect(getSubscriptionModels).toHaveBeenCalledWith("copilot", "bound-account");
+  expect(connectSubscription).not.toHaveBeenCalled();
+  expect(provider.models).toEqual(["selected-model"]);
 });

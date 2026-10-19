@@ -43,6 +43,20 @@ fn build_http_request(chat_request: &str, provider_config: &str) -> Result<Strin
             }
         }
     }
+    if let Some(value) = request
+        .get("responses_tool_strict")
+        .filter(|value| !value.is_null())
+    {
+        let controls = value
+            .as_object()
+            .filter(|controls| controls.values().all(Value::is_boolean))
+            .ok_or_else(|| capability("Tool strictness must contain boolean values"))?;
+        if controls.values().any(|strict| strict == true) {
+            return Err(capability(
+                "Claude subscriptions cannot preserve strict function tool constraints.",
+            ));
+        }
+    }
     for field in [
         "thinking",
         "anthropic_thinking",
@@ -244,6 +258,27 @@ mod tests {
         );
     }
     #[test]
+    fn non_strict_tools_are_usable_but_required_strictness_is_rejected() {
+        let fixture = fixture();
+        for (controls, accepted) in [
+            (json!({}), true),
+            (json!({"read":false}), true),
+            (json!({"read":true}), false),
+            (json!({"read":"false"}), false),
+        ] {
+            let mut request = fixture["chat_request"].clone();
+            request["responses_tool_strict"] = controls;
+            assert_eq!(
+                super::build_http_request(
+                    &request.to_string(),
+                    &fixture["provider_config"].to_string()
+                )
+                .is_ok(),
+                accepted
+            );
+        }
+    }
+    #[test]
     fn tool_result_and_system_opaque_parts_fail_before_flattening() {
         let f = fixture();
         for role in ["system", "tool"] {
@@ -274,7 +309,11 @@ mod tests {
             output["body"]["messages"][1]["content"][0]["is_error"],
             true
         );
-        for state in ["anthropic_thinking", "reasoning_effort"] {
+        for state in [
+            "anthropic_thinking",
+            "reasoning_effort",
+            "responses_tool_strict",
+        ] {
             request[state] = json!("opaque");
             assert!(super::build_http_request(
                 &request.to_string(),

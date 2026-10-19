@@ -18,6 +18,7 @@ Select its discovered model in the existing routing page. Save and apply the con
 
 The login reference stays bound to its source and account identity. An account replacement requires an explicit reconnect.
 **Disconnect reference** removes the Token Station binding. It does not sign the original client out.
+**Refresh models** updates the visible catalog. It preserves selected models and routes.
 The renderer receives account metadata and opaque reference IDs. It does not receive access tokens or refresh tokens.
 
 Subscription inference uses account allowance. Token Station does not estimate API dollar cost or silently fall back to a paid API.
@@ -36,6 +37,8 @@ Catalog presence does not prove that every model has remaining allowance.
 - Google account access, project permissions, and model availability are checked by Code Assist.
 - Google subscription calls use Host HTTP transport. Receipts record `root_rpc_path` because South cannot represent these root RPC actions.
 - Google signed tool state stays bound to its model. Unsupported continuation and foreign opaque state return capability errors.
+- Google thinking state can replay to the same model through an opaque carrier. Tool identifiers remain unique across turns.
+- Google subscriptions reject strict function-schema constraints that their transport cannot preserve.
 - Google optional text signatures are retained in buffered response metadata. Stock translated clients and streams do not replay them.
 - Windows Antigravity credential support has deterministic parser coverage. Real Windows credential access remains unverified.
 

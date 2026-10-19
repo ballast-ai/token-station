@@ -4723,9 +4723,11 @@ mod feature_probe_tests {
             },
             ContentPart::Text {
                 text: r#"{"ok":"#.into(),
+                cache_control: None,
             },
             ContentPart::Text {
                 text: "true}".into(),
+                cache_control: None,
             },
         ]);
         assert!(validate_provider_health_content(&content).is_ok());

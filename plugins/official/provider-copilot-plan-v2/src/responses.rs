@@ -208,6 +208,16 @@ fn build_body(r: &ChatRequest) -> ComponentResultV1<Value> {
         }
         _ => None,
     };
+    let strictness = r
+        .extensions
+        .get("responses_tool_strict")
+        .map(|value| {
+            value
+                .as_object()
+                .filter(|controls| controls.values().all(Value::is_boolean))
+                .ok_or_else(|| capability("Tool strictness must contain boolean values"))
+        })
+        .transpose()?;
     let mut names = BTreeSet::new();
     let mut tools = Vec::new();
     for tool in &r.tools {
@@ -220,7 +230,11 @@ fn build_body(r: &ChatRequest) -> ComponentResultV1<Value> {
         if forced.is_some_and(|name| name != tool.name) {
             continue;
         }
-        tools.push(json!({"type":"function","name":tool.name,"description":tool.description.as_deref().unwrap_or(""),"parameters":tool.parameters,"strict":false}));
+        let strict = strictness
+            .and_then(|controls| controls.get(&tool.name))
+            .cloned()
+            .unwrap_or(json!(false));
+        tools.push(json!({"type":"function","name":tool.name,"description":tool.description.as_deref().unwrap_or(""),"parameters":tool.parameters,"strict":strict}));
     }
     if forced.is_some_and(|name| !names.contains(name))
         || (r.tools.is_empty() && matches!(r.tool_choice, Some(ToolChoice::Required)))

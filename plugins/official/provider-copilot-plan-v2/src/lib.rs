@@ -100,17 +100,30 @@ fn check_semantics(r: &ChatRequest, path: &str) -> ComponentResultV1<()> {
         ));
     }
     if path == "/v1/messages"
-        && [
-            "reasoning_effort",
-            "parallel_tool_calls",
-            "responses_tool_strict",
-        ]
-        .iter()
-        .any(|key| r.extensions.contains_key(*key))
+        && ["reasoning_effort", "parallel_tool_calls"]
+            .iter()
+            .any(|key| r.extensions.contains_key(*key))
     {
         return Err(capability(
             "Copilot Messages cannot preserve the requested reasoning or tool controls",
         ));
+    }
+    if path == "/v1/messages" {
+        if let Some(value) = r
+            .extensions
+            .get("responses_tool_strict")
+            .filter(|value| !value.is_null())
+        {
+            let controls = value
+                .as_object()
+                .filter(|controls| controls.values().all(Value::is_boolean))
+                .ok_or_else(|| capability("Tool strictness must contain boolean values"))?;
+            if controls.values().any(|strict| strict == true) {
+                return Err(capability(
+                    "Copilot Messages cannot preserve strict function tool constraints.",
+                ));
+            }
+        }
     }
     for message in &r.messages {
         if message
@@ -260,6 +273,28 @@ fn prepare(
     } else {
         OpenAiCompatibleReferenceV1.build_http_request(r, &native)?
     };
+    if path == "/chat/completions" {
+        if let Some(value) = r.extensions.get("responses_tool_strict") {
+            let strictness = value
+                .as_object()
+                .filter(|controls| controls.values().all(Value::is_boolean))
+                .ok_or_else(|| capability("Tool strictness must contain boolean values"))?;
+            if let Some(tools) = descriptor
+                .body
+                .as_mut()
+                .and_then(|body| body["tools"].as_array_mut())
+            {
+                for tool in tools {
+                    if let Some(strict) = tool["function"]["name"]
+                        .as_str()
+                        .and_then(|name| strictness.get(name))
+                    {
+                        tool["function"]["strict"] = strict.clone();
+                    }
+                }
+            }
+        }
+    }
     if path == "/chat/completions"
         && r.extensions.get("reasoning_effort").is_some_and(|value| {
             descriptor

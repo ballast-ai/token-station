@@ -204,12 +204,14 @@ async fn discover_and_connect(state: &Mutex<AppInner>) -> Result<bool, String> {
     {
         return Ok(false);
     }
-    // Recheck the on-disk source and registration after the asynchronous model fetch.
-    let current = AccountManager::new(&data_dir).account(&source_id)?;
-    if current.id != account.id || current.state != "ready" {
-        return Ok(false);
-    }
-    attach_discovered(&mut inner, &current, &models)
+    AccountManager::new(&data_dir)
+        .with_automatic_account(&source_id, |current| {
+            if current.id != account.id {
+                return Ok(false);
+            }
+            attach_discovered(&mut inner, current, &models)
+        })
+        .map(|attached| attached.unwrap_or(false))
 }
 
 #[cfg(test)]

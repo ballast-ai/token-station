@@ -9,13 +9,16 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, File, OpenOptions},
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use token_station_private_fs::{ensure_private_dir, verify_private_file, write_atomic_private};
+use token_station_private_fs::{
+    create_private_file, ensure_private_dir, verify_private_dir, verify_private_file,
+    verify_single_link_file, write_atomic_private,
+};
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: u64 = 1024 * 1024;
 const GEMINI_CLIENT: &str =
@@ -59,7 +62,7 @@ impl Default for Endpoints {
         }
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 struct Record {
     id: String,
     source: String,
@@ -428,12 +431,40 @@ impl AccountManager {
             project: None,
         })
     }
+    fn lock(&self) -> Result<File> {
+        self.valid_kind()?;
+        ensure_private_dir(&self.root).map_err(|_| failure())?;
+        let path = self.root.join("references.lock");
+        create_private_file(&path, b"").map_err(|_| failure())?;
+        verify_private_file(&path).map_err(|_| failure())?;
+        verify_single_link_file(&path).map_err(|_| failure())?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|_| failure())?;
+        file.lock().map_err(|_| failure())?;
+        Ok(file)
+    }
+    fn generation(&self) -> Result<u64> {
+        let path = self.root.join("generation");
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(_) => return Err(failure()),
+            Ok(_) => {}
+        }
+        verify_private_file(&path).map_err(|_| failure())?;
+        verify_single_link_file(&path).map_err(|_| failure())?;
+        serde_json::from_slice(&read_bounded(&path)?).map_err(|_| failure())
+    }
     fn record(&self, id: &str) -> Result<Record> {
         if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("Invalid Google subscription reference.".into());
         }
         let path = self.root.join(format!("{id}.json"));
+        verify_private_dir(&self.root).map_err(|_| failure())?;
         verify_private_file(&path).map_err(|_| failure())?;
+        verify_single_link_file(&path).map_err(|_| failure())?;
         let r: Record = serde_json::from_slice(&read_bounded(&path)?).map_err(|_| failure())?;
         if r.id != id
             || !self.sources().iter().any(|(s, _)| *s == r.source)
@@ -443,8 +474,25 @@ impl AccountManager {
         }
         Ok(r)
     }
-    fn bound(&self, id: &str) -> Result<(Record, Login)> {
-        let r = self.record(id)?;
+    fn verify_source(&self, source: &str, fingerprint: &str) -> Result<()> {
+        let current = self.local(Some(source))?;
+        if hash(&current.refresh) != fingerprint {
+            return Err("The local Google account changed. Reconnect this subscription.".into());
+        }
+        Ok(())
+    }
+    fn verify_bound(&self, record: &Record, generation: u64) -> Result<()> {
+        let _lock = self.lock()?;
+        if self.generation()? != generation || self.record(&record.id)? != *record {
+            return Err("The local Google account changed. Reconnect this subscription.".into());
+        }
+        self.verify_source(&record.source, &record.fingerprint)
+    }
+    fn bound(&self, id: &str) -> Result<(Record, Login, u64)> {
+        let (r, generation) = {
+            let _lock = self.lock()?;
+            (self.record(id)?, self.generation()?)
+        };
         let mut login = self.local(Some(&r.source))?;
         if hash(&login.refresh) != r.fingerprint {
             return Err("The local Google account changed. Reconnect this subscription.".into());
@@ -453,7 +501,8 @@ impl AccountManager {
         if email != r.email {
             return Err("The local Google account changed. Reconnect this subscription.".into());
         }
-        Ok((r, login))
+        self.verify_bound(&r, generation)?;
+        Ok((r, login, generation))
     }
     fn view(r: &Record, state: &str) -> AccountView {
         AccountView {
@@ -535,6 +584,10 @@ impl AccountManager {
     /// # Errors
     /// The local login, protected reference, or Google account cannot be verified.
     pub fn connect(&self) -> Result<AccountView> {
+        let generation = {
+            let _lock = self.lock()?;
+            self.generation()?
+        };
         let mut login = self.local(None)?;
         let email = self.authorized(&mut login)?;
         let (_project, models) = self.catalog(&login)?;
@@ -552,7 +605,13 @@ impl AccountManager {
             fingerprint,
             email,
         };
-        ensure_private_dir(&self.root).map_err(|_| failure())?;
+        let _lock = self.lock()?;
+        if self.generation()? != generation {
+            return Err(
+                "The Google subscription changed during connection. Retry the connection.".into(),
+            );
+        }
+        self.verify_source(&r.source, &r.fingerprint)?;
         write_atomic_private(
             &self.root.join(format!("{}.json", r.id)),
             &serde_json::to_vec(&r).map_err(|_| failure())?,
@@ -563,16 +622,19 @@ impl AccountManager {
     /// # Errors
     /// The local login, protected reference, or Google account cannot be verified.
     pub fn models(&self, id: &str) -> Result<Vec<Model>> {
-        let (_, login) = self.bound(id)?;
-        self.catalog(&login).map(|(_, m)| m)
+        let (record, login, generation) = self.bound(id)?;
+        let (_, models) = self.catalog(&login)?;
+        self.verify_bound(&record, generation)?;
+        Ok(models)
     }
     /// # Errors
     /// The local login, protected reference, or Google account cannot be verified.
     /// # Errors
     /// The local login, protected reference, or Google account cannot be verified.
     pub fn connection(&self, id: &str) -> Result<Connection> {
-        let (r, login) = self.bound(id)?;
+        let (r, login, generation) = self.bound(id)?;
         let (project, models) = self.catalog(&login)?;
+        self.verify_bound(&r, generation)?;
         let mut metadata = BTreeMap::new();
         metadata.insert("google_project".into(), json!(project));
         metadata.insert(
@@ -597,13 +659,20 @@ impl AccountManager {
     /// # Errors
     /// The local login, protected reference, or Google account cannot be verified.
     pub fn access_token(&self, id: &str) -> Result<String> {
-        let (_, mut login) = self.bound(id)?;
+        let (_, mut login, _) = self.bound(id)?;
         Ok(std::mem::take(&mut login.access))
     }
     /// # Errors
     /// The local login, protected reference, or Google account cannot be verified.
     pub fn disconnect(&self, id: &str) -> Result<()> {
+        let _lock = self.lock()?;
         self.record(id)?;
+        let generation = self.generation()?.checked_add(1).ok_or_else(failure)?;
+        write_atomic_private(
+            &self.root.join("generation"),
+            generation.to_string().as_bytes(),
+        )
+        .map_err(|_| failure())?;
         fs::remove_file(self.root.join(format!("{id}.json"))).map_err(|_| failure())
     }
     #[allow(
@@ -952,6 +1021,13 @@ mod tests {
         stop: Arc<AtomicBool>,
         server: Option<thread::JoinHandle<()>>,
         switched: Arc<AtomicBool>,
+        gate: Arc<Gate>,
+    }
+    #[derive(Default)]
+    struct Gate {
+        target: Mutex<Option<String>>,
+        entered: AtomicBool,
+        released: AtomicBool,
     }
     impl Fixture {
         fn new(kind: Kind) -> Self {
@@ -967,8 +1043,10 @@ mod tests {
             let base = format!("http://{}", listener.local_addr().unwrap());
             let stop = Arc::new(AtomicBool::new(false));
             let switched = Arc::new(AtomicBool::new(false));
+            let gate = Arc::new(Gate::default());
             let done = stop.clone();
             let sw = switched.clone();
+            let paused = gate.clone();
             let server = thread::spawn(move || {
                 while !done.load(Ordering::Relaxed) {
                     let Ok((mut socket, _)) = listener.accept() else {
@@ -1009,17 +1087,22 @@ mod tests {
                         continue;
                     }
                     let request = String::from_utf8_lossy(&raw);
-                    let value = if request.starts_with("GET /user") {
-                        json!({"email":if sw.load(Ordering::Relaxed){"other@example.com"}else{"fixture@example.com"}})
-                    } else if request.starts_with("POST /token") {
-                        json!({"access_token":"refreshed-fixture-access","expires_in":3600})
-                    } else if request.contains("loadCodeAssist") {
-                        json!({"cloudaicompanionProject":"fixture-project","currentTier":{"id":"free-tier"}})
-                    } else if request.contains("fetchAvailableModels") {
-                        json!({"models":{"gemini-fixture":{"displayName":"Fixture","maxTokens":128_000,"supportsImages":true},"tab_internal":{"displayName":"Hidden"},"disabled":{"disabled":true}}})
-                    } else if request.starts_with("POST /v1internal:retrieveUserQuota ") {
-                        json!({"buckets":[{"modelId":"gemini-fixture"},{"modelId":"gemini-fixture"}]})
-                    } else {
+                    if paused
+                        .target
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|target| request.starts_with(target))
+                    {
+                        paused.entered.store(true, Ordering::Relaxed);
+                        while !paused.released.load(Ordering::Relaxed)
+                            && !done.load(Ordering::Relaxed)
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    let Some(value) = Self::reply_value(&request, sw.load(Ordering::Relaxed))
+                    else {
                         continue;
                     };
                     let body = value.to_string();
@@ -1040,7 +1123,23 @@ mod tests {
                 stop,
                 server: Some(server),
                 switched,
+                gate,
             }
+        }
+        fn reply_value(request: &str, switched: bool) -> Option<Value> {
+            Some(if request.starts_with("GET /user") {
+                json!({"email":if switched{"other@example.com"}else{"fixture@example.com"}})
+            } else if request.starts_with("POST /token") {
+                json!({"access_token":"refreshed-fixture-access","expires_in":3600})
+            } else if request.contains("loadCodeAssist") {
+                json!({"cloudaicompanionProject":"fixture-project","currentTier":{"id":"free-tier"}})
+            } else if request.contains("fetchAvailableModels") {
+                json!({"models":{"gemini-fixture":{"displayName":"Fixture","maxTokens":128_000,"supportsImages":true},"tab_internal":{"displayName":"Hidden"},"disabled":{"disabled":true}}})
+            } else if request.starts_with("POST /v1internal:retrieveUserQuota ") {
+                json!({"buckets":[{"modelId":"gemini-fixture"},{"modelId":"gemini-fixture"}]})
+            } else {
+                return None;
+            })
         }
         fn login(&self, refresh: &str, expired: bool) {
             let path = self.manager.sources()[0].1.clone();
@@ -1052,6 +1151,19 @@ mod tests {
                 v
             };
             fs::write(path, value.to_string()).unwrap();
+        }
+        fn pause(&self, target: &str) {
+            *self.gate.target.lock().unwrap() = Some(target.into());
+        }
+        fn wait_for_pause(&self) {
+            let started = std::time::Instant::now();
+            while !self.gate.entered.load(Ordering::Relaxed) {
+                assert!(started.elapsed() < Duration::from_secs(5));
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        fn release(&self) {
+            self.gate.released.store(true, Ordering::Relaxed);
         }
     }
     impl Drop for Fixture {
@@ -1188,6 +1300,64 @@ mod tests {
         );
         fixture.login("replacement-refresh", true);
         assert!(clone.access_token(&account.id).is_err());
+    }
+    #[test]
+    fn lifecycle_changes_during_network_work_reject_stale_results() {
+        for operation in ["connect", "connection", "models", "access_token"] {
+            for change in ["replacement", "removal", "disconnect", "reconnect"] {
+                let fixture = Fixture::new(Kind::GeminiCli);
+                fixture.login("fixture-refresh", true);
+                let account = fixture.manager.connect().unwrap();
+                let record_path = fixture.manager.root.join(format!("{}.json", account.id));
+                let record = fs::read(&record_path).unwrap();
+                fixture.manager.cache.lock().unwrap().clear();
+                fixture.pause(if operation == "access_token" {
+                    "POST /token "
+                } else {
+                    "POST /v1internal:retrieveUserQuota "
+                });
+                let manager = fixture.manager.clone();
+                let id = account.id.clone();
+                let pending = thread::spawn(move || match operation {
+                    "connect" => manager.connect().map(|_| ()),
+                    "connection" => manager.connection(&id).map(|_| ()),
+                    "models" => manager.models(&id).map(|_| ()),
+                    _ => manager.access_token(&id).map(|_| ()),
+                });
+                fixture.wait_for_pause();
+                match change {
+                    "replacement" => fixture.login("replacement-refresh", true),
+                    "removal" => fs::remove_file(&fixture.manager.sources()[0].1).unwrap(),
+                    _ => {
+                        let manager = fixture.manager.clone();
+                        let id = account.id.clone();
+                        let (send, receive) = std::sync::mpsc::channel();
+                        let disconnect = thread::spawn(move || {
+                            send.send(manager.disconnect(&id)).unwrap();
+                        });
+                        let result = receive.recv_timeout(Duration::from_secs(2));
+                        if result.is_err() {
+                            fixture.release();
+                        }
+                        disconnect.join().unwrap();
+                        result.expect("Disconnect waited for network work").unwrap();
+                        if change == "reconnect" {
+                            write_atomic_private(&record_path, &record).unwrap();
+                        }
+                    }
+                }
+                fixture.release();
+                assert!(
+                    pending.join().unwrap().is_err(),
+                    "{operation} accepted a stale result after {change}"
+                );
+                if change == "disconnect" {
+                    assert!(fixture.manager.list().unwrap().is_empty());
+                } else if change == "reconnect" {
+                    assert_eq!(fixture.manager.list().unwrap().len(), 1);
+                }
+            }
+        }
     }
     #[test]
     fn incomplete_fixture_request_cannot_receive_a_quota_success() {

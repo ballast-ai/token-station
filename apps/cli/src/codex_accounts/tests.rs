@@ -545,6 +545,81 @@ fn automatic_registration_checks_disconnect_before_refresh_or_source_registratio
     assert!(f.manager.auto_connect_allowed("../invalid").is_err());
 }
 
+#[test]
+fn automatic_attachment_does_not_commit_after_disconnect() {
+    let fixture = Fixture::new();
+    fixture.auth();
+    let account = fixture.manager.connect_automatically().unwrap();
+    fixture.manager.disconnect(&account.id).unwrap();
+    let committed = fixture.dir.join("attached-provider");
+    let result = fixture.manager.with_automatic_account(&account.id, |_| {
+        fs::write(&committed, b"attached").map_err(local_error)?;
+        Ok(true)
+    });
+    assert_eq!(result, Ok(None));
+    assert!(!committed.exists());
+    assert!(fixture.manager.list().unwrap().is_empty());
+}
+
+#[test]
+fn automatic_attachment_holds_the_reference_lock_until_commit_finishes() {
+    let fixture = Fixture::new();
+    fixture.auth();
+    let account = fixture.manager.connect_automatically().unwrap();
+    let result = fixture.manager.with_automatic_account(&account.id, |_| {
+        let concurrent = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fixture.manager.root.join("references.lock"))
+            .map_err(local_error)?;
+        assert!(matches!(
+            concurrent.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        Ok(true)
+    });
+    assert_eq!(result, Ok(Some(true)));
+}
+
+#[test]
+fn automatic_attachment_commits_the_current_bound_account_without_source_changes() {
+    let fixture = Fixture::new();
+    fixture.auth();
+    let original = fs::read(fixture.manager.home.join("auth.json")).unwrap();
+    let account = fixture.manager.connect_automatically().unwrap();
+    let committed = fixture.dir.join("attached-provider");
+    let result = fixture
+        .manager
+        .with_automatic_account(&account.id, |current| {
+            assert_eq!(current.id, account.id);
+            assert_eq!(current.account_id, "synthetic-account");
+            fs::write(&committed, &current.id).map_err(local_error)?;
+            Ok(current.id.clone())
+        });
+    assert_eq!(result, Ok(Some(account.id.clone())));
+    assert_eq!(fs::read_to_string(&committed).unwrap(), account.id);
+    assert_eq!(
+        original,
+        fs::read(fixture.manager.home.join("auth.json")).unwrap()
+    );
+}
+
+#[test]
+fn automatic_attachment_rejects_a_replaced_native_account() {
+    let fixture = Fixture::new();
+    fixture.auth();
+    let account = fixture.manager.connect_automatically().unwrap();
+    rewrite(&fixture, |document| {
+        document["tokens"]["account_id"] = "other-account".into();
+        document["tokens"]["id_token"] = jwt("other-account", "other-user", 4_000_000_000).into();
+        document["tokens"]["access_token"] = document["tokens"]["id_token"].clone();
+    });
+    let result = fixture.manager.with_automatic_account(&account.id, |_| {
+        panic!("A replaced native account cannot authorize automatic attachment")
+    });
+    assert_eq!(result, Ok(None::<()>));
+}
+
 #[cfg(unix)]
 #[test]
 fn automatic_suppression_rejects_unsafe_files_without_following_links() {

@@ -44,6 +44,16 @@ pub(super) fn alias_client_tools(
             tool.name.clone_from(alias);
         }
     }
+    if let Some(strictness) = request
+        .extensions
+        .get_mut("responses_tool_strict")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        *strictness = std::mem::take(strictness)
+            .into_iter()
+            .map(|(name, value)| (forward.get(&name).cloned().unwrap_or(name), value))
+            .collect();
+    }
     for message in &mut request.messages {
         for call in &mut message.tool_calls {
             if let Some(alias) = forward.get(&call.name) {
@@ -70,6 +80,24 @@ pub(super) fn alias_client_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aliases_tool_strictness_with_its_function_name() {
+        let name = "client.function.with.dots";
+        let mut request: ChatRequest = serde_json::from_value(json!({"model":"test","messages":[],
+            "tools":[{"name":name,"parameters":{"type":"object"}}],
+            "responses_tool_strict":{name:true}}))
+        .unwrap();
+        let aliases = alias_client_tools(&mut request);
+        let alias = &request.tools[0].name;
+        assert_eq!(aliases[alias], name);
+        assert_eq!(request.extensions["responses_tool_strict"][alias], true);
+        assert!(
+            request.extensions["responses_tool_strict"]
+                .get(name)
+                .is_none()
+        );
+    }
 
     #[test]
     fn aliases_history_even_when_the_current_round_retires_tools() {
