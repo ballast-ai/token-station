@@ -38,6 +38,7 @@ impl Parser {
         let c = &r["candidates"][0];
         let mut events = Vec::new();
         for part in c["content"]["parts"].as_array().into_iter().flatten() {
+            validate_output_part(part)?;
             if let Some(call) = part.get("functionCall") {
                 let name = call["name"]
                     .as_str()

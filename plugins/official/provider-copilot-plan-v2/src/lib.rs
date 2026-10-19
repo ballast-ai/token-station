@@ -269,7 +269,39 @@ fn prepare(
                 json!({"type":"function","function":{"name":name}}),
             ));
         }
-        AnthropicReferenceV1.build_http_request(&mapped, &native)?
+        let mut descriptor = AnthropicReferenceV1.build_http_request(&mapped, &native)?;
+        let error_flags = r
+            .messages
+            .iter()
+            .filter_map(|message| {
+                Some((
+                    message.tool_call_id.as_deref()?,
+                    message
+                        .extensions
+                        .get("anthropic_tool_result_is_error")?
+                        .as_bool()?,
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for message in descriptor
+            .body
+            .as_mut()
+            .and_then(|body| body["messages"].as_array_mut())
+            .into_iter()
+            .flatten()
+        {
+            for block in message["content"].as_array_mut().into_iter().flatten() {
+                if block["type"] == "tool_result" {
+                    if let Some(is_error) = block["tool_use_id"]
+                        .as_str()
+                        .and_then(|id| error_flags.get(id))
+                    {
+                        block["is_error"] = json!(is_error);
+                    }
+                }
+            }
+        }
+        descriptor
     } else {
         OpenAiCompatibleReferenceV1.build_http_request(r, &native)?
     };
@@ -460,51 +492,71 @@ impl StreamParserV1 for DialectStream {
         if self.pending.len() > 4 * 1024 * 1024 {
             return Err(protocol("Copilot stream frame exceeds its size limit"));
         }
-        let text = match std::str::from_utf8(&self.pending) {
-            Ok(t) => t,
-            Err(e) if e.error_len().is_none() => return Ok(Vec::new()),
-            Err(_) => return Err(protocol("Copilot stream is not UTF-8")),
-        };
-        if !text.contains("\n\n") && !text.contains("\r\n\r\n") {
-            return Ok(Vec::new());
+        loop {
+            let lf = self
+                .pending
+                .windows(2)
+                .position(|bytes| bytes == b"\n\n")
+                .map(|end| (end, 2));
+            let crlf = self
+                .pending
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .map(|end| (end, 4));
+            let Some((end, separator)) = (match (lf, crlf) {
+                (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+                (left, right) => left.or(right),
+            }) else {
+                return Ok(Vec::new());
+            };
+            let text = std::str::from_utf8(&self.pending[..end])
+                .map_err(|_| protocol("Copilot stream is not UTF-8"))?;
+            let data = text
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("data:")
+                        .map(|value| value.strip_prefix(' ').unwrap_or(value))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if data.is_empty() {
+                self.pending.drain(..end + separator);
+                continue;
+            }
+            let raw: Value = serde_json::from_str(&data)
+                .map_err(|_| protocol("Copilot stream has an invalid first frame"))?;
+            let event = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("event:").map(str::trim))
+                .next_back();
+            if event == Some("ping") || raw["type"] == "ping" {
+                self.pending.drain(..end + separator);
+                continue;
+            }
+            let mut parser = if raw.get("choices").is_some() {
+                OpenAiCompatibleReferenceV1.stream_parser()
+            } else if raw["type"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("response."))
+            {
+                ResponsesCodec.stream_parser()
+            } else if event.is_some_and(|kind| {
+                kind.starts_with("message_") || kind.starts_with("content_block_") || kind == "ping"
+            }) || raw["type"].as_str().is_some_and(|kind| {
+                kind.starts_with("message_") || kind.starts_with("content_block_") || kind == "ping"
+            }) {
+                Box::new(MessagesStream::new())
+            } else {
+                return Err(protocol("Copilot stream has an unknown dialect"));
+            };
+            let events = parser.parse_chunk(&self.pending)?;
+            self.done |= events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Done { .. }));
+            self.pending.clear();
+            self.parser = Some(parser);
+            return Ok(events);
         }
-        let complete_end = text
-            .rfind("\n\n")
-            .map(|p| p + 2)
-            .or_else(|| text.rfind("\r\n\r\n").map(|p| p + 4))
-            .unwrap_or_default();
-        let data = text[..complete_end]
-            .lines()
-            .find_map(|line| line.strip_prefix("data:").map(str::trim));
-        let Some(data) = data else {
-            return Ok(Vec::new());
-        };
-        let raw: Value = serde_json::from_str(data)
-            .map_err(|_| protocol("Copilot stream has an invalid first frame"))?;
-        let event = text[..complete_end]
-            .lines()
-            .find_map(|line| line.strip_prefix("event:").map(str::trim));
-        let mut parser = if raw.get("choices").is_some() {
-            OpenAiCompatibleReferenceV1.stream_parser()
-        } else if raw["type"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("response."))
-        {
-            ResponsesCodec.stream_parser()
-        } else if event.is_some_and(|s| {
-            s.starts_with("message_") || s.starts_with("content_block_") || s == "ping"
-        }) || raw["type"].as_str().is_some_and(|s| {
-            s.starts_with("message_") || s.starts_with("content_block_") || s == "ping"
-        }) {
-            Box::new(MessagesStream::new())
-        } else {
-            return Err(protocol("Copilot stream has an unknown dialect"));
-        };
-        let events = parser.parse_chunk(&self.pending)?;
-        self.done |= events.iter().any(|e| matches!(e, StreamEvent::Done { .. }));
-        self.pending.clear();
-        self.parser = Some(parser);
-        Ok(events)
     }
     fn finish(&mut self) -> ComponentResultV1<Vec<StreamEvent>> {
         let events = self
@@ -523,17 +575,26 @@ impl StreamParserV1 for DialectStream {
 struct MessagesStream {
     tail: Vec<u8>,
     parser: Box<dyn StreamParserV1>,
+    saw_thinking_block: bool,
+    refused_thinking_blocks: bool,
 }
 impl MessagesStream {
     fn new() -> Self {
         Self {
             tail: Vec::new(),
             parser: AnthropicReferenceV1.stream_parser(),
+            saw_thinking_block: false,
+            refused_thinking_blocks: false,
         }
     }
 }
 impl StreamParserV1 for MessagesStream {
     fn parse_chunk(&mut self, chunk: &[u8]) -> ComponentResultV1<Vec<StreamEvent>> {
+        if self.refused_thinking_blocks {
+            return Err(capability(
+                "Copilot cannot preserve multiple streamed thinking blocks",
+            ));
+        }
         if chunk.is_empty() {
             if !self.tail.is_empty() {
                 return Err(protocol("Copilot Messages ended inside a stream frame"));
@@ -569,22 +630,32 @@ impl StreamParserV1 for MessagesStream {
                 .map_err(|_| protocol("Copilot Messages frame is not UTF-8"))?;
             let event = text
                 .lines()
-                .find_map(|line| line.strip_prefix("event:").map(str::trim));
+                .filter_map(|line| line.strip_prefix("event:").map(str::trim))
+                .next_back();
             let data = text
                 .lines()
                 .filter_map(|line| line.strip_prefix("data:").map(str::trim))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let mut parser_frame = None;
             if !data.is_empty() {
                 let raw: Value = serde_json::from_str(&data)
                     .map_err(|_| protocol("Copilot Messages frame has invalid JSON"))?;
+                let event_name = event.or_else(|| raw["type"].as_str()).unwrap_or_default();
+                if event_name.contains(['\r', '\n']) {
+                    return Err(protocol("Copilot Messages has an invalid event name"));
+                }
+                if event_name == "ping" {
+                    continue;
+                }
+                parser_frame = Some(format!("event: {event_name}\ndata: {raw}\n\n").into_bytes());
                 if event == Some("error")
                     || raw["type"] == "error"
                     || raw.get("error").is_some_and(|v| !v.is_null())
                 {
                     return Err(protocol("Copilot Messages emitted an upstream error"));
                 }
-                if event == Some("content_block_start") || raw["type"] == "content_block_start" {
+                if event_name == "content_block_start" {
                     let block = &raw["content_block"];
                     if !matches!(
                         block["type"].as_str(),
@@ -594,6 +665,15 @@ impl StreamParserV1 for MessagesStream {
                             "Copilot cannot preserve this streamed Messages content block",
                         ));
                     }
+                    if block["type"] == "thinking" {
+                        if self.saw_thinking_block {
+                            self.refused_thinking_blocks = true;
+                            return Err(capability(
+                                "Copilot cannot preserve multiple streamed thinking blocks",
+                            ));
+                        }
+                        self.saw_thinking_block = true;
+                    }
                     if block["type"] == "tool_use"
                         && block.get("input").is_some_and(|v| v != &json!({}))
                     {
@@ -601,7 +681,10 @@ impl StreamParserV1 for MessagesStream {
                             "Copilot cannot preserve initialized streamed tool arguments",
                         ));
                     }
-                    events.extend(self.parser.parse_chunk(&frame)?);
+                    events.extend(
+                        self.parser
+                            .parse_chunk(parser_frame.as_deref().unwrap_or(&frame))?,
+                    );
                     if let Some(text) = block["text"].as_str().filter(|v| !v.is_empty()) {
                         events.push(StreamEvent::Delta {
                             index: 0,
@@ -622,7 +705,7 @@ impl StreamParserV1 for MessagesStream {
                     }
                     continue;
                 }
-                if (event == Some("content_block_delta") || raw["type"] == "content_block_delta")
+                if event_name == "content_block_delta"
                     && !matches!(
                         raw["delta"]["type"].as_str(),
                         Some(
@@ -637,7 +720,7 @@ impl StreamParserV1 for MessagesStream {
                         "Copilot cannot preserve this streamed Messages delta",
                     ));
                 }
-                if (event == Some("message_start") || raw["type"] == "message_start")
+                if event_name == "message_start"
                     && raw["message"]["content"]
                         .as_array()
                         .is_some_and(|v| !v.is_empty())
@@ -647,7 +730,10 @@ impl StreamParserV1 for MessagesStream {
                     ));
                 }
             }
-            events.extend(self.parser.parse_chunk(&frame)?);
+            events.extend(
+                self.parser
+                    .parse_chunk(parser_frame.as_deref().unwrap_or(&frame))?,
+            );
         }
         Ok(events)
     }

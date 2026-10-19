@@ -532,3 +532,131 @@ fn legacy_tool_ids_replay_and_malformed_carriers_fail_closed() {
             .is_err());
     }
 }
+
+#[test]
+fn unsupported_buffered_output_matches_stream_capability_refusal() {
+    for part in [
+        json!({"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"fixture"}}),
+        json!({"executableCode":{"language":"PYTHON","code":"print(1)"}}),
+        json!({"futureOutput":{"data":"fixture"}}),
+        json!({"text":"visible","codeExecutionResult":{"outcome":"OUTCOME_OK","output":"fixture"}}),
+        json!({"functionCall":{"id":"wire","name":"read","args":{}},"executableCode":{"language":"PYTHON","code":"print(1)"}}),
+        json!({}),
+        json!(null),
+        json!(42),
+    ] {
+        let wire = json!({"response":{"modelVersion":"m","candidates":[{"content":{"parts":[{"text":"visible"},part]},"finishReason":"STOP"}]}});
+        let error = CodeAssist
+            .parse_response(&response(wire.clone()))
+            .unwrap_err();
+        assert_eq!(error.code, token_station_protocol::ErrorCode::Capability);
+        let error = CodeAssist
+            .stream_parser()
+            .parse_chunk(format!("data: {wire}\n\n").as_bytes())
+            .unwrap_err();
+        assert_eq!(error.code, token_station_protocol::ErrorCode::Capability);
+    }
+}
+
+#[test]
+fn historical_tool_ids_require_unique_calls_and_matching_results() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let identity = |wire: &str| {
+        format!(
+            "ca1_{}",
+            URL_SAFE_NO_PAD.encode(json!([wire, "", "m"]).to_string())
+        )
+    };
+    let first = identity("first");
+    let second = identity("second");
+    for (calls, results) in [
+        (vec![&first, &first], vec![&first, &second]),
+        (vec![&first, &second], vec![&first, &first]),
+        (vec![&first], vec![&second]),
+    ] {
+        let mut messages = calls.into_iter().map(|id| json!({"role":"assistant","tool_calls":[{"id":id,"name":"read","arguments":"{}"}]})).collect::<Vec<_>>();
+        messages.extend(
+            results
+                .into_iter()
+                .map(|id| json!({"role":"tool","tool_call_id":id,"content":"fixture"})),
+        );
+        let request = req(json!({"model":"m","messages":messages}));
+        let error = CodeAssist
+            .build_http_request(&request, &config("gemini-cli-plan"))
+            .unwrap_err();
+        assert_eq!(error.code, token_station_protocol::ErrorCode::Capability);
+    }
+}
+
+#[test]
+fn responses_thinking_extension_restores_only_unambiguous_bound_carriers() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let original = json!([
+        {"text":"first","thought":true,"thoughtSignature":"signature-a"},
+        {"text":"second","thought":true,"thoughtSignature":"signature-b"}
+    ]);
+    let carrier = format!(
+        "ca_th1_{}",
+        URL_SAFE_NO_PAD.encode(json!(["m", original]).to_string())
+    );
+    let request = |content: Value, opaque: Value| {
+        req(json!({"model":"m","messages":[{
+            "role":"assistant","content":content,"responses_reasoning_encrypted_content":opaque
+        }]}))
+    };
+    let content = json!([{"type":"thinking","thinking":"firstsecond"}]);
+    let valid = request(content.clone(), json!(carrier));
+    let body = CodeAssist
+        .build_http_request(&valid, &config("gemini-cli-plan"))
+        .unwrap()
+        .body
+        .unwrap();
+    assert_eq!(body["request"]["contents"][0]["parts"], original);
+    let matching = request(
+        json!([{"type":"thinking","thinking":"firstsecond","signature":carrier}]),
+        json!(carrier),
+    );
+    assert!(CodeAssist
+        .build_http_request(&matching, &config("gemini-cli-plan"))
+        .is_ok());
+    for opaque in [
+        json!("foreign"),
+        json!("ca_th1_invalid"),
+        json!(""),
+        json!(null),
+        json!({}),
+        json!(false),
+    ] {
+        assert!(CodeAssist
+            .build_http_request(
+                &request(content.clone(), opaque),
+                &config("gemini-cli-plan")
+            )
+            .is_err());
+    }
+    for content in [
+        json!([{"type":"thinking","thinking":"firstsecond","signature":"foreign"}]),
+        json!([{"type":"thinking","thinking":"firstsecond","signature":format!("ca_th1_{}", URL_SAFE_NO_PAD.encode(json!(["m",[{"text":"firstsecond","thought":true,"thoughtSignature":"other"}]]).to_string()))}]),
+        json!([{"type":"thinking","thinking":"first"},{"type":"thinking","thinking":"second"}]),
+        json!([{"type":"text","text":"firstsecond"}]),
+        json!([{"type":"thinking","thinking":"modified"}]),
+        json!([]),
+    ] {
+        assert!(CodeAssist
+            .build_http_request(
+                &request(content, json!(carrier)),
+                &config("gemini-cli-plan")
+            )
+            .is_err());
+    }
+    let mut foreign_model = valid;
+    foreign_model.model = "another-model".into();
+    assert!(CodeAssist
+        .build_http_request(&foreign_model, &config("gemini-cli-plan"))
+        .is_err());
+    let mut foreign_role = request(content, json!(carrier));
+    foreign_role.messages[0].role = token_station_protocol::Role::User;
+    assert!(CodeAssist
+        .build_http_request(&foreign_role, &config("gemini-cli-plan"))
+        .is_err());
+}

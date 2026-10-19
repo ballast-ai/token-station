@@ -6,7 +6,7 @@ use south_component_conformance::{
     reference_gemini::GeminiReferenceV1, ComponentResultV1, ProviderComponentV1, StreamParserV1,
 };
 use south_provider_api::{ComponentMetadataV1, PROVIDER_WORLD};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use token_station_protocol::ResponseFormat;
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode, ErrorEnvelope, FinishReason,
@@ -160,6 +160,66 @@ fn validate_thought_part(part: &Value) -> ComponentResultV1<()> {
     }
     Ok(())
 }
+fn validate_output_part(part: &Value) -> ComponentResultV1<()> {
+    let fields = part
+        .as_object()
+        .ok_or_else(|| capability("Code Assist returned an unsupported content part."))?;
+    if fields
+        .keys()
+        .any(|key| !["text", "thought", "thoughtSignature", "functionCall"].contains(&key.as_str()))
+    {
+        return Err(capability(
+            "Code Assist returned an unsupported content part.",
+        ));
+    }
+    if fields
+        .get("thought")
+        .is_some_and(|thought| !thought.is_boolean())
+        || fields
+            .get("thoughtSignature")
+            .is_some_and(|signature| !signature.is_string())
+    {
+        return Err(protocol("Code Assist returned invalid content metadata."));
+    }
+    if let Some(call) = fields.get("functionCall") {
+        if fields.contains_key("text") {
+            return Err(capability(
+                "Code Assist returned mixed content in one part.",
+            ));
+        }
+        let call = call
+            .as_object()
+            .ok_or_else(|| protocol("Code Assist returned an invalid function call."))?;
+        if call
+            .keys()
+            .any(|key| !["name", "args", "id"].contains(&key.as_str()))
+        {
+            return Err(capability(
+                "Code Assist returned an unsupported function call field.",
+            ));
+        }
+        if call
+            .get("name")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            || call
+                .get("args")
+                .is_some_and(|arguments| !arguments.is_object())
+            || call
+                .get("id")
+                .is_some_and(|id| !id.is_null() && id.as_str().is_none_or(str::is_empty))
+        {
+            return Err(protocol("Code Assist returned an invalid function call."));
+        }
+    } else if part["thought"] == true {
+        validate_thought_part(part)?;
+    } else if !part["text"].is_string() {
+        return Err(capability(
+            "Code Assist returned an unsupported content part.",
+        ));
+    }
+    Ok(())
+}
 fn thinking_signature(parts: &[Value], model: &str) -> ComponentResultV1<String> {
     if model.is_empty() {
         return Err(protocol("Code Assist thinking has no model identity."));
@@ -286,6 +346,24 @@ impl ProviderComponentV1 for CodeAssist {
         }
         let mut thinking_parts = VecDeque::new();
         for m in &r.messages {
+            let responses_thinking = m
+                .extensions
+                .get("responses_reasoning_encrypted_content")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| capability("Invalid opaque Google thinking history."))
+                })
+                .transpose()?;
+            if responses_thinking.is_some()
+                && (m.role != token_station_protocol::Role::Assistant
+                    || !matches!(&m.content, Some(Content::Parts(parts)) if parts.iter().filter(|part| matches!(part, ContentPart::Thinking { .. })).count() == 1))
+            {
+                return Err(capability(
+                    "Opaque Google thinking history requires one assistant thinking part.",
+                ));
+            }
             if let Some(Content::Parts(ps)) = &m.content {
                 if matches!(
                     m.role,
@@ -309,7 +387,16 @@ impl ProviderComponentV1 for CodeAssist {
                             thinking,
                             signature,
                         } => {
-                            let preserved = signature.as_deref().map(|signature| {
+                            if signature
+                                .as_deref()
+                                .zip(responses_thinking)
+                                .is_some_and(|(signature, opaque)| signature != opaque)
+                            {
+                                return Err(capability(
+                                    "Google thinking history contains conflicting opaque state.",
+                                ));
+                            }
+                            let preserved = signature.as_deref().or(responses_thinking).map(|signature| {
                                 if m.role != token_station_protocol::Role::Assistant {
                                     return Err(capability("Google thinking history requires an assistant message."));
                                 }
@@ -321,6 +408,40 @@ impl ProviderComponentV1 for CodeAssist {
                     }
                 }
             }
+        }
+        let calls = r
+            .messages
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+            .collect::<Vec<_>>();
+        let results = r
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<Vec<_>>();
+        let mut call_ids = BTreeSet::new();
+        for call in &calls {
+            if !call_ids.insert(call.id.as_str()) {
+                return Err(capability(
+                    "Historical Google tool call IDs must be unique.",
+                ));
+            }
+            if !serde_json::from_str::<Value>(&call.arguments).is_ok_and(|value| value.is_object())
+            {
+                return Err(capability(
+                    "Google tool arguments must contain a complete JSON object.",
+                ));
+            }
+        }
+        let mut result_ids = BTreeSet::new();
+        if results
+            .iter()
+            .any(|id| !call_ids.contains(id) || !result_ids.insert(*id))
+            || call_ids != result_ids
+        {
+            return Err(capability(
+                "Historical Google calls require exactly one matching result.",
+            ));
         }
         let mut gc = c.clone();
         gc.provider = "gemini".into();
@@ -387,33 +508,6 @@ impl ProviderComponentV1 for CodeAssist {
                 ));
             };
             body["generationConfig"]["thinkingConfig"] = thinking;
-        }
-        for call in r.messages.iter().flat_map(|m| &m.tool_calls) {
-            if !serde_json::from_str::<Value>(&call.arguments).is_ok_and(|value| value.is_object())
-            {
-                return Err(capability(
-                    "Google tool arguments must contain a complete JSON object.",
-                ));
-            }
-        }
-        let calls = r
-            .messages
-            .iter()
-            .flat_map(|m| m.tool_calls.iter())
-            .collect::<Vec<_>>();
-        let results = r
-            .messages
-            .iter()
-            .filter_map(|m| m.tool_call_id.as_deref())
-            .collect::<Vec<_>>();
-        if calls.len() != results.len()
-            || calls
-                .iter()
-                .any(|call| results.iter().filter(|id| **id == call.id).count() != 1)
-        {
-            return Err(capability(
-                "Historical Google calls require exactly one matching result.",
-            ));
         }
         let mut call_index = 0usize;
         let mut result_index = 0usize;
@@ -531,15 +625,7 @@ impl ProviderComponentV1 for CodeAssist {
             .into_iter()
             .flatten()
         {
-            if part
-                .get("functionCall")
-                .and_then(|call| call.get("args"))
-                .is_some_and(|arguments| !arguments.is_object())
-            {
-                return Err(protocol(
-                    "Google tool arguments must contain a JSON object.",
-                ));
-            }
+            validate_output_part(part)?;
         }
         let mut out = GeminiReferenceV1.parse_response(&inner)?;
         let parts = raw["candidates"][0]["content"]["parts"].as_array();
