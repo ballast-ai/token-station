@@ -13,7 +13,7 @@ use serde_json::Value;
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, CacheTtl, ChatRequest, ChatResponse, Content, ContentPart,
     ErrorCode, ErrorEnvelope, FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts,
-    ModelCapability, ProviderConfig, ReasoningMode, Role, StreamEvent,
+    ModelCapability, ProviderConfig, ReasoningMode, Role, StreamEvent, ToolCall,
 };
 
 /// Parses `fixture`, re-serializes it, and asserts nothing moved.
@@ -410,4 +410,37 @@ fn the_0_5_chat_request_fixture_gains_no_new_wire_keys() {
     assert_eq!(request.sampling.top_k, None);
     assert_eq!(request.tools[0].strict, None);
     assert_eq!(request.tools[0].cache_control, None);
+}
+
+#[test]
+fn a_tool_call_signature_round_trips_and_is_omitted_when_absent() {
+    let signed: ToolCall = assert_exact_round_trip(
+        r#"{"id": "call_1", "name": "read_file", "arguments": "{}", "signature": "c2lnbmVk"}"#,
+    );
+    assert_eq!(signed.signature.as_deref(), Some("c2lnbmVk"));
+
+    // A 0.6.0 peer's call has no signature: it parses to `None`, and `None`
+    // is not written back.
+    let unsigned: ToolCall =
+        assert_exact_round_trip(r#"{"id": "call_2", "name": "read_file", "arguments": "{}"}"#);
+    assert_eq!(unsigned, ToolCall::new("call_2", "read_file", "{}"));
+}
+
+#[test]
+fn a_tool_call_delta_carries_the_signature_on_the_fragment_it_arrived_with() {
+    let events: Vec<StreamEvent> = assert_exact_round_trip(
+        r#"[
+            {"type": "tool_call_delta", "index": 0, "id": "call_1", "name": "read_file",
+             "arguments_delta": "{\"path\"", "signature": "c2lnbmVk"},
+            {"type": "tool_call_delta", "index": 0, "arguments_delta": ": \"README.md\"}"}
+        ]"#,
+    );
+    let StreamEvent::ToolCallDelta { ref signature, .. } = events[0] else {
+        panic!("expected the opening tool_call_delta");
+    };
+    assert_eq!(signature.as_deref(), Some("c2lnbmVk"));
+    let StreamEvent::ToolCallDelta { ref signature, .. } = events[1] else {
+        panic!("expected a continuation tool_call_delta");
+    };
+    assert_eq!(signature, &None);
 }
