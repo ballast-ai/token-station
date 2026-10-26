@@ -185,6 +185,7 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
                     id,
                     name: name.to_owned(),
                     arguments: encode(&args)?,
+                    signature: None,
                 });
             }
             if let Some(result) = part.get("functionResponse") {
@@ -829,6 +830,7 @@ impl Guest for GeminiClient {
                 id: call_id,
                 name,
                 arguments_delta,
+                ..
             } => {
                 STREAM_CALLS.with(|streams| {
                     let mut streams = streams.borrow_mut();
@@ -1013,11 +1015,13 @@ mod tests {
                     id: "call-one".into(),
                     name: "read".into(),
                     arguments: "{}".into(),
+                    signature: None,
                 },
                 ToolCall {
                     id: "call-two".into(),
                     name: "read".into(),
                     arguments: "{}".into(),
+                    signature: None,
                 },
             ],
             tool_call_id: None,

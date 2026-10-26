@@ -224,6 +224,31 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Opaque provider-issued signature bound to this one call (Gemini 3's
+    /// `thoughtSignature` on a `functionCall` part). The provider requires it
+    /// back, unchanged, on the same call when the conversation is replayed; a
+    /// call that arrived without one stays without one — an adapter never
+    /// synthesizes a signature or copies another call's. `None` is not
+    /// serialized, so a peer that does not know the field never sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+impl ToolCall {
+    /// A call without a provider signature — the common case.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            signature: None,
+        }
+    }
 }
 
 /// A stable view of a tool call's `arguments`, for comparison, de-duplication
@@ -652,6 +677,7 @@ mod tests {
             id: "call_1".to_owned(),
             name: "get_weather".to_owned(),
             arguments: r#"{"city": "Beijing"}"#.to_owned(),
+            signature: None,
         };
         let round_tripped: ToolCall =
             serde_json::from_str(&serde_json::to_string(&call).expect("serializable call"))
@@ -757,11 +783,13 @@ mod tests {
             id: "1".to_owned(),
             name: "f".to_owned(),
             arguments: r#"{ "b": 1, "a": 2 }"#.to_owned(),
+            signature: None,
         };
         let b = ToolCall {
             id: "2".to_owned(),
             name: "f".to_owned(),
             arguments: r#"{"a":2,"b":1}"#.to_owned(),
+            signature: None,
         };
         assert_eq!(a.canonical_arguments(), b.canonical_arguments());
         assert_eq!(
@@ -778,6 +806,7 @@ mod tests {
             id: "1".to_owned(),
             name: "f".to_owned(),
             arguments: raw.to_owned(),
+            signature: None,
         };
         // The invalid arguments are preserved verbatim and flagged, not "fixed".
         assert_eq!(

@@ -300,6 +300,7 @@ fn tool_call(block: &Value) -> Result<ToolCall, String> {
         id: id.to_owned(),
         name: name.to_owned(),
         arguments: serde_json::to_string(input).map_err(internal)?,
+        signature: None,
     })
 }
 
@@ -1088,6 +1089,7 @@ impl Guest for AnthropicClient {
                     id,
                     name,
                     arguments_delta,
+                    ..
                 } => {
                     let state = states.get_mut(stream_id).expect("state inserted above");
                     let mut rendered = String::new();

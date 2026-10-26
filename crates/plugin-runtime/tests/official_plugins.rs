@@ -322,6 +322,7 @@ fn gemini_parallel_tool_fragments_finish_with_complete_objects() {
                     id: None,
                     name: name.map(str::to_owned),
                     arguments_delta: arguments.to_owned(),
+                    signature: None,
                 },
                 &context,
             )
@@ -726,6 +727,7 @@ fn responses_stream_restores_custom_and_namespace_tool_calls() {
             id: id.map(str::to_owned),
             name: name.map(str::to_owned),
             arguments_delta: args.to_owned(),
+            signature: None,
         };
 
     // Custom tool: announced as a custom_tool_call with a ctc_ id, and its
@@ -1387,6 +1389,7 @@ fn responses_stream_assigns_global_output_indices_by_first_appearance() {
             id: id.map(str::to_owned),
             name: name.map(str::to_owned),
             arguments_delta: arguments.to_owned(),
+            signature: None,
         };
 
     let text_first = response_sse_events(
@@ -1484,6 +1487,7 @@ fn responses_stream_keeps_tool_first_output_order() {
                     id: Some("call-first".to_owned()),
                     name: Some("read_first".to_owned()),
                     arguments_delta: "{}".to_owned(),
+                    signature: None,
                 },
                 &context,
             )

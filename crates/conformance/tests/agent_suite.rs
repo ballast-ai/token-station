@@ -52,6 +52,7 @@ fn tool_calls_from_openai(raw: &Value) -> Vec<ToolCall> {
                 .as_str()
                 .unwrap_or_default()
                 .to_owned(),
+            signature: None,
         })
         .collect()
 }
@@ -247,6 +248,7 @@ impl AgentAdapter for OpenAiClient {
                 id,
                 name,
                 arguments_delta,
+                ..
             } => {
                 let mut function = format!(
                     "\"arguments\":{}",

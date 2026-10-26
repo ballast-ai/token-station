@@ -35,6 +35,23 @@
 //! silently coerced. Breaking changes go to `-v2`; they never mutate `v1` in
 //! place.
 //!
+//! # Changes in 0.7.0
+//!
+//! The kernel mirror carries this surface as `canonical_ir` contract 5 and
+//! `stream` contract 3. The addition is optional on the wire: an absent field
+//! deserializes to `None`, and a `None` field is not serialized. JSON from a
+//! 0.6.0 peer still parses, and a 0.6.0 peer ignores the new field.
+//!
+//! - [`ToolCall::signature`] and the `signature` of
+//!   [`StreamEvent::ToolCallDelta`]: an opaque provider-issued signature bound
+//!   to one tool call (Gemini 3's `thoughtSignature` on a `functionCall`
+//!   part), which the provider requires back on the same call when the
+//!   conversation is replayed.
+//!
+//! Rust code that builds a [`ToolCall`] or a [`StreamEvent::ToolCallDelta`]
+//! with a struct literal, or matches the delta without `..`, must add the new
+//! field. Use [`ToolCall::new`] for a call without a signature.
+//!
 //! # Changes in 0.6.0
 //!
 //! The kernel mirror carries this surface as `canonical_ir` contract 4.
