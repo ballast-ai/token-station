@@ -39,7 +39,7 @@ toml = "0.8"
 toml_edit = "=0.20.2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 axum = "=0.8.9"
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream"] }
 ureq = { version = "3.3.0", features = ["socks-proxy"] }
 semver = "=1.0.28"
 sha2 = "=0.10.9"
