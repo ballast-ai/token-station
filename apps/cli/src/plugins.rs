@@ -132,6 +132,9 @@ impl PackageSource {
 /// A package's parsed, validated manifest — one of the two schemas the
 /// directory scan dispatches on.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// One value exists per installed package, parsed once per directory scan, so
+// the variant size gap costs nothing. Boxing either side only moves the gap.
+#[allow(clippy::large_enum_variant)]
 pub enum PackageManifest {
     /// `agent-adapter-v1`, this repository's schema.
     Agent(AdapterManifest),

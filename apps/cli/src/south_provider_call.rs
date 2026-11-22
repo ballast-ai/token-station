@@ -507,15 +507,14 @@ pub(crate) fn map_failure_v1(
                 413,
                 "provider request body is too large",
             ),
-            ContractErrorV1::InvalidEndpoint
-            | ContractErrorV1::InvalidRelativePath
-            | ContractErrorV1::InvalidCredentialSlot
-            | ContractErrorV1::InvalidJsonBody
-            | ContractErrorV1::InvalidQueryValue
-            | ContractErrorV1::DuplicateQueryParameter
-            | ContractErrorV1::EmptyQuery
-            | ContractErrorV1::QueryTooLarge
-            | ContractErrorV1::InvalidUserAgentValue => (
+            // Every other variant rejects a request shape that the host or a
+            // component built: endpoint, path, slot, JSON body, query and
+            // user-agent since the frozen v1 set, and multipart, text media
+            // type and declared secret, query and quota headers since
+            // `ContractErrorV1` became `#[non_exhaustive]` in South 0.25.0.
+            // None is the caller's fault, so each fails closed as one internal
+            // contract rejection.
+            _ => (
                 ErrorCode::Internal,
                 500,
                 "provider request contract rejected",

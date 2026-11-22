@@ -20,7 +20,7 @@ use south_contracts::{
 };
 use south_core::{
     AsyncHttpTransport, AsyncStreamingTransport, CredentialResolutionFuture, CredentialResolver,
-    OpenedByteStreamV1, PreparedHttpRequestV1, ProviderCallErrorV1, SecretValue,
+    OpenedByteStreamV1, PreparedHttpRequestV1, ProviderCallErrorV1, RequestBodyRefV1, SecretValue,
     StreamByteSourceV1, StreamChunkFutureV1, StreamOpenErrorV1, StreamingOpenFutureV1,
     TransportFuture,
 };
@@ -531,8 +531,15 @@ fn url_projection_rechecks_raw_path_origin_and_canonical_destination() {
             "https://api.example.test/v1/a//b",
             PrepareProviderCallErrorV1::Contract(ContractErrorV1::InvalidRelativePath),
         ),
+        // HTTP contract version eleven (South SF26) admits an encoded slash
+        // inside one segment, but every decoded piece must still be a safe
+        // segment. A dot-segment smuggled through the escape stays refused.
         (
-            "https://api.example.test/v1/a%2fb",
+            "https://api.example.test/v1/a%2f..%2fb",
+            PrepareProviderCallErrorV1::Contract(ContractErrorV1::InvalidRelativePath),
+        ),
+        (
+            "https://api.example.test/v1/a%2F..%2Fb",
             PrepareProviderCallErrorV1::Contract(ContractErrorV1::InvalidRelativePath),
         ),
         (
@@ -557,6 +564,19 @@ fn url_projection_rechecks_raw_path_origin_and_canonical_destination() {
         .expect_err("unsafe destination must fail before execution");
         assert_eq!(error, expected, "unexpected classification for {url}");
     }
+
+    // The same escape with safe pieces is one segment, as a Bedrock
+    // inference-profile ARN needs. The protocol crate applies this D5 rule
+    // below an endpoint, so South must not refuse what the host admits.
+    let mut encoded_slash = descriptor();
+    encoded_slash.url = "https://api.example.test/v1/a%2fb".to_owned();
+    prepare_provider_call_v1(
+        &eligible_policy(),
+        &provider_config(),
+        &auth_config(),
+        &encoded_slash,
+    )
+    .expect("an encoded slash between safe pieces stays inside one segment");
 
     let mut default_port = descriptor();
     default_port.url = "https://api.example.test:443/v1/chat/completions".to_owned();
@@ -726,7 +746,10 @@ impl AsyncHttpTransport for InspectingTransport {
             request.url().as_str(),
             "https://api.example.test/v1/chat/completions"
         );
-        assert_eq!(request.body().as_str(), r#"{"model":"test"}"#);
+        let Some(RequestBodyRefV1::Json(body)) = request.body() else {
+            panic!("a chat-completions request carries a JSON body");
+        };
+        assert_eq!(body.as_str(), r#"{"model":"test"}"#);
         assert_eq!(request.headers().get("x-trace-id"), Some("trace-1"));
         assert_eq!(
             request.auth_headers().collect::<Vec<_>>(),
@@ -1572,20 +1595,50 @@ async fn community_streaming_adapter_passes_the_public_south_suite() {
     assert_eq!(report.passed_case_ids().len(), 9);
 }
 
+/// Header Auth cases the community adapter does not serve yet.
+///
+/// South auth contract versions four and five added the combined
+/// `BearerAndHeaderSecret` arm and package-declared secret header names. The
+/// adapter projects only `Bearer` and a sanctioned `HeaderSecret`, so it
+/// refuses these requests as ineligible and the legacy transport serves them.
+/// That is the existing behavior, not a regression. The list is exact: a newly
+/// failing case turns this red, and so does a case that starts to pass.
+const UNSERVED_HEADER_AUTH_CASES: &[&str] = &[
+    "BufferedBearerAndHeaderSecretSuccess",
+    "BufferedDeclaredHeaderSecretSuccess",
+    "DeclaredHeaderRedactedFromTranscript",
+];
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn community_adapter_passes_the_public_header_auth_suite() {
+async fn community_adapter_fails_the_header_auth_suite_only_on_unserved_arms() {
     let executor = CommunityHeaderAuthConformanceExecutorV1;
-    let report = tokio::time::timeout(
+    let failure = tokio::time::timeout(
         Duration::from_secs(5),
         run_header_auth_conformance_v1(&executor),
     )
     .await
     .expect("structured header-auth conformance watchdog must not expire")
-    .expect("community adapter must pass the public Header Auth suite");
+    .expect_err(
+        "the adapter now passes every Header Auth case: \
+         remove UNSERVED_HEADER_AUTH_CASES and require a full pass",
+    );
 
-    assert_eq!(report.suite_id(), "south.header-auth.v1");
-    assert_eq!(report.suite_version(), 1);
-    assert_eq!(report.passed_case_ids().len(), 3);
+    assert_eq!(failure.suite_id(), "south.header-auth.v1");
+    assert_eq!(failure.suite_version(), 1);
+    assert_eq!(failure.evaluated_case_count(), 7);
+    let failing: BTreeSet<String> = failure
+        .mismatches()
+        .iter()
+        .map(|mismatch| format!("{:?}", mismatch.case_id()))
+        .collect();
+    let unserved: BTreeSet<String> = UNSERVED_HEADER_AUTH_CASES
+        .iter()
+        .map(|case| (*case).to_owned())
+        .collect();
+    assert_eq!(
+        failing, unserved,
+        "only the unserved arms may fail: {failure:?}"
+    );
 }
 
 struct CommunityHeaderAuthConformanceExecutorV1;
@@ -1614,8 +1667,7 @@ impl HeaderAuthProbe {
             .expect("a header-auth request binds exactly one auth header");
         assert!(auth_headers.next().is_none());
         self.sanctioned_header_exact.store(
-            name == fixture.secret_header().header_name()
-                && value == FAKE_HEADER_SECRET_V1.as_bytes(),
+            name == fixture.header().header_name() && value == FAKE_HEADER_SECRET_V1.as_bytes(),
             Ordering::SeqCst,
         );
         self.authorization_header_absent
@@ -1742,7 +1794,7 @@ fn prepare_header_auth_conformance_fixture(
         Some(serde_json::from_str(input.json_body()).expect("canonical request body is valid"));
     descriptor.auth = Some(
         Auth::header(
-            fixture.secret_header().header_name(),
+            fixture.header().header_name(),
             SecretRef::new(input.requested_credential_slot()),
         )
         .expect("canonical Header Auth fixture uses a host-redacted name"),
@@ -2468,6 +2520,10 @@ fn map_contract_failure_code(error: ContractErrorV1) -> ProviderCallFailureCodeV
         ContractErrorV1::InvalidCredentialSlot => ProviderCallFailureCodeV1::InvalidCredentialSlot,
         ContractErrorV1::InvalidJsonBody => ProviderCallFailureCodeV1::InvalidJsonBody,
         ContractErrorV1::RequestBodyTooLarge => ProviderCallFailureCodeV1::RequestBodyTooLarge,
+        // The frozen v1 provider-call suite drives JSON requests only. It has no
+        // code for a multipart, text-body or declared-header rejection, so
+        // reaching one means the suite changed and this mapping must follow.
+        other => panic!("the frozen v1 provider-call suite cannot produce {other:?}"),
     }
 }
 
