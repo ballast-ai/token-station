@@ -16,6 +16,11 @@
           "name": "lookup",
           "arguments": "{\"query\":\"Token Station\"}"
         }
+      ],
+      "reasoning_replay_protocol_family": "claude-signed-thinking",
+      "reasoning_replay_block_layout": [
+        {"kind": "content", "ordinal": 0},
+        {"kind": "tool_call", "call_id": "toolu_1"}
       ]
     },
     {
@@ -26,5 +31,6 @@
   ],
   "sampling": {"max_output_tokens": 1024},
   "stream": false,
+  "reasoning_mode": "adaptive",
   "anthropic_thinking": {"type": "adaptive"}
 }

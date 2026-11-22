@@ -24,6 +24,7 @@ mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
 #[cfg(all(test, feature = "builtin-plugins"))]
 mod classifier_input_tests;
+mod component_request; // host-owned request fields: host values and replay markers
 mod jev_routing;
 #[cfg(test)]
 mod jev_tests;
