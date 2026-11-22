@@ -26,10 +26,14 @@
 //!   defines the IR itself; going through JSON keeps those two packages from
 //!   meeting, and it is the shape the runtime actually uses, so the ledger
 //!   measures what production would measure.
-//! - `f` is the `AnthropicReferenceV1` implementation rather than the wasm
-//!   component. South's `anthropic_sandbox_parity_v1` already pins the
-//!   sandboxed component to this implementation byte for byte, so the
-//!   translation is the same and no wasm build is paid for here.
+//! - `f` is the packaged `provider-anthropic-v2` wasm component, loaded under
+//!   the host's own runtime and admission gates. It used to be South's native
+//!   `AnthropicReferenceV1`, which South pins to the component of the same
+//!   revision. That parity holds only while the host's South libraries and
+//!   the packaged component come from one revision. They no longer do: the
+//!   libraries moved on, and the newer reference replays signed thinking only
+//!   under the reasoning-replay markers this host does not set yet. Measuring
+//!   the reference would report a translation that production does not run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -38,7 +42,9 @@ use std::sync::OnceLock;
 
 use serde_json::{Value, json};
 use south_component_conformance::abi::build_http_request_json;
-use south_component_conformance::reference_anthropic::AnthropicReferenceV1;
+use south_component_conformance::sandbox::SandboxedComponentV1;
+use south_provider_runtime::{LoadedComponentV1, NoSecretsV1};
+use token_station_cli::south_component::{host_expectations, south_component_runtime};
 use token_station_conformance::AgentAdapter;
 use token_station_plugin_runtime::{AgentPlugin, PluginRuntime, RuntimeLimits};
 use token_station_protocol::{AgentRequestEnvelope, Extensions, HeaderDigest, Principal};
@@ -84,6 +90,36 @@ fn agent_plugin() -> &'static AgentPlugin {
     })
 }
 
+/// The packaged Anthropic component, built as the package builds it and loaded
+/// through every gate the host applies at load.
+fn anthropic_component() -> &'static SandboxedComponentV1 {
+    static COMPONENT: OnceLock<SandboxedComponentV1> = OnceLock::new();
+    COMPONENT.get_or_init(|| {
+        let package = repo_root().join("plugins/official/provider-anthropic-v2");
+        let status = Command::new("cargo")
+            .args(["build", "--release", "--target", "wasm32-wasip2"])
+            .current_dir(&package)
+            .status()
+            .expect("cargo is on PATH");
+        assert!(status.success(), "provider-anthropic-v2 must build");
+        let wasm =
+            std::fs::read(package.join("target/wasm32-wasip2/release/provider_anthropic_v2.wasm"))
+                .expect("the component wasm reads");
+        let manifest =
+            std::fs::read_to_string(package.join("manifest.json")).expect("manifest reads");
+        let runtime = south_component_runtime().expect("component runtime builds");
+        let loaded = LoadedComponentV1::load_embedded(
+            &runtime,
+            &manifest,
+            &wasm,
+            &host_expectations(),
+            NoSecretsV1,
+        )
+        .expect("the packaged component loads through every admission gate");
+        SandboxedComponentV1::new(loaded)
+    })
+}
+
 /// `ProviderEndpoint` serialises as a bare string, so the component's config is
 /// this small.
 fn component_config() -> String {
@@ -120,7 +156,7 @@ fn round_tripped(client_body: &Value) -> Result<Value, String> {
 
     let request_json = serde_json::to_string(&request).expect("the host IR serialises");
     let descriptor_json =
-        build_http_request_json(&AnthropicReferenceV1, &request_json, &component_config())
+        build_http_request_json(anthropic_component(), &request_json, &component_config())
             .map_err(|error| format!("component refused: {error}"))?;
     let descriptor: Value =
         serde_json::from_str(&descriptor_json).expect("the component returns JSON");
