@@ -624,13 +624,10 @@ pub(super) fn emit_content(
     {
         return false;
     }
-    if !emit(Reply::Chunk(sse(
+    emit(Reply::Chunk(sse(
         "content_block_stop",
         &json!({"type":"content_block_stop","index":index}),
-    ))) {
-        return false;
-    }
-    true
+    )))
 }
 
 impl Gateway {

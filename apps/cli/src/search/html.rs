@@ -53,10 +53,10 @@ impl Document {
         predicate: impl Fn(&Node) -> bool,
         check: &dyn Fn() -> Result<(), String>,
     ) -> Result<Option<usize>, String> {
-        for index in start..end {
+        for (offset, node) in self.nodes[start..end].iter().enumerate() {
             check()?;
-            if predicate(&self.nodes[index]) {
-                return Ok(Some(index));
+            if predicate(node) {
+                return Ok(Some(start + offset));
             }
         }
         Ok(None)
