@@ -1,5 +1,6 @@
 {
   "chunks": [
+    "event: content_block_start\ndata: {\"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
     "event: content_block_delta\ndata: {\"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"hi\"}}\n\n"
   ]
 }

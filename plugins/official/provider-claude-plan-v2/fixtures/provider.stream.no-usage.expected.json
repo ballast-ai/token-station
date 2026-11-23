@@ -1,0 +1,14 @@
+[
+  {
+    "type": "delta",
+    "index": 0,
+    "content": "hi"
+  },
+  {
+    "type": "finish",
+    "finish_reason": "length"
+  },
+  {
+    "type": "done"
+  }
+]

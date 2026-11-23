@@ -13,9 +13,9 @@
       "source": "repository"
     },
     "provider-claude-plan-v2": {
-      "files": 36,
+      "files": 47,
       "fixtures": "fixtures",
-      "sha256": "bcbd950bdcdd76621449afdab3f0d24ded368f0aab45d23256a623f39c173f04",
+      "sha256": "304e9ba3ae01173b64d68d63c51695a205e9b4ce8df02eb7238b4a182ceafd17",
       "source": "repository"
     },
     "provider-codeassist-v2": {

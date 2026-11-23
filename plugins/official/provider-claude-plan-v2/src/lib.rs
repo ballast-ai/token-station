@@ -61,6 +61,8 @@ fn build_http_request(chat_request: &str, provider_config: &str) -> Result<Strin
         "thinking",
         "anthropic_thinking",
         "reasoning_effort",
+        "reasoning_mode",
+        "reasoning_budget_tokens",
         "context_management",
         "previous_response_id",
         "conversation",
@@ -153,7 +155,7 @@ mod shell {
         fn metadata() -> AdapterMetadata {
             AdapterMetadata {
                 name: "provider-claude-plan".into(),
-                version: "1.0.0".into(),
+                version: "1.1.0".into(),
                 api_version: "provider-adapter-v2".into(),
             }
         }
