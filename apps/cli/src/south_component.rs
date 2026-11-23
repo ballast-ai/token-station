@@ -15,10 +15,10 @@ use std::sync::Mutex;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use south_provider_api::{ComponentManifestV1, HostExpectationsV1, HostRangeV1, RUNTIME_ABI};
+use south_provider_api::{ComponentManifestV1, HostRangeV1, RUNTIME_ABI};
 use south_provider_runtime::{
-    CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, HostCompatibilityV1, LoadErrorV1,
-    LoadedComponentV1, NoSecretsV1, RuntimeLimitsV1,
+    CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, HostCompatibilityV1, LoadedComponentV1,
+    NoSecretsV1, RuntimeLimitsV1,
 };
 use token_station_protocol::{
     ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, HttpRequestDescriptor, HttpResponseParts,
@@ -107,77 +107,40 @@ pub fn south_component_runtime() -> Result<ComponentRuntimeV1, String> {
 ///
 /// South judges every component against the host's declaration; the host owns
 /// the declaration. These are constants rather than derivations because nothing
-/// in the dependency graph carries them: South exposes no release constant, and
-/// the kernel revision names an upstream commit no crate here can look up. A
-/// declaration that nobody checks is what let the tuple rot unnoticed for three
-/// releases, so `tests/south-dependency-policy.mjs` asserts these constants
-/// against the pinned South release and every shipped manifest.
+/// in the dependency graph carries them: South exposes no release constant. A
+/// declaration that nobody checks is what let the old exact tuple rot unnoticed
+/// for three releases, so `tests/south-dependency-policy.mjs` asserts these
+/// constants against the pinned South release and every shipped manifest.
 ///
-/// Two handshakes are live while the shipped packages straddle South's switch
-/// from an exact tuple to a range (South B3, `host-zero-vendor-boundary` §8.4):
-///
-/// - **Range**, for a package that declares `runtime_abi`. The package must
-///   speak this runtime ABI, declare exactly these kernel contracts, and have
-///   been verified with a South runtime from `SOUTH_RUNTIME_MIN` up to the one
-///   this host links.
-/// - **Exact tuple**, for a package built before the range handshake. It
-///   declares no `runtime_abi` and must equal the `TUPLE_*` values. The plan
-///   components are the last such packages; delete this arm with them.
-///
-/// The arm is chosen by the package's own declaration, so no package can pick
-/// the more lenient one.
+/// The handshake is South's range (B3, `host-zero-vendor-boundary` §8.4): a
+/// package must declare this runtime ABI and exactly these kernel contracts,
+/// and must have been verified with a South runtime from `SOUTH_RUNTIME_MIN` up
+/// to the one this host links. A package built before the range handshake
+/// declares no `runtime_abi` and is refused; the exact-tuple arm left with the
+/// last such package.
 pub(crate) const SOUTH_RUNTIME: &str = "0.85.1";
-/// The oldest South runtime a range package may declare: the oldest one among
-/// the packages this host ships. Raising it is how a host enforces a release
-/// that tightened a South gate.
+/// The oldest South runtime a package may declare: the oldest one among the
+/// packages this host ships. Raising it is how a host enforces a release that
+/// tightened a South gate.
 pub(crate) const SOUTH_RUNTIME_MIN: &str = "0.77.0";
 /// The kernel contracts of protocol 0.7.0 (kernel mirror `ce6894d`).
 pub(crate) const KERNEL_CONTRACTS: [(&str, u32); 3] =
     [("canonical_ir", 5), ("error_catalog", 1), ("stream", 3)];
-pub(crate) const TUPLE_IR_SCHEMA_ID: &str = "token-station-protocol@0.3.0/v0.2.0";
-pub(crate) const TUPLE_KERNEL_VERSION: &str = "0.2.0";
-pub(crate) const TUPLE_KERNEL_REVISION: &str = "72458e3a11fe157f9ac04818c44b62a3dd2cb09c";
-pub(crate) const TUPLE_SOUTH_RUNTIME: &str = "0.20.0";
 
 /// The admission every component is loaded through; see `SOUTH_RUNTIME`.
-#[derive(Debug, Clone)]
-pub struct HostAdmission {
-    range: HostRangeV1,
-    tuple: HostExpectationsV1,
-}
-
-impl HostCompatibilityV1 for HostAdmission {
-    fn admit(&self, manifest: &ComponentManifestV1) -> Result<(), LoadErrorV1> {
-        if manifest.compatibility.runtime_abi.is_some() {
-            self.range.admit(manifest)
-        } else {
-            self.tuple.admit(manifest)
-        }
-    }
-}
-
-/// The admission this host loads every component through.
 #[must_use]
-pub fn host_admission() -> HostAdmission {
-    HostAdmission {
-        range: HostRangeV1 {
-            runtime_abi: RUNTIME_ABI,
-            south_runtime_min: SOUTH_RUNTIME_MIN.to_owned(),
-            south_runtime: SOUTH_RUNTIME.to_owned(),
-            kernel_contracts: KERNEL_CONTRACTS
-                .iter()
-                .map(|(name, version)| ((*name).to_owned(), *version))
-                .collect(),
-            // Provider-world packages declare no South contracts; task, media,
-            // image and speech worlds are not served by this host.
-            contracts: BTreeMap::new(),
-        },
-        tuple: HostExpectationsV1 {
-            ir_schema_id: TUPLE_IR_SCHEMA_ID.to_owned(),
-            kernel_version: TUPLE_KERNEL_VERSION.to_owned(),
-            kernel_revision: TUPLE_KERNEL_REVISION.to_owned(),
-            south_runtime: TUPLE_SOUTH_RUNTIME.to_owned(),
-        },
+pub fn host_admission() -> HostRangeV1 {
+    HostRangeV1 {
+        runtime_abi: RUNTIME_ABI,
+        south_runtime_min: SOUTH_RUNTIME_MIN.to_owned(),
+        south_runtime: SOUTH_RUNTIME.to_owned(),
+        kernel_contracts: KERNEL_CONTRACTS
+            .iter()
+            .map(|(name, version)| ((*name).to_owned(), *version))
+            .collect(),
+        // Provider-world packages declare no South contracts; task, media,
+        // image and speech worlds are not served by this host.
+        contracts: BTreeMap::new(),
     }
 }
 
@@ -538,27 +501,18 @@ mod tests {
     }
 
     #[test]
-    fn a_package_cannot_choose_the_more_lenient_arm() {
-        // A tuple-era package that claims the range arm is judged by the range.
-        let mut tuple = packaged_manifest("provider-copilot-plan-v2");
-        tuple["compatibility"]["runtime_abi"] = serde_json::json!(1);
-        tuple["compatibility"]["kernel_contracts"] =
-            serde_json::json!({"canonical_ir": 5, "error_catalog": 1, "stream": 3});
-        assert!(
-            admits(&tuple)
-                .unwrap_err()
-                .contains("older than this host's minimum")
-        );
-        // A range-era package that drops runtime_abi is judged by the tuple.
-        let mut range = packaged_manifest("provider-anthropic-v2");
-        range["compatibility"]
+    fn a_package_built_before_the_range_handshake_is_refused() {
+        let mut stale = packaged_manifest("provider-copilot-plan-v2");
+        let compatibility = stale["compatibility"]
             .as_object_mut()
-            .expect("compatibility object")
-            .remove("runtime_abi");
+            .expect("compatibility object");
+        compatibility.remove("runtime_abi");
+        compatibility.remove("kernel_contracts");
+        compatibility.insert("south_runtime".into(), serde_json::json!("0.20.0"));
         assert!(
-            admits(&range)
+            admits(&stale)
                 .unwrap_err()
-                .contains("not compatible with this host")
+                .contains("declares no runtime_abi")
         );
     }
 }

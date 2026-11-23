@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-c1",
+  "model": "gpt-5.5",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Cached."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 4,
+    "cache_read_tokens": 90,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 0
+  }
+}

@@ -146,48 +146,35 @@ fn a_range_component_outside_the_host_range_is_refused() {
     }
 }
 
-/// Each of the four host-known fields, tampered one at a time on a tuple-era
-/// package (no `runtime_abi`) that is otherwise exactly the one that ships.
-/// All four must be refused.
+/// A package built before South's range handshake declares no `runtime_abi`.
+/// The host refuses it by name instead of judging it by the exact tuple it
+/// carries, which no arm of this host reads any more.
 #[test]
-fn a_tuple_component_disagreeing_on_any_tuple_field_is_refused() {
+fn a_package_built_before_the_range_handshake_is_refused() {
     let wasm = std::fs::read(build_wasm(
         "provider-copilot-plan-v2",
         "provider_copilot_plan_v2",
     ))
     .expect("the copilot component builds");
-    let shipped: serde_json::Value = serde_json::from_str(
+    let mut stale: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             repo_root().join("plugins/official/provider-copilot-plan-v2/manifest.json"),
         )
         .expect("its manifest reads"),
     )
     .expect("the manifest is JSON");
-    assert!(shipped["compatibility"].get("runtime_abi").is_none());
+    let compatibility = stale["compatibility"]
+        .as_object_mut()
+        .expect("compatibility object");
+    compatibility.remove("runtime_abi");
+    compatibility.remove("kernel_contracts");
+    compatibility.insert("south_runtime".into(), serde_json::json!("0.20.0"));
     let runtime = south_component_runtime().expect("the south runtime builds");
-
-    // Shape-valid but different. A malformed value would be refused earlier, by
-    // the manifest schema gate, and would prove nothing about the handshake.
-    for (field, other) in [
-        ("ir_schema_id", "token-station-protocol@0.4.0/v0.2.0"),
-        ("kernel_version", "0.3.0"),
-        (
-            "kernel_revision",
-            "0123456789abcdef0123456789abcdef01234567",
-        ),
-        ("south_runtime", "0.15.0"),
-    ] {
-        let mut tampered = shipped.clone();
-        tampered["compatibility"][field] = serde_json::json!(other);
-        let refused = SouthComponentAdapter::load_embedded(&runtime, &tampered.to_string(), &wasm);
-        let Err(message) = refused else {
-            panic!("a component disagreeing on `{field}` must not be admitted");
-        };
-        assert!(
-            message.contains("not compatible"),
-            "the refusal must name the handshake, not something downstream: {message}"
-        );
-    }
+    let Err(message) = SouthComponentAdapter::load_embedded(&runtime, &stale.to_string(), &wasm)
+    else {
+        panic!("a package without runtime_abi must not be admitted");
+    };
+    assert!(message.contains("declares no runtime_abi"), "{message}");
 }
 
 /// The shipped package is admitted. Without this the test above would pass on a

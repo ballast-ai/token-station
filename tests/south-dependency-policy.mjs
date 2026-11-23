@@ -22,10 +22,6 @@ const southPackageVersions = new Map([
   ["south-testkit", southRelease],
   ["south-transport-reqwest", southRelease],
 ]);
-// The admission tuple of the components built before South's range handshake
-// (South 0.20.0). They declare no runtime_abi and must match this exactly. The
-// range-era components are checked against the host's range instead.
-const tupleSouthRuntime = "0.20.0";
 // The kernel contracts of protocol 0.7.0, as the kernel mirror at
 // kernelRevision records them. The host and every range-era manifest must
 // declare exactly these.
@@ -325,7 +321,7 @@ assert.deepEqual(
 // a set of constants, and a constant nobody checks is what let the tuple go
 // unenforced for three releases. Close the loop here: the declaration must
 // match the pinned South release, and every shipped manifest must fall inside
-// it through the arm its own runtime_abi selects.
+// it.
 const southComponentSource = fs.readFileSync(
   path.join(root, "apps/cli/src/south_component.rs"),
   "utf8",
@@ -350,11 +346,6 @@ assert.equal(
 );
 const runtimeMin = declaredConstant("SOUTH_RUNTIME_MIN");
 assert.ok(runtimeMin, "the host must declare SOUTH_RUNTIME_MIN");
-assert.equal(
-  declaredConstant("TUPLE_SOUTH_RUNTIME"),
-  tupleSouthRuntime,
-  "the host's TUPLE_SOUTH_RUNTIME must equal the tuple-era components' runtime",
-);
 const declaredKernelContracts = Object.fromEntries(
   [...(southComponentSource.match(/const KERNEL_CONTRACTS[^=]*=\s*\[([^\]]*)\];/s)?.[1] ?? "")
     .matchAll(/\("([a-z_]+)",\s*(\d+)\)/g)]
@@ -377,49 +368,34 @@ for (const { dir: componentDir } of JSON.parse(
     ),
   );
   const compatibility = manifest.compatibility;
-  if (compatibility.runtime_abi !== undefined) {
-    assert.equal(compatibility.runtime_abi, 1, `${componentDir} speaks another runtime ABI`);
-    assert.ok(
-      compareVersions(compatibility.south_runtime, runtimeMin) >= 0 &&
-        compareVersions(compatibility.south_runtime, southRelease) <= 0,
-      `${componentDir} declares south_runtime ${compatibility.south_runtime}, outside ${runtimeMin}..=${southRelease}`,
-    );
-    assert.deepEqual(
-      compatibility.kernel_contracts,
-      kernelContracts,
-      `${componentDir} declares kernel contracts the host does not distribute`,
-    );
-    if (
-      oldestRangeRuntime === undefined ||
-      compareVersions(compatibility.south_runtime, oldestRangeRuntime) < 0
-    ) {
-      oldestRangeRuntime = compatibility.south_runtime;
-    }
-    continue;
-  }
   assert.equal(
-    compatibility.south_runtime,
-    tupleSouthRuntime,
-    `${componentDir} declares a south_runtime the host would refuse at load`,
+    compatibility.runtime_abi,
+    1,
+    `${componentDir} must declare runtime ABI 1; a package without one predates the range handshake`,
   );
-  for (const [field, constant] of [
-    ["ir_schema_id", "TUPLE_IR_SCHEMA_ID"],
-    ["kernel_version", "TUPLE_KERNEL_VERSION"],
-    ["kernel_revision", "TUPLE_KERNEL_REVISION"],
-  ]) {
-    assert.equal(
-      compatibility[field],
-      declaredConstant(constant),
-      `${componentDir}.${field} disagrees with the host's ${constant}`,
-    );
+  assert.ok(
+    compareVersions(compatibility.south_runtime, runtimeMin) >= 0 &&
+      compareVersions(compatibility.south_runtime, southRelease) <= 0,
+    `${componentDir} declares south_runtime ${compatibility.south_runtime}, outside ${runtimeMin}..=${southRelease}`,
+  );
+  assert.deepEqual(
+    compatibility.kernel_contracts,
+    kernelContracts,
+    `${componentDir} declares kernel contracts the host does not distribute`,
+  );
+  if (
+    oldestRangeRuntime === undefined ||
+    compareVersions(compatibility.south_runtime, oldestRangeRuntime) < 0
+  ) {
+    oldestRangeRuntime = compatibility.south_runtime;
   }
 }
-// The floor is the oldest shipped range-era runtime: lower admits packages
+// The floor is the oldest shipped runtime: lower admits packages
 // nothing tests, higher refuses one the host ships.
 assert.equal(
   runtimeMin,
   oldestRangeRuntime,
-  "SOUTH_RUNTIME_MIN must equal the oldest south_runtime among the shipped range-era components",
+  "SOUTH_RUNTIME_MIN must equal the oldest south_runtime among the shipped components",
 );
 
 console.log("South dependency and MSRV policy check: PASS");

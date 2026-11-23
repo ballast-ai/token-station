@@ -356,7 +356,7 @@ fn multiline_events_preserve_dialects_across_heartbeats_and_byte_splits() {
             ),
             (
                 None,
-                json!({"type":"response.completed","response":{"id":"r","model":"m","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"你好"}]}]}}),
+                json!({"type":"response.completed","response":{"id":"r","model":"m","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"你好"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
             ),
         ],
         vec![
@@ -365,8 +365,16 @@ fn multiline_events_preserve_dialects_across_heartbeats_and_byte_splits() {
                 json!({"type":"message_start","message":{"usage":{"input_tokens":1}}}),
             ),
             (
+                Some("content_block_start"),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            ),
+            (
                 Some("content_block_delta"),
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好"}}),
+            ),
+            (
+                Some("content_block_stop"),
+                json!({"type":"content_block_stop","index":0}),
             ),
             (
                 Some("message_delta"),
@@ -420,10 +428,14 @@ fn repeated_event_fields_use_the_last_value_including_ping() {
     use token_station_protocol::StreamEvent;
     for first_event in ["ping", "message_start"] {
         let wire = format!(
-            "event: {first_event}\nevent: content_block_delta\ndata: {}\n\nevent: content_block_delta\nevent: ping\ndata: {}\n\nevent: content_block_start\nevent: ping\ndata: {}\n\nevent: message_delta\ndata: {}\n\n",
+            // South 0.85.1 refuses a delta for a block that was never started, so
+            // block 0 opens first; the event-field cases below are unchanged.
+            "event: content_block_start\ndata: {}\n\nevent: {first_event}\nevent: content_block_delta\ndata: {}\n\nevent: content_block_delta\nevent: ping\ndata: {}\n\nevent: content_block_start\nevent: ping\ndata: {}\n\nevent: content_block_stop\ndata: {}\n\nevent: message_delta\ndata: {}\n\n",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"visible"}}),
             json!({"type":"ping"}),
             json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"hidden"}}),
+            json!({"type":"content_block_stop","index":0}),
             json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
         );
         for size in [1, wire.len()] {
