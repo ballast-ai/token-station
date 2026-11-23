@@ -25,9 +25,9 @@
       "source": "repository"
     },
     "provider-copilot-plan-v2": {
-      "files": 12,
+      "files": 23,
       "fixtures": "fixtures",
-      "sha256": "ef7779d943ec2b3f0a5a6c733660bde3c375810972d3f5055ffefb5a97d64237",
+      "sha256": "beb56278625d375657391a90c92594618bca3b5ba78f03a47540398012445d33",
       "source": "repository"
     },
     "provider-openai-compatible-v2": {

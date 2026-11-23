@@ -63,20 +63,6 @@ fn build_component(package: &str, stem: &str) -> PathBuf {
 /// One registered conformance gap: the check that fails and the case it fails on.
 type Gap = (&'static str, &'static str);
 
-/// The usage rows South's suite requires since South 0.43.0 (South #131).
-/// The remaining plan components carry none of them. Adding them is not a fixture edit:
-/// those components still turn a missing upstream usage report into zeros,
-/// which the rows exist to refuse. The plan-component rebuild retires these
-/// gaps together with the rows. The two South-sourced components already ship
-/// the rows from South 0.85.1 and register nothing.
-const USAGE_ROWS_NOT_SHIPPED: [Gap; 5] = [
-    ("Coverage", "provider.response.usage"),
-    ("Coverage", "provider.response.missing-usage"),
-    ("Coverage", "provider.response.cached-usage"),
-    ("Coverage", "provider.stream.usage-terminal"),
-    ("Coverage", "provider.stream.no-usage"),
-];
-
 fn run(package: &str, stem: &str, registered: &[Gap]) {
     // The host's own runtime and expectations, so this proves the packaged
     // component loads under the gates the product actually applies — not under
@@ -152,12 +138,8 @@ fn the_packaged_chatgpt_plan_component_passes_the_full_suite() {
 }
 
 #[test]
-fn the_packaged_copilot_component_fails_only_its_registered_gaps() {
-    run(
-        "provider-copilot-plan-v2",
-        "provider_copilot_plan_v2",
-        &USAGE_ROWS_NOT_SHIPPED,
-    );
+fn the_packaged_copilot_component_passes_the_full_suite() {
+    run("provider-copilot-plan-v2", "provider_copilot_plan_v2", &[]);
 }
 
 #[test]

@@ -14,6 +14,92 @@ use token_station_protocol::{
 };
 #[cfg(target_arch = "wasm32")]
 mod shell;
+
+const CLAUDE_REPLAY_CAPABILITY: &str = "reasoning_replay.claude.v1";
+const REPLAY_FAMILY: &str = "reasoning_replay_protocol_family";
+const REPLAY_LAYOUT: &str = "reasoning_replay_block_layout";
+
+/// Keeps signed thinking on Copilot's Messages endpoint as it was before South
+/// 0.39.0.
+///
+/// The South Messages reference now replays a thinking signature only for a
+/// turn that carries replay markers, and only for a model that declares
+/// `reasoning_replay.claude.v1`. The host gives neither to a Copilot target:
+/// its replay grant covers Anthropic's own origin. These signatures were issued
+/// through this same Copilot endpoint, so this component marks every assistant
+/// turn the layout can describe, in the order the 0.20.0 reference wrote it
+/// (content parts, then tool calls), and declares the capability on the
+/// request it hands the reference. A turn the layout cannot describe goes out
+/// as the reference renders it without replay.
+fn replay_signed_thinking(request: &mut ChatRequest, native: &mut ProviderConfig) {
+    for message in &mut request.messages {
+        message.extensions.remove(REPLAY_FAMILY);
+        message.extensions.remove(REPLAY_LAYOUT);
+        if message.role != Role::Assistant {
+            continue;
+        }
+        let Some(Content::Parts(parts)) = &message.content else {
+            continue;
+        };
+        let reasoning = parts.iter().any(|part| {
+            matches!(
+                part,
+                ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. }
+            )
+        });
+        let describable = parts.iter().all(|part| match part {
+            ContentPart::Text { .. } | ContentPart::RedactedThinking { .. } => true,
+            ContentPart::Thinking { signature, .. } => signature
+                .as_deref()
+                .is_some_and(|signature| !signature.is_empty()),
+            _ => false,
+        });
+        let mut ids = std::collections::BTreeSet::new();
+        let unique = message
+            .tool_calls
+            .iter()
+            .all(|call| !call.id.is_empty() && ids.insert(call.id.as_str()));
+        let blocks = parts.len() + message.tool_calls.len();
+        if !reasoning || !describable || !unique || blocks > 128 {
+            continue;
+        }
+        let layout = (0..parts.len())
+            .map(|ordinal| json!({"kind":"content","ordinal":ordinal}))
+            .chain(
+                message
+                    .tool_calls
+                    .iter()
+                    .map(|call| json!({"kind":"tool_call","call_id":call.id})),
+            )
+            .collect::<Vec<_>>();
+        message
+            .extensions
+            .insert(REPLAY_FAMILY.into(), json!("claude-signed-thinking"));
+        message
+            .extensions
+            .insert(REPLAY_LAYOUT.into(), Value::Array(layout));
+    }
+    let model = request.model.clone();
+    if !native
+        .models
+        .iter()
+        .any(|candidate| candidate.model == model)
+    {
+        native.models.push(ModelCapability {
+            model: model.clone(),
+            ..ModelCapability::default()
+        });
+    }
+    for candidate in native
+        .models
+        .iter_mut()
+        .filter(|candidate| candidate.model == model)
+    {
+        candidate
+            .supported_parameters
+            .insert(CLAUDE_REPLAY_CAPABILITY.into());
+    }
+}
 pub struct CopilotPlan;
 fn capability(message: &str) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorCode::Capability, 400, message)
@@ -94,6 +180,14 @@ fn check_semantics(r: &ChatRequest, path: &str) -> ComponentResultV1<()> {
             ));
         }
     }
+    // The typed thinking mode and budget (protocol 0.6.0) are refused like the
+    // `thinking` object above: the South 0.85.1 Messages reference would
+    // otherwise forward them.
+    if r.reasoning.mode.is_some() || r.reasoning.budget_tokens.is_some() {
+        return Err(capability(
+            "Copilot cannot preserve the requested continuation or hosted tool",
+        ));
+    }
     if path == "/v1/messages" && r.response_format.is_some() {
         return Err(capability(
             "Copilot Messages cannot preserve the requested response format",
@@ -162,7 +256,7 @@ fn check_semantics(r: &ChatRequest, path: &str) -> ComponentResultV1<()> {
                             "This Copilot endpoint cannot preserve signed thinking",
                         ))
                     }
-                    ContentPart::ImageUrl { image_url }
+                    ContentPart::ImageUrl { image_url, .. }
                         if !(image_url.url.starts_with("https://")
                             || image_url.url.starts_with("data:image/")) =>
                     {
@@ -269,6 +363,8 @@ fn prepare(
                 json!({"type":"function","function":{"name":name}}),
             ));
         }
+        let mut native = native;
+        replay_signed_thinking(&mut mapped, &mut native);
         let mut descriptor = AnthropicReferenceV1.build_http_request(&mapped, &native)?;
         let error_flags = r
             .messages
@@ -327,13 +423,15 @@ fn prepare(
             }
         }
     }
+    // Typed since protocol 0.6.0, same wire key.
     if path == "/chat/completions"
-        && r.extensions.get("reasoning_effort").is_some_and(|value| {
+        && r.reasoning.effort.as_ref().is_some_and(|effort| {
             descriptor
                 .body
                 .as_ref()
                 .and_then(|body| body.get("reasoning_effort"))
-                != Some(value)
+                .and_then(Value::as_str)
+                != Some(effort.as_str())
         })
     {
         return Err(capability(
@@ -384,7 +482,7 @@ impl ProviderComponentV1 for CopilotPlan {
     fn metadata(&self) -> ComponentMetadataV1 {
         ComponentMetadataV1 {
             name: "provider-copilot-plan".into(),
-            version: "2.1.0".into(),
+            version: "2.2.0".into(),
             api_version: PROVIDER_WORLD.into(),
         }
     }
@@ -414,6 +512,17 @@ impl ProviderComponentV1 for CopilotPlan {
         }
         let value: Value = serde_json::from_str(&parts.body)
             .map_err(|_| protocol("Copilot returned invalid JSON"))?;
+        if value["object"] == "response" {
+            // A Responses JSON object is the `response.completed` state; the
+            // codec's terminal checks, usage included, apply to it as well.
+            return ResponsesCodec.parse_response(&HttpResponseParts {
+                body: format!(
+                    "data: {}\n\n",
+                    json!({"type":"response.completed","response":value})
+                ),
+                ..parts.clone()
+            });
+        }
         if value["type"] == "message" {
             if value["content"].as_array().is_none_or(|blocks| {
                 blocks.iter().any(|block| {
@@ -694,12 +803,15 @@ impl StreamParserV1 for MessagesStream {
                     if let Some(thinking) = block["thinking"].as_str().filter(|v| !v.is_empty()) {
                         events.push(StreamEvent::ThinkingDelta {
                             index: 0,
+                            // The only reasoning block: more are refused above.
+                            block_index: 0,
                             thinking_delta: thinking.into(),
                         });
                     }
                     if let Some(signature) = block["signature"].as_str().filter(|v| !v.is_empty()) {
                         events.push(StreamEvent::ThinkingSignatureDelta {
                             index: 0,
+                            block_index: 0,
                             signature_delta: signature.into(),
                         });
                     }
