@@ -98,7 +98,7 @@ fn parallel_tool_stream_is_incremental_and_replays_in_a_second_request() {
         json!({"type":"response.function_call_arguments.delta","item_id":"fc_a","output_index":0,"delta":"\"a\"}"}),
         json!({"type":"response.function_call_arguments.done","item_id":"fc_a","output_index":0,"arguments":"{\"path\":\"a\"}"}),
         json!({"type":"response.function_call_arguments.done","item_id":"fc_b","output_index":1,"arguments":"{\"q\":\"中\"}"}),
-        json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":20,"output_tokens":8,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}),
+        json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":20,"output_tokens":8,"total_tokens":28,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}),
     ];
     let wire: Vec<u8> = frames.into_iter().flat_map(frame).collect();
     let mut whole = ChatGptPlan.stream_parser();
@@ -221,7 +221,7 @@ fn buffered_clients_use_the_same_sse_terminal_and_tool_rules() {
     let wire=[
       json!({"type":"response.created","response":{"id":"resp_1","model":"m"}}),
       json!({"type":"response.output_text.delta","delta":"hello"}),
-      json!({"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","usage":{"input_tokens":4,"output_tokens":2}}})
+      json!({"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}})
     ].into_iter().flat_map(frame).collect::<Vec<_>>();
     let mut parts:token_station_protocol::HttpResponseParts=serde_json::from_value(json!({"status":200,"headers":{"content-type":"text/event-stream"},"body":String::from_utf8(wire).unwrap()})).unwrap();
     let response = ChatGptPlan.parse_response(&parts).unwrap();
@@ -244,7 +244,7 @@ fn malformed_completed_arguments_do_not_finish_a_tool_call() {
     let wire=[
       json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc","call_id":"call","name":"read","namespace":"tokenstation_tools"}}),
       json!({"type":"response.function_call_arguments.done","item_id":"fc","output_index":0,"arguments":"{"}),
-      json!({"type":"response.completed","response":{"status":"completed"}})
+      json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}})
     ].into_iter().flat_map(frame).collect::<Vec<_>>();
     let events = ChatGptPlan.stream_parser().parse_chunk(&wire).unwrap();
     assert!(events
@@ -255,7 +255,7 @@ fn malformed_completed_arguments_do_not_finish_a_tool_call() {
 
 #[test]
 fn terminal_only_tool_output_is_complete_and_unknown_namespaces_fail() {
-    let mut event = json!({"type":"response.completed","response":{"status":"completed","output":[{"id":"fc1","type":"function_call","call_id":"call1","name":"read","namespace":"tokenstation_tools","arguments":"{}"}]}});
+    let mut event = json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"id":"fc1","type":"function_call","call_id":"call1","name":"read","namespace":"tokenstation_tools","arguments":"{}"}]}});
     let mut parser = ChatGptPlan.stream_parser();
     let events = parser.parse_chunk(&frame(event.clone())).unwrap();
     parser.finish().unwrap();
@@ -313,7 +313,7 @@ fn loopback_test_endpoints_keep_the_declared_path_and_slot() {
 #[test]
 fn crlf_and_utf8_byte_splits_match_and_empty_stream_does_not_complete() {
     assert!(ChatGptPlan.stream_parser().finish().is_err());
-    let wire="data: {\"type\":\"response.output_text.delta\",\"delta\":\"中\"}\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\r\n\r\n";
+    let wire="data: {\"type\":\"response.output_text.delta\",\"delta\":\"中\"}\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\r\n\r\n";
     let mut parser = ChatGptPlan.stream_parser();
     let mut events = Vec::new();
     for chunk in wire.as_bytes().chunks(1) {

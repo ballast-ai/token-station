@@ -1,0 +1,21 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "The capital of France is Paris.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "id": "resp_68af0a1c7f8c8190b7d5c3b9a0e1f2d3",
+  "model": "gpt-5.5-2026-08-07",
+  "usage": {
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "input_tokens": 36,
+    "output_tokens": 87,
+    "reasoning_tokens": 0
+  }
+}

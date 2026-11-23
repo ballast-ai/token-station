@@ -289,7 +289,7 @@ fn tools_response(calls: Vec<(String, Value)>) -> String {
         frames.push(json!({"type":"response.output_item.done","output_index":index,"item":done}));
     }
     let output: Vec<_> = items.into_iter().map(|(item, _)| item).collect();
-    frames.push(json!({"type":"response.completed","response":{"id":"resp_tools","model":"gpt-5.5","status":"completed","output":output,"usage":{"input_tokens":10,"output_tokens":5}}}));
+    frames.push(json!({"type":"response.completed","response":{"id":"resp_tools","model":"gpt-5.5","status":"completed","output":output,"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}));
     sse(frames)
 }
 fn final_response(terminal: &str) -> String {
@@ -298,7 +298,7 @@ fn final_response(terminal: &str) -> String {
         json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":FINAL}),
     ];
     if terminal != "truncated" {
-        events.push(json!({"type":format!("response.{terminal}"),"response":{"id":"resp_final","model":"gpt-5.5","status":terminal,"output":[],"usage":{"input_tokens":10,"output_tokens":5},"error":if terminal=="completed"{Value::Null}else{json!({"code":"server_error","message":"Fixture failure"})}}}));
+        events.push(json!({"type":format!("response.{terminal}"),"response":{"id":"resp_final","model":"gpt-5.5","status":terminal,"output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"error":if terminal=="completed"{Value::Null}else{json!({"code":"server_error","message":"Fixture failure"})}}}));
     }
     sse(events)
 }

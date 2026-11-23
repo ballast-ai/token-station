@@ -74,8 +74,8 @@ fn content_parts(content: &Content, role: Role) -> ComponentResultV1<Vec<Value>>
             // Agent. It is not verifiable model state or executable content.
             !matches!(part, ContentPart::Thinking { signature: None, .. } if role == Role::Assistant)
         }).map(|part| match part {
-            ContentPart::Text { text } => Ok(json!({"type":text_type,"text":text})),
-            ContentPart::ImageUrl { image_url } if role != Role::Assistant && role != Role::System => {
+            ContentPart::Text { text, .. } => Ok(json!({"type":text_type,"text":text})),
+            ContentPart::ImageUrl { image_url, .. } if role != Role::Assistant && role != Role::System => {
                 if !(image_url.url.starts_with("https://") || image_url.url.starts_with("data:image/")) {
                     return Err(capability("ChatGPT plan images require HTTPS or an inline image data URL"));
                 }
@@ -262,17 +262,13 @@ fn build_body(r: &ChatRequest) -> ComponentResultV1<Value> {
             ToolChoice::Required | ToolChoice::Other(_) => json!("required"),
         };
     }
-    if let Some(parallel) = r.extensions.get("parallel_tool_calls") {
-        if !parallel.is_boolean() {
-            return Err(capability("parallel_tool_calls must be a boolean"));
-        }
-        body["parallel_tool_calls"] = parallel.clone();
+    // Both are typed since protocol 0.6.0, with the same wire keys; the type
+    // now does the shape check the extension lookup used to do here.
+    if let Some(parallel) = r.parallel_tool_calls {
+        body["parallel_tool_calls"] = json!(parallel);
     }
-    if let Some(effort) = r.extensions.get("reasoning_effort") {
-        let effort = effort
-            .as_str()
-            .ok_or_else(|| capability("reasoning_effort must be a string"))?;
-        body["reasoning"] = json!({"effort":effort});
+    if let Some(effort) = &r.reasoning.effort {
+        body["reasoning"] = json!({"effort":effort.as_str()});
     }
     if let Some(format) = &r.response_format {
         use token_station_protocol::ResponseFormat;
@@ -304,7 +300,7 @@ impl ProviderComponentV1 for ChatGptPlan {
     fn metadata(&self) -> ComponentMetadataV1 {
         ComponentMetadataV1 {
             name: "provider-chatgpt-plan".into(),
-            version: "2.1.0".into(),
+            version: "2.2.0".into(),
             api_version: PROVIDER_WORLD.into(),
         }
     }
@@ -347,9 +343,18 @@ impl ProviderComponentV1 for ChatGptPlan {
             return Err(self.map_provider_error(parts)?);
         }
         // A buffered client still receives an upstream SSE response. Use the
-        // identical parser, including its terminal and failure checks.
+        // identical parser, including its terminal and failure checks. A JSON
+        // response object is the same terminal state as `response.completed`,
+        // so it goes through that event's checks too.
         let mut parser = stream::ResponsesStream::default();
-        let mut events = parser.parse_chunk(parts.body.as_bytes())?;
+        let body = match serde_json::from_str::<Value>(&parts.body) {
+            Ok(response) if response.is_object() => format!(
+                "data: {}\n\n",
+                json!({"type":"response.completed","response":response})
+            ),
+            _ => parts.body.clone(),
+        };
+        let mut events = parser.parse_chunk(body.as_bytes())?;
         events.extend(parser.finish()?);
         let mut message = Message::text(Role::Assistant, "");
         let mut text = String::new();
@@ -364,11 +369,13 @@ impl ProviderComponentV1 for ChatGptPlan {
                     id,
                     name,
                     arguments_delta,
+                    ..
                 } => {
                     let call = tools.entry(index).or_insert(ToolCall {
                         id: String::new(),
                         name: String::new(),
                         arguments: String::new(),
+                        signature: None,
                     });
                     if let Some(id) = id {
                         call.id = id;

@@ -147,12 +147,8 @@ fn the_packaged_openai_compatible_component_passes_the_full_suite() {
 }
 
 #[test]
-fn the_packaged_chatgpt_plan_component_fails_only_its_registered_gaps() {
-    run(
-        "provider-chatgpt-plan-v2",
-        "provider_chatgpt_plan_v2",
-        &USAGE_ROWS_NOT_SHIPPED,
-    );
+fn the_packaged_chatgpt_plan_component_passes_the_full_suite() {
+    run("provider-chatgpt-plan-v2", "provider_chatgpt_plan_v2", &[]);
 }
 
 #[test]
