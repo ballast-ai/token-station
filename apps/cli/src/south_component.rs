@@ -262,6 +262,13 @@ impl SouthComponentAdapter {
         self.manifest.auth_arms.clone()
     }
 
+    /// The secret-bearing header names the manifest declares (`secret_headers`,
+    /// auth contract version five), already checked by South's manifest gate.
+    #[must_use]
+    pub fn secret_headers(&self) -> &[String] {
+        &self.manifest.secret_headers
+    }
+
     /// Whether the manifest lets `family` models declare the dialect word `word`
     /// (`model_parameters`, South family-model-parameters record).
     #[must_use]

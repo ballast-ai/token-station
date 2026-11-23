@@ -446,6 +446,7 @@ impl Gateway {
             body_mode,
             upstream.auth_arms.clone(),
         )
+        .with_secret_headers(upstream.secret_headers.clone())
     }
 
     /// Resolves the descriptor into a real HTTP exchange.

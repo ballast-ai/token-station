@@ -1114,6 +1114,8 @@ struct Upstream {
     /// once at assembly. Transport eligibility judges by these instead of by
     /// the dialect's name.
     auth_arms: std::collections::BTreeSet<String>,
+    /// The secret header names the admitted component declares, parsed once.
+    secret_headers: south_contracts::DeclaredSecretHeadersV1,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
@@ -1268,6 +1270,10 @@ fn assemble_upstreams(
             .expect("the caller loaded a component for every configured dialect")
             .clone();
         let auth_arms = admitted.auth_arms();
+        let secret_headers = south_contracts::DeclaredSecretHeadersV1::try_from_names(
+            admitted.secret_headers().iter().map(String::as_str),
+        )
+        .map_err(|error| format!("upstream `{name}` secret headers: {error}"))?;
         let component_replays = admitted
             .declares_model_parameter(&entry.provider, component_request::CLAUDE_REPLAY_CAPABILITY);
         let plugin: Arc<dyn ProviderAdapter + Send + Sync> = admitted;
@@ -1329,6 +1335,7 @@ fn assemble_upstreams(
                 config: provider_config,
                 auth_config: entry.auth.clone(),
                 auth_arms,
+                secret_headers,
                 plugin,
                 dialect: entry.api_dialect,
                 native_search: crate::native_search::resolve(entry),
