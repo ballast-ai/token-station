@@ -105,7 +105,8 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<HttpRequestDescriptor, ErrorEnvelope> {
         let provider_protocol = upstream.config.provider.as_str();
-        let descriptor = super::plan_stops::prepare(provider_protocol, request)
+        let sealed = super::component_request::seal(&upstream.config, request);
+        let descriptor = super::plan_stops::prepare(provider_protocol, &sealed)
             .and_then(|projected| {
                 upstream
                     .plugin

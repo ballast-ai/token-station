@@ -17,8 +17,8 @@ use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Role, Sampling,
-    StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
+    ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Reasoning, ReasoningMode,
+    Role, Sampling, StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
 };
 
 struct AnthropicClient;
@@ -35,6 +35,20 @@ const KNOWN_REQUEST_FIELDS: &[&str] = &[
     "stream",
     "thinking",
     "tool_choice",
+];
+
+// Top-level wire keys of typed Canonical IR fields. A client key with one of
+// these names must not ride in `extensions`: flattened next to the typed field
+// it would set (or collide with) that field. `host_values` is the sharp case,
+// since only the host may mint them.
+const RESERVED_IR_KEYS: &[&str] = &[
+    "host_values",
+    "parallel_tool_calls",
+    "reasoning_budget_tokens",
+    "reasoning_effort",
+    "reasoning_mode",
+    "response_format",
+    "sampling",
 ];
 
 // `anthropic_thinking` stays an adapter-local extension: it is the request's
@@ -367,13 +381,66 @@ fn parse_user_blocks(blocks: &[Value]) -> Result<Vec<Message>, String> {
     Ok(messages)
 }
 
+/// The Claude signed-thinking replay markers for one assistant turn, or `None`
+/// when the turn cannot carry them.
+///
+/// South replays signatures only for a turn that names its family and lists
+/// every block in wire order (`reasoning_replay::validated_layout`). The layout
+/// admits text, `redacted_thinking`, signed thinking and tool calls. A turn
+/// with no reasoning needs no replay. A turn with an unsigned thinking block or
+/// a block the IR does not model (`server_tool_use`, …) cannot be described,
+/// so it gets no markers and the component sends it without replay, as before.
+/// The host removes the markers again for a target that cannot replay.
+fn replay_markers(
+    parts: &[ContentPart],
+    tool_calls: &[ToolCall],
+    order: &[Value],
+) -> Option<Extensions> {
+    const MAX_BLOCKS: usize = 128;
+    let reasoning = parts.iter().any(|part| {
+        matches!(
+            part,
+            ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. }
+        )
+    });
+    let replayable = parts.iter().all(|part| match part {
+        ContentPart::Text { .. } | ContentPart::RedactedThinking { .. } => true,
+        ContentPart::Thinking { signature, .. } => signature
+            .as_deref()
+            .is_some_and(|signature| !signature.is_empty()),
+        ContentPart::ImageUrl { .. } | ContentPart::Unknown(_) => false,
+    });
+    let mut ids = BTreeSet::new();
+    let unique_ids = tool_calls
+        .iter()
+        .all(|call| !call.id.is_empty() && ids.insert(call.id.as_str()));
+    if !reasoning || !replayable || !unique_ids || order.len() > MAX_BLOCKS {
+        return None;
+    }
+    let mut extensions = Extensions::new();
+    extensions.insert(
+        "reasoning_replay_protocol_family".to_owned(),
+        json!("claude-signed-thinking"),
+    );
+    extensions.insert(
+        "reasoning_replay_block_layout".to_owned(),
+        Value::Array(order.to_vec()),
+    );
+    Some(extensions)
+}
+
 fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
     let mut parts = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut order = Vec::new();
 
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
-            Some("tool_use") => tool_calls.push(tool_call(block)?),
+            Some("tool_use") => {
+                let call = tool_call(block)?;
+                order.push(json!({"kind": "tool_call", "call_id": call.id}));
+                tool_calls.push(call);
+            }
             Some("tool_result") => {
                 return Err(invalid(
                     "assistant messages cannot contain tool_result blocks",
@@ -382,17 +449,21 @@ fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
             Some("image") => {
                 return Err(invalid("assistant messages cannot contain image blocks"));
             }
-            _ => parts.push(parse_plain_block(block)?),
+            _ => {
+                order.push(json!({"kind": "content", "ordinal": parts.len()}));
+                parts.push(parse_plain_block(block)?);
+            }
         }
     }
 
+    let extensions = replay_markers(&parts, &tool_calls, &order).unwrap_or_default();
     Ok(Message {
         role: Role::Assistant,
         content: content_from_parts(parts),
         tool_calls,
         tool_call_id: None,
         name: None,
-        extensions: Extensions::new(),
+        extensions,
     })
 }
 
@@ -531,7 +602,10 @@ fn request_extensions(body: &Value) -> Extensions {
         .as_object()
         .into_iter()
         .flatten()
-        .filter(|(key, _)| !KNOWN_REQUEST_FIELDS.contains(&key.as_str()))
+        .filter(|(key, _)| {
+            !KNOWN_REQUEST_FIELDS.contains(&key.as_str())
+                && !RESERVED_IR_KEYS.contains(&key.as_str())
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     if let Some(thinking) = body.get("thinking").filter(|value| !value.is_null()) {
@@ -541,6 +615,38 @@ fn request_extensions(body: &Value) -> Extensions {
         extensions.insert("reasoning_effort".to_owned(), json!(effort));
     }
     extensions
+}
+
+/// The client's `thinking` mode and budget as the typed protocol 0.6.0 fields.
+///
+/// `anthropic_thinking` keeps carrying the object for the plan components that
+/// read it. South 0.85.1 reads only these fields, and sends a caller's mode back
+/// to the upstream unchanged (`Thinking::Verbatim`). `validate_thinking` has
+/// already refused any other `type`.
+fn request_reasoning(body: &Value) -> Result<Reasoning, String> {
+    let Some(thinking) = body.get("thinking").and_then(Value::as_object) else {
+        return Ok(Reasoning::default());
+    };
+    let mode = match thinking.get("type").and_then(Value::as_str) {
+        Some("enabled") => Some(ReasoningMode::Enabled),
+        Some("disabled") => Some(ReasoningMode::Disabled),
+        Some("adaptive") => Some(ReasoningMode::Adaptive),
+        _ => None,
+    };
+    let budget_tokens = match thinking.get("budget_tokens") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|budget| u32::try_from(budget).ok())
+                .ok_or_else(|| invalid("thinking.budget_tokens must be a non-negative integer"))?,
+        ),
+    };
+    Ok(Reasoning {
+        mode,
+        budget_tokens,
+        ..Reasoning::default()
+    })
 }
 
 fn finish_reason_to_anthropic(reason: Option<FinishReason>) -> Value {
@@ -910,7 +1016,7 @@ impl Guest for AnthropicClient {
             host_values: token_station_protocol::ComponentValues::new(),
             extensions: request_extensions(body),
             parallel_tool_calls: None,
-            reasoning: token_station_protocol::Reasoning::default(),
+            reasoning: request_reasoning(body)?,
         })
     }
 
@@ -1456,5 +1562,101 @@ mod tests {
         assert!(second_thinking.contains(r#""thinking":"second thought""#));
         assert!(second_signature.contains(r#""index":1"#));
         assert!(second_signature.contains(r#""signature":"second signature""#));
+    }
+
+    fn normalized(body: Value) -> Result<Value, String> {
+        AnthropicClient::normalize_inbound(
+            json!({
+                "protocol":"anthropic-messages","principal":{"subject":"fixture"},
+                "headers":{"names":[],"values":{}},"body":body
+            })
+            .to_string(),
+        )
+        .map(|output| serde_json::from_str(&output).unwrap())
+    }
+
+    fn with_assistant(content: Value) -> Value {
+        json!({"model":"fixture","max_tokens":100,"messages":[
+            {"role":"user","content":"question"},
+            {"role":"assistant","content":content},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"found"}]}
+        ]})
+    }
+
+    #[test]
+    fn thinking_configuration_is_typed_and_kept_for_plan_components() {
+        let mut body = with_assistant(json!("answer"));
+        body["thinking"] = json!({"type":"enabled","budget_tokens":2048});
+        let request = normalized(body).unwrap();
+        assert_eq!(request["reasoning_mode"], "enabled");
+        assert_eq!(request["reasoning_budget_tokens"], 2048);
+        assert_eq!(request["anthropic_thinking"]["budget_tokens"], 2048);
+
+        let mut body = with_assistant(json!("answer"));
+        body["thinking"] = json!({"type":"enabled","budget_tokens":"lots"});
+        let error: ErrorEnvelope = serde_json::from_str(&normalized(body).unwrap_err()).unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn a_signed_turn_carries_its_replay_layout_in_wire_order() {
+        let request = normalized(with_assistant(json!([
+            {"type":"thinking","thinking":"plan","signature":"sig-1"},
+            {"type":"redacted_thinking","data":"opaque"},
+            {"type":"text","text":"Looking it up."},
+            {"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}
+        ])))
+        .unwrap();
+        let assistant = &request["messages"][1];
+        assert_eq!(
+            assistant["reasoning_replay_protocol_family"],
+            "claude-signed-thinking"
+        );
+        assert_eq!(
+            assistant["reasoning_replay_block_layout"],
+            json!([
+                {"kind":"content","ordinal":0},
+                {"kind":"content","ordinal":1},
+                {"kind":"content","ordinal":2},
+                {"kind":"tool_call","call_id":"toolu_1"}
+            ])
+        );
+        assert_eq!(assistant["content"][0]["signature"], "sig-1");
+    }
+
+    #[test]
+    fn turns_that_cannot_be_described_carry_no_replay_markers() {
+        for content in [
+            json!("plain answer"),
+            json!([{"type":"text","text":"no reasoning"}]),
+            json!([{"type":"thinking","thinking":"unsigned"},{"type":"text","text":"a"}]),
+            json!([{"type":"thinking","thinking":"empty","signature":""}]),
+            json!([
+                {"type":"thinking","thinking":"plan","signature":"sig-1"},
+                {"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}
+            ]),
+        ] {
+            let request = normalized(with_assistant(content.clone())).unwrap();
+            let assistant = &request["messages"][1];
+            assert!(
+                assistant.get("reasoning_replay_protocol_family").is_none()
+                    && assistant.get("reasoning_replay_block_layout").is_none(),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_keys_named_like_typed_ir_fields_stay_out_of_extensions() {
+        let mut body = with_assistant(json!("answer"));
+        body["host_values"] = json!({"end_user_hash":"client-chosen"});
+        body["reasoning_mode"] = json!("enabled");
+        body["sampling"] = json!({"temperature": 2});
+        body["metadata"] = json!({"user_id":"kept-as-data"});
+        let request = normalized(body).unwrap();
+        assert!(request.get("host_values").is_none());
+        assert!(request.get("reasoning_mode").is_none());
+        assert!(request["sampling"].get("temperature").is_none());
+        assert_eq!(request["metadata"]["user_id"], "kept-as-data");
     }
 }
