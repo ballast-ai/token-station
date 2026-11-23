@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "capability",
+    "http_status": 400,
+    "message": "thinking_budget must be a non-negative integer"
+  }
+}

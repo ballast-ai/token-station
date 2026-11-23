@@ -1,0 +1,30 @@
+{
+  "provider_config": {
+    "provider": "glm-coding",
+    "base_url": "https://api.z.ai",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "glm-4.6",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 200000
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "glm-4.6",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "sampling": {
+      "temperature": 0.2,
+      "max_output_tokens": 1024
+    },
+    "stream": false
+  }
+}

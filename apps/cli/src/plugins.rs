@@ -1271,11 +1271,11 @@ mod tests {
             // host moved on, and a fixture that disagrees with the host tests
             // nothing once the handshake is enforced.
             "compatibility": {
-                "ir_schema_id": crate::south_component::IR_SCHEMA_ID,
-                "kernel_version": crate::south_component::KERNEL_VERSION,
-                "kernel_revision": crate::south_component::KERNEL_REVISION,
+                "ir_schema_id": crate::south_component::TUPLE_IR_SCHEMA_ID,
+                "kernel_version": crate::south_component::TUPLE_KERNEL_VERSION,
+                "kernel_revision": crate::south_component::TUPLE_KERNEL_REVISION,
                 "wit_package": "token-station:adapter@2.0.0",
-                "south_runtime": crate::south_component::SOUTH_RUNTIME
+                "south_runtime": crate::south_component::TUPLE_SOUTH_RUNTIME
             }
         })
         .to_string()

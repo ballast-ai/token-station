@@ -374,8 +374,6 @@ impl Gateway {
                 );
             })?;
         ctx.restore_tool_aliases(&mut chat_response);
-        chat_response.usage =
-            canonical_provider_usage(upstream.config.provider.as_str(), chat_response.usage);
         record_conversion(
             record,
             ConversionStage::ProviderResponse,
@@ -811,8 +809,7 @@ impl Gateway {
                             );
                         }
                     };
-                    let mut events =
-                        canonical_provider_events(upstream.config.provider.as_str(), events);
+                    let mut events = events;
                     for event in &mut events {
                         ctx.restore_tool_event(event);
                     }
@@ -973,8 +970,7 @@ impl Gateway {
                         );
                     }
                 };
-                let mut events =
-                    canonical_provider_events(upstream.config.provider.as_str(), events);
+                let mut events = events;
                 for event in &mut events {
                     ctx.restore_tool_event(event);
                 }

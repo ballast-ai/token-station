@@ -2,9 +2,9 @@
   "comment": "Provider fixture provenance. Entries without source are vendored from South. source=repository identifies locally authored fixtures. Use scripts/check-provider-fixtures.py record <south-checkout> after reviewing changes. Change South first for vendored fixtures.",
   "packages": {
     "provider-anthropic-v2": {
-      "files": 46,
+      "files": 97,
       "fixtures": "fixtures-anthropic",
-      "sha256": "86569809a50a4ee12c0c2f7c2c47ae9c929b7e7b9157db863af1e7744efd87e7"
+      "sha256": "dbc9ac0bc21676cd4cf07ed1e035e7e0ab2b92ac8d74764e5efedd31a8c0c09d"
     },
     "provider-chatgpt-plan-v2": {
       "files": 22,
@@ -12,29 +12,29 @@
       "sha256": "0d90d1c6ca360d7f76158278b87f72bac8a6215b786486074de6a57e0796deae",
       "source": "repository"
     },
-    "provider-openai-compatible-v2": {
-      "files": 46,
-      "fixtures": "fixtures",
-      "sha256": "c0a23f2fe0024020012cc47a51a3e5330258a10e00c6c14ccc7526bcdae08164"
-    },
     "provider-claude-plan-v2": {
-      "fixtures": "fixtures",
-      "source": "repository",
       "files": 36,
-      "sha256": "bcbd950bdcdd76621449afdab3f0d24ded368f0aab45d23256a623f39c173f04"
-    },
-    "provider-copilot-plan-v2": {
       "fixtures": "fixtures",
-      "source": "repository",
-      "files": 12,
-      "sha256": "ef7779d943ec2b3f0a5a6c733660bde3c375810972d3f5055ffefb5a97d64237"
+      "sha256": "bcbd950bdcdd76621449afdab3f0d24ded368f0aab45d23256a623f39c173f04",
+      "source": "repository"
     },
     "provider-codeassist-v2": {
-      "fixtures": "fixtures",
-      "source": "repository",
       "files": 16,
-      "sha256": "7efad7f8f7f70f075cbf1d220823c1314c8a4d2f461542011e46df2323611ccb"
+      "fixtures": "fixtures",
+      "sha256": "7efad7f8f7f70f075cbf1d220823c1314c8a4d2f461542011e46df2323611ccb",
+      "source": "repository"
+    },
+    "provider-copilot-plan-v2": {
+      "files": 12,
+      "fixtures": "fixtures",
+      "sha256": "ef7779d943ec2b3f0a5a6c733660bde3c375810972d3f5055ffefb5a97d64237",
+      "source": "repository"
+    },
+    "provider-openai-compatible-v2": {
+      "files": 163,
+      "fixtures": "fixtures",
+      "sha256": "881904e934270f5436423bbdbe13c00a5000fbdd8e1fea41fda534718483ce59"
     }
   },
-  "south_revision": "efbb9b6"
+  "south_revision": "174158d"
 }

@@ -2,12 +2,38 @@
   {
     "type": "thinking_delta",
     "index": 0,
+    "block_index": 0,
+    "thinking_delta": ""
+  },
+  {
+    "type": "thinking_delta",
+    "index": 0,
+    "block_index": 0,
     "thinking_delta": "Weighing."
   },
   {
     "type": "thinking_signature_delta",
     "index": 0,
+    "block_index": 0,
     "signature_delta": "SIG-1"
+  },
+  {
+    "type": "thinking_delta",
+    "index": 0,
+    "block_index": 1,
+    "thinking_delta": ""
+  },
+  {
+    "type": "thinking_signature_delta",
+    "index": 0,
+    "block_index": 1,
+    "signature_delta": "SIG-EMPTY"
+  },
+  {
+    "type": "redacted_thinking",
+    "index": 0,
+    "block_index": 2,
+    "data": "OPAQUE"
   },
   {
     "type": "finish",

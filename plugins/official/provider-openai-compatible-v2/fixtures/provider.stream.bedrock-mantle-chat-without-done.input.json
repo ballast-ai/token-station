@@ -1,0 +1,8 @@
+{
+  "chunks": [
+    "data: {\"choices\":[{\"delta\":{\"content\":\"hel\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-mantle\",\"model\":\"openai.gpt-oss-120b-1:0\",\"object\":\"chat.completion.chunk\"}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":null,\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-mantle\",\"model\":\"openai.gpt-oss-120b-1:0\",\"object\":\"chat.completion.chunk\"}\n\n",
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-mantle\",\"model\":\"openai.gpt-oss-120b-1:0\",\"object\":\"chat.completion.chunk\"}\n\n",
+    "data: {\"choices\":[],\"created\":1700000000,\"id\":\"chatcmpl-mantle\",\"model\":\"openai.gpt-oss-120b-1:0\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":500,\"prompt_tokens\":1000,\"total_tokens\":1500}}\n\n"
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "provider-openai-compatible",
-  "version": "2.1.0",
+  "version": "2.14.2",
   "api_version": "provider-adapter-v2",
   "providers": [
     "openai-compatible",
@@ -14,8 +14,38 @@
   ],
   "auth_arms": [
     "bearer",
+    "bearer_and_header_secret",
     "header_secret"
   ],
+  "config_schema": {
+    "azure-openai-v1": {
+      "max_tokens_field": {
+        "syntax": {
+          "enum": [
+            "max_completion_tokens",
+            "max_tokens"
+          ]
+        },
+        "default": "max_completion_tokens",
+        "description": "The body key the output cap is sent under: max_completion_tokens (the default, as the host's native Azure OpenAI arm sends it) or max_tokens for a deployment that accepts only the legacy key. A migrated row takes the native row's max_tokens_field, else max_tokens when it cleared accepts_max_completion_tokens."
+      }
+    }
+  },
+  "model_parameters": {
+    "azure-openai-v1": {
+      "words": [
+        "anthropic.tool_choice.auto_only",
+        "reasoning_effort"
+      ]
+    },
+    "openai-compatible": {
+      "words": [
+        "anthropic.tool_choice.auto_only",
+        "reasoning_content",
+        "reasoning_effort"
+      ]
+    }
+  },
   "permissions": {
     "network": false,
     "filesystem": false,
@@ -28,10 +58,16 @@
     "fixtures": "fixtures/"
   },
   "compatibility": {
-    "ir_schema_id": "token-station-protocol@0.3.0/v0.2.0",
-    "kernel_version": "0.2.0",
-    "kernel_revision": "72458e3a11fe157f9ac04818c44b62a3dd2cb09c",
+    "ir_schema_id": "token-station-protocol@0.7.0/v0.6.0",
+    "kernel_version": "0.6.0",
+    "kernel_revision": "a04925518b95c6557374252db7fbe7f026688bde",
     "wit_package": "token-station:adapter@2.0.0",
-    "south_runtime": "0.20.0"
+    "south_runtime": "0.83.0",
+    "runtime_abi": 1,
+    "kernel_contracts": {
+      "canonical_ir": 5,
+      "error_catalog": 1,
+      "stream": 3
+    }
   }
 }

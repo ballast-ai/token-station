@@ -1,0 +1,30 @@
+{
+  "id": "chatcmpl-bt1",
+  "model": "qwen3.7-plus",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user asks about the weather."
+          },
+          {
+            "type": "text",
+            "text": "Sunny, 24 degrees."
+          }
+        ]
+      },
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {
+    "input_tokens": 14,
+    "output_tokens": 73,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 20
+  }
+}

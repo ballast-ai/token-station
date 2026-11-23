@@ -1,0 +1,21 @@
+{
+  "method": "POST",
+  "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "qwen3.7-plus",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "temperature": 0.2
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "provider_api_key"
+  }
+}

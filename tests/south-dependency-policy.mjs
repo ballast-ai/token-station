@@ -22,11 +22,14 @@ const southPackageVersions = new Map([
   ["south-testkit", southRelease],
   ["south-transport-reqwest", southRelease],
 ]);
-// The runtime contract the shipped South components were built against. It is
-// a property of the component packages, not of the host's South libraries, so
-// it moves only when the components are rebuilt. The host's SOUTH_RUNTIME and
-// every component manifest must agree on it.
-const componentSouthRuntime = "0.20.0";
+// The admission tuple of the components built before South's range handshake
+// (South 0.20.0). They declare no runtime_abi and must match this exactly. The
+// range-era components are checked against the host's range instead.
+const tupleSouthRuntime = "0.20.0";
+// The kernel contracts of protocol 0.7.0, as the kernel mirror at
+// kernelRevision records them. The host and every range-era manifest must
+// declare exactly these.
+const kernelContracts = { canonical_ir: 5, error_catalog: 1, stream: 3 };
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git";
 // South 0.85.1 resolves the kernel protocol crate at this revision. It is the
@@ -317,52 +320,106 @@ assert.deepEqual(
   "only the dedicated South transport may directly own reqwest",
 );
 
-// The host declares the component contract it admits, and South's loader judges
-// every component against that declaration. Nothing in the dependency graph
-// carries the value, so it is a constant — and a constant nobody checks is
-// precisely what let the compatibility tuple go unenforced for three releases.
-// Close the loop here: the declaration and every shipped component manifest
-// must agree. The value follows the components, not the host's South libraries:
-// a library-only upgrade keeps it, and a component rebuild moves it.
+// The host declares what it admits, and South's loader judges every component
+// against that declaration. Nothing in the dependency graph carries it, so it is
+// a set of constants, and a constant nobody checks is what let the tuple go
+// unenforced for three releases. Close the loop here: the declaration must
+// match the pinned South release, and every shipped manifest must fall inside
+// it through the arm its own runtime_abi selects.
 const southComponentSource = fs.readFileSync(
   path.join(root, "apps/cli/src/south_component.rs"),
   "utf8",
 );
-const declaredRuntime = southComponentSource.match(
-  /^(?:pub\(crate\) )?const SOUTH_RUNTIME: &str = "([^"]+)";$/m,
-)?.[1];
+const declaredConstant = (constant) =>
+  southComponentSource.match(
+    new RegExp(`^(?:pub\\(crate\\) )?const ${constant}: &str = "([^"]+)";$`, "m"),
+  )?.[1];
+const triple = (version) => version.split(".").map(Number);
+const compareVersions = (left, right) => {
+  const [a, b] = [triple(left), triple(right)];
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return 0;
+};
+
 assert.equal(
-  declaredRuntime,
-  componentSouthRuntime,
-  "the host's declared SOUTH_RUNTIME must equal the shipped components' runtime contract",
+  declaredConstant("SOUTH_RUNTIME"),
+  southRelease,
+  "the host's SOUTH_RUNTIME must be the South release it links",
+);
+const runtimeMin = declaredConstant("SOUTH_RUNTIME_MIN");
+assert.ok(runtimeMin, "the host must declare SOUTH_RUNTIME_MIN");
+assert.equal(
+  declaredConstant("TUPLE_SOUTH_RUNTIME"),
+  tupleSouthRuntime,
+  "the host's TUPLE_SOUTH_RUNTIME must equal the tuple-era components' runtime",
+);
+const declaredKernelContracts = Object.fromEntries(
+  [...(southComponentSource.match(/const KERNEL_CONTRACTS[^=]*=\s*\[([^\]]*)\];/s)?.[1] ?? "")
+    .matchAll(/\("([a-z_]+)",\s*(\d+)\)/g)]
+    .map(([, name, version]) => [name, Number(version)]),
+);
+assert.deepEqual(
+  declaredKernelContracts,
+  kernelContracts,
+  "the host's KERNEL_CONTRACTS must equal the kernel mirror's contracts",
 );
 
-for (const componentDir of ["provider-openai-compatible-v2", "provider-anthropic-v2", "provider-chatgpt-plan-v2", "provider-claude-plan-v2", "provider-copilot-plan-v2", "provider-codeassist-v2"]) {
+let oldestRangeRuntime;
+for (const { dir: componentDir } of JSON.parse(
+  fs.readFileSync(path.join(root, "plugins/official/packages.json"), "utf8"),
+).packages.filter((entry) => entry.kind === "south-component")) {
   const manifest = JSON.parse(
     fs.readFileSync(
       path.join(root, "plugins/official", componentDir, "manifest.json"),
       "utf8",
     ),
   );
+  const compatibility = manifest.compatibility;
+  if (compatibility.runtime_abi !== undefined) {
+    assert.equal(compatibility.runtime_abi, 1, `${componentDir} speaks another runtime ABI`);
+    assert.ok(
+      compareVersions(compatibility.south_runtime, runtimeMin) >= 0 &&
+        compareVersions(compatibility.south_runtime, southRelease) <= 0,
+      `${componentDir} declares south_runtime ${compatibility.south_runtime}, outside ${runtimeMin}..=${southRelease}`,
+    );
+    assert.deepEqual(
+      compatibility.kernel_contracts,
+      kernelContracts,
+      `${componentDir} declares kernel contracts the host does not distribute`,
+    );
+    if (
+      oldestRangeRuntime === undefined ||
+      compareVersions(compatibility.south_runtime, oldestRangeRuntime) < 0
+    ) {
+      oldestRangeRuntime = compatibility.south_runtime;
+    }
+    continue;
+  }
   assert.equal(
-    manifest.compatibility.south_runtime,
-    componentSouthRuntime,
+    compatibility.south_runtime,
+    tupleSouthRuntime,
     `${componentDir} declares a south_runtime the host would refuse at load`,
   );
   for (const [field, constant] of [
-    ["ir_schema_id", "IR_SCHEMA_ID"],
-    ["kernel_version", "KERNEL_VERSION"],
-    ["kernel_revision", "KERNEL_REVISION"],
+    ["ir_schema_id", "TUPLE_IR_SCHEMA_ID"],
+    ["kernel_version", "TUPLE_KERNEL_VERSION"],
+    ["kernel_revision", "TUPLE_KERNEL_REVISION"],
   ]) {
-    const declared = southComponentSource.match(
-      new RegExp(`^(?:pub\\(crate\\) )?const ${constant}: &str = "([^"]+)";$`, "m"),
-    )?.[1];
     assert.equal(
-      manifest.compatibility[field],
-      declared,
+      compatibility[field],
+      declaredConstant(constant),
       `${componentDir}.${field} disagrees with the host's ${constant}`,
     );
   }
 }
+// The floor is the oldest shipped range-era runtime: lower admits packages
+// nothing tests, higher refuses one the host ships.
+assert.equal(
+  runtimeMin,
+  oldestRangeRuntime,
+  "SOUTH_RUNTIME_MIN must equal the oldest south_runtime among the shipped range-era components",
+);
 
 console.log("South dependency and MSRV policy check: PASS");

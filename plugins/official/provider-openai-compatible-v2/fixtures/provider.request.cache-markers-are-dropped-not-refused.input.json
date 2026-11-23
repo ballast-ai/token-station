@@ -1,0 +1,130 @@
+{
+  "provider_config": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "gpt-5.5",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 400000,
+        "supported_parameters": [
+          "stop",
+          "temperature",
+          "top_p"
+        ]
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "gpt-5.5",
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "Rules.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "More rules."
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "a",
+            "cache_control": {
+              "type": "ephemeral",
+              "ttl": "1h"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://x.test/i.png"
+            },
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "b"
+          },
+          {
+            "type": "input_audio",
+            "input_audio": {
+              "data": "UklGRg==",
+              "format": "wav"
+            },
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "c1",
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Beijing\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": [
+          {
+            "type": "text",
+            "text": "18C"
+          },
+          {
+            "type": "text",
+            "text": "sunny",
+            "cache_control": {
+              "type": "ephemeral",
+              "ttl": "1h"
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Look up weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        },
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        },
+        "strict": true
+      }
+    ],
+    "tool_choice": "auto",
+    "sampling": {
+      "temperature": 0.2,
+      "top_k": 40
+    }
+  }
+}

@@ -86,11 +86,11 @@ fn target(name: &str) -> Value {
 fn audit_hardening_retries_preserve_observed_usage_and_unknown_cost() {
     let first = MockUpstream::start(vec![vec![http_json(
         200,
-        r#"{"id":"invalid","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20}}"#,
+        r#"{"id":"invalid","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}"#,
     )]]);
     let second = MockUpstream::start(vec![vec![http_json(
         200,
-        r#"{"id":"ok","model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+        r#"{"id":"ok","model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
     )]]);
     let fixture = Fixture::new(
         "agent-openai",
@@ -330,7 +330,7 @@ fn audit_hardening_rejected_retry_preserves_final_target_pricing() {
     )]]);
     let second = MockUpstream::start(vec![vec![http_json(
         200,
-        r#"{"id":"ok","model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+        r#"{"id":"ok","model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
     )]]);
     let fixture = Fixture::new(
         "agent-openai",

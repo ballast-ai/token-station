@@ -1,0 +1,32 @@
+{
+  "provider_config": {
+    "provider": "bailian-openai-compatible",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "qwen-turbo",
+        "tool": true,
+        "vision": false,
+        "json_schema": true,
+        "context_window": 1000000
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "qwen-turbo",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "sampling": {
+      "temperature": 0.2,
+      "max_output_tokens": 1024
+    },
+    "stream": false,
+    "thinking_budget": 300,
+    "reasoning_mode": "disabled"
+  }
+}

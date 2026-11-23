@@ -19,7 +19,7 @@ use std::process::Command;
 use south_component_conformance::sandbox::SandboxedComponentV1;
 use south_component_conformance::{FixturePackV1, run_provider_component_suite_v1};
 use south_provider_runtime::{LoadedComponentV1, NoSecretsV1};
-use token_station_cli::south_component::{host_expectations, south_component_runtime};
+use token_station_cli::south_component::{host_admission, south_component_runtime};
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -64,11 +64,11 @@ fn build_component(package: &str, stem: &str) -> PathBuf {
 type Gap = (&'static str, &'static str);
 
 /// The usage rows South's suite requires since South 0.43.0 (South #131).
-/// No shipped pack carries all five. Adding them is not a fixture edit: run
-/// against the two vendored components, South's rows show that both still turn
-/// a missing upstream usage report into zeros, which the rows exist to refuse.
-/// The component rebuild that adopts the strict usage references retires
-/// these gaps together with the rows.
+/// The plan components carry none of them. Adding them is not a fixture edit:
+/// those components still turn a missing upstream usage report into zeros,
+/// which the rows exist to refuse. The plan-component rebuild retires these
+/// gaps together with the rows. The two South-sourced components already ship
+/// the rows from South 0.85.1 and register nothing.
 const USAGE_ROWS_NOT_SHIPPED: [Gap; 5] = [
     ("Coverage", "provider.response.usage"),
     ("Coverage", "provider.response.missing-usage"),
@@ -76,17 +76,6 @@ const USAGE_ROWS_NOT_SHIPPED: [Gap; 5] = [
     ("Coverage", "provider.stream.usage-terminal"),
     ("Coverage", "provider.stream.no-usage"),
 ];
-
-/// A stream case whose expected events predate the IR's `block_index`.
-///
-/// The components built against South 0.20.0 emit thinking events without a
-/// `block_index`. The host's protocol 0.7.0 decodes the absent field as `0`
-/// and re-encodes it, so the produced events carry a field the vendored
-/// expectation does not. Both the fixture match and the split-stream replay
-/// compare against that expectation, so one case fails both checks.
-const fn predates_block_index(case: &'static str) -> [Gap; 2] {
-    [("FixtureMatch", case), ("StreamIncrementality", case)]
-}
 
 fn run(package: &str, stem: &str, registered: &[Gap]) {
     // The host's own runtime and expectations, so this proves the packaged
@@ -100,7 +89,7 @@ fn run(package: &str, stem: &str, registered: &[Gap]) {
         &runtime,
         &manifest,
         &wasm,
-        &host_expectations(),
+        &host_admission(),
         NoSecretsV1,
     )
     .expect("the packaged component loads through every admission gate");
@@ -144,26 +133,16 @@ fn run(package: &str, stem: &str, registered: &[Gap]) {
 }
 
 #[test]
-fn the_packaged_anthropic_component_fails_only_its_registered_gaps() {
-    let mut gaps = USAGE_ROWS_NOT_SHIPPED.to_vec();
-    gaps.extend(predates_block_index(
-        "provider.stream.thinking-signature-survives",
-    ));
-    run("provider-anthropic-v2", "provider_anthropic_v2", &gaps);
+fn the_packaged_anthropic_component_passes_the_full_suite() {
+    run("provider-anthropic-v2", "provider_anthropic_v2", &[]);
 }
 
 #[test]
-fn the_packaged_openai_compatible_component_fails_only_its_registered_gaps() {
-    // This pack already ships the three cache and stream usage rows.
-    let mut gaps = vec![
-        ("Coverage", "provider.response.usage"),
-        ("Coverage", "provider.response.missing-usage"),
-    ];
-    gaps.extend(predates_block_index("provider.stream.bare-reasoning-field"));
+fn the_packaged_openai_compatible_component_passes_the_full_suite() {
     run(
         "provider-openai-compatible-v2",
         "provider_openai_compatible_v2",
-        &gaps,
+        &[],
     );
 }
 

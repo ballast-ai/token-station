@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "internal",
+    "http_status": 500,
+    "message": "host value end_user_hash is not 1 to 128 bytes of [A-Za-z0-9_-]; the host must send a well-formed per-tenant hash or none"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "internal",
+    "http_status": 500,
+    "message": "the `max_tokens_field` configuration value is neither `max_completion_tokens` nor `max_tokens`"
+  }
+}

@@ -10,7 +10,7 @@
 # south_provider_api::ADAPTER_WIT by this crate's test.
 [package]
 name = "provider-openai-compatible-v2"
-version = "2.1.0"
+version = "2.14.2"
 edition = "2021"
 publish = false
 
@@ -21,11 +21,11 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-south-component-conformance = { version = "=0.20.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "7afe9a5b8ce80246597c43f7dd1b285b67eef9ed", default-features = false }
+south-component-conformance = { version = "=0.81.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f", default-features = false }
 wit-bindgen = "0.59"
 
 [dev-dependencies]
-south-provider-api = { version = "=0.20.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "7afe9a5b8ce80246597c43f7dd1b285b67eef9ed" }
+south-provider-api = { version = "=0.65.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f" }
 
 [profile.release]
 lto = "thin"

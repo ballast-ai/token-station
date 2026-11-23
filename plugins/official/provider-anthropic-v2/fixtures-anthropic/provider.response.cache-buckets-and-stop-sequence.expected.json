@@ -13,7 +13,7 @@
     }
   ],
   "usage": {
-    "input_tokens": 120,
+    "input_tokens": 240,
     "output_tokens": 3,
     "cache_read_tokens": 90,
     "cache_write_tokens": 30,

@@ -1,0 +1,8 @@
+{
+  "chunks": [
+    "data: {\"id\":\"chatcmpl-bx2\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen-plus\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+    "data: {\"id\":\"chatcmpl-bx2\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen-plus\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: {\"id\":\"chatcmpl-bx2\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen-plus\",\"choices\":[],\"usage\":{\"prompt_tokens\":2000,\"completion_tokens\":30,\"total_tokens\":2030,\"prompt_tokens_details\":{\"cached_tokens\":1024,\"cache_creation_input_tokens\":512,\"cache_type\":\"ephemeral\"}}}\n\n",
+    "data: [DONE]\n\n"
+  ]
+}
