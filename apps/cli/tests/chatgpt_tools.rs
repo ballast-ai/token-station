@@ -142,7 +142,7 @@ fn text_response_with(text: &str, failed: bool) -> String {
     sse(vec![
         json!({"type":"response.created","response":{"id":"resp_final","model":"gpt-5.5","status":"in_progress"}}),
         json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":text}),
-        json!({"type":if failed { "response.failed" } else { "response.completed" },"response":{"id":"resp_final","model":"gpt-5.5","status":if failed { "failed" } else { "completed" },"output":[],"usage":{"input_tokens":10,"output_tokens":8},"error":if failed { json!({"code":"server_error","message":"Fixture terminal failure"}) } else { Value::Null }}}),
+        json!({"type":if failed { "response.failed" } else { "response.completed" },"response":{"id":"resp_final","model":"gpt-5.5","status":if failed { "failed" } else { "completed" },"output":[],"usage":{"input_tokens":10,"output_tokens":8,"total_tokens":18},"error":if failed { json!({"code":"server_error","message":"Fixture terminal failure"}) } else { Value::Null }}}),
     ])
 }
 fn tool_response(name: &str, argument: &str, path: &Path, turn: usize) -> String {
@@ -161,7 +161,7 @@ fn tool_response(name: &str, argument: &str, path: &Path, turn: usize) -> String
         json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":id,"delta":arguments[split..]}),
         json!({"type":"response.function_call_arguments.done","output_index":0,"item_id":id,"arguments":arguments}),
         json!({"type":"response.output_item.done","output_index":0,"item":done}),
-        json!({"type":"response.completed","response":{"id":format!("resp_{turn}"),"model":"gpt-5.5","status":"completed","output":[done],"usage":{"input_tokens":10,"output_tokens":8}}}),
+        json!({"type":"response.completed","response":{"id":format!("resp_{turn}"),"model":"gpt-5.5","status":"completed","output":[done],"usage":{"input_tokens":10,"output_tokens":8,"total_tokens":18}}}),
     ])
 }
 

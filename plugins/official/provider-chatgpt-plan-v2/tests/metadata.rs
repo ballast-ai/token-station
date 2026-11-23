@@ -137,7 +137,7 @@ fn metadata_does_not_hide_errors_refusals_or_truncation() {
             wire.extend(&baseline);
             wire.extend(frame(metadata()));
             wire.extend(frame(
-                json!({"type":"response.completed","response":{"status":"completed"}}),
+                json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
             ));
             for size in [1, 7, wire.len()] {
                 let error = stream(&wire, size).unwrap_err();
@@ -165,7 +165,7 @@ fn metadata_compatibility_does_not_accept_unknown_event_names() {
         let mut wire = frame(metadata());
         wire.extend(frame(json!({"type":kind,"metadata":{}})));
         wire.extend(frame(
-            json!({"type":"response.completed","response":{"status":"completed"}}),
+            json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
         ));
         for size in [1, wire.len()] {
             assert_eq!(

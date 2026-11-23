@@ -166,7 +166,7 @@ fn searches(round: usize, arguments: &[Value]) -> String {
         frames.push(json!({"type":"response.output_item.done","output_index":index,"item":done}));
         output.push(done);
     }
-    frames.push(json!({"type":"response.completed","response":{"id":format!("resp_{round}"),"model":"gpt-5.5","status":"completed","output":output,"usage":{"input_tokens":10,"output_tokens":5}}}));
+    frames.push(json!({"type":"response.completed","response":{"id":format!("resp_{round}"),"model":"gpt-5.5","status":"completed","output":output,"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}));
     events(frames)
 }
 
@@ -176,7 +176,7 @@ fn final_answer(terminal: &str) -> String {
         json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":INVENTED}),
     ];
     if terminal != "truncated" {
-        frames.push(json!({"type":format!("response.{terminal}"),"response":{"id":"resp_final","model":"gpt-5.5","status":terminal,"output":[],"usage":{"input_tokens":10,"output_tokens":5},"error":if terminal == "completed" {Value::Null} else {json!({"code":"server_error","message":"Fixture model failure"})}}}));
+        frames.push(json!({"type":format!("response.{terminal}"),"response":{"id":"resp_final","model":"gpt-5.5","status":terminal,"output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"error":if terminal == "completed" {Value::Null} else {json!({"code":"server_error","message":"Fixture model failure"})}}}));
     }
     events(frames)
 }

@@ -118,6 +118,7 @@ impl ResponsesStream {
             index: tool_index,
             id: Some(call_id.to_owned()),
             name: Some(name.to_owned()),
+            signature: None,
             arguments_delta: String::new(),
         });
         Ok(())
@@ -159,6 +160,7 @@ impl ResponsesStream {
                 index: call.index,
                 id: None,
                 name: None,
+                signature: None,
                 arguments_delta: delta.to_owned(),
             });
         }
@@ -374,21 +376,9 @@ impl ResponsesStream {
                     finish_reason: Some(reason),
                     stop_sequence: None,
                 });
-                if let Some(usage) = response.get("usage").filter(|u| u.is_object()) {
-                    events.push(StreamEvent::Usage {
-                        usage: Usage {
-                            input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
-                            output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-                            cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
-                                .as_u64()
-                                .unwrap_or(0),
-                            reasoning_tokens: usage["output_tokens_details"]["reasoning_tokens"]
-                                .as_u64()
-                                .unwrap_or(0),
-                            ..Usage::default()
-                        },
-                    });
-                }
+                events.push(StreamEvent::Usage {
+                    usage: usage_of(response.get("usage"))?,
+                });
                 events.push(StreamEvent::Done {
                     finish_reason: None,
                     stop_sequence: None,
@@ -507,4 +497,64 @@ impl StreamParserV1 for ResponsesStream {
         }
         Ok(events)
     }
+}
+
+/// The terminal `response.usage`, under South 0.85.1's Responses rule
+/// (`reference_openai_responses::usage_of`, south #131): a completed response
+/// without exact usage is an error, never a zero.
+fn usage_of(usage: Option<&Value>) -> ComponentResultV1<Usage> {
+    let Some(usage) = usage.filter(|usage| usage.is_object()) else {
+        return Err(protocol(
+            "The ChatGPT plan response carries no usage object",
+        ));
+    };
+    let required = |key: &str| {
+        usage[key]
+            .as_u64()
+            .ok_or_else(|| protocol("The ChatGPT plan usage lacks a valid token count"))
+    };
+    let details = |key: &str| match usage.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(details @ Value::Object(_)) => Ok(Some(details)),
+        Some(_) => Err(protocol("The ChatGPT plan usage has invalid token details")),
+    };
+    let optional = |details: Option<&Value>, key: &str| match details.and_then(|d| d.get(key)) {
+        None | Some(Value::Null) => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| protocol("The ChatGPT plan usage has an invalid token count")),
+    };
+    let input = required("input_tokens")?;
+    let output = required("output_tokens")?;
+    let total = required("total_tokens")?;
+    if input.checked_add(output) != Some(total) {
+        return Err(protocol(
+            "The ChatGPT plan total_tokens does not equal input_tokens plus output_tokens",
+        ));
+    }
+    let input_details = details("input_tokens_details")?;
+    let cached = optional(input_details, "cached_tokens")?;
+    let cache_write = optional(input_details, "cache_write_tokens")?;
+    if cached
+        .checked_add(cache_write)
+        .is_none_or(|cache| cache > input)
+    {
+        return Err(protocol(
+            "The ChatGPT plan cached and cache-write counts exceed input_tokens",
+        ));
+    }
+    let reasoning = optional(details("output_tokens_details")?, "reasoning_tokens")?;
+    if reasoning > output {
+        return Err(protocol(
+            "The ChatGPT plan reasoning_tokens exceeds output_tokens",
+        ));
+    }
+    Ok(Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cached,
+        cache_write_tokens: cache_write,
+        reasoning_tokens: reasoning,
+        ..Usage::default()
+    })
 }
