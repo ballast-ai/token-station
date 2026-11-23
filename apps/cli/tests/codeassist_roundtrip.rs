@@ -74,7 +74,8 @@ fn assert_capability(error: CallErrorV1) {
 fn assert_unique_tools(component: &LoadedComponentV1, config: &str) {
     let tool_response = json!({"response":{
         "modelVersion":"gemini-3.8-flash-n",
-        "candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{}}}]},"finishReason":"STOP"}]
+        "candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{}}}]},"finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}
     }});
     let mut identities = BTreeSet::new();
     for streamed in [false, true] {
@@ -223,7 +224,8 @@ fn responses_agent_replays_google_thinking_through_both_real_components() {
             .call_parse_response(
                 &json!({"status":200,"headers":{},"body":json!({"response":{
             "modelVersion":"gemini-3.8-flash-n",
-            "candidates":[{"content":{"parts":parts},"finishReason":"STOP"}]
+            "candidates":[{"content":{"parts":parts},"finishReason":"STOP"}],
+            "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}
         }}).to_string()})
                 .to_string(),
             )

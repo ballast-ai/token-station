@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn a_package_cannot_choose_the_more_lenient_arm() {
         // A tuple-era package that claims the range arm is judged by the range.
-        let mut tuple = packaged_manifest("provider-codeassist-v2");
+        let mut tuple = packaged_manifest("provider-copilot-plan-v2");
         tuple["compatibility"]["runtime_abi"] = serde_json::json!(1);
         tuple["compatibility"]["kernel_contracts"] =
             serde_json::json!({"canonical_ir": 5, "error_catalog": 1, "stream": 3});

@@ -62,6 +62,8 @@ impl Parser {
                     )?),
                     name: Some(name.into()),
                     arguments_delta: arguments.to_string(),
+                    // The id carries the thought signature.
+                    signature: None,
                 });
                 self.calls += 1;
             } else if part["thought"].as_bool() == Some(true) {
@@ -74,6 +76,7 @@ impl Parser {
                 if let Some(text) = part["text"].as_str() {
                     events.push(StreamEvent::ThinkingDelta {
                         index: 0,
+                        block_index: 0,
                         thinking_delta: text.into(),
                     });
                 }
@@ -110,17 +113,15 @@ impl Parser {
                 other => FinishReason::Other(other.into()),
             });
         }
-        if let Some(meta) = r.get("usageMetadata") {
-            let n = |s: &str| meta[s].as_u64().unwrap_or(0);
-            let mut usage = Usage {
-                input_tokens: n("promptTokenCount"),
-                output_tokens: n("candidatesTokenCount"),
-                cache_read_tokens: n("cachedContentTokenCount"),
-                reasoning_tokens: n("thoughtsTokenCount"),
-                ..Usage::default()
-            };
-            adjust_usage(&mut usage);
-            events.push(StreamEvent::Usage { usage });
+        // Gemini streams running counts. Only the chunk that finishes the
+        // candidate carries the turn's usage; earlier counts are progress
+        // (South `provider.stream.intermediate-counts-are-progress-not-usage`).
+        if c["finishReason"].is_string() {
+            if let Some(meta) = r.get("usageMetadata") {
+                events.push(StreamEvent::Usage {
+                    usage: usage_of(meta)?,
+                });
+            }
         }
         Ok(events)
     }
@@ -142,6 +143,7 @@ impl StreamParserV1 for Parser {
                 if !self.thoughts.is_empty() {
                     events.push(StreamEvent::ThinkingSignatureDelta {
                         index: 0,
+                        block_index: 0,
                         signature_delta: thinking_signature(&self.thoughts, &self.model)?,
                     });
                 }

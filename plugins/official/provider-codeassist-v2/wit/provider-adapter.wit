@@ -87,7 +87,10 @@ interface provider-adapter {
     healthcheck: func() -> adapter-health;
 
     /// `provider-config`: `protocol::ProviderConfig` (the policy-fenced
-    /// four-field subset: `provider`, `base_url`, `auth`, `models`)
+    /// subset: `provider`, `base_url`, `auth`, `models`, and `declared`,
+    /// which holds only the non-secret values the package declares: its
+    /// family's `config_schema` keys and the attributes its credentials
+    /// export; a component reads no other key)
     /// -> `list<protocol::ModelCapability>`.
     ///
     /// A component has no network, so it cannot ask a self-hosted upstream
@@ -97,7 +100,8 @@ interface provider-adapter {
     /// result — using it is host policy, honouring the call is not.
     model-capabilities: func(provider-config: json) -> result<json, json>;
 
-    /// `chat-request`: `protocol::ChatRequest`,
+    /// `chat-request`: `protocol::ChatRequest`, whose `host_values` holds
+    /// only the host values the manifest declares (`host_values`),
     /// `provider-config`: `protocol::ProviderConfig`
     /// -> `protocol::HttpRequestDescriptor`.
     ///
@@ -113,6 +117,9 @@ interface provider-adapter {
     /// normalizes the dialect's complete report — every bucket, in the
     /// dialect's native cache convention — and a 2xx whose body cannot yield
     /// exact usage is an error (`provider_protocol_error`), never a zero.
+    /// The one exception is a package whose manifest declares
+    /// `usage_evidence: absent` (its upstream never reports tokens): its usage
+    /// is all zero, it emits no usage event, and the host never reads either.
     parse-response: func(response-parts: json) -> result<json, json>;
 
     /// `chunk`: raw bounded body bytes -> `list<protocol::StreamEvent>` (json).

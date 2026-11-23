@@ -8,7 +8,15 @@ fn config(kind: &str) -> ProviderConfig {
 fn req(v: Value) -> ChatRequest {
     serde_json::from_value(v).unwrap()
 }
-fn response(v: Value) -> HttpResponseParts {
+/// A buffered Code Assist response. Since South #131 a response without exact
+/// usage is an error, so a case that is not about usage gets a complete report
+/// here instead of repeating one in every literal.
+fn response(mut v: Value) -> HttpResponseParts {
+    if let Some(inner) = v.get_mut("response").and_then(Value::as_object_mut) {
+        inner.entry("usageMetadata").or_insert_with(
+            || json!({"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}),
+        );
+    }
     HttpResponseParts {
         status: 200,
         headers: Default::default(),
@@ -142,7 +150,7 @@ fn sse_envelope_handles_split_frames_and_usage() {
     let data = format!(
         "data: {}\n\ndata: {}\n\n",
         json!({"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}}),
-        json!({"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"cachedContentTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":2}}})
+        json!({"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"cachedContentTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":15}}})
     );
     let mut parser = CodeAssist.stream_parser();
     let mut events = Vec::new();
@@ -231,7 +239,7 @@ fn truncated_stream_and_unknown_content_fail_explicitly() {
 }
 #[test]
 fn signed_visible_json_keeps_text_and_optional_metadata_without_fake_thinking() {
-    let out = CodeAssist.parse_response(&response(json!({"response":{"modelVersion":"gemini-2.5-flash","candidates":[{"content":{"parts":[{"text":"{\"ok\":true}","thoughtSignature":"optional-text-fixture"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}}))).unwrap();
+    let out = CodeAssist.parse_response(&response(json!({"response":{"modelVersion":"gemini-2.5-flash","candidates":[{"content":{"parts":[{"text":"{\"ok\":true}","thoughtSignature":"optional-text-fixture"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}}))).unwrap();
     assert_eq!(
         serde_json::to_value(&out.choices[0].message.content).unwrap(),
         json!("{\"ok\":true}")
@@ -251,7 +259,7 @@ fn signed_visible_stream_and_empty_signature_trailer_are_normal_text() {
     let wire = format!(
         "data: {}\n\ndata: {}\n\n",
         json!({"response":{"modelVersion":"gemini-2.5-flash","candidates":[{"content":{"parts":[{"text":"visible answer","thoughtSignature":"optional-inline-fixture"}]}}]}}),
-        json!({"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"optional-trailer-fixture"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}})
+        json!({"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"optional-trailer-fixture"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}})
     );
     let mut events = Vec::new();
     for chunk in wire.as_bytes().chunks(13) {

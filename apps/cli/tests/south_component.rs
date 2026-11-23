@@ -152,13 +152,13 @@ fn a_range_component_outside_the_host_range_is_refused() {
 #[test]
 fn a_tuple_component_disagreeing_on_any_tuple_field_is_refused() {
     let wasm = std::fs::read(build_wasm(
-        "provider-codeassist-v2",
-        "provider_codeassist_v2",
+        "provider-copilot-plan-v2",
+        "provider_copilot_plan_v2",
     ))
-    .expect("the codeassist component builds");
+    .expect("the copilot component builds");
     let shipped: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
-            repo_root().join("plugins/official/provider-codeassist-v2/manifest.json"),
+            repo_root().join("plugins/official/provider-copilot-plan-v2/manifest.json"),
         )
         .expect("its manifest reads"),
     )
