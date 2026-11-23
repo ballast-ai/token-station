@@ -8,15 +8,17 @@ use crate::{
         IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
         PreparedProviderStreamResultV1, RequestBodyModeV1, StableProviderCallFailureV1,
         build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
-        execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
-        open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
+        execute_prepared_provider_call_v1, execute_prepared_provider_call_with_transcript_v1,
+        map_failure_v1, map_stream_read_failure_v1, open_prepared_provider_stream_v1,
+        prepare_provider_call_v1, prepare_provider_stream_v1,
     },
 };
 use south_contracts::{
-    BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, MAX_JSON_REQUEST_BODY_BYTES,
-    MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, MAX_STREAM_ERROR_BODY_BYTES, PreparationErrorV1,
-    ProviderQuotaMetadataFieldV1, ProviderQuotaMetadataV1, StreamChunkV1, StreamReadErrorV1,
-    StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
+    BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, DeclaredSecretHeadersV1,
+    MAX_JSON_REQUEST_BODY_BYTES, MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES,
+    MAX_STREAM_ERROR_BODY_BYTES, PreparationErrorV1, ProviderQuotaMetadataFieldV1,
+    ProviderQuotaMetadataV1, ResponseDiagnosticsV1, ResponseTranscriptV1, StreamChunkV1,
+    StreamReadErrorV1, StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
 };
 use south_core::{
     AsyncHttpTransport, AsyncStreamingTransport, CredentialResolutionFuture, CredentialResolver,
@@ -253,7 +255,7 @@ fn a_component_declaring_both_arms_still_carries_a_bearer() {
 /// hand one to a component. The descriptor falls back to the legacy transport,
 /// which presents both headers.
 #[test]
-fn the_combined_arm_is_ineligible_for_south() {
+fn the_combined_arm_needs_the_component_to_declare_it() {
     let mut request = descriptor();
     request.auth = Some(
         Auth::bearer_and_header("x-goog-api-key", SecretRef::new("provider_api_key"))
@@ -266,7 +268,57 @@ fn the_combined_arm_is_ineligible_for_south() {
             &auth_config(),
             &request,
         )
-        .expect_err("no South arm carries both headers yet"),
+        .expect_err("a component that does not declare bearer_and_header_secret"),
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
+}
+
+#[test]
+fn a_declared_combined_arm_is_prepared_for_south() {
+    let mut request = descriptor();
+    request.auth = Some(
+        Auth::bearer_and_header("x-goog-api-key", SecretRef::new("provider_api_key"))
+            .expect("a valid combined credential"),
+    );
+    let mut arms = both_arms();
+    arms.insert("bearer_and_header_secret".to_owned());
+    prepare_provider_call_v1(
+        &eligible_policy_with(arms),
+        &provider_config(),
+        &auth_config(),
+        &request,
+    )
+    .expect("a component declaring the combined arm is served by South");
+}
+
+#[test]
+fn a_declared_secret_header_is_served_and_never_smuggled() {
+    let declared = || {
+        DeclaredSecretHeadersV1::try_from_names(["x-vendor-key"])
+            .expect("a declarable secret header name")
+    };
+    let policy = || eligible_policy_with(both_arms()).with_secret_headers(declared());
+
+    let request = header_descriptor("x-vendor-key", "provider_api_key");
+    prepare_provider_call_v1(&policy(), &provider_config(), &auth_config(), &request)
+        .expect("the declared arm carries the credential");
+
+    // The same name on the ordinary channel fails closed instead of falling
+    // back to the legacy transport, which knows no declaration.
+    let mut smuggled = descriptor();
+    smuggled.headers =
+        SafeHeaders::try_new([("x-vendor-key", "not-a-credential")]).expect("plain header");
+    assert_eq!(
+        prepare_provider_call_v1(&policy(), &provider_config(), &auth_config(), &smuggled)
+            .expect_err("a declared name on the ordinary channel"),
+        PrepareProviderCallErrorV1::Preparation(PreparationErrorV1::UnsupportedAuthShape)
+    );
+
+    // A name the component never declared stays off the South path.
+    let invented = header_descriptor("x-other-key", "provider_api_key");
+    assert_eq!(
+        prepare_provider_call_v1(&policy(), &provider_config(), &auth_config(), &invented)
+            .expect_err("an undeclared header name"),
         PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
     );
 }
@@ -1595,50 +1647,18 @@ async fn community_streaming_adapter_passes_the_public_south_suite() {
     assert_eq!(report.passed_case_ids().len(), 9);
 }
 
-/// Header Auth cases the community adapter does not serve yet.
-///
-/// South auth contract versions four and five added the combined
-/// `BearerAndHeaderSecret` arm and package-declared secret header names. The
-/// adapter projects only `Bearer` and a sanctioned `HeaderSecret`, so it
-/// refuses these requests as ineligible and the legacy transport serves them.
-/// That is the existing behavior, not a regression. The list is exact: a newly
-/// failing case turns this red, and so does a case that starts to pass.
-const UNSERVED_HEADER_AUTH_CASES: &[&str] = &[
-    "BufferedBearerAndHeaderSecretSuccess",
-    "BufferedDeclaredHeaderSecretSuccess",
-    "DeclaredHeaderRedactedFromTranscript",
-];
-
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn community_adapter_fails_the_header_auth_suite_only_on_unserved_arms() {
+async fn community_adapter_passes_every_header_auth_case() {
     let executor = CommunityHeaderAuthConformanceExecutorV1;
-    let failure = tokio::time::timeout(
+    let report = tokio::time::timeout(
         Duration::from_secs(5),
         run_header_auth_conformance_v1(&executor),
     )
     .await
-    .expect("structured header-auth conformance watchdog must not expire")
-    .expect_err(
-        "the adapter now passes every Header Auth case: \
-         remove UNSERVED_HEADER_AUTH_CASES and require a full pass",
-    );
-
-    assert_eq!(failure.suite_id(), "south.header-auth.v1");
-    assert_eq!(failure.suite_version(), 1);
-    assert_eq!(failure.evaluated_case_count(), 7);
-    let failing: BTreeSet<String> = failure
-        .mismatches()
-        .iter()
-        .map(|mismatch| format!("{:?}", mismatch.case_id()))
-        .collect();
-    let unserved: BTreeSet<String> = UNSERVED_HEADER_AUTH_CASES
-        .iter()
-        .map(|case| (*case).to_owned())
-        .collect();
-    assert_eq!(
-        failing, unserved,
-        "only the unserved arms may fail: {failure:?}"
-    );
+    .expect("structured header-auth conformance watchdog must not expire");
+    let report = report.unwrap_or_else(|failure| panic!("{failure:?}"));
+    assert_eq!(report.suite_id(), "south.header-auth.v1");
+    assert_eq!(report.passed_case_ids().len(), 7);
 }
 
 struct CommunityHeaderAuthConformanceExecutorV1;
@@ -1660,18 +1680,27 @@ impl HeaderAuthProbe {
         }
     }
 
+    /// The reference wire-shape check: the header-secret arms bind exactly one
+    /// auth header, the combined arm binds exactly two with `authorization`
+    /// first, and both carry the one resolved secret.
     fn inspect(&self, request: &PreparedHttpRequestV1<'_>, fixture: &HeaderAuthFixtureV1) {
-        let mut auth_headers = request.auth_headers();
-        let (name, value) = auth_headers
-            .next()
-            .expect("a header-auth request binds exactly one auth header");
-        assert!(auth_headers.next().is_none());
-        self.sanctioned_header_exact.store(
-            name == fixture.header().header_name() && value == FAKE_HEADER_SECRET_V1.as_bytes(),
+        let bound: Vec<(&str, Vec<u8>)> = request
+            .auth_headers()
+            .map(|(name, value)| (name, value.to_vec()))
+            .collect();
+        let secret = FAKE_HEADER_SECRET_V1.as_bytes();
+        let mut expected: Vec<(&str, Vec<u8>)> = Vec::with_capacity(2);
+        if fixture.bearer_alongside() {
+            expected.push(("authorization", [b"Bearer ".as_slice(), secret].concat()));
+        }
+        expected.push((fixture.header().header_name(), secret.to_vec()));
+        self.sanctioned_header_exact
+            .store(bound == expected, Ordering::SeqCst);
+        self.authorization_header_absent.store(
+            bound.iter().all(|(name, _)| *name != "authorization")
+                && request.headers().get("authorization").is_none(),
             Ordering::SeqCst,
         );
-        self.authorization_header_absent
-            .store(name != "authorization", Ordering::SeqCst);
     }
 
     fn evidence(&self) -> HeaderAuthEvidenceV1 {
@@ -1709,16 +1738,35 @@ impl AsyncHttpTransport for HeaderAuthConformanceTransport<'_, '_> {
         self.probe.transport_calls.fetch_add(1, Ordering::SeqCst);
         self.probe.inspect(request, self.fixture);
         let upstream = *self.fixture.upstream();
+        // Transcribe every upstream header as the reqwest transport does: under
+        // the declaration the request's headers were validated with.
+        let transcript = match upstream {
+            HeaderAuthUpstreamV1::Response(raw) => ResponseTranscriptV1::capture_redacting(
+                raw.content_type()
+                    .map(|value| ("content-type", value))
+                    .into_iter()
+                    .chain(raw.retry_after().map(|value| ("retry-after", value)))
+                    .chain(self.fixture.upstream_response_headers().iter().copied())
+                    .map(|(name, value)| (name, Some(value))),
+                request.headers().secret_headers(),
+            ),
+            _ => ResponseTranscriptV1::default(),
+        };
         Box::pin(async move {
             match upstream {
-                HeaderAuthUpstreamV1::Response(raw) => BufferedHttpResponseV1::try_from_parts(
-                    raw.status()
-                        .try_into()
-                        .map_err(|_| TransportErrorV1::ResponseMetadataInvalid)?,
-                    raw.body().as_bytes().to_vec(),
-                    raw.content_type().map(str::to_owned),
-                    raw.retry_after().map(str::to_owned),
-                ),
+                HeaderAuthUpstreamV1::Response(raw) => {
+                    BufferedHttpResponseV1::try_from_parts_with_response_metadata(
+                        raw.status()
+                            .try_into()
+                            .map_err(|_| TransportErrorV1::ResponseMetadataInvalid)?,
+                        raw.body().as_bytes().to_vec(),
+                        raw.content_type().map(str::to_owned),
+                        raw.retry_after().map(str::to_owned),
+                        ProviderQuotaMetadataV1::default(),
+                        ResponseDiagnosticsV1::default(),
+                        transcript,
+                    )
+                }
                 HeaderAuthUpstreamV1::Stream(_) | HeaderAuthUpstreamV1::NotReached => {
                     Err(TransportErrorV1::RequestFailed)
                 }
@@ -1792,18 +1840,29 @@ fn prepare_header_auth_conformance_fixture(
         SafeHeaders::try_new(input.headers().iter().copied()).expect("canonical headers are valid");
     descriptor.body =
         Some(serde_json::from_str(input.json_body()).expect("canonical request body is valid"));
-    descriptor.auth = Some(
-        Auth::header(
-            fixture.header().header_name(),
-            SecretRef::new(input.requested_credential_slot()),
-        )
-        .expect("canonical Header Auth fixture uses a host-redacted name"),
-    );
-    let policy = if streaming {
-        eligible_streaming_policy_with(header_secret_arms())
+    let name = fixture.header().header_name();
+    let slot = SecretRef::new(input.requested_credential_slot());
+    descriptor.auth = Some(if fixture.bearer_alongside() {
+        Auth::bearer_and_header(name, slot)
+            .expect("canonical Header Auth fixture uses a host-redacted name")
     } else {
-        eligible_policy_with(header_secret_arms())
-    };
+        Auth::header(name, slot).expect("canonical Header Auth fixture uses a host-redacted name")
+    });
+    // The arms and declared names a package carrying this fixture would
+    // declare; the descriptor decides which one the request uses.
+    let arms = BTreeSet::from([
+        "header_secret".to_owned(),
+        "bearer_and_header_secret".to_owned(),
+    ]);
+    let declared =
+        DeclaredSecretHeadersV1::try_from_names(fixture.declared_secret_headers().iter().copied())
+            .expect("the fixture declares valid secret header names");
+    let policy = if streaming {
+        eligible_streaming_policy_with(arms)
+    } else {
+        eligible_policy_with(arms)
+    }
+    .with_secret_headers(declared);
 
     if streaming {
         prepare_provider_stream_v1(&policy, &provider, &auth, &descriptor)
@@ -1884,7 +1943,7 @@ impl CommunityHeaderAuthConformanceExecutorV1 {
             fixture,
             probe: &probe,
         };
-        match execute_prepared_provider_call_v1(
+        match execute_prepared_provider_call_with_transcript_v1(
             &prepared,
             &resolver,
             &transport,
@@ -1893,8 +1952,8 @@ impl CommunityHeaderAuthConformanceExecutorV1 {
         )
         .await
         {
-            Ok(response) => {
-                let bounded = BufferedHttpResponseV1::try_from_parts(
+            Ok((response, transcript)) => {
+                let bounded = BufferedHttpResponseV1::try_from_parts_with_response_metadata(
                     response
                         .status
                         .try_into()
@@ -1902,6 +1961,9 @@ impl CommunityHeaderAuthConformanceExecutorV1 {
                     response.body.into_bytes(),
                     response.headers.get("content-type").cloned(),
                     response.headers.get("retry-after").cloned(),
+                    ProviderQuotaMetadataV1::default(),
+                    ResponseDiagnosticsV1::default(),
+                    transcript,
                 )
                 .expect("adapter response remains inside the South response contract");
                 HeaderAuthObservationV1::response(bounded, probe.evidence())
