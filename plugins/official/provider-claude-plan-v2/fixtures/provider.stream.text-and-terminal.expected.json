@@ -2,7 +2,7 @@
   {
     "type": "usage",
     "usage": {
-      "input_tokens": 42,
+      "input_tokens": 72,
       "output_tokens": 0,
       "cache_read_tokens": 30,
       "cache_write_tokens": 0,
@@ -26,9 +26,9 @@
   {
     "type": "usage",
     "usage": {
-      "input_tokens": 0,
+      "input_tokens": 72,
       "output_tokens": 9,
-      "cache_read_tokens": 0,
+      "cache_read_tokens": 30,
       "cache_write_tokens": 0,
       "reasoning_tokens": 0
     }

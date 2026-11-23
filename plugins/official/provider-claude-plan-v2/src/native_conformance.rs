@@ -68,6 +68,10 @@ fn packaged_fixtures_pass_every_native_provider_component_check() {
             "unknown_field_tolerance",
             "stream_incrementality",
             "endpoint_confinement",
+            // South 0.43.0 (south #131): the usage rows and the two usage checks they enable.
+            "usage_rows",
+            "usage_never_defaulted",
+            "usage_partition",
             "auth_errors_are_not_retriable",
         ])
     );

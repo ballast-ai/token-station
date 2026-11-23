@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "provider_protocol_error",
+    "http_status": 502,
+    "message": "a Messages response must carry a usage object"
+  }
+}

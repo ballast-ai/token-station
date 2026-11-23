@@ -64,7 +64,7 @@ fn build_component(package: &str, stem: &str) -> PathBuf {
 type Gap = (&'static str, &'static str);
 
 /// The usage rows South's suite requires since South 0.43.0 (South #131).
-/// The plan components carry none of them. Adding them is not a fixture edit:
+/// The remaining plan components carry none of them. Adding them is not a fixture edit:
 /// those components still turn a missing upstream usage report into zeros,
 /// which the rows exist to refuse. The plan-component rebuild retires these
 /// gaps together with the rows. The two South-sourced components already ship
@@ -174,10 +174,6 @@ fn the_packaged_google_component_fails_only_its_registered_gaps() {
 }
 
 #[test]
-fn the_packaged_claude_component_fails_only_its_registered_gaps() {
-    run(
-        "provider-claude-plan-v2",
-        "provider_claude_plan_v2",
-        &USAGE_ROWS_NOT_SHIPPED,
-    );
+fn the_packaged_claude_component_passes_the_full_suite() {
+    run("provider-claude-plan-v2", "provider_claude_plan_v2", &[]);
 }
