@@ -252,15 +252,40 @@ fn responses_agent_replays_google_thinking_through_both_real_components() {
     assert!(request.messages.iter().any(|message| {
         message
             .extensions
-            .get("responses_reasoning_encrypted_content")
-            .and_then(Value::as_str)
-            .is_some_and(|state| state.starts_with("ca_th1_"))
+            .get("responses_opaque_reasoning_items")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["encrypted_content"]
+                        .as_str()
+                        .is_some_and(|state| state.starts_with("ca_th1_"))
+                })
+            })
     }));
-    let descriptor: Value = serde_json::from_str(&component.call_build_http_request(
-        &serde_json::to_string(&request).unwrap(),
-        &json!({"provider":"gemini-cli-plan","base_url":"https://cloudcode-pa.googleapis.com",
-            "auth":"local_subscription_token","google_project":"fixture-project"}).to_string(),
-    ).expect("normalized Google history replays")).expect("descriptor decodes");
+    let config =
+        json!({"provider":"gemini-cli-plan","base_url":"https://cloudcode-pa.googleapis.com",
+        "auth":"local_subscription_token","google_project":"fixture-project"})
+        .to_string();
+    let error = component
+        .call_build_http_request(&serde_json::to_string(&request).unwrap(), &config)
+        .expect_err("the OpenAI replay markers must not reach the Gemini dialect");
+    assert!(format!("{error:?}").contains("capability"), "{error:?}");
+    // The host's seal does this for a target that does not declare
+    // `reasoning_replay.openai.v1`: it removes the family and the layout and
+    // keeps the items (`gateway::component_request` unit tests).
+    let mut request = request;
+    for message in &mut request.messages {
+        message
+            .extensions
+            .remove("reasoning_replay_protocol_family");
+        message.extensions.remove("reasoning_replay_block_layout");
+    }
+    let descriptor: Value = serde_json::from_str(
+        &component
+            .call_build_http_request(&serde_json::to_string(&request).unwrap(), &config)
+            .expect("sealed Google history replays"),
+    )
+    .expect("descriptor decodes");
     let actual = descriptor["body"]["request"]["contents"]
         .as_array()
         .unwrap()

@@ -58,7 +58,8 @@
         "required": [
           "path"
         ]
-      }
+      },
+      "strict": false
     },
     {
       "name": "__token_station_responses_local_shell",

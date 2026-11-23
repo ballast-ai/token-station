@@ -9,8 +9,7 @@ dependencies = [
  "serde",
  "serde_json",
  "south-north-codec",
- "token-station-protocol 0.3.0",
- "token-station-protocol 0.7.0",
+ "token-station-protocol",
  "wit-bindgen",
 ]
 
@@ -19,6 +18,12 @@ name = "anyhow"
 version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bitflags"
@@ -185,12 +190,13 @@ dependencies = [
 
 [[package]]
 name = "south-north-codec"
-version = "0.37.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?tag=v0.37.0#3cb625104df76df738645b69f1cafd17bcbcad8d"
+version = "0.85.1"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f#174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f"
 dependencies = [
+ "base64",
  "serde_json",
  "thiserror",
- "token-station-protocol 0.3.0",
+ "token-station-protocol",
 ]
 
 [[package]]
@@ -237,16 +243,8 @@ dependencies = [
 
 [[package]]
 name = "token-station-protocol"
-version = "0.3.0"
-source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "token-station-protocol"
 version = "0.7.0"
+source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ce6894d99f51283e4985d39a2d533307bda27b6a#ce6894d99f51283e4985d39a2d533307bda27b6a"
 dependencies = [
  "serde",
  "serde_json",
