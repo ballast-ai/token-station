@@ -1,0 +1,31 @@
+name: South drift
+
+# The monthly South re-pin reminder. The host pins South by exact revision, so
+# it falls behind silently; this opens (or updates) one issue when the pin has
+# passed the age or minor-gap limit in scripts/check-south-drift.mjs. It never
+# blocks a build: pull requests and pushes do not run it.
+on:
+  schedule:
+    - cron: "17 3 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+      - run: node tests/south-drift.mjs
+      - run: node scripts/check-south-drift.mjs --issue
+        env:
+          GH_TOKEN: ${{ github.token }}
