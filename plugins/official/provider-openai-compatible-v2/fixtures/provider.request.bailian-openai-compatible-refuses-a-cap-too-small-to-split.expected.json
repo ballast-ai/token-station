@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "capability",
+    "http_status": 400,
+    "message": "this model reasons by default and its upstream caps the reasoning apart from the answer; an output cap below 5 leaves no room for both"
+  }
+}

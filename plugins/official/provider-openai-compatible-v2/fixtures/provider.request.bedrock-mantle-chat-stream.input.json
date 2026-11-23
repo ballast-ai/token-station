@@ -1,0 +1,31 @@
+{
+  "provider_config": {
+    "provider": "openai-compatible",
+    "base_url": "https://bedrock-mantle.us-east-1.api.aws",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "openai.gpt-oss-120b-1:0",
+        "tool": true,
+        "vision": false,
+        "json_schema": true,
+        "context_window": 131072,
+        "supported_parameters": [
+          "reasoning_effort",
+          "temperature",
+          "top_p"
+        ]
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "openai.gpt-oss-120b-1:0",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ],
+    "stream": true
+  }
+}

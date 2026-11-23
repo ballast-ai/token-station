@@ -26,6 +26,11 @@
             "signature": "SIG-1"
           },
           {
+            "type": "thinking",
+            "thinking": "",
+            "signature": "SIG-EMPTY"
+          },
+          {
             "type": "redacted_thinking",
             "data": "OPAQUE"
           },

@@ -30,10 +30,12 @@
 //!   the host's own runtime and admission gates. It used to be South's native
 //!   `AnthropicReferenceV1`, which South pins to the component of the same
 //!   revision. That parity holds only while the host's South libraries and
-//!   the packaged component come from one revision. They no longer do: the
-//!   libraries moved on, and the newer reference replays signed thinking only
-//!   under the reasoning-replay markers this host does not set yet. Measuring
-//!   the reference would report a translation that production does not run.
+//!   the packaged component come from one revision, which a library-only
+//!   upgrade breaks. Measuring the package itself keeps the ledger on the
+//!   translation production runs. The newer component replays signed thinking
+//!   only under the reasoning-replay markers `agent-anthropic` stamps and only
+//!   for a model that declares the capability, so the config below declares it
+//!   the way the host does for Anthropic itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -44,7 +46,7 @@ use serde_json::{Value, json};
 use south_component_conformance::abi::build_http_request_json;
 use south_component_conformance::sandbox::SandboxedComponentV1;
 use south_provider_runtime::{LoadedComponentV1, NoSecretsV1};
-use token_station_cli::south_component::{host_expectations, south_component_runtime};
+use token_station_cli::south_component::{host_admission, south_component_runtime};
 use token_station_conformance::AgentAdapter;
 use token_station_plugin_runtime::{AgentPlugin, PluginRuntime, RuntimeLimits};
 use token_station_protocol::{AgentRequestEnvelope, Extensions, HeaderDigest, Principal};
@@ -112,7 +114,7 @@ fn anthropic_component() -> &'static SandboxedComponentV1 {
             &runtime,
             &manifest,
             &wasm,
-            &host_expectations(),
+            &host_admission(),
             NoSecretsV1,
         )
         .expect("the packaged component loads through every admission gate");
@@ -120,10 +122,20 @@ fn anthropic_component() -> &'static SandboxedComponentV1 {
     })
 }
 
-/// `ProviderEndpoint` serialises as a bare string, so the component's config is
-/// this small.
+/// The component's config as the host assembles it for an upstream at
+/// Anthropic itself: the routed model declares Claude signed-thinking replay,
+/// which the host derives for `api.anthropic.com` (`component_request::
+/// grant_replay`). `ProviderEndpoint` serialises as a bare string.
 fn component_config() -> String {
-    json!({"provider": "anthropic", "base_url": UPSTREAM}).to_string()
+    json!({
+        "provider": "anthropic",
+        "base_url": UPSTREAM,
+        "models": [{
+            "model": ROUTED_MODEL,
+            "supported_parameters": ["reasoning_replay.claude.v1"]
+        }]
+    })
+    .to_string()
 }
 
 /// What the passthrough would put on the wire for this caller body.
@@ -506,6 +518,56 @@ fn erase_r6_tool_use_reordered(value: &mut Value) {
     }
 }
 
+/// R-7: an assistant turn the replay layout cannot describe loses its signed
+/// reasoning.
+///
+/// Since South 0.39.0 the component replays thinking signatures and
+/// `redacted_thinking` only for a turn whose markers list every block exactly
+/// once (`reasoning_replay::validated_layout`). `agent-anthropic` cannot write
+/// that list for a turn that holds a block the IR does not model
+/// (`server_tool_use`, `web_search_tool_result`) or repeats a tool-call id, so
+/// such a turn goes out without its signatures and redacted blocks. A request
+/// that declares a server tool takes the native pass-through instead, which
+/// keeps this class to history the client still carries after it stopped
+/// declaring the tool. Removing it needs South's layout to admit unmodeled
+/// blocks.
+fn erase_r7_undescribable_turn_drops_signed_reasoning(value: &mut Value) {
+    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let kind = |block: &Value| block.get("type").and_then(Value::as_str).map(str::to_owned);
+        let unmodeled = blocks.iter().any(|block| {
+            !matches!(
+                kind(block).as_deref(),
+                Some("text" | "thinking" | "redacted_thinking" | "tool_use")
+            )
+        });
+        let mut ids = BTreeSet::new();
+        let repeated_id = blocks
+            .iter()
+            .filter(|block| kind(block).as_deref() == Some("tool_use"))
+            .any(|block| !ids.insert(block.get("id").cloned().unwrap_or(Value::Null).to_string()));
+        if !unmodeled && !repeated_id {
+            continue;
+        }
+        blocks.retain(|block| kind(block).as_deref() != Some("redacted_thinking"));
+        for block in blocks.iter_mut() {
+            if kind(block).as_deref() == Some("thinking")
+                && let Some(object) = block.as_object_mut()
+            {
+                object.remove("signature");
+            }
+        }
+    }
+}
+
 /// A registered class: its label, and the narrow rewrite that erases exactly it.
 type Eraser = (&'static str, fn(&mut Value));
 
@@ -522,6 +584,10 @@ const ERASERS: &[Eraser] = &[
     (
         "R-6 tool_use blocks are re-ordered to the end",
         erase_r6_tool_use_reordered,
+    ),
+    (
+        "R-7 an undescribable assistant turn drops its signed reasoning",
+        erase_r7_undescribable_turn_drops_signed_reasoning,
     ),
 ];
 

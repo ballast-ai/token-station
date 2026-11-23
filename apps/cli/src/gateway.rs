@@ -138,8 +138,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const STREAM_READ: usize = 8 * 1024;
 const ANTHROPIC_PROVIDER: &str = "anthropic";
 
-/// Provider components preserve their dialect's wire usage convention. Fold
-/// that convention once when provider data enters the host's canonical IR.
+/// Anthropic's wire `input_tokens` excludes the cache buckets; the canonical
+/// IR's includes them. Only the native pass-through reads Anthropic's wire
+/// usage itself. Provider components report canonical usage already: the
+/// Anthropic component has folded the cache buckets in since South 0.40.0
+/// (south #118), so applying this to component output would count them twice.
 fn canonical_provider_usage(provider: &str, mut usage: Usage) -> Usage {
     if provider == ANTHROPIC_PROVIDER {
         usage.input_tokens = usage
@@ -148,18 +151,6 @@ fn canonical_provider_usage(provider: &str, mut usage: Usage) -> Usage {
             .saturating_add(usage.cache_write_tokens);
     }
     usage
-}
-
-fn canonical_provider_events(provider: &str, events: Vec<StreamEvent>) -> Vec<StreamEvent> {
-    events
-        .into_iter()
-        .map(|event| match event {
-            StreamEvent::Usage { usage } => StreamEvent::Usage {
-                usage: canonical_provider_usage(provider, usage),
-            },
-            event => event,
-        })
-        .collect()
 }
 
 fn absorb_record_usage(record: &mut RequestRecord, usage: Usage) {
@@ -1277,6 +1268,8 @@ fn assemble_upstreams(
             .expect("the caller loaded a component for every configured dialect")
             .clone();
         let auth_arms = admitted.auth_arms();
+        let component_replays = admitted
+            .declares_model_parameter(&entry.provider, component_request::CLAUDE_REPLAY_CAPABILITY);
         let plugin: Arc<dyn ProviderAdapter + Send + Sync> = admitted;
 
         let mut provider_config =
@@ -1300,6 +1293,7 @@ fn assemble_upstreams(
             .cloned()
             .map(project_capability_evidence_for_v1)
             .collect();
+        component_request::grant_replay(&mut provider_config, component_replays);
 
         // The component may refine the declared catalog; it cannot invent one,
         // having no network. This is `model_capabilities`' production call.

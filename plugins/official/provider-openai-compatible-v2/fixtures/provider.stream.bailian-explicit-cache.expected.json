@@ -1,0 +1,25 @@
+[
+  {
+    "type": "delta",
+    "index": 0,
+    "content": "Hi"
+  },
+  {
+    "type": "finish",
+    "finish_reason": "stop"
+  },
+  {
+    "type": "usage",
+    "usage": {
+      "input_tokens": 2000,
+      "output_tokens": 30,
+      "cache_read_tokens": 1024,
+      "explicit_cache_read_tokens": 1024,
+      "cache_write_tokens": 512,
+      "reasoning_tokens": 0
+    }
+  },
+  {
+    "type": "done"
+  }
+]

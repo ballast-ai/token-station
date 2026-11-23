@@ -1312,8 +1312,12 @@ mod loop_tests {
         run_scenario("partial_cache");
     }
 
+    /// South 0.43.0 (south #131) refuses a buffered chat completion without
+    /// usage instead of reporting zeros, so a search round whose upstream
+    /// omits usage fails closed: nothing is billed as free, and the search loop
+    /// does not continue on a round it cannot account for.
     #[test]
-    fn missing_round_usage_remains_unknown_after_search_and_persistence() {
+    fn a_round_without_usage_fails_closed() {
         run_scenario("missing_usage");
     }
 
@@ -1522,7 +1526,7 @@ mod loop_tests {
                         }
                         json!({"id":format!("msg_{round}"),"type":"message","role":"assistant","model":"test-model","content":content,"stop_reason":if message["tool_calls"].is_array() {"tool_use"} else {"end_turn"},"usage":{"input_tokens":10,"output_tokens":5}})
                     } else {
-                        json!({"id":format!("chat_{round}"),"model":"test-model","choices":[{"index":0,"message":message,"finish_reason":if message["tool_calls"].is_array() {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}})
+                        json!({"id":format!("chat_{round}"),"model":"test-model","choices":[{"index":0,"message":message,"finish_reason":if message["tool_calls"].is_array() {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})
                     };
                     if scenario == "partial_cache" && round == 0 {
                         if provider == "anthropic" {
@@ -1688,6 +1692,21 @@ mod loop_tests {
                 std::fs::remove_dir_all(&root).unwrap();
                 continue;
             }
+            if scenario == "missing_usage" {
+                assert_eq!(seen.lock().unwrap().len(), 1, "no round after it");
+                assert_eq!(answer.status, 502, "{}", answer.body);
+                assert!(answer.body.contains("usage"), "{}", answer.body);
+                let receipts = recorder.0.lock().unwrap();
+                assert!(
+                    receipts
+                        .last()
+                        .unwrap()
+                        .usage
+                        .is_none_or(|usage| usage.total() == 0)
+                );
+                std::fs::remove_dir_all(&root).unwrap();
+                continue;
+            }
             assert_eq!(answer.status, 200, "{}", answer.body);
             assert!(
                 !answer.body.contains(INTERNAL),
@@ -1761,11 +1780,7 @@ mod loop_tests {
             } else {
                 2
             };
-            let billed_rounds = if scenario == "missing_usage" {
-                rounds - 1
-            } else {
-                rounds
-            };
+            let billed_rounds = rounds;
             let canonical_input = billed_rounds * 10
                 + usize::from(scenario == "partial_cache" && provider == "anthropic") * 3;
             let wire_input =
@@ -1777,8 +1792,11 @@ mod loop_tests {
             if matches!(scenario, "limit" | "parallel" | "three" | "thinking_auto") {
                 assert_eq!(
                     requests[0]["tool_choice"],
+                    // The loop asks for one call per round (`parallel_tool_calls`
+                    // false). Messages carries that inside `tool_choice`, which
+                    // stays `auto`: evidence is enforced by the host.
                     if provider == "anthropic" {
-                        json!({"type":"auto"})
+                        json!({"type":"auto","disable_parallel_tool_use":true})
                     } else {
                         json!("auto")
                     },
@@ -1844,7 +1862,7 @@ mod loop_tests {
                 usize::try_from(receipts.last().unwrap().usage.unwrap().input_tokens).unwrap(),
                 canonical_input
             );
-            if matches!(scenario, "ordinary" | "missing_usage" | "partial_cache") {
+            if matches!(scenario, "ordinary" | "partial_cache") {
                 let database = root.join("accounting-regression.sqlite");
                 let store = crate::store::SqliteStore::open(&database).unwrap();
                 store.record(receipts.last().unwrap());
@@ -1877,16 +1895,6 @@ mod loop_tests {
                         &output["usage"]["input_tokens_details"]["cached_tokens"]
                     };
                     assert_eq!(cache, 3);
-                } else {
-                    let observation = restored[0].usage_observation.unwrap();
-                    assert!(observation.incomplete);
-                    assert_eq!(observation.input_tokens, None);
-                    assert_eq!(observation.output_tokens, None);
-                    assert_eq!(restored[0].cost_micros, None);
-                    assert_eq!(restored[0].cost_kind, CostKind::Unknown);
-                    assert_eq!(statistics.total.unpriced_requests, 1);
-                    assert_eq!(statistics.total.incomplete_usage_requests, 1);
-                    assert_eq!(output["usage"]["token_station_incomplete"], true);
                 }
             }
             let attempt_ordinals: Vec<_> = receipts

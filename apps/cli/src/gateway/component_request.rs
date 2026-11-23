@@ -23,6 +23,31 @@ pub(super) const CLAUDE_REPLAY_CAPABILITY: &str = "reasoning_replay.claude.v1";
 const REPLAY_FAMILY: &str = "reasoning_replay_protocol_family";
 const REPLAY_LAYOUT: &str = "reasoning_replay_block_layout";
 
+/// Where Anthropic itself serves Messages. Replay is granted only to an
+/// upstream whose endpoint covers this URL: a signature goes back only to the
+/// service that issued it, never to an Anthropic-compatible third party.
+const OFFICIAL_ANTHROPIC_MESSAGES: &str = "https://api.anthropic.com/v1/messages";
+
+/// Declares Claude signed-thinking replay on every model of an upstream that
+/// talks to Anthropic itself through a component that can replay.
+///
+/// The capability is derived here, at assembly, and never written to the
+/// user's configuration: it follows from the endpoint and the admitted
+/// component, not from a per-model setting someone has to remember.
+pub(super) fn grant_replay(config: &mut ProviderConfig, component_replays: bool) {
+    if !component_replays
+        || config.provider != "anthropic"
+        || !config.base_url.permits(OFFICIAL_ANTHROPIC_MESSAGES)
+    {
+        return;
+    }
+    for model in &mut config.models {
+        model
+            .supported_parameters
+            .insert(CLAUDE_REPLAY_CAPABILITY.to_owned());
+    }
+}
+
 fn target_accepts_replay(config: &ProviderConfig, request: &ChatRequest) -> bool {
     config.models.iter().any(|model| {
         model.model == request.model
@@ -58,7 +83,7 @@ pub(super) fn seal<'a>(config: &ProviderConfig, request: &'a ChatRequest) -> Cow
 
 #[cfg(test)]
 mod tests {
-    use super::{CLAUDE_REPLAY_CAPABILITY, REPLAY_FAMILY, REPLAY_LAYOUT, seal};
+    use super::{CLAUDE_REPLAY_CAPABILITY, REPLAY_FAMILY, REPLAY_LAYOUT, grant_replay, seal};
     use serde_json::json;
     use std::borrow::Cow;
     use token_station_protocol::{ChatRequest, Message, ProviderConfig, Role};
@@ -128,6 +153,36 @@ mod tests {
         request.model = "claude-other".to_owned();
         let sealed = seal(&config(&[CLAUDE_REPLAY_CAPABILITY]), &request);
         assert!(!sealed.messages[1].extensions.contains_key(REPLAY_FAMILY));
+    }
+
+    fn anthropic_config(base_url: &str) -> ProviderConfig {
+        let mut config = config(&[]);
+        config.base_url = token_station_protocol::ProviderEndpoint::try_new(base_url).unwrap();
+        config
+    }
+
+    #[test]
+    fn replay_is_granted_only_to_anthropic_itself_through_a_replaying_component() {
+        for base_url in ["https://api.anthropic.com", "https://api.anthropic.com/v1"] {
+            let mut config = anthropic_config(base_url);
+            grant_replay(&mut config, true);
+            assert!(
+                config.models[0]
+                    .supported_parameters
+                    .contains(CLAUDE_REPLAY_CAPABILITY),
+                "{base_url}"
+            );
+        }
+        let mut third_party = anthropic_config("https://api.example.com/anthropic");
+        grant_replay(&mut third_party, true);
+        let mut old_component = anthropic_config("https://api.anthropic.com");
+        grant_replay(&mut old_component, false);
+        let mut other_dialect = anthropic_config("https://api.anthropic.com");
+        other_dialect.provider = "openai-compatible".to_owned();
+        grant_replay(&mut other_dialect, true);
+        for config in [third_party, old_component, other_dialect] {
+            assert!(config.models[0].supported_parameters.is_empty());
+        }
     }
 
     #[test]

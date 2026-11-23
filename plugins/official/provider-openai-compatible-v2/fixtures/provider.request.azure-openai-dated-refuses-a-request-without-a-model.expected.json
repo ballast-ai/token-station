@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "capability",
+    "http_status": 400,
+    "message": "Azure OpenAI addresses the deployment in the URL path, so a request without a model has no deployment to send to"
+  }
+}

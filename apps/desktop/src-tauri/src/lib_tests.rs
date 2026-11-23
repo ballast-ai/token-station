@@ -10281,7 +10281,7 @@ fn verify_image_transport_fixture(responses: bool) {
                 ),
                 _ => (
                     200,
-                    json!({"id":"probe-fixture","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":if attempt == 0 { colors.join(",") } else { "I cannot determine the image".to_owned() }},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10}}),
+                    json!({"id":"probe-fixture","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":if attempt == 0 { colors.join(",") } else { "I cannot determine the image".to_owned() }},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}),
                 ),
             };
             let body = reply.to_string();

@@ -2234,7 +2234,7 @@ fn assert_semantic_http_round_trip(mode: token_station_cli::semantic::Mode) {
     let answer = json!({
         "id": "semantic-http-response",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello."}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 8, "completion_tokens": 2}
+        "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
     });
     let low = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let high = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
@@ -2337,7 +2337,7 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
             "message": { "role": "assistant", "content": "42." },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 9, "completion_tokens": 3 }
+        "usage": { "prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("roundtrip", "sk-test-key-abc\n");
@@ -2658,7 +2658,7 @@ fn all_four_inbound_protocols_coexist_in_declared_match_order() {
             "message": {"role": "assistant", "content": "OK"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("four-inbound-agents", "sk-test-key-abc");
@@ -2725,7 +2725,7 @@ fn exceeded_agent_budget_is_observe_only_and_never_blocks_routing() {
             "message": { "role": "assistant", "content": "still routed" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("budget-observe-only", "sk-test-key-abc");
@@ -2770,7 +2770,7 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
                 "message": { "role": "assistant", "content": "OK" },
                 "finish_reason": "stop"
             }],
-            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
         })
     };
     let home = MockUpstream::start(vec![vec![http_json(
@@ -2871,7 +2871,7 @@ fn claude_desktop_discovers_only_the_token_station_compatibility_alias() {
             "message": { "role": "assistant", "content": "unused" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
@@ -2922,7 +2922,7 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
             "message": { "role": "assistant", "content": "unused" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
@@ -3023,7 +3023,7 @@ fn scoped_models_switch_on_the_next_request_after_router_reload() {
             "message": { "role": "assistant", "content": "unused" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
@@ -3091,7 +3091,7 @@ fn harness_routing_answer(id: &str, model: &str) -> Value {
             "message": { "role": "assistant", "content": "ok" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     })
 }
 
@@ -3280,7 +3280,7 @@ fn chat_completions_structured_output_reaches_the_supported_upstream_unchanged()
     let answer = json!({
         "id":"chatcmpl-structured", "model":"gpt-5.5",
         "choices":[{"index":0,"message":{"role":"assistant","content":"{\"title\":\"Fixture title\"}"},"finish_reason":"stop"}],
-        "usage":{"prompt_tokens":7,"completion_tokens":3}
+        "usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}
     });
     let reply = http_json(200, &answer.to_string());
     let mock = MockUpstream::start(vec![vec![reply.clone()], vec![reply]]);
@@ -3326,6 +3326,7 @@ fn a_responses_request_round_trips_through_the_existing_provider_pipeline() {
         "usage": {
             "prompt_tokens": 7,
             "completion_tokens": 2,
+            "total_tokens": 9,
             "prompt_tokens_details": {"cached_tokens": 3},
             "completion_tokens_details": {"reasoning_tokens": 1}
         }
@@ -3399,7 +3400,7 @@ fn responses_structured_output_round_trips_through_the_provider() {
             "message": {"role": "assistant", "content": "{\"answer\":true}"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 4, "completion_tokens": 3}
+        "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("responses-structured-output", "sk-test-key-abc");
@@ -3494,7 +3495,7 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
             "message": {"role": "assistant", "content": "first answer"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
     });
     let second_answer = json!({
         "id": "chatcmpl-provider-reused-id",
@@ -3504,7 +3505,7 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
             "message": {"role": "assistant", "content": "second answer"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 8, "completion_tokens": 2}
+        "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
     });
     let mock = MockUpstream::start(vec![
         vec![http_json(200, &first_answer.to_string())],
@@ -3561,7 +3562,7 @@ fn responses_previous_response_id_replays_history_through_the_provider_pipeline(
 fn search_history_compacts_and_continues_without_executable_search() {
     let answer = json!({"id":"chatcmpl-search-summary","model":"gpt-5.5",
         "choices":[{"index":0,"message":{"role":"assistant","content":"Search summary"},"finish_reason":"stop"}],
-        "usage":{"prompt_tokens":20,"completion_tokens":3}});
+        "usage":{"prompt_tokens":20,"completion_tokens":3,"total_tokens":23}});
     let mock = MockUpstream::start_with_validator(
         vec![
             vec![http_json(200, &answer.to_string())],
@@ -3617,7 +3618,7 @@ fn responses_streamed_previous_response_id_replays_terminal_snapshot() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"streamed answer\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
         "data: [DONE]\n\n"
     );
     let first = format!(
@@ -3626,7 +3627,7 @@ fn responses_streamed_previous_response_id_replays_terminal_snapshot() {
     );
     let answer = json!({"id":"second","model":"gpt-5.5","choices":[{
         "index":0,"message":{"role":"assistant","content":"continued"},"finish_reason":"stop"
-    }],"usage":{"prompt_tokens":8,"completion_tokens":2}});
+    }],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}});
     let mock = MockUpstream::start(vec![
         vec![first.into_bytes()],
         vec![http_json(200, &answer.to_string())],
@@ -3668,7 +3669,7 @@ fn responses_stream_render_error_emits_failure_without_continuation_history() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bad_shell\",\"function\":{\"name\":\"__token_station_responses_local_shell\",\"arguments\":\"not-json\"}}]}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
         "data: [DONE]\n\n"
     );
     let first = format!(
@@ -3731,7 +3732,7 @@ fn oversized_responses_history_reaches_upstream_without_optional_continuation_st
             "message": {"role": "assistant", "content": "compacted"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 4, "completion_tokens": 2}
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
     });
     let continued_answer = json!({
         "id": "chatcmpl-compacted-turn",
@@ -3741,7 +3742,7 @@ fn oversized_responses_history_reaches_upstream_without_optional_continuation_st
             "message": {"role": "assistant", "content": "continued"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
     });
     let mock = MockUpstream::start_with_validator(
         vec![
@@ -3936,7 +3937,7 @@ fn a_responses_namespace_stream_is_incremental_and_protocol_shaped() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"STREAM_OK\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"marker.txt\\\"}\"}}]}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
         "data: [DONE]\n\n"
     );
     let header = format!(
@@ -4030,7 +4031,7 @@ fn responses_function_call_and_output_complete_a_second_turn() {
             },
             "finish_reason": "tool_calls"
         }],
-        "usage": {"prompt_tokens": 8, "completion_tokens": 3}
+        "usage": {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11}
     });
     let final_answer = json!({
         "id": "chatcmpl-final",
@@ -4040,7 +4041,7 @@ fn responses_function_call_and_output_complete_a_second_turn() {
             "message": {"role": "assistant", "content": "TOOL_RESULT_OK"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 12, "completion_tokens": 2}
+        "usage": {"prompt_tokens": 12, "completion_tokens": 2, "total_tokens": 14}
     });
     let mock = MockUpstream::start(vec![
         vec![http_json(200, &tool_answer.to_string())],
@@ -4129,7 +4130,7 @@ fn responses_namespace_tool_is_flattened_for_the_provider_and_restored_for_codex
             },
             "finish_reason": "tool_calls"
         }],
-        "usage": {"prompt_tokens": 8, "completion_tokens": 3}
+        "usage": {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &tool_answer.to_string())]]);
     let key = key_file("responses-namespace-tool", "sk-test-key-abc");
@@ -4258,7 +4259,7 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
             "message": {"role": "assistant", "content": "42."},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 11, "completion_tokens": 3}
+        "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("anthropic-roundtrip", "sk-test-key-abc\n");
@@ -4589,7 +4590,7 @@ fn claude_desktop_adaptive_thinking_reaches_the_translated_provider() {
             "message": {"role": "assistant", "content": "ready"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("claude-desktop-adaptive-thinking", "sk-test-key-abc");
@@ -4639,7 +4640,7 @@ fn anthropic_adaptive_thinking_degrades_safely_for_an_undeclared_chat_provider()
             "message": {"role": "assistant", "content": "hello"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 2, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("anthropic-adaptive-thinking", "sk-test-key-abc");
@@ -4687,7 +4688,7 @@ fn anthropic_forced_tool_choice_is_translated_and_reaches_the_upstream() {
             "message": {"role": "assistant", "content": "done"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("anthropic-tool-choice", "sk-test-key-abc");
@@ -4736,7 +4737,7 @@ fn anthropic_pdf_tool_result_is_extracted_before_chat_translation() {
             "message": {"role": "assistant", "content": "PDF_OK"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 40, "completion_tokens": 2}
+        "usage": {"prompt_tokens": 40, "completion_tokens": 2, "total_tokens": 42}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("anthropic-pdf-tool-result", "sk-test-key-abc");
@@ -4804,7 +4805,7 @@ fn anthropic_unreadable_documents_become_honest_localized_text() {
             "message": {"role": "assistant", "content": "I did not read the attachments."},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 40, "completion_tokens": 8}
+        "usage": {"prompt_tokens": 40, "completion_tokens": 8, "total_tokens": 48}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("anthropic-unreadable-documents", "sk-test-key-abc");
@@ -5058,7 +5059,7 @@ fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":3,\"cache_write_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":3,\"cache_write_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n",
         "data: [DONE]\n\n"
     );
     let head = format!(
@@ -5176,7 +5177,7 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9}}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n"
     );
@@ -5294,7 +5295,9 @@ fn an_sse_error_before_output_stays_uncommitted_and_typed() {
     );
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["error_code"], "Text(\"provider_protocol_error\")");
+    // A bare `event:error` with no data, then EOF: South 0.85.1 reports the
+    // stream as ended before its terminal frame.
+    assert_eq!(row["error_code"], "Text(\"transport_truncated\")");
     assert_eq!(row["status"], "Integer(502)");
     std::fs::remove_file(key).ok();
 }
@@ -5514,7 +5517,7 @@ fn opencode_and_hermes_images_reach_a_vision_capable_upstream() {
             "message": { "role": "assistant", "content": "VISION_OK" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 12, "completion_tokens": 2 }
+        "usage": { "prompt_tokens": 12, "completion_tokens": 2, "total_tokens": 14 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("vision-agents", "sk-test-key-abc");
@@ -5564,7 +5567,7 @@ fn codex_and_claude_code_preserve_images_for_a_vision_upstream() {
     let answer = json!({
         "id": "chatcmpl-vision", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "VISION_OK" }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 12, "completion_tokens": 2 }
+        "usage": { "prompt_tokens": 12, "completion_tokens": 2, "total_tokens": 14 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("codex-claude-vision", "sk-test-key");
@@ -5628,7 +5631,7 @@ fn every_openai_chat_agent_rejects_images_before_a_non_vision_upstream() {
             "message": { "role": "assistant", "content": "I can continue with the text." },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 12, "completion_tokens": 6 }
+        "usage": { "prompt_tokens": 12, "completion_tokens": 6, "total_tokens": 18 }
     });
     let home = MockUpstream::start(vec![
         vec![http_json(200, &answer.to_string())],
@@ -5677,7 +5680,7 @@ fn image_route_refusal_records_zero_attempts_even_with_later_text() {
             "message": { "role": "assistant", "content": "我会根据剩余文字继续。" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 18, "completion_tokens": 8 }
+        "usage": { "prompt_tokens": 18, "completion_tokens": 8, "total_tokens": 26 }
     });
     let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let custom = MockUpstream::start(Vec::new());
@@ -5732,7 +5735,7 @@ fn codex_responses_rejects_images_without_a_supported_route() {
             "message": { "role": "assistant", "content": "Continued without the image." },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
+        "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
     });
     let home = MockUpstream::start(Vec::new());
     let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
@@ -5784,7 +5787,7 @@ fn an_upstream_image_refusal_never_retries_without_the_image() {
             "message": { "role": "assistant", "content": "Continued after fallback." },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 10, "completion_tokens": 4 }
+        "usage": { "prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14 }
     });
     let mock = MockUpstream::start(vec![
         vec![http_json(400, &refusal.to_string())],
@@ -5885,7 +5888,7 @@ fn a_broken_agent_adapter_is_skipped_and_the_proxy_still_serves() {
             "message": { "role": "assistant", "content": "ok." },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 4, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("resilient-agents", "sk-test-key-abc");
@@ -5914,7 +5917,7 @@ fn nothing_the_caller_wrote_reaches_disk() {
     let answer = json!({
         "id": "chatcmpl-1", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": CANARY }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("canary", &format!("sk-test-{CANARY}"));
@@ -5953,7 +5956,7 @@ fn switching_metrics_off_leaves_the_file_log_only() {
     let answer = json!({
         "id": "chatcmpl-1", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("no-metrics", "sk-test-key-abc");
@@ -6118,7 +6121,7 @@ fn direct_gateway_dispatches_only_to_the_applied_target() {
             "message": { "role": "assistant", "content": "ok" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let first = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let applied = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
@@ -6259,7 +6262,7 @@ fn quota_first_cools_an_account_the_upstream_rate_limited() {
             "message": { "role": "assistant", "content": "ok" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6 }
     });
     // No `Retry-After` on the 429, so the cooldown uses the default and no
     // inter-attempt wait slows the test. The mock repeats its last scripted
@@ -6315,7 +6318,7 @@ fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
             "message": { "role": "assistant", "content": "ok" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6 }
     });
     let primary = MockUpstream::start(vec![
         vec![http_json_with_headers(
@@ -6485,7 +6488,7 @@ fn malformed_2xx_and_truncated_bodies_fallback_without_recording_empty_success()
             "message": {"role": "assistant", "content": "fallback"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     })
     .to_string();
     let truncated = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 999\r\nconnection: close\r\n\r\n{\"choices\":[".to_vec();
@@ -6651,7 +6654,7 @@ fn retry_after_waits_within_the_budget_before_fallback() {
     let answer = json!({
         "id": "chatcmpl-ok", "model": "gpt-5.5",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     });
     let fallback = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("retry-after-budget", "sk-test-key");
@@ -6699,7 +6702,7 @@ fn a_failing_upstream_is_ejected_bypassed_probed_and_restored() {
     let ok = json!({
         "id": "chatcmpl-1", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     })
     .to_string();
     let boom =
@@ -6891,7 +6894,7 @@ fn azure_header_auth_now_runs_on_south_whatever_the_configured_mode() {
     let answer = json!({
         "id": "chatcmpl-azure-legacy", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "legacy" }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 2, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let proxy = start_azure_production_proxy(
@@ -6943,7 +6946,7 @@ fn production_header_auth_opt_in_executes_buffered_south_once() {
     let answer = json!({
         "id": "chatcmpl-azure-buffered", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "azure" }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 2, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let proxy = start_south_header_auth_production_proxy(&mock, "synthetic-azure-secret");
@@ -7101,7 +7104,7 @@ fn production_buffered_opt_in_executes_south_once_and_records_the_actual_engine(
     let answer = json!({
         "id": "chatcmpl-production-south", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "south" }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 2, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3 }
     });
     let mock = MockUpstream::start(vec![vec![http_json_with_headers(
         200,
@@ -7260,7 +7263,7 @@ fn the_default_engine_is_south_and_the_receipt_says_so() {
             "message": {"role": "assistant", "content": "south"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let (config_path, _) = write_south_probe_config(&mock, "sk-south-default", true);
@@ -8274,7 +8277,7 @@ fn an_upstream_probe_runs_the_real_southbound_path() {
     let answer = json!({
         "id": "chatcmpl-1", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("probe-ok", "sk-test-key-abc\n");
@@ -8310,7 +8313,7 @@ fn south_v1_probe_runs_the_official_plugin_and_real_reqwest_transport_once() {
     let answer = json!({
         "id": "chatcmpl-south", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(201, &answer.to_string())]]);
     let (gateway, data_dir) = south_probe_gateway(&mock, "sk-south-loopback");
@@ -8349,7 +8352,7 @@ fn south_v1_probe_uses_the_exact_azure_header_auth_dialect() {
     let answer = json!({
         "id": "chatcmpl-azure-probe", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(201, &answer.to_string())]]);
     let (gateway, data_dir) = south_header_probe_gateway(&mock, "synthetic-azure-probe-secret");
@@ -8373,7 +8376,10 @@ fn south_v1_probe_uses_the_exact_azure_header_auth_dialect() {
     );
     assert_eq!(seen[0].authorization, None);
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
-    assert_eq!(seen[0].body["max_tokens"], json!(1));
+    // The Azure family's `max_tokens_field` defaults to `max_completion_tokens`
+    // since provider-openai-compatible 2.14 (its manifest `config_schema`).
+    assert_eq!(seen[0].body["max_completion_tokens"], json!(1));
+    assert!(seen[0].body.get("max_tokens").is_none());
 
     std::fs::remove_dir_all(data_dir).ok();
 }
@@ -8501,7 +8507,8 @@ fn south_v1_probe_timeout_uses_structured_paused_time_and_closes_the_socket() {
 fn cli_south_transport_reports_the_existing_success_shape() {
     let answer = json!({
         "id": "chatcmpl-cli-south", "model": "gpt-5.5",
-        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }]
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(201, &answer.to_string())]]);
     let (config_path, data_dir) = write_south_probe_config(&mock, "sk-south-cli-success", true);
@@ -8547,7 +8554,8 @@ fn a_planted_publisher_receipt_changes_nothing_either_way() {
     // but "a receipt is not a channel at all": planting one must change nothing.
     let answer = json!({
         "id": "chatcmpl-receipt-is-not-a-channel", "model": "gpt-5.5",
-        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }]
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
     });
     let secret = "sk-south-cli-must-not-leak";
 
@@ -8604,7 +8612,8 @@ fn provider_feature_probe_executes_stream_tool_and_json_requests() {
                 }]
             },
             "finish_reason": "tool_calls"
-        }]
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     });
     let structured = json!({
         "id": "chatcmpl-json", "model": "gpt-5.5",
@@ -8612,7 +8621,8 @@ fn provider_feature_probe_executes_stream_tool_and_json_requests() {
             "index": 0,
             "message": {"role": "assistant", "content": "{\"ok\":true}"},
             "finish_reason": "stop"
-        }]
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     });
     let mock = MockUpstream::start(vec![
         vec![stream],
@@ -8867,7 +8877,7 @@ fn admin_data_plane_serves_the_running_views() {
     let answer = json!({
         "id": "chatcmpl-admin", "model": "gpt-5.5",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     });
     let upstream = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key_file = key_file("admin-views", "sk-admin-views");
@@ -9058,7 +9068,7 @@ fn a_bare_reasoning_field_surfaces_as_thinking_in_a_reply() {
             "message": { "role": "assistant", "content": "42.", "reasoning": "six sevens" },
             "finish_reason": "stop"
         }],
-        "usage": { "prompt_tokens": 9, "completion_tokens": 3 }
+        "usage": { "prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("bare-reasoning", "sk-test-key-abc\n");
@@ -9091,7 +9101,7 @@ fn a_bare_reasoning_delta_surfaces_as_thinking_in_a_stream() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"six \"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"42.\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9}}\n\n",
         "data: [DONE]\n\n"
     );
     let mock = MockUpstream::start(vec![sse_response(sse)]);
@@ -9121,7 +9131,7 @@ fn a_redacted_thinking_block_is_dropped_not_refused() {
             "message": {"role": "assistant", "content": "still here"},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 11, "completion_tokens": 3}
+        "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("redacted-thinking", "sk-test-key-abc\n");
@@ -9167,7 +9177,7 @@ fn an_empty_first_delta_opens_no_text_block() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":1}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":1,\"total_tokens\":8}}\n\n",
         "data: [DONE]\n\n"
     );
     let mock = MockUpstream::start(vec![sse_response(sse)]);
@@ -11292,7 +11302,7 @@ fn completed_image_delivery_survives_late_cancellation_without_learning_cancelle
                 &json!({"error":{"message":"Rate limit exceeded"}}).to_string(),
             )]]);
             let success = if dialect == "translated" {
-                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1}})
+                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}})
             } else {
                 json!({"id":"image-ok","status":if delivery == "incomplete" {"incomplete"} else {"completed"},"output":[],"content":[]})
             };
@@ -11433,7 +11443,7 @@ fn automatic_image_routing_learns_acceptance_and_rejection_without_removing_imag
             let primary =
                 MockUpstream::start(vec![vec![http_json(first_status, &rejection.to_string())]]);
             let success = if dialect == "translated" {
-                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1}})
+                json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}})
             } else {
                 json!({"id":"image-ok","output":[],"content":[]})
             };
@@ -11549,7 +11559,7 @@ fn image_format_rejection_does_not_poison_the_next_valid_image_request() {
     for dialect in ["translated", "anthropic-native", "responses-native"] {
         let rejection = json!({"error":{"message":"Unsupported image type: image/tiff"}});
         let success = if dialect == "translated" {
-            json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}]})
+            json!({"id":"image-ok","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":"accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})
         } else {
             json!({"id":"image-ok","status":"completed","output":[],"content":[]})
         };
@@ -11644,7 +11654,7 @@ fn quota_plan_exhaustion_rotates_and_stops_when_selected_accounts_are_spent() {
     let ok = json!({
         "id": "quota-plan-fixture", "object": "chat.completion", "model": "gpt-5.5",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "fixture"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
     });
     let spent = || {
         vec![http_json_with_headers(

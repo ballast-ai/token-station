@@ -711,6 +711,11 @@ mod tests {
                 manifest["name"] = json!(package);
                 if wasm == "component.wasm" {
                     manifest["providers"] = json!(["vision-security-fixture"]);
+                    // Family-keyed declarations must name declared families.
+                    if let Some(object) = manifest.as_object_mut() {
+                        object.remove("config_schema");
+                        object.remove("model_parameters");
+                    }
                 }
                 std::fs::write(
                     target.join("manifest.json"),

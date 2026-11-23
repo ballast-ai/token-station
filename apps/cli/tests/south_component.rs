@@ -108,10 +108,11 @@ fn the_anthropic_component_renders_a_messages_request() {
 // tests exist so "a stale package is refused" stops being a claim about a field
 // and becomes a claim about behaviour.
 
-/// Each of the four host-known fields, tampered one at a time on a package that
-/// is otherwise exactly the one that ships. All four must be refused.
+/// A range-era package (it declares `runtime_abi`) outside what the host admits
+/// is refused. Its `ir_schema_id`, `kernel_version` and `kernel_revision` are
+/// provenance only under the range handshake, so they are not tampered here.
 #[test]
-fn a_component_disagreeing_on_any_tuple_field_is_refused() {
+fn a_range_component_outside_the_host_range_is_refused() {
     let wasm = std::fs::read(build_wasm("provider-anthropic-v2", "provider_anthropic_v2"))
         .expect("the anthropic component builds");
     let shipped: serde_json::Value = serde_json::from_str(
@@ -121,6 +122,48 @@ fn a_component_disagreeing_on_any_tuple_field_is_refused() {
         .expect("its manifest reads"),
     )
     .expect("the manifest is JSON");
+    let runtime = south_component_runtime().expect("the south runtime builds");
+
+    for (field, other) in [
+        ("runtime_abi", serde_json::json!(2)),
+        ("south_runtime", serde_json::json!("0.76.0")),
+        ("south_runtime", serde_json::json!("0.86.0")),
+        (
+            "kernel_contracts",
+            serde_json::json!({"canonical_ir": 4, "error_catalog": 1, "stream": 3}),
+        ),
+    ] {
+        let mut tampered = shipped.clone();
+        tampered["compatibility"][field] = other.clone();
+        let refused = SouthComponentAdapter::load_embedded(&runtime, &tampered.to_string(), &wasm);
+        let Err(message) = refused else {
+            panic!("a component declaring `{field}` = {other} must not be admitted");
+        };
+        assert!(
+            message.contains("outside the range"),
+            "the refusal must name the handshake, not something downstream: {message}"
+        );
+    }
+}
+
+/// Each of the four host-known fields, tampered one at a time on a tuple-era
+/// package (no `runtime_abi`) that is otherwise exactly the one that ships.
+/// All four must be refused.
+#[test]
+fn a_tuple_component_disagreeing_on_any_tuple_field_is_refused() {
+    let wasm = std::fs::read(build_wasm(
+        "provider-claude-plan-v2",
+        "provider_claude_plan_v2",
+    ))
+    .expect("the claude-plan component builds");
+    let shipped: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repo_root().join("plugins/official/provider-claude-plan-v2/manifest.json"),
+        )
+        .expect("its manifest reads"),
+    )
+    .expect("the manifest is JSON");
+    assert!(shipped["compatibility"].get("runtime_abi").is_none());
     let runtime = south_component_runtime().expect("the south runtime builds");
 
     // Shape-valid but different. A malformed value would be refused earlier, by

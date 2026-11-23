@@ -1,0 +1,26 @@
+{
+  "provider_config": {
+    "provider": "gemini-openai-compatible",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "gemini-2.5-flash",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 1048576
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "gemini-2.5-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Synthetic canary"
+      }
+    ],
+    "stream": false
+  }
+}

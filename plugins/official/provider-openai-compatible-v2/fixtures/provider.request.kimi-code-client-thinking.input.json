@@ -1,0 +1,33 @@
+{
+  "provider_config": {
+    "provider": "kimi-code",
+    "base_url": "https://api.moonshot.cn",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "kimi-k2-0905-preview",
+        "tool": true,
+        "vision": false,
+        "json_schema": true,
+        "context_window": 262144
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "kimi-k2-0905-preview",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "sampling": {
+      "temperature": 0.2,
+      "max_output_tokens": 1024
+    },
+    "stream": false,
+    "thinking": {
+      "type": "disabled"
+    }
+  }
+}

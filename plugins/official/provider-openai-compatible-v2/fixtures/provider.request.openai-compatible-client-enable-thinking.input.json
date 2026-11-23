@@ -1,0 +1,31 @@
+{
+  "provider_config": {
+    "provider": "openai-compatible",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "qwen-plus",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 200000
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "qwen-plus",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "sampling": {
+      "temperature": 0.2,
+      "max_output_tokens": 1024
+    },
+    "stream": false,
+    "enable_thinking": false
+  }
+}

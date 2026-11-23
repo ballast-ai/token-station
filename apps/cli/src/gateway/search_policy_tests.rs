@@ -416,7 +416,7 @@ fn exercise_backend(
                 };
                 (
                     200,
-                    json!({"id":"chat_local","model":"test-model","choices":[{"index":0,"message":message,"finish_reason":if tool_result {"stop"} else {"tool_calls"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}),
+                    json!({"id":"chat_local","model":"test-model","choices":[{"index":0,"message":message,"finish_reason":if tool_result {"stop"} else {"tool_calls"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}),
                 )
             };
             if native_anthropic && code == 200 && (native || !profile) {

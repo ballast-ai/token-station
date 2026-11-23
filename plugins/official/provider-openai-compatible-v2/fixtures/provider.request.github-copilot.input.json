@@ -1,0 +1,26 @@
+{
+  "provider_config": {
+    "provider": "github-copilot",
+    "base_url": "https://api.individual.githubcopilot.com",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "gpt-5.5",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 400000
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "gpt-5.5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "stream": true
+  }
+}

@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 use south_provider_runtime::{CallErrorV1, LoadedComponentV1, NoSecretsV1};
-use token_station_cli::south_component::{host_expectations, south_component_runtime};
+use token_station_cli::south_component::{host_admission, south_component_runtime};
 use token_station_conformance::AgentAdapter;
 use token_station_plugin_runtime::{AgentPlugin, PluginRuntime, RuntimeLimits};
 use token_station_protocol::{AgentRequestEnvelope, ChatResponse};
@@ -37,7 +37,7 @@ fn component() -> LoadedComponentV1 {
         &south_component_runtime().expect("production runtime builds"),
         &manifest,
         &wasm,
-        &host_expectations(),
+        &host_admission(),
         NoSecretsV1,
     )
     .expect("Code Assist loads through production admission gates")
