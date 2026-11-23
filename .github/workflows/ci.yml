@@ -104,6 +104,7 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
       - run: npm --prefix apps/desktop ci
       - run: node tests/agent-sensitive-boundary.mjs
+      - run: node tests/south-drift.mjs
       - run: node --test tests/desktop-build-info.mjs
       - run: node --test tests/dev-desktop-packages.mjs
       - run: npm --prefix apps/desktop test -- --run
