@@ -135,13 +135,27 @@ fn streams_all_three_dialects_across_every_byte_boundary() {
         include_str!("../../provider-chatgpt-plan-v2/fixtures/provider.stream.tool.input.json"),
         include_str!("data/anthropic-signed-thinking-stream.input.json"),
     ] {
-        let input:Value=serde_json::from_str(source).unwrap();let chunks=input["chunks"].as_array().unwrap();
-        let mut baseline=CopilotPlan.stream_parser();let mut expected=Vec::new();
-        for chunk in chunks {expected.extend(baseline.parse_chunk(chunk.as_str().unwrap().as_bytes()).unwrap());}
+        let input: Value = serde_json::from_str(source).unwrap();
+        let chunks = input["chunks"].as_array().unwrap();
+        let mut baseline = CopilotPlan.stream_parser();
+        let mut expected = Vec::new();
+        for chunk in chunks {
+            expected.extend(
+                baseline
+                    .parse_chunk(chunk.as_str().unwrap().as_bytes())
+                    .unwrap(),
+            );
+        }
         expected.extend(baseline.finish().unwrap());
-        let mut fragmented=CopilotPlan.stream_parser();let mut actual=Vec::new();
-        for chunk in chunks {for byte in chunk.as_str().unwrap().as_bytes(){actual.extend(fragmented.parse_chunk(&[*byte]).unwrap());}}
-        actual.extend(fragmented.finish().unwrap());assert_eq!(actual,expected);
+        let mut fragmented = CopilotPlan.stream_parser();
+        let mut actual = Vec::new();
+        for chunk in chunks {
+            for byte in chunk.as_str().unwrap().as_bytes() {
+                actual.extend(fragmented.parse_chunk(&[*byte]).unwrap());
+            }
+        }
+        actual.extend(fragmented.finish().unwrap());
+        assert_eq!(actual, expected);
     }
 }
 #[test]
