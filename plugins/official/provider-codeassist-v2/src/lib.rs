@@ -294,14 +294,72 @@ fn unwrap_response(parts: &HttpResponseParts) -> ComponentResultV1<HttpResponseP
         ..parts.clone()
     })
 }
-fn adjust_usage(u: &mut Usage) {
-    u.output_tokens = u.output_tokens.saturating_add(u.reasoning_tokens);
+/// Gemini `usageMetadata` as the IR reports it, under South 0.85.1's rule
+/// (`gemini_text::usage_of`): a turn without exact usage is an error, never a
+/// zero (south #131).
+///
+/// Thoughts are reported outside the candidates, so output is candidates plus
+/// thoughts and input is prompt plus tool-use prompt. `promptTokenCount` and
+/// `totalTokenCount` are required, and the parts must add up to the total. A
+/// missing `candidatesTokenCount` is zero only when the total closes without it.
+pub(crate) fn usage_of(meta: &Value) -> ComponentResultV1<Usage> {
+    let count = |key: &str| -> ComponentResultV1<u64> {
+        match meta.get(key) {
+            None => Ok(0),
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| protocol("Code Assist returned an invalid usage count.")),
+        }
+    };
+    let sum = |a: u64, b: u64| {
+        a.checked_add(b)
+            .ok_or_else(|| protocol("Code Assist usage counts overflow."))
+    };
+    if !meta.is_object() {
+        return Err(protocol("Code Assist usage metadata is not an object."));
+    }
+    let required = |key: &str| {
+        meta.get(key).and_then(Value::as_u64).ok_or_else(|| {
+            protocol("Code Assist usage lacks a valid promptTokenCount or totalTokenCount.")
+        })
+    };
+    let prompt = required("promptTokenCount")?;
+    let total = required("totalTokenCount")?;
+    let cached = count("cachedContentTokenCount")?;
+    if cached > prompt {
+        return Err(protocol(
+            "Code Assist cachedContentTokenCount exceeds promptTokenCount.",
+        ));
+    }
+    let input_tokens = sum(prompt, count("toolUsePromptTokenCount")?)?;
+    let thoughts = count("thoughtsTokenCount")?;
+    let candidates = match meta.get("candidatesTokenCount") {
+        Some(_) => count("candidatesTokenCount")?,
+        None if sum(input_tokens, thoughts)? < total => {
+            return Err(protocol("Code Assist usage lacks candidatesTokenCount."));
+        }
+        None => 0,
+    };
+    let output_tokens = sum(candidates, thoughts)?;
+    if sum(input_tokens, output_tokens)? != total {
+        return Err(protocol(
+            "Code Assist totalTokenCount does not equal its prompt, candidates and thoughts.",
+        ));
+    }
+    Ok(Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens: cached,
+        reasoning_tokens: thoughts,
+        ..Usage::default()
+    })
 }
+
 impl ProviderComponentV1 for CodeAssist {
     fn metadata(&self) -> ComponentMetadataV1 {
         ComponentMetadataV1 {
             name: "provider-codeassist".into(),
-            version: "2.1.0".into(),
+            version: "2.2.0".into(),
             api_version: PROVIDER_WORLD.into(),
         }
     }
@@ -323,11 +381,15 @@ impl ProviderComponentV1 for CodeAssist {
             "hosted_tools",
             "web_search",
             "anthropic_server_tools",
-            "parallel_tool_calls",
         ] {
             if r.extensions.get(key).is_some_and(|v| !v.is_null()) {
                 return Err(capability("This Google subscription cannot preserve the requested native state or generation constraint."));
             }
+        }
+        // Typed since protocol 0.6.0 (the wire key is unchanged), so it is no
+        // longer in `extensions`. Code Assist has no switch for it either way.
+        if r.parallel_tool_calls.is_some() {
+            return Err(capability("This Google subscription cannot preserve the requested native state or generation constraint."));
         }
         if let Some(value) = r
             .extensions
@@ -445,8 +507,20 @@ impl ProviderComponentV1 for CodeAssist {
         }
         let mut gc = c.clone();
         gc.provider = "gemini".into();
+        // Two channels this component owns stay out of the reference: a call's
+        // thought signature travels inside its id (`decode_id` below), and the
+        // thinking configuration is derived from the effort further down. The
+        // South 0.85.1 reference would otherwise write `thoughtSignature` from
+        // `ToolCall::signature` and its own `thinkingConfig`.
+        let mut reference_request = r.clone();
+        for message in &mut reference_request.messages {
+            for call in &mut message.tool_calls {
+                call.signature = None;
+            }
+        }
+        reference_request.reasoning = Default::default();
         let mut body = GeminiReferenceV1
-            .build_http_request(r, &gc)?
+            .build_http_request(&reference_request, &gc)?
             .body
             .ok_or_else(|| protocol("Gemini translation produced no body."))?;
         for content in body["contents"].as_array_mut().into_iter().flatten() {
@@ -487,7 +561,8 @@ impl ProviderComponentV1 for CodeAssist {
                 }
             }
         }
-        if let Some(effort) = r.extensions.get("reasoning_effort").and_then(Value::as_str) {
+        // Typed since protocol 0.6.0; the wire key is unchanged.
+        if let Some(effort) = r.reasoning.effort.as_ref().map(|effort| effort.as_str()) {
             let level =
                 match effort {
                     "low" | "high" => effort,
@@ -651,7 +726,10 @@ impl ProviderComponentV1 for CodeAssist {
                 .filter_map(|part| part["text"].as_str())
                 .collect::<String>();
             let mut content = match out.choices[0].message.content.take() {
-                Some(Content::Text(text)) => vec![ContentPart::Text { text }],
+                Some(Content::Text(text)) => vec![ContentPart::Text {
+                    text,
+                    cache_control: None,
+                }],
                 Some(Content::Parts(parts)) => parts
                     .into_iter()
                     .filter(|part| !matches!(part, ContentPart::Thinking { .. }))
@@ -710,8 +788,11 @@ impl ProviderComponentV1 for CodeAssist {
                 wire["thoughtSignature"].as_str().unwrap_or_default(),
                 &out.model,
             )?;
+            // The id carries the signature; one channel, as before 0.85.1.
+            call.signature = None;
         }
-        adjust_usage(&mut out.usage);
+        // The reference already reports output as candidates plus thoughts and
+        // refuses a response without exact usage (South #131).
         Ok(out)
     }
     fn map_provider_error(&self, p: &HttpResponseParts) -> ComponentResultV1<ErrorEnvelope> {

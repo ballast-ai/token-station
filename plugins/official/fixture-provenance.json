@@ -19,9 +19,9 @@
       "source": "repository"
     },
     "provider-codeassist-v2": {
-      "files": 16,
+      "files": 27,
       "fixtures": "fixtures",
-      "sha256": "7efad7f8f7f70f075cbf1d220823c1314c8a4d2f461542011e46df2323611ccb",
+      "sha256": "f9af91187e37e9a10fb9985788cdae454f7702bdd57b7a9cee5d95014307a334",
       "source": "repository"
     },
     "provider-copilot-plan-v2": {

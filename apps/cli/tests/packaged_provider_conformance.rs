@@ -165,12 +165,8 @@ fn the_packaged_copilot_component_fails_only_its_registered_gaps() {
 }
 
 #[test]
-fn the_packaged_google_component_fails_only_its_registered_gaps() {
-    run(
-        "provider-codeassist-v2",
-        "provider_codeassist_v2",
-        &USAGE_ROWS_NOT_SHIPPED,
-    );
+fn the_packaged_google_component_passes_the_full_suite() {
+    run("provider-codeassist-v2", "provider_codeassist_v2", &[]);
 }
 
 #[test]

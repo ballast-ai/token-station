@@ -81,7 +81,7 @@ fn trap_main(adapter: &SouthComponentAdapter) {
 }
 
 fn response() -> HttpResponseParts {
-    serde_json::from_value(json!({"status":200,"headers":{},"body":json!({"response":{"modelVersion":"m","candidates":[{"content":{"parts":[{"text":"after"}]},"finishReason":"STOP"}]}}).to_string()})).unwrap()
+    serde_json::from_value(json!({"status":200,"headers":{},"body":json!({"response":{"modelVersion":"m","candidates":[{"content":{"parts":[{"text":"after"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}).to_string()})).unwrap()
 }
 
 #[test]
@@ -208,7 +208,8 @@ fn directory_admission_preserves_manifest_precedence_and_file_bounds() {
     stale["compatibility"]["south_runtime"] = json!("0.15.0");
     std::fs::write(directory.0.join("manifest.json"), stale.to_string()).unwrap();
     let error = SouthComponentAdapter::load_dir(&runtime, &directory.0).unwrap_err();
-    assert!(error.contains("not compatible"), "{error}");
+    // The package declares runtime_abi, so the range handshake judges it.
+    assert!(error.contains("outside the range"), "{error}");
     std::fs::write(directory.0.join("manifest.json"), "{").unwrap();
     assert!(
         SouthComponentAdapter::load_dir(&runtime, &directory.0)
@@ -234,7 +235,7 @@ fn directory_admission_preserves_manifest_precedence_and_file_bounds() {
     assert!(
         SouthComponentAdapter::load_dir(&runtime, &directory.0)
             .unwrap_err()
-            .contains("not compatible")
+            .contains("outside the range")
     );
     std::fs::write(directory.0.join("manifest.json"), "{").unwrap();
     assert!(
