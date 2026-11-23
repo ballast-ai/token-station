@@ -126,10 +126,14 @@ fn redacts_upstream_failures_and_maps_plan_allowance() {
 }
 #[test]
 fn streams_all_three_dialects_across_every_byte_boundary() {
+    // The Chat Completions and Messages samples are this package's own copies:
+    // the South-vendored packs beside it move with every South re-pin, and a
+    // newer Messages sample streams several thinking blocks, which Copilot
+    // refuses by design (`multiple_streamed_thinking_blocks_fail_...`).
     for source in [
-        include_str!("../../provider-openai-compatible-v2/fixtures/provider.stream.tool-call.input.json"),
+        include_str!("data/openai-tool-call-stream.input.json"),
         include_str!("../../provider-chatgpt-plan-v2/fixtures/provider.stream.tool.input.json"),
-        include_str!("../../provider-anthropic-v2/fixtures-anthropic/provider.stream.thinking-signature-survives.input.json"),
+        include_str!("data/anthropic-signed-thinking-stream.input.json"),
     ] {
         let input:Value=serde_json::from_str(source).unwrap();let chunks=input["chunks"].as_array().unwrap();
         let mut baseline=CopilotPlan.stream_parser();let mut expected=Vec::new();
