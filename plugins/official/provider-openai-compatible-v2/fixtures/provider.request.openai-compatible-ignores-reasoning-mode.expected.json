@@ -1,0 +1,22 @@
+{
+  "method": "POST",
+  "url": "https://api.z.ai/api/paas/v4/chat/completions",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "glm-4.6",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "temperature": 0.2,
+    "max_tokens": 1024
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "provider_api_key"
+  }
+}

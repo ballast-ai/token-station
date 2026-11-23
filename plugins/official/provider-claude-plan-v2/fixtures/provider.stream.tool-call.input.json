@@ -1,0 +1,9 @@
+{
+  "chunks": [
+    "event: content_block_start\ndata: {\"index\": 1, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_1\", \"name\": \"get_weather\"}}\n\n",
+    "event: content_block_delta\ndata: {\"index\": 1, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"city\\\"\"}}\n\n",
+    "event: content_block_delta\ndata: {\"index\": 1, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \": \\\"Beijing\\\"}\"}}\n\n",
+    "event: content_block_stop\ndata: {\"index\": 1}\n\n",
+    "event: message_delta\ndata: {\"delta\": {\"stop_reason\": \"tool_use\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 12}}\n\n"
+  ]
+}

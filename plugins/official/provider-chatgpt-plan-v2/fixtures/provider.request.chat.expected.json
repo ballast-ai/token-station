@@ -1,0 +1,30 @@
+{
+  "method": "POST",
+  "url": "https://api.openai.com/v1/responses",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "text/event-stream"
+  },
+  "body": {
+    "model": "plan-model",
+    "instructions": "Follow the user.",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "hello"
+          }
+        ]
+      }
+    ],
+    "stream": true,
+    "store": false
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "chatgpt_access_token"
+  }
+}

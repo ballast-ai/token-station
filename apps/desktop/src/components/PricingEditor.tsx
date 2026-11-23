@@ -1,3 +1,5 @@
+import type { ProviderView } from "../api";
+import { upstreamDisplayName } from "../providerPresentation";
 import { useEffect, useRef, useState } from "react";
 import {
   ModelPriceView,
@@ -37,7 +39,7 @@ function rateMicros(raw: string, invalidMessage: string): number {
   return micros;
 }
 
-export default function PricingEditor() {
+export default function PricingEditor({ providers = [] }: { providers?: ProviderView[] }) {
   const { copy } = useLocalizedCopy();
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [table, setTable] = useState<PriceTableView | null>(null);
@@ -397,7 +399,7 @@ export default function PricingEditor() {
             <TableHead>{copy("Actions", "操作", "動作", "アクション")}</TableHead>
           </TableRow></TableHeader>
           <TableBody>{offerings.map((offering) => <TableRow key={offering.key}>
-            <TableCell><div>{offering.upstream}</div><code>{offering.model}</code></TableCell>
+            <TableCell><div>{upstreamDisplayName(offering.upstream, providers)}</div><code>{offering.model}</code></TableCell>
             <TableCell>{offering.price ? displayRate(offering.price.input_per_mtok) : "—"}</TableCell>
             <TableCell>{offering.price ? displayRate(offering.price.output_per_mtok) : "—"}</TableCell>
             <TableCell>{offering.price ? displayRate(offering.price.cache_read_per_mtok) : "—"}</TableCell>

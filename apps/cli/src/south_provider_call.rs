@@ -6,12 +6,11 @@ use std::{
     time::Duration,
 };
 
-use south_provider_api::AuthArmV1;
-
 use south_contracts::{
-    BearerAuthV1, ContractErrorV1, CredentialSlotV1, JsonBodyV1, JsonPostRequestV1,
-    PreparationErrorV1, ProviderAuthV1, ProviderEndpointV1, ProviderQuotaMetadataFieldV1,
-    RelativePathV1, SafeHeaders, SecretHeaderV1, StreamTransportConfigV1,
+    BearerAuthV1, ContractErrorV1, CredentialSlotV1, DeclaredSecretHeaderV1,
+    DeclaredSecretHeadersV1, JsonBodyV1, JsonPostRequestV1, PreparationErrorV1, ProviderAuthV1,
+    ProviderEndpointV1, ProviderQuotaMetadataFieldV1, RelativePathV1, ResponseTranscriptV1,
+    SafeHeaders, SecretHeaderV1, StreamTransportConfigV1,
 };
 use south_core::raw::BoundedResolverV1;
 use south_core::{
@@ -58,6 +57,7 @@ pub(crate) enum IneligibleV1 {
     Body,
     SecretSource,
     Headers,
+    RootRpcPath,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,21 +75,34 @@ pub(crate) struct CommunityCallPolicyV1 {
     /// its manifest, which admission has already verified — so eligibility asks
     /// the component what it does rather than matching its dialect against a
     /// list the host has to remember to extend.
-    auth_arms: BTreeSet<AuthArmV1>,
+    auth_arms: BTreeSet<String>,
+    /// The secret-bearing header names the admitted component declares
+    /// (manifest `secret_headers`, auth contract version five). A descriptor
+    /// may carry its credential in one of these through the declared-header
+    /// arm, and no ordinary header may use the names at all.
+    secret_headers: DeclaredSecretHeadersV1,
 }
 
 impl CommunityCallPolicyV1 {
     #[must_use]
-    pub(crate) const fn new(
+    pub(crate) fn new(
         egress_mode: EgressMode,
         body_mode: RequestBodyModeV1,
-        auth_arms: BTreeSet<AuthArmV1>,
+        auth_arms: BTreeSet<String>,
     ) -> Self {
         Self {
             egress_mode,
             body_mode,
             auth_arms,
+            secret_headers: DeclaredSecretHeadersV1::default(),
         }
+    }
+
+    /// The component's declared secret headers, parsed once at assembly.
+    #[must_use]
+    pub(crate) fn with_secret_headers(mut self, secret_headers: DeclaredSecretHeadersV1) -> Self {
+        self.secret_headers = secret_headers;
+        self
     }
 }
 
@@ -100,6 +113,16 @@ impl fmt::Debug for CommunityCallPolicyV1 {
             .field("egress_mode", &self.egress_mode)
             .field("body_mode", &self.body_mode)
             .field("auth_arms", &self.auth_arms)
+            // Header names, never values: the declaration holds no secret.
+            .field(
+                "secret_headers",
+                &self
+                    .secret_headers
+                    .as_slice()
+                    .iter()
+                    .map(DeclaredSecretHeaderV1::as_str)
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -200,7 +223,8 @@ impl CredentialResolver for CommunityCredentialResolverV1<'_> {
             }
             let secret = self
                 .secrets
-                .resolve(self.upstream, self.declared_slot)
+                .resolve_async(self.upstream, self.declared_slot)
+                .await
                 .map_err(|_| CredentialResolutionErrorV1)?;
             Ok(SecretValue::new(secret))
         })
@@ -285,6 +309,28 @@ fn prepare_provider_call_for_mode_v1(
         descriptor,
     )?;
 
+    // Code Assist requires a colon in the first path segment. South rejects
+    // scheme-like relative paths, and Google rejects an encoded separator.
+    // Admit only the component's exact actions to the existing Host transport.
+    if matches!(
+        provider.provider.as_str(),
+        "gemini-cli-plan" | "antigravity-plan"
+    ) {
+        let base = provider.base_url.as_str();
+        let base = base.trim_end_matches('/');
+        if ["generateContent", "streamGenerateContent?alt=sse"]
+            .iter()
+            .any(|action| descriptor.url == format!("{base}/v1internal:{action}"))
+        {
+            provider
+                .authorize(descriptor)
+                .map_err(|error| map_legacy_authorization(&error))?;
+            return Err(PrepareProviderCallErrorV1::Ineligible(
+                IneligibleV1::RootRpcPath,
+            ));
+        }
+    }
+
     let endpoint = ProviderEndpointV1::parse(&provider.base_url.as_str())?;
     let relative_path = project_relative_path(&endpoint, &descriptor.url)?;
     let bound_slot = provider
@@ -292,19 +338,34 @@ fn prepare_provider_call_for_mode_v1(
         .as_ref()
         .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
     let bound_slot = CredentialSlotV1::parse(bound_slot.as_str())?;
+    let slot = |secret: &token_station_protocol::SecretRef| {
+        CredentialSlotV1::parse(secret.as_str()).map(BearerAuthV1::new)
+    };
     let requested_auth = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { secret }) => {
-            ProviderAuthV1::from(BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?))
+        Some(Auth::Bearer { secret }) => ProviderAuthV1::from(slot(secret)?),
+        Some(Auth::Header { name, secret }) if policy.auth_arms.contains("header_secret") => {
+            if let Some(header) = sanctioned_secret_header(name) {
+                ProviderAuthV1::HeaderSecret {
+                    header,
+                    slot: slot(secret)?,
+                }
+            } else if policy.secret_headers.contains(name) {
+                ProviderAuthV1::DeclaredHeaderSecret {
+                    header: DeclaredSecretHeaderV1::parse(name)?,
+                    slot: slot(secret)?,
+                }
+            } else {
+                return Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth));
+            }
         }
-        Some(Auth::Header { name, secret })
-            if policy.auth_arms.contains(&AuthArmV1::HeaderSecret)
-                && sanctioned_secret_header(name).is_some() =>
+        Some(Auth::BearerAndHeader { name, secret })
+            if policy.auth_arms.contains("bearer_and_header_secret") =>
         {
             let header = sanctioned_secret_header(name)
                 .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
-            ProviderAuthV1::HeaderSecret {
+            ProviderAuthV1::BearerAndHeaderSecret {
                 header,
-                slot: BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?),
+                slot: slot(secret)?,
             }
         }
         _ => return Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)),
@@ -314,11 +375,22 @@ fn prepare_provider_call_for_mode_v1(
         .authorize(descriptor)
         .map_err(|error| map_legacy_authorization(&error))?;
 
-    let headers = SafeHeaders::try_from_iter(
+    // A declared secret name on the ordinary header channel is refused outright,
+    // never handed to the legacy transport: that transport knows no declaration
+    // and would send the header as it came.
+    if descriptor
+        .headers
+        .iter()
+        .any(|(name, _)| policy.secret_headers.contains(&name.to_ascii_lowercase()))
+    {
+        return Err(PreparationErrorV1::UnsupportedAuthShape.into());
+    }
+    let headers = SafeHeaders::try_from_iter_with_secret_headers(
         descriptor
             .headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str())),
+        &policy.secret_headers,
     )
     .map_err(|_| PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Headers))?;
     let body = descriptor
@@ -346,6 +418,31 @@ where
     R: south_core::CredentialResolver + ?Sized,
     T: south_core::AsyncHttpTransport + ?Sized,
 {
+    execute_prepared_provider_call_with_transcript_v1(
+        prepared,
+        resolver,
+        transport,
+        deadline,
+        cancellation,
+    )
+    .await
+    .map(|(parts, _)| parts)
+}
+
+/// [`execute_prepared_provider_call_v1`], also returning South's response
+/// transcript: the upstream's headers for a reader, already redacted of every
+/// sanctioned and declared secret header. The component never sees it.
+pub(crate) async fn execute_prepared_provider_call_with_transcript_v1<R, T>(
+    prepared: &PreparedCommunityProviderCallV1,
+    resolver: &R,
+    transport: &T,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> Result<(HttpResponseParts, ResponseTranscriptV1), StableProviderCallFailureV1>
+where
+    R: south_core::CredentialResolver + ?Sized,
+    T: south_core::AsyncHttpTransport + ?Sized,
+{
     let response = south_core::execute_provider_call_v1(
         &prepared.binding,
         &prepared.request,
@@ -369,12 +466,15 @@ where
             headers.insert(field.as_header_name().to_owned(), value.to_owned());
         }
     }
-    Ok(HttpResponseParts {
-        status: response.status().as_u16(),
-        headers,
-        body: response.body().to_owned(),
-        extensions: BTreeMap::new(),
-    })
+    Ok((
+        HttpResponseParts {
+            status: response.status().as_u16(),
+            headers,
+            body: response.body().to_owned(),
+            extensions: BTreeMap::new(),
+        },
+        response.response_transcript().clone(),
+    ))
 }
 
 /// Opens the real South stream and projects a bounded non-2xx rejection for host classification.
@@ -485,15 +585,14 @@ pub(crate) fn map_failure_v1(
                 413,
                 "provider request body is too large",
             ),
-            ContractErrorV1::InvalidEndpoint
-            | ContractErrorV1::InvalidRelativePath
-            | ContractErrorV1::InvalidCredentialSlot
-            | ContractErrorV1::InvalidJsonBody
-            | ContractErrorV1::InvalidQueryValue
-            | ContractErrorV1::DuplicateQueryParameter
-            | ContractErrorV1::EmptyQuery
-            | ContractErrorV1::QueryTooLarge
-            | ContractErrorV1::InvalidUserAgentValue => (
+            // Every other variant rejects a request shape that the host or a
+            // component built: endpoint, path, slot, JSON body, query and
+            // user-agent since the frozen v1 set, and multipart, text media
+            // type and declared secret, query and quota headers since
+            // `ContractErrorV1` became `#[non_exhaustive]` in South 0.25.0.
+            // None is the caller's fault, so each fails closed as one internal
+            // contract rejection.
+            _ => (
                 ErrorCode::Internal,
                 500,
                 "provider request contract rejected",
@@ -639,9 +738,14 @@ fn check_static_eligibility(
     // component carries. Anything else — the dialect's name in particular — is
     // not the transport's business once admission has run.
     let supported_auth = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { .. }) => policy.auth_arms.contains(&AuthArmV1::Bearer),
+        Some(Auth::Bearer { .. }) => policy.auth_arms.contains("bearer"),
         Some(Auth::Header { name, .. }) => {
-            policy.auth_arms.contains(&AuthArmV1::HeaderSecret)
+            policy.auth_arms.contains("header_secret")
+                && (sanctioned_secret_header(name).is_some()
+                    || policy.secret_headers.contains(name))
+        }
+        Some(Auth::BearerAndHeader { name, .. }) => {
+            policy.auth_arms.contains("bearer_and_header_secret")
                 && sanctioned_secret_header(name).is_some()
         }
         _ => false,
@@ -672,7 +776,10 @@ fn sanctioned_secret_header(name: &str) -> Option<SecretHeaderV1> {
 fn has_supported_secret_source(auth_config: &AuthConfig) -> bool {
     let source_count = usize::from(auth_config.store)
         + usize::from(auth_config.env.is_some())
-        + usize::from(auth_config.file.is_some());
+        + usize::from(auth_config.file.is_some())
+        + usize::from(auth_config.chatgpt_account.is_some())
+        + usize::from(auth_config.codex_account.is_some())
+        + usize::from(auth_config.local_subscription.is_some());
     auth_config.file.is_none() && source_count == 1
 }
 

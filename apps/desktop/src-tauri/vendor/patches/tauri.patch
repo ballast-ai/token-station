@@ -1,0 +1,44 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -333,7 +333,7 @@
+ default-features = false
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.gtk]
+-version = "0.18"
++version = "0.19"
+ features = ["v3_24"]
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies.webkit2gtk]
+--- a/src/test/mock_runtime.rs
++++ b/src/test/mock_runtime.rs
+@@ -490,7 +490,7 @@
+     target_os = "netbsd",
+     target_os = "openbsd"
+   ))]
+-  fn transient_for(self, parent: &impl gtk::glib::IsA<gtk::Window>) -> Self {
++  fn transient_for(self, parent: &impl gtk::prelude::IsA<gtk::Window>) -> Self {
+     self
+   }
+ 
+--- a/src/webview/webview_window.rs
++++ b/src/webview/webview_window.rs
+@@ -707,7 +707,7 @@
+     target_os = "openbsd"
+   ))]
+   #[must_use]
+-  pub fn transient_for_raw(mut self, parent: &impl gtk::glib::IsA<gtk::Window>) -> Self {
++  pub fn transient_for_raw(mut self, parent: &impl gtk::prelude::IsA<gtk::Window>) -> Self {
+     self.window_builder = self.window_builder.transient_for_raw(parent);
+     self
+   }
+--- a/src/window/mod.rs
++++ b/src/window/mod.rs
+@@ -749,7 +749,7 @@
+     target_os = "openbsd"
+   ))]
+   #[must_use]
+-  pub fn transient_for_raw(mut self, parent: &impl gtk::glib::IsA<gtk::Window>) -> Self {
++  pub fn transient_for_raw(mut self, parent: &impl gtk::prelude::IsA<gtk::Window>) -> Self {
+     self.window_builder = self.window_builder.transient_for(parent);
+     self
+   }

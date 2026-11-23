@@ -286,6 +286,45 @@ pub(crate) fn south_header_auth_v1_unavailable_reason(
     package_verified: bool,
 ) -> Option<&'static str> {
     let provider = upstream["provider"].as_str().unwrap_or_default();
+    if token_station_cli::config::is_subscription_provider(provider) {
+        let local_package = match provider {
+            "claude-plan" => Some("provider-claude-plan"),
+            "copilot-plan" => Some("provider-copilot-plan"),
+            "gemini-cli-plan" | "antigravity-plan" => Some("provider-codeassist"),
+            _ => None,
+        };
+        if let Some(package) = local_package {
+            if !package_verified
+                || !draft["plugins"]["providers"][provider]
+                    .as_str()
+                    .is_some_and(|name| name == package || name == format!("{package}-v2"))
+            {
+                return Some("provider_package");
+            }
+            if !upstream["auth"]["local_subscription"].is_object() {
+                return Some("auth");
+            }
+            return match provider {
+                "claude-plan" => Some("provider_call"),
+                "gemini-cli-plan" | "antigravity-plan" => Some("root_rpc_path"),
+                _ => None,
+            };
+        }
+        if !package_verified
+            || draft["plugins"]["providers"][provider].as_str() != Some("provider-chatgpt-plan")
+        {
+            return Some("provider_package");
+        }
+        let source = if provider == "codex-plan" {
+            "codex_account"
+        } else {
+            "chatgpt_account"
+        };
+        if upstream["auth"][source].as_str().is_none() {
+            return Some("auth");
+        }
+        return None;
+    }
     if upstream
         .get("api_dialect")
         .and_then(Value::as_str)
@@ -410,6 +449,13 @@ pub(crate) fn ensure_generic_provider_mutation_allowed(
     inner: &AppInner,
     name: &str,
 ) -> Result<(), String> {
+    if token_station_cli::config::is_subscription_provider(
+        inner.draft["upstreams"][name]["provider"]
+            .as_str()
+            .unwrap_or_default(),
+    ) {
+        return Err("Manage this provider from its subscription connection panel".to_owned());
+    }
     if inner.draft["upstreams"]
         .get(name)
         .and_then(|upstream| upstream.get("access_tier"))

@@ -1,0 +1,21 @@
+{
+  "method": "POST",
+  "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "gemini-2.5-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Synthetic canary"
+      }
+    ]
+  },
+  "auth": {
+    "scheme": "bearer_and_header",
+    "name": "x-goog-api-key",
+    "secret": "provider_api_key"
+  }
+}

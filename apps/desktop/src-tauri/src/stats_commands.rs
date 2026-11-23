@@ -1,7 +1,12 @@
 use crate::*;
 
-pub(crate) fn budget_statuses(inner: &AppInner) -> Result<Vec<BudgetStatus>, String> {
-    let budgets: std::collections::BTreeMap<String, AgentBudget> = inner
+struct BudgetSnapshot {
+    db: PathBuf,
+    budgets: std::collections::BTreeMap<String, AgentBudget>,
+}
+
+fn budget_snapshot(inner: &AppInner) -> Result<BudgetSnapshot, String> {
+    let budgets = inner
         .draft
         .get("agent_budgets")
         .cloned()
@@ -9,28 +14,30 @@ pub(crate) fn budget_statuses(inner: &AppInner) -> Result<Vec<BudgetStatus>, Str
         .transpose()
         .map_err(|error| format!("Agent 预算配置不合法：{error}"))?
         .unwrap_or_default();
-    let db = inner.data_dir().join("metrics.sqlite");
+    Ok(BudgetSnapshot {
+        db: inner.data_dir().join("metrics.sqlite"),
+        budgets,
+    })
+}
+
+fn budget_statuses(snapshot: BudgetSnapshot) -> Result<Vec<BudgetStatus>, String> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0);
-    budgets
+    snapshot
+        .budgets
         .iter()
         .map(|(agent_id, budget)| {
-            let aggregate = if db.exists() {
-                stats::collect_range(
-                    &db,
+            let aggregate = if snapshot.db.exists() {
+                stats::collect_budget_spend(
+                    &snapshot.db,
+                    agent_id,
                     budget.period_start_ms,
                     budget.period_end_ms,
-                    Some(stats::GroupBy::Agent),
                 )?
-                .groups
-                .into_iter()
-                .find(|(candidate, _)| candidate == agent_id)
-                .map(|(_, aggregate)| aggregate)
-                .unwrap_or_default()
             } else {
-                stats::Aggregate::default()
+                stats::BudgetSpend::default()
             };
             let used_micros = aggregate
                 .cost_micros
@@ -51,7 +58,8 @@ pub(crate) fn budget_statuses(inner: &AppInner) -> Result<Vec<BudgetStatus>, Str
 pub(crate) fn get_agent_budgets(
     state: State<'_, AppStateManaged>,
 ) -> Result<Vec<BudgetStatus>, String> {
-    budget_statuses(&state.0.lock().unwrap())
+    let snapshot = budget_snapshot(&state.0.lock().unwrap())?;
+    budget_statuses(snapshot)
 }
 
 #[tauri::command]
@@ -86,7 +94,9 @@ pub(crate) fn set_agent_budget(
         serde_json::to_value(budget).map_err(|error| error.to_string())?;
     inner.observe_draft()?;
     inner.save_draft()?;
-    budget_statuses(&inner)
+    let snapshot = budget_snapshot(&inner)?;
+    drop(inner);
+    budget_statuses(snapshot)
 }
 
 #[tauri::command]
@@ -104,7 +114,9 @@ pub(crate) fn remove_agent_budget(
     }
     inner.observe_draft()?;
     inner.save_draft()?;
-    budget_statuses(&inner)
+    let snapshot = budget_snapshot(&inner)?;
+    drop(inner);
+    budget_statuses(snapshot)
 }
 
 /// Read-only usage aggregation. since accepts all, hours, or days; by accepts

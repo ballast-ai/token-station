@@ -8,15 +8,21 @@ use super::{
 };
 use crate::agent_integration::config_codec::{
     apply_patch, parse_source_bytes, prepare_owned_paths_for_write, render_document, semantic_json,
-    ConfigDocument, DocumentFormat,
+    semantic_value_at, ConfigDocument, DocumentFormat,
 };
 use crate::agent_integration::plan::read_config_source;
 use crate::agent_integration::types::{
     BaseUrlShape, ConfigPath, PatchKind, PatchOperation, Platform,
 };
 
-const DEFAULT_MODEL: &[&str] = &["agent-default-model"];
-const TOKEN_STATION_PROVIDER: &[&str] = &["llm-pi-ai", "providers", "tokenstation"];
+const DEFAULT_MODEL: &[&str] = &["$cordis", "agent-default-model", "config"];
+const TOKEN_STATION_PROVIDER: &[&str] = &[
+    "$cordis",
+    "llm-pi-ai",
+    "config",
+    "providers",
+    "tokenstation",
+];
 const CREDENTIAL_KEY: &str = "TOKENSTATION_API_KEY";
 
 pub struct DeepSeekHarnessConnector;
@@ -24,7 +30,7 @@ pub(super) static CONNECTOR: DeepSeekHarnessConnector = DeepSeekHarnessConnector
 static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     connector_id: "deepseek-harness-v1",
     agent_id: "deepseek-harness",
-    label: "DeepSeek Harness settings.yaml",
+    label: "DeepSeek Harness cordis.patch.yml",
     adapter_id: "agent-openai",
     base_url_shape: BaseUrlShape::OriginV1,
     platforms: &[
@@ -33,11 +39,14 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
         Platform::Windows,
         Platform::Wsl,
     ],
-    config_format: DocumentFormat::Yaml,
-    config_path_template: "${HOME}/.dsh/settings.yaml",
-    owned_fields: &["agent-default-model", "llm-pi-ai.providers.tokenstation"],
+    config_format: DocumentFormat::CordisYaml,
+    config_path_template: "${HOME}/.dsh/cordis.patch.yml",
+    owned_fields: &[
+        "$cordis.agent-default-model.config",
+        "$cordis.llm-pi-ai.config.providers.tokenstation",
+    ],
     requires_virtual_key: true,
-    restart_required: false,
+    restart_required: true,
 };
 
 impl Connector for DeepSeekHarnessConnector {
@@ -46,7 +55,7 @@ impl Connector for DeepSeekHarnessConnector {
     }
 
     fn config_path(&self, home: &Path) -> PathBuf {
-        home.join(".dsh").join("settings.yaml")
+        home.join(".dsh").join("cordis.patch.yml")
     }
 
     fn create_dir_error(&self) -> &'static str {
@@ -57,13 +66,20 @@ impl Connector for DeepSeekHarnessConnector {
         vec![path(DEFAULT_MODEL), path(TOKEN_STATION_PROVIDER)]
     }
 
+    fn legacy_owned_paths(&self) -> Vec<ConfigPath> {
+        vec![
+            path(&["agent-default-model"]),
+            path(&["llm-pi-ai", "providers", "tokenstation"]),
+        ]
+    }
+
     fn projects_model_metadata(&self) -> bool {
         true
     }
 
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
         if !input.adapter_ready {
-            return Err("Cannot connect DeepSeek Harness because the gateway did not load agent-openai. settings.yaml was not changed.".to_string());
+            return Err("Cannot connect DeepSeek Harness because the gateway did not load agent-openai. cordis.patch.yml was not changed.".to_string());
         }
         input
             .token
@@ -73,17 +89,25 @@ impl Connector for DeepSeekHarnessConnector {
 
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String> {
         let root = semantic_json(document)?;
-        if !root.is_object() {
-            return Err("DeepSeek Harness settings.yaml must contain a YAML object.".to_string());
-        }
-        for pointer in ["/agent-default-model", "/llm-pi-ai", "/llm-pi-ai/providers"] {
-            if root
-                .pointer(pointer)
-                .is_some_and(|value| !value.is_object() && !value.is_null())
-            {
-                return Err(format!(
-                    "DeepSeek Harness settings.yaml field {pointer} must be an object."
-                ));
+        let rows = root.as_array().ok_or("DeepSeek Harness cordis.patch.yml must contain a YAML array. Disconnect legacy settings.yaml ownership first.")?;
+        for row in rows {
+            if matches!(
+                row["id"].as_str(),
+                Some("agent-default-model" | "llm-pi-ai")
+            ) {
+                if row
+                    .get("config")
+                    .is_some_and(|v| !v.is_object() && !v.is_null())
+                {
+                    return Err("DeepSeek Harness row configuration must be an object.".into());
+                }
+                if row["id"] == "llm-pi-ai"
+                    && row
+                        .pointer("/config/providers")
+                        .is_some_and(|v| !v.is_object() && !v.is_null())
+                {
+                    return Err("DeepSeek Harness providers must be an object.".into());
+                }
             }
         }
         Ok(())
@@ -113,6 +137,7 @@ impl Connector for DeepSeekHarnessConnector {
                     "apiKeyEnv": CREDENTIAL_KEY,
                     "api": "openai-completions",
                     "baseURL": input.base_url,
+                    "retryPolicy": {"mode": "normal", "maxRetries": 0},
                     "models": [model]
                 }),
             ),
@@ -129,7 +154,9 @@ impl Connector for DeepSeekHarnessConnector {
             .ok_or_else(|| "DeepSeek Harness requires a local virtual key.".to_string())?;
         let credentials_path = primary_target
             .parent()
-            .ok_or_else(|| "DeepSeek Harness settings.yaml must have a .dsh parent directory.".to_string())?
+            .ok_or_else(|| {
+                "DeepSeek Harness cordis.patch.yml must have a .dsh parent directory.".to_string()
+            })?
             .join(".credentials.yaml");
         let source = read_config_source(&credentials_path)?;
         let label = "DeepSeek Harness .credentials.yaml";
@@ -197,19 +224,19 @@ impl Connector for DeepSeekHarnessConnector {
         let expected_limits = input
             .model_metadata
             .and_then(AgentModelMetadata::safe_limits);
-        let valid = root.pointer("/agent-default-model/provider") == Some(&json!("tokenstation"))
-            && root.pointer("/agent-default-model/model") == Some(&json!("auto"))
-            && root.pointer("/llm-pi-ai/providers/tokenstation/api")
-                == Some(&json!("openai-completions"))
-            && root.pointer("/llm-pi-ai/providers/tokenstation/apiKeyEnv")
-                == Some(&json!(CREDENTIAL_KEY))
-            && root.pointer("/llm-pi-ai/providers/tokenstation/baseURL")
-                == Some(&json!(input.base_url))
-            && expected_limits.is_none_or(|(context, output)| {
-                root.pointer("/llm-pi-ai/providers/tokenstation/models/0/contextWindow")
-                    == Some(&json!(context))
-                    && root.pointer("/llm-pi-ai/providers/tokenstation/models/0/maxTokens")
-                        == Some(&json!(output))
+        let default = semantic_value_at(&root, &path(DEFAULT_MODEL));
+        let provider = semantic_value_at(&root, &path(TOKEN_STATION_PROVIDER));
+        let valid = default
+            .is_some_and(|v| v["provider"] == "tokenstation" && v["model"] == "auto")
+            && provider.is_some_and(|v| {
+                v["api"] == "openai-completions"
+                    && v["apiKeyEnv"] == CREDENTIAL_KEY
+                    && v["baseURL"] == input.base_url
+                    && v["retryPolicy"]["maxRetries"] == 0
+                    && expected_limits.is_none_or(|(context, output)| {
+                        v["models"][0]["contextWindow"] == context
+                            && v["models"][0]["maxTokens"] == output
+                    })
             });
         valid
             .then_some(())
@@ -218,7 +245,7 @@ impl Connector for DeepSeekHarnessConnector {
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
         format!(
-            "DeepSeek Harness now uses OpenAI Completions at {}. Settings and credentials are restored in one transaction.",
+            "DeepSeek Harness now uses OpenAI Completions at {}. Restart DSH to load cordis.patch.yml. Overlay and credentials are restored in one transaction.",
             input.base_url
         )
     }

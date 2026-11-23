@@ -169,6 +169,11 @@ fn offering_views(
     let mut offerings = Vec::new();
     if let Some(upstreams) = draft["upstreams"].as_object() {
         for (name, upstream) in upstreams {
+            if token_station_cli::config::is_subscription_provider(
+                upstream["provider"].as_str().unwrap_or_default(),
+            ) {
+                continue;
+            }
             let identity = provider_identity(upstream);
             let models: BTreeSet<&str> = upstream["models"]
                 .as_array()
@@ -427,6 +432,9 @@ async fn synchronize(
         let config = inner.materialize()?;
         let mut targets = Vec::new();
         for (name, upstream) in &config.upstreams {
+            if token_station_cli::config::is_subscription_provider(&upstream.provider) {
+                continue;
+            }
             if inner.draft["upstreams"][name]["provider"].as_str() != Some("openai-compatible") {
                 continue;
             }
@@ -839,5 +847,77 @@ mod tests {
         );
         drop(inner);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod harness_draft_tests {
+    use super::*;
+    use tauri::Manager;
+
+    #[test]
+    fn price_commit_keeps_harness_switch_pending_until_explicit_save() {
+        let root = std::env::temp_dir().join(format!("ts-price-harness-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("token-station.json");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"] = serde_json::json!({"mode":"direct","direct_target":{"upstream":"provider","model":"model"}});
+        draft["upstreams"]["provider"] = serde_json::json!({"provider":"openai-compatible","base_url":"https://example.test/v1",
+            "models":[{"model":"model","context_window":128000,"max_output_tokens":8000}]});
+        draft["agent_routes"]["opencode"] = serde_json::json!({"mode":"inherit","harness_model_mapping_enabled":false,
+            "harness_model_routes":{"fast":{"upstream":"provider","model":"model"}}});
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+        config.validate().unwrap();
+        config.save(&path).unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(crate::AppStateManaged(std::sync::Mutex::new(
+            crate::AppInner::new(path.clone(), draft, None),
+        )));
+        let paths = crate::AgentIntegrationPaths {
+            snapshot_root: root.join("snapshots"),
+            ownership_root: root.join("ownership"),
+        };
+        app.manage(crate::AgentCommandState::new(paths).unwrap());
+        for index in 0..1_001 {
+            crate::set_agent_harness_model_mapping_enabled(
+                app.state(),
+                "opencode".into(),
+                index % 2 == 0,
+            )
+            .unwrap();
+        }
+        let state = app.state::<crate::AppStateManaged>();
+        {
+            let mut inner = state.0.lock().unwrap();
+            let mut next = draft_price_table(&inner).unwrap();
+            next.version += 1;
+            save_synced_table(&mut inner, &next).unwrap();
+        }
+        let saved = token_station_cli::config::ClientConfig::load(&path).unwrap();
+        assert!(
+            !saved.agent_routes["opencode"].harness_model_mapping_enabled,
+            "Background pricing must not persist the pending switch"
+        );
+        assert!(
+            crate::get_state(app.state()).agent_routes["opencode"].harness_model_mapping_enabled
+        );
+        crate::restart_agent_harness_routes(app.state(), app.state(), "opencode".into()).unwrap();
+        assert!(
+            token_station_cli::config::ClientConfig::load(&path)
+                .unwrap()
+                .agent_routes["opencode"]
+                .harness_model_mapping_enabled
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn subscription_models_are_not_api_price_offerings() {
+        for provider in ["chatgpt-plan", "codex-plan"] {
+            let draft = json!({"upstreams":{"plan":{"provider":provider,"models":[{"model":"gpt-example"}]}}});
+            assert!(
+                offering_views(&draft, &PriceTable::default(), &SyncMetadata::default()).is_empty()
+            );
+        }
     }
 }

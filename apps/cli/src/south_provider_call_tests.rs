@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
 
-use south_provider_api::AuthArmV1;
-
 use crate::{
     config::{AuthConfig, ClientConfig, EgressMode},
     secrets::{SecretStore, store_set},
@@ -10,19 +8,21 @@ use crate::{
         IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
         PreparedProviderStreamResultV1, RequestBodyModeV1, StableProviderCallFailureV1,
         build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
-        execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
-        open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
+        execute_prepared_provider_call_v1, execute_prepared_provider_call_with_transcript_v1,
+        map_failure_v1, map_stream_read_failure_v1, open_prepared_provider_stream_v1,
+        prepare_provider_call_v1, prepare_provider_stream_v1,
     },
 };
 use south_contracts::{
-    BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, MAX_JSON_REQUEST_BODY_BYTES,
-    MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, MAX_STREAM_ERROR_BODY_BYTES, PreparationErrorV1,
-    ProviderQuotaMetadataFieldV1, ProviderQuotaMetadataV1, StreamChunkV1, StreamReadErrorV1,
-    StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
+    BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, DeclaredSecretHeadersV1,
+    MAX_JSON_REQUEST_BODY_BYTES, MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES,
+    MAX_STREAM_ERROR_BODY_BYTES, PreparationErrorV1, ProviderQuotaMetadataFieldV1,
+    ProviderQuotaMetadataV1, ResponseDiagnosticsV1, ResponseTranscriptV1, StreamChunkV1,
+    StreamReadErrorV1, StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
 };
 use south_core::{
     AsyncHttpTransport, AsyncStreamingTransport, CredentialResolutionFuture, CredentialResolver,
-    OpenedByteStreamV1, PreparedHttpRequestV1, ProviderCallErrorV1, SecretValue,
+    OpenedByteStreamV1, PreparedHttpRequestV1, ProviderCallErrorV1, RequestBodyRefV1, SecretValue,
     StreamByteSourceV1, StreamChunkFutureV1, StreamOpenErrorV1, StreamingOpenFutureV1,
     TransportFuture,
 };
@@ -63,28 +63,28 @@ use token_station_protocol::{
 use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 /// What a component that carries a bearer token declares.
-fn bearer_arms() -> BTreeSet<AuthArmV1> {
-    BTreeSet::from([AuthArmV1::Bearer])
+fn bearer_arms() -> BTreeSet<String> {
+    BTreeSet::from(["bearer".to_owned()])
 }
 
 /// What a component that carries a sanctioned secret header declares — the
 /// Anthropic package's shape.
-fn header_secret_arms() -> BTreeSet<AuthArmV1> {
-    BTreeSet::from([AuthArmV1::HeaderSecret])
+fn header_secret_arms() -> BTreeSet<String> {
+    BTreeSet::from(["header_secret".to_owned()])
 }
 
 /// The OpenAI-compatible package's shape: it serves both the bearer dialects
 /// and Azure's `api-key`, and says so. What used to be a "cumulative" host mode
 /// is now just a component declaring two arms.
-fn both_arms() -> BTreeSet<AuthArmV1> {
-    BTreeSet::from([AuthArmV1::Bearer, AuthArmV1::HeaderSecret])
+fn both_arms() -> BTreeSet<String> {
+    BTreeSet::from(["bearer".to_owned(), "header_secret".to_owned()])
 }
 
-fn eligible_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
+fn eligible_policy_with(arms: BTreeSet<String>) -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Buffered, arms)
 }
 
-fn eligible_streaming_policy_with(arms: BTreeSet<AuthArmV1>) -> CommunityCallPolicyV1 {
+fn eligible_streaming_policy_with(arms: BTreeSet<String>) -> CommunityCallPolicyV1 {
     CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Streaming, arms)
 }
 
@@ -125,6 +125,9 @@ fn azure_provider_config() -> ProviderConfig {
 
 fn auth_config() -> AuthConfig {
     AuthConfig {
+        chatgpt_account: None,
+        codex_account: None,
+        local_subscription: None,
         slot: "provider_api_key".to_owned(),
         store: true,
         env: None,
@@ -252,7 +255,7 @@ fn a_component_declaring_both_arms_still_carries_a_bearer() {
 /// hand one to a component. The descriptor falls back to the legacy transport,
 /// which presents both headers.
 #[test]
-fn the_combined_arm_is_ineligible_for_south() {
+fn the_combined_arm_needs_the_component_to_declare_it() {
     let mut request = descriptor();
     request.auth = Some(
         Auth::bearer_and_header("x-goog-api-key", SecretRef::new("provider_api_key"))
@@ -265,7 +268,57 @@ fn the_combined_arm_is_ineligible_for_south() {
             &auth_config(),
             &request,
         )
-        .expect_err("no South arm carries both headers yet"),
+        .expect_err("a component that does not declare bearer_and_header_secret"),
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
+}
+
+#[test]
+fn a_declared_combined_arm_is_prepared_for_south() {
+    let mut request = descriptor();
+    request.auth = Some(
+        Auth::bearer_and_header("x-goog-api-key", SecretRef::new("provider_api_key"))
+            .expect("a valid combined credential"),
+    );
+    let mut arms = both_arms();
+    arms.insert("bearer_and_header_secret".to_owned());
+    prepare_provider_call_v1(
+        &eligible_policy_with(arms),
+        &provider_config(),
+        &auth_config(),
+        &request,
+    )
+    .expect("a component declaring the combined arm is served by South");
+}
+
+#[test]
+fn a_declared_secret_header_is_served_and_never_smuggled() {
+    let declared = || {
+        DeclaredSecretHeadersV1::try_from_names(["x-vendor-key"])
+            .expect("a declarable secret header name")
+    };
+    let policy = || eligible_policy_with(both_arms()).with_secret_headers(declared());
+
+    let request = header_descriptor("x-vendor-key", "provider_api_key");
+    prepare_provider_call_v1(&policy(), &provider_config(), &auth_config(), &request)
+        .expect("the declared arm carries the credential");
+
+    // The same name on the ordinary channel fails closed instead of falling
+    // back to the legacy transport, which knows no declaration.
+    let mut smuggled = descriptor();
+    smuggled.headers =
+        SafeHeaders::try_new([("x-vendor-key", "not-a-credential")]).expect("plain header");
+    assert_eq!(
+        prepare_provider_call_v1(&policy(), &provider_config(), &auth_config(), &smuggled)
+            .expect_err("a declared name on the ordinary channel"),
+        PrepareProviderCallErrorV1::Preparation(PreparationErrorV1::UnsupportedAuthShape)
+    );
+
+    // A name the component never declared stays off the South path.
+    let invented = header_descriptor("x-other-key", "provider_api_key");
+    assert_eq!(
+        prepare_provider_call_v1(&policy(), &provider_config(), &auth_config(), &invented)
+            .expect_err("an undeclared header name"),
         PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
     );
 }
@@ -471,6 +524,9 @@ fn unsupported_descriptor_and_secret_shapes_are_closed_host_local_reasons() {
     );
 
     let file_auth = AuthConfig {
+        chatgpt_account: None,
+        codex_account: None,
+        local_subscription: None,
         slot: "provider_api_key".to_owned(),
         store: false,
         env: None,
@@ -527,8 +583,15 @@ fn url_projection_rechecks_raw_path_origin_and_canonical_destination() {
             "https://api.example.test/v1/a//b",
             PrepareProviderCallErrorV1::Contract(ContractErrorV1::InvalidRelativePath),
         ),
+        // HTTP contract version eleven (South SF26) admits an encoded slash
+        // inside one segment, but every decoded piece must still be a safe
+        // segment. A dot-segment smuggled through the escape stays refused.
         (
-            "https://api.example.test/v1/a%2fb",
+            "https://api.example.test/v1/a%2f..%2fb",
+            PrepareProviderCallErrorV1::Contract(ContractErrorV1::InvalidRelativePath),
+        ),
+        (
+            "https://api.example.test/v1/a%2F..%2Fb",
             PrepareProviderCallErrorV1::Contract(ContractErrorV1::InvalidRelativePath),
         ),
         (
@@ -553,6 +616,19 @@ fn url_projection_rechecks_raw_path_origin_and_canonical_destination() {
         .expect_err("unsafe destination must fail before execution");
         assert_eq!(error, expected, "unexpected classification for {url}");
     }
+
+    // The same escape with safe pieces is one segment, as a Bedrock
+    // inference-profile ARN needs. The protocol crate applies this D5 rule
+    // below an endpoint, so South must not refuse what the host admits.
+    let mut encoded_slash = descriptor();
+    encoded_slash.url = "https://api.example.test/v1/a%2fb".to_owned();
+    prepare_provider_call_v1(
+        &eligible_policy(),
+        &provider_config(),
+        &auth_config(),
+        &encoded_slash,
+    )
+    .expect("an encoded slash between safe pieces stays inside one segment");
 
     let mut default_port = descriptor();
     default_port.url = "https://api.example.test:443/v1/chat/completions".to_owned();
@@ -645,6 +721,9 @@ fn adapter_debug_surfaces_only_shape_and_counts() {
     );
     provider.auth = Some(SecretRef::new(slot_sentinel));
     let auth = AuthConfig {
+        chatgpt_account: None,
+        codex_account: None,
+        local_subscription: None,
         slot: slot_sentinel.to_owned(),
         store: true,
         env: None,
@@ -719,7 +798,10 @@ impl AsyncHttpTransport for InspectingTransport {
             request.url().as_str(),
             "https://api.example.test/v1/chat/completions"
         );
-        assert_eq!(request.body().as_str(), r#"{"model":"test"}"#);
+        let Some(RequestBodyRefV1::Json(body)) = request.body() else {
+            panic!("a chat-completions request carries a JSON body");
+        };
+        assert_eq!(body.as_str(), r#"{"model":"test"}"#);
         assert_eq!(request.headers().get("x-trace-id"), Some("trace-1"));
         assert_eq!(
             request.auth_headers().collect::<Vec<_>>(),
@@ -1566,19 +1648,17 @@ async fn community_streaming_adapter_passes_the_public_south_suite() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn community_adapter_passes_the_public_header_auth_suite() {
+async fn community_adapter_passes_every_header_auth_case() {
     let executor = CommunityHeaderAuthConformanceExecutorV1;
     let report = tokio::time::timeout(
         Duration::from_secs(5),
         run_header_auth_conformance_v1(&executor),
     )
     .await
-    .expect("structured header-auth conformance watchdog must not expire")
-    .expect("community adapter must pass the public Header Auth suite");
-
+    .expect("structured header-auth conformance watchdog must not expire");
+    let report = report.unwrap_or_else(|failure| panic!("{failure:?}"));
     assert_eq!(report.suite_id(), "south.header-auth.v1");
-    assert_eq!(report.suite_version(), 1);
-    assert_eq!(report.passed_case_ids().len(), 3);
+    assert_eq!(report.passed_case_ids().len(), 7);
 }
 
 struct CommunityHeaderAuthConformanceExecutorV1;
@@ -1600,19 +1680,27 @@ impl HeaderAuthProbe {
         }
     }
 
+    /// The reference wire-shape check: the header-secret arms bind exactly one
+    /// auth header, the combined arm binds exactly two with `authorization`
+    /// first, and both carry the one resolved secret.
     fn inspect(&self, request: &PreparedHttpRequestV1<'_>, fixture: &HeaderAuthFixtureV1) {
-        let mut auth_headers = request.auth_headers();
-        let (name, value) = auth_headers
-            .next()
-            .expect("a header-auth request binds exactly one auth header");
-        assert!(auth_headers.next().is_none());
-        self.sanctioned_header_exact.store(
-            name == fixture.secret_header().header_name()
-                && value == FAKE_HEADER_SECRET_V1.as_bytes(),
+        let bound: Vec<(&str, Vec<u8>)> = request
+            .auth_headers()
+            .map(|(name, value)| (name, value.to_vec()))
+            .collect();
+        let secret = FAKE_HEADER_SECRET_V1.as_bytes();
+        let mut expected: Vec<(&str, Vec<u8>)> = Vec::with_capacity(2);
+        if fixture.bearer_alongside() {
+            expected.push(("authorization", [b"Bearer ".as_slice(), secret].concat()));
+        }
+        expected.push((fixture.header().header_name(), secret.to_vec()));
+        self.sanctioned_header_exact
+            .store(bound == expected, Ordering::SeqCst);
+        self.authorization_header_absent.store(
+            bound.iter().all(|(name, _)| *name != "authorization")
+                && request.headers().get("authorization").is_none(),
             Ordering::SeqCst,
         );
-        self.authorization_header_absent
-            .store(name != "authorization", Ordering::SeqCst);
     }
 
     fn evidence(&self) -> HeaderAuthEvidenceV1 {
@@ -1650,16 +1738,35 @@ impl AsyncHttpTransport for HeaderAuthConformanceTransport<'_, '_> {
         self.probe.transport_calls.fetch_add(1, Ordering::SeqCst);
         self.probe.inspect(request, self.fixture);
         let upstream = *self.fixture.upstream();
+        // Transcribe every upstream header as the reqwest transport does: under
+        // the declaration the request's headers were validated with.
+        let transcript = match upstream {
+            HeaderAuthUpstreamV1::Response(raw) => ResponseTranscriptV1::capture_redacting(
+                raw.content_type()
+                    .map(|value| ("content-type", value))
+                    .into_iter()
+                    .chain(raw.retry_after().map(|value| ("retry-after", value)))
+                    .chain(self.fixture.upstream_response_headers().iter().copied())
+                    .map(|(name, value)| (name, Some(value))),
+                request.headers().secret_headers(),
+            ),
+            _ => ResponseTranscriptV1::default(),
+        };
         Box::pin(async move {
             match upstream {
-                HeaderAuthUpstreamV1::Response(raw) => BufferedHttpResponseV1::try_from_parts(
-                    raw.status()
-                        .try_into()
-                        .map_err(|_| TransportErrorV1::ResponseMetadataInvalid)?,
-                    raw.body().as_bytes().to_vec(),
-                    raw.content_type().map(str::to_owned),
-                    raw.retry_after().map(str::to_owned),
-                ),
+                HeaderAuthUpstreamV1::Response(raw) => {
+                    BufferedHttpResponseV1::try_from_parts_with_response_metadata(
+                        raw.status()
+                            .try_into()
+                            .map_err(|_| TransportErrorV1::ResponseMetadataInvalid)?,
+                        raw.body().as_bytes().to_vec(),
+                        raw.content_type().map(str::to_owned),
+                        raw.retry_after().map(str::to_owned),
+                        ProviderQuotaMetadataV1::default(),
+                        ResponseDiagnosticsV1::default(),
+                        transcript,
+                    )
+                }
                 HeaderAuthUpstreamV1::Stream(_) | HeaderAuthUpstreamV1::NotReached => {
                     Err(TransportErrorV1::RequestFailed)
                 }
@@ -1713,6 +1820,9 @@ fn prepare_header_auth_conformance_fixture(
     );
     provider.auth = Some(SecretRef::new(input.bound_credential_slot()));
     let auth = AuthConfig {
+        chatgpt_account: None,
+        codex_account: None,
+        local_subscription: None,
         slot: input.bound_credential_slot().to_owned(),
         store: true,
         env: None,
@@ -1730,18 +1840,29 @@ fn prepare_header_auth_conformance_fixture(
         SafeHeaders::try_new(input.headers().iter().copied()).expect("canonical headers are valid");
     descriptor.body =
         Some(serde_json::from_str(input.json_body()).expect("canonical request body is valid"));
-    descriptor.auth = Some(
-        Auth::header(
-            fixture.secret_header().header_name(),
-            SecretRef::new(input.requested_credential_slot()),
-        )
-        .expect("canonical Header Auth fixture uses a host-redacted name"),
-    );
-    let policy = if streaming {
-        eligible_streaming_policy_with(header_secret_arms())
+    let name = fixture.header().header_name();
+    let slot = SecretRef::new(input.requested_credential_slot());
+    descriptor.auth = Some(if fixture.bearer_alongside() {
+        Auth::bearer_and_header(name, slot)
+            .expect("canonical Header Auth fixture uses a host-redacted name")
     } else {
-        eligible_policy_with(header_secret_arms())
-    };
+        Auth::header(name, slot).expect("canonical Header Auth fixture uses a host-redacted name")
+    });
+    // The arms and declared names a package carrying this fixture would
+    // declare; the descriptor decides which one the request uses.
+    let arms = BTreeSet::from([
+        "header_secret".to_owned(),
+        "bearer_and_header_secret".to_owned(),
+    ]);
+    let declared =
+        DeclaredSecretHeadersV1::try_from_names(fixture.declared_secret_headers().iter().copied())
+            .expect("the fixture declares valid secret header names");
+    let policy = if streaming {
+        eligible_streaming_policy_with(arms)
+    } else {
+        eligible_policy_with(arms)
+    }
+    .with_secret_headers(declared);
 
     if streaming {
         prepare_provider_stream_v1(&policy, &provider, &auth, &descriptor)
@@ -1822,7 +1943,7 @@ impl CommunityHeaderAuthConformanceExecutorV1 {
             fixture,
             probe: &probe,
         };
-        match execute_prepared_provider_call_v1(
+        match execute_prepared_provider_call_with_transcript_v1(
             &prepared,
             &resolver,
             &transport,
@@ -1831,8 +1952,8 @@ impl CommunityHeaderAuthConformanceExecutorV1 {
         )
         .await
         {
-            Ok(response) => {
-                let bounded = BufferedHttpResponseV1::try_from_parts(
+            Ok((response, transcript)) => {
+                let bounded = BufferedHttpResponseV1::try_from_parts_with_response_metadata(
                     response
                         .status
                         .try_into()
@@ -1840,6 +1961,9 @@ impl CommunityHeaderAuthConformanceExecutorV1 {
                     response.body.into_bytes(),
                     response.headers.get("content-type").cloned(),
                     response.headers.get("retry-after").cloned(),
+                    ProviderQuotaMetadataV1::default(),
+                    ResponseDiagnosticsV1::default(),
+                    transcript,
                 )
                 .expect("adapter response remains inside the South response contract");
                 HeaderAuthObservationV1::response(bounded, probe.evidence())
@@ -2014,6 +2138,9 @@ fn prepare_stream_conformance_input(
     );
     provider.auth = Some(SecretRef::new(input.bound_credential_slot()));
     let auth = AuthConfig {
+        chatgpt_account: None,
+        codex_account: None,
+        local_subscription: None,
         slot: input.bound_credential_slot().to_owned(),
         store: true,
         env: None,
@@ -2171,6 +2298,9 @@ fn prepare_conformance_input(
     );
     provider.auth = Some(SecretRef::new(input.bound_credential_slot()));
     let auth = AuthConfig {
+        chatgpt_account: None,
+        codex_account: None,
+        local_subscription: None,
         slot: input.bound_credential_slot().to_owned(),
         store: true,
         env: None,
@@ -2452,6 +2582,10 @@ fn map_contract_failure_code(error: ContractErrorV1) -> ProviderCallFailureCodeV
         ContractErrorV1::InvalidCredentialSlot => ProviderCallFailureCodeV1::InvalidCredentialSlot,
         ContractErrorV1::InvalidJsonBody => ProviderCallFailureCodeV1::InvalidJsonBody,
         ContractErrorV1::RequestBodyTooLarge => ProviderCallFailureCodeV1::RequestBodyTooLarge,
+        // The frozen v1 provider-call suite drives JSON requests only. It has no
+        // code for a multipart, text-body or declared-header rejection, so
+        // reaching one means the suite changed and this mapping must follow.
+        other => panic!("the frozen v1 provider-call suite cannot produce {other:?}"),
     }
 }
 
@@ -2905,4 +3039,70 @@ async fn south_quota_projection_is_fail_soft_for_absent_partial_and_malformed_fi
         1,
         "only the complete Anthropic token family may create a quota window"
     );
+}
+
+#[test]
+fn codeassist_root_rpc_uses_an_explicit_host_transport_boundary() {
+    for provider in ["gemini-cli-plan", "antigravity-plan"] {
+        for action in ["generateContent", "streamGenerateContent?alt=sse"] {
+            let mut config = provider_config();
+            config.provider = provider.to_owned();
+            config.base_url = ProviderEndpoint::try_new("https://api.example.test").unwrap();
+            let mut candidate = descriptor();
+            candidate.url = format!("https://api.example.test/v1internal:{action}");
+            let result =
+                prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate);
+            assert!(
+                matches!(
+                    result,
+                    Err(PrepareProviderCallErrorV1::Ineligible(
+                        IneligibleV1::RootRpcPath
+                    ))
+                ),
+                "{provider} {action}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn root_rpc_boundary_cannot_bypass_binding_or_admit_unknown_actions() {
+    let mut config = provider_config();
+    config.provider = "antigravity-plan".to_owned();
+    config.base_url = ProviderEndpoint::try_new("https://api.example.test").unwrap();
+    for url in [
+        "https://other.example.test/v1internal:generateContent",
+        "https://api.example.test/v1internal:delete",
+        "https://api.example.test/v1internal:generateContent?key=secret",
+        "https://api.example.test/v1internal:streamGenerateContent?alt=sse&key=secret",
+        "https://api.example.test/v1internal:generateContent#fragment",
+    ] {
+        let mut candidate = descriptor();
+        candidate.url = url.to_owned();
+        let result =
+            prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate);
+        assert!(
+            matches!(
+                result,
+                Err(PrepareProviderCallErrorV1::Contract(_)
+                    | PrepareProviderCallErrorV1::Preparation(_))
+            ),
+            "reject {url}: {result:?}"
+        );
+    }
+    let mut candidate = descriptor();
+    candidate.url = "https://api.example.test/v1internal:generateContent".to_owned();
+    candidate.auth = Some(Auth::bearer(SecretRef::new("wrong_slot")));
+    assert!(matches!(
+        prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate),
+        Err(PrepareProviderCallErrorV1::Preparation(
+            PreparationErrorV1::CredentialBindingMismatch
+        ))
+    ));
+    config.provider = "openai-compatible".to_owned();
+    candidate.auth = Some(Auth::bearer(SecretRef::new("provider_api_key")));
+    assert!(matches!(
+        prepare_provider_call_v1(&eligible_policy(), &config, &auth_config(), &candidate),
+        Err(PrepareProviderCallErrorV1::Contract(_))
+    ));
 }

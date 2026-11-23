@@ -1,0 +1,6 @@
+{
+  "code": "rate_limit",
+  "http_status": 429,
+  "message": "Copilot requests are rate limited.",
+  "retry_after_ms": 2000
+}

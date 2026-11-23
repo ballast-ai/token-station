@@ -20,7 +20,8 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, named_params, types::Type,
 };
 use token_station_metrics::{
-    AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
+    AttemptRecord, ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+    ClassifierKind, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
     ConversionRecord, ConversionStage, CostKind, DecisionRecord, ProviderCallEngine,
     QuotaDecisionSnapshot, ReceiptView, RecordedDecidedBy, Recorder, RequestPathKind,
     RequestRecord, RoutingRecord, SCHEMA_VERSION, UsageSemantics,
@@ -89,6 +90,13 @@ pub fn snapshot_database(source: &Path, destination: &Path) -> Result<(), String
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|error| format!("metrics store `{}`: {error}", source.display()))?;
+    // Protect the empty destination before SQLite writes the first private byte.
+    token_station_private_fs::create_private_file(destination, b"").map_err(|error| {
+        format!(
+            "private metrics snapshot `{}`: {error}",
+            destination.display()
+        )
+    })?;
     connection
         .backup(rusqlite::MAIN_DB, destination, None)
         .map_err(|error| {
@@ -440,6 +448,132 @@ const MIGRATIONS: &[Migration] = &[
         to: 14,
         sql: "ALTER TABLE requests ADD COLUMN usage_observation TEXT;",
     },
+    Migration {
+        // v14 -> v15: admit the classifier reason. Preserve every feature and
+        // quota column through a named copy while widening the closed check.
+        to: 15,
+        sql: "
+            DROP TABLE IF EXISTS decisions_v15;
+            CREATE TABLE decisions_v15 (
+                request_id TEXT PRIMARY KEY,
+                upstream TEXT NOT NULL,
+                model TEXT NOT NULL,
+                pool TEXT NOT NULL,
+                decision_kind TEXT NOT NULL
+                    CHECK (decision_kind IN ('rule', 'hint', 'classifier', 'heuristic', 'default', 'exact_model', 'quota')),
+                rule_id TEXT,
+                hint_kind TEXT,
+                hint_value TEXT,
+                heuristic_score INTEGER,
+                heuristic_threshold INTEGER,
+                fallbacks INTEGER NOT NULL,
+                est_input_tokens INTEGER NOT NULL,
+                conversation_tokens INTEGER NOT NULL DEFAULT 0,
+                message_count INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                has_images INTEGER NOT NULL,
+                requires_json_schema INTEGER NOT NULL,
+                code_block_count INTEGER NOT NULL,
+                requested_max_output_tokens INTEGER,
+                hint_count INTEGER NOT NULL,
+                reasoning_marker_count INTEGER NOT NULL,
+                technical_term_count INTEGER NOT NULL,
+                simple_indicator_count INTEGER NOT NULL,
+                code_keyword_count INTEGER NOT NULL,
+                math_term_count INTEGER NOT NULL,
+                creative_term_count INTEGER NOT NULL,
+                multi_step_signal INTEGER NOT NULL,
+                question_count INTEGER NOT NULL,
+                system_format_hint INTEGER NOT NULL,
+                quota_reset_ms INTEGER,
+                quota_remaining_permille INTEGER,
+                quota_headroom_permille INTEGER,
+                quota_pressured INTEGER,
+                quota_exhausted INTEGER
+            );
+            INSERT INTO decisions_v15 (
+                request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
+                hint_value, heuristic_score, heuristic_threshold, fallbacks,
+                est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
+                requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+                reasoning_marker_count, technical_term_count, simple_indicator_count,
+                code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+                question_count, system_format_hint, quota_reset_ms, quota_remaining_permille,
+                quota_headroom_permille, quota_pressured, quota_exhausted
+            )
+            SELECT
+                request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
+                hint_value, heuristic_score, heuristic_threshold, fallbacks,
+                est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
+                requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+                reasoning_marker_count, technical_term_count, simple_indicator_count,
+                code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+                question_count, system_format_hint, quota_reset_ms, quota_remaining_permille,
+                quota_headroom_permille, quota_pressured, quota_exhausted
+            FROM decisions;
+            DROP TABLE decisions;
+            ALTER TABLE decisions_v15 RENAME TO decisions;
+        ",
+    },
+    Migration {
+        // v15 -> v16: one optional content-free input diagnostic per request.
+        // Historical requests have no row. Their input handling stays unknown.
+        to: 16,
+        sql: "CREATE TABLE classifier_inputs (
+            request_id TEXT PRIMARY KEY,
+            classifier TEXT NOT NULL CHECK (classifier IN ('scx', 'jev')),
+            handling TEXT NOT NULL CHECK (handling IN ('full', 'reduced', 'skipped')),
+            reason TEXT CHECK (reason IS NULL OR reason IN ('byte_limit', 'token_limit'))
+        );",
+    },
+    Migration {
+        to: 17,
+        sql: "ALTER TABLE decisions ADD COLUMN task_tokens INTEGER;
+              ALTER TABLE decisions ADD COLUMN task_code_block_count INTEGER;
+              ALTER TABLE decisions ADD COLUMN task_message_count INTEGER;",
+    },
+    Migration {
+        to: 18,
+        sql: "ALTER TABLE requests ADD COLUMN subscription_billing INTEGER NOT NULL DEFAULT 0
+                CHECK (subscription_billing IN (0, 1));",
+    },
+    Migration {
+        // v18 -> v19: preserve all attempts while admitting one explicit RPC transport reason.
+        to: 19,
+        sql: "
+CREATE TABLE attempts_v19 (
+    request_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    upstream TEXT NOT NULL,
+    model TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    http_status INTEGER,
+    error_code TEXT,
+    stream_outcome TEXT CHECK (
+        stream_outcome IS NULL OR stream_outcome IN (
+            'complete', 'failed_after_partial', 'failed_before_output', 'client_cancelled'
+        )
+    ),
+    provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (provider_call_engine IN (
+            'legacy', 'south_v1_buffered', 'south_v1_streaming', 'native', 'unknown'
+        )),
+    south_fallback_reason TEXT
+        CHECK (south_fallback_reason IS NULL OR south_fallback_reason IN (
+            'configured_legacy', 'buffered_mode_cannot_stream', 'unauthenticated_upstream',
+            'no_provider_runtime', 'credential_resolver', 'provider_dialect',
+            'provider_package_unapproved', 'api_dialect', 'egress', 'streaming', 'method',
+            'auth', 'body', 'secret_source', 'response_metadata', 'headers', 'root_rpc_path'
+        )),
+    fallback_allowed INTEGER NOT NULL,
+    PRIMARY KEY (request_id, ordinal)
+);
+            INSERT INTO attempts_v19 SELECT * FROM attempts;
+            DROP TABLE attempts;
+            ALTER TABLE attempts_v19 RENAME TO attempts;
+        ",
+    },
+
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -486,6 +620,7 @@ CREATE TABLE IF NOT EXISTS requests (
     usage_observation   TEXT,
     usage_semantics     TEXT NOT NULL DEFAULT 'canonical_total_v2'
         CHECK (usage_semantics IN ('provider_reported_v1', 'canonical_total_v2')),
+    subscription_billing INTEGER NOT NULL DEFAULT 0 CHECK (subscription_billing IN (0, 1)),
     -- micro-units; NULL when the model has no price (unknown, not zero)
     cost_micros         INTEGER,
     -- actual/estimated/unknown; unknown never carries a numeric cost
@@ -507,13 +642,20 @@ CREATE INDEX IF NOT EXISTS requests_started_at ON requests (started_at_ms);
 CREATE UNIQUE INDEX IF NOT EXISTS requests_request_id
     ON requests (request_id) WHERE request_id <> '';
 
+CREATE TABLE IF NOT EXISTS classifier_inputs (
+    request_id TEXT PRIMARY KEY,
+    classifier TEXT NOT NULL CHECK (classifier IN ('scx', 'jev')),
+    handling TEXT NOT NULL CHECK (handling IN ('full', 'reduced', 'skipped')),
+    reason TEXT CHECK (reason IS NULL OR reason IN ('byte_limit', 'token_limit'))
+);
+
 CREATE TABLE IF NOT EXISTS decisions (
     request_id TEXT PRIMARY KEY,
     upstream TEXT NOT NULL,
     model TEXT NOT NULL,
     pool TEXT NOT NULL,
     decision_kind TEXT NOT NULL
-        CHECK (decision_kind IN ('rule', 'hint', 'heuristic', 'default', 'exact_model', 'quota')),
+        CHECK (decision_kind IN ('rule', 'hint', 'classifier', 'heuristic', 'default', 'exact_model', 'quota')),
     rule_id TEXT,
     hint_kind TEXT,
     hint_value TEXT,
@@ -522,6 +664,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     fallbacks INTEGER NOT NULL,
     est_input_tokens INTEGER NOT NULL,
     conversation_tokens INTEGER NOT NULL DEFAULT 0,
+    task_tokens INTEGER,
+    task_code_block_count INTEGER,
+    task_message_count INTEGER,
     message_count INTEGER NOT NULL,
     tool_count INTEGER NOT NULL,
     has_images INTEGER NOT NULL,
@@ -568,7 +713,7 @@ CREATE TABLE IF NOT EXISTS attempts (
             'configured_legacy', 'buffered_mode_cannot_stream', 'unauthenticated_upstream',
             'no_provider_runtime', 'credential_resolver', 'provider_dialect',
             'provider_package_unapproved', 'api_dialect', 'egress', 'streaming', 'method',
-            'auth', 'body', 'secret_source', 'response_metadata', 'headers'
+            'auth', 'body', 'secret_source', 'response_metadata', 'headers', 'root_rpc_path'
         )),
     fallback_allowed INTEGER NOT NULL,
     PRIMARY KEY (request_id, ordinal)
@@ -605,6 +750,73 @@ CREATE TABLE IF NOT EXISTS conversion_reports (
 /// The SQLite-backed [`Recorder`].
 pub struct SqliteStore {
     connection: Mutex<Connection>,
+    // Drop the connection before releasing the cross-process lifecycle lease.
+    _lifecycle: std::fs::File,
+}
+
+/// Coordinates every CLI and desktop metrics writer with offline restore.
+/// The stable sidecar must never be removed, including after the lock is released.
+pub(crate) fn metrics_lifecycle_lock(
+    path: &Path,
+    exclusive: bool,
+) -> Result<std::fs::File, String> {
+    let canonical = canonical_metrics_path(path, 0)
+        .map_err(|error| format!("metrics database path `{}`: {error}", path.display()))?;
+    let mut name = canonical
+        .file_name()
+        .ok_or("Metrics database path has no filename.")?
+        .to_os_string();
+    name.push(".lifecycle.lock");
+    let lock_path = canonical.with_file_name(name);
+    token_station_private_fs::create_private_file(&lock_path, b"")
+        .map_err(|error| format!("metrics lifecycle lock: {error}"))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("metrics lifecycle lock: {error}"))?;
+    let result = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    result.map_err(|error| format!("Metrics database is in use or cannot be locked: {error}. Stop the running service before restore."))?;
+    if canonical.exists() {
+        token_station_private_fs::verify_single_link_file(&canonical)
+            .map_err(|error| format!("Metrics database requires a single file path: {error}."))?;
+    }
+    Ok(file)
+}
+
+fn canonical_metrics_path(path: &Path, links: usize) -> std::io::Result<std::path::PathBuf> {
+    if links >= 40 {
+        return Err(std::io::Error::other(
+            "Metrics database path contains too many symbolic links.",
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            // Resolve even a dangling file link before SQLite creates its target.
+            let target = std::fs::read_link(path)?;
+            canonical_metrics_path(&parent.join(target), links + 1)
+        }
+        Ok(_) => std::fs::canonicalize(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !parent.exists() {
+                crate::private_fs::ensure_private_dir(parent)?;
+            }
+            Ok(std::fs::canonicalize(parent)?.join(
+                path.file_name().ok_or_else(|| {
+                    std::io::Error::other("Metrics database path has no filename.")
+                })?,
+            ))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -675,6 +887,14 @@ fn decision_columns(decided_by: &RecordedDecidedBy) -> DecisionColumns {
             score: None,
             threshold: None,
         },
+        RecordedDecidedBy::Classifier => DecisionColumns {
+            kind: "classifier",
+            rule_id: None,
+            hint_kind: None,
+            hint_value: None,
+            score: None,
+            threshold: None,
+        },
         RecordedDecidedBy::Heuristic {
             score,
             matched_band_at_least,
@@ -718,6 +938,9 @@ fn decision_columns(decided_by: &RecordedDecidedBy) -> DecisionColumns {
 }
 
 fn normalized_cost(record: &RequestRecord) -> (CostKind, Option<i64>, Option<u32>) {
+    if record.subscription_billing {
+        return (CostKind::Unknown, None, None);
+    }
     match (record.cost_kind, record.cost_micros) {
         (CostKind::Actual, Some(cost)) if cost >= 0 => {
             (CostKind::Actual, Some(cost), record.price_version)
@@ -822,6 +1045,9 @@ impl SqliteStore {
             if seed.persisted_request_id.is_empty() {
                 continue;
             }
+            seed.view.classifier_input =
+                read_classifier_input(&connection, &seed.persisted_request_id)
+                    .map_err(|error| format!("request classifier input decode: {error}"))?;
             seed.view.decision = read_decision(&connection, &seed.persisted_request_id)
                 .map_err(|error| format!("request decision decode: {error}"))?;
             seed.view.attempt_records = read_attempts(&connection, &seed.persisted_request_id)
@@ -875,6 +1101,7 @@ impl SqliteStore {
                            FROM requests
                           WHERE id > ?1
                             AND cost_kind = 'unknown'
+                            AND subscription_billing = 0
                             AND usage_semantics = 'canonical_total_v2'
                             AND model IS NOT NULL
                             AND input_tokens IS NOT NULL
@@ -909,7 +1136,9 @@ impl SqliteStore {
             let batch_len = candidates.len();
             for (id, upstream, model, mut usage, observation) in candidates {
                 last_id = id;
-                if !crate::accounting::can_estimate(&usage, observation) {
+                if observation.is_some_and(|value| value.cost_requires_attempt_pricing)
+                    || !crate::accounting::can_estimate(&usage, observation)
+                {
                     continue;
                 }
                 if let Some(observation) = observation {
@@ -926,7 +1155,7 @@ impl SqliteStore {
                     .execute(
                         "UPDATE requests
                             SET cost_kind = 'estimated', cost_micros = ?1, price_version = ?2
-                          WHERE id = ?3 AND cost_kind = 'unknown'",
+                          WHERE id = ?3 AND cost_kind = 'unknown' AND subscription_billing = 0",
                         rusqlite::params![cost, version, id],
                     )
                     .map_err(|error| format!("cost backfill update: {error}"))?;
@@ -948,6 +1177,7 @@ impl SqliteStore {
     /// A message for the operator: the store failing to open is a startup
     /// error, unlike a single record failing to write.
     pub fn open(path: &Path) -> Result<Self, String> {
+        let lifecycle = metrics_lifecycle_lock(path, false)?;
         let mut connection = Connection::open(path)
             .map_err(|error| format!("metrics store `{}`: {error}", path.display()))?;
 
@@ -980,6 +1210,7 @@ impl SqliteStore {
 
         Ok(Self {
             connection: Mutex::new(connection),
+            _lifecycle: lifecycle,
         })
     }
 
@@ -1016,7 +1247,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)] // one atomic parent + three child-table write
+    #[allow(clippy::too_many_lines)] // one atomic parent + four child-table write
     fn insert(&self, record: &RequestRecord) -> Result<(), rusqlite::Error> {
         let routing = record.routing.as_ref();
         let features = routing.map(|routing| routing.features);
@@ -1047,7 +1278,7 @@ impl SqliteStore {
                 est_input_tokens, message_count, tool_count, has_images,
                 requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, usage_semantics, cost_micros, cost_kind, price_version, usage_observation
+                reasoning_tokens, usage_semantics, cost_micros, cost_kind, price_version, usage_observation, subscription_billing
             ) VALUES (
                 :request_id, :agent_id, :running_revision, :request_method, :path_kind,
                 :started_at_ms, :latency_ms, :protocol, :requested_model, :stream, :status,
@@ -1057,7 +1288,7 @@ impl SqliteStore {
                 :est_input_tokens, :message_count, :tool_count, :has_images,
                 :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
                 :input_tokens, :output_tokens, :cache_read_tokens, :cache_write_tokens,
-                :reasoning_tokens, 'canonical_total_v2', :cost_micros, :cost_kind, :price_version, :usage_observation
+                :reasoning_tokens, 'canonical_total_v2', :cost_micros, :cost_kind, :price_version, :usage_observation, :subscription_billing
             )",
             named_params! {
                 ":request_id": record.request_id,
@@ -1098,6 +1329,7 @@ impl SqliteStore {
                 ":reasoning_tokens": record.usage.map(|value| wide(value.reasoning_tokens)),
                 ":usage_observation": record.usage_observation.map(|value| serde_json::to_string(&value).expect("numeric usage observation")),
                 ":cost_micros": cost_micros,
+                ":subscription_billing": record.subscription_billing,
                 ":cost_kind": cost_kind.as_str(),
                 ":price_version": price_version,
             },
@@ -1105,6 +1337,26 @@ impl SqliteStore {
         if inserted == 0 {
             transaction.commit()?;
             return Ok(());
+        }
+
+        if let Some(diagnostic) = record.classifier_input {
+            let classifier = match diagnostic.classifier {
+                ClassifierKind::Scx => "scx",
+                ClassifierKind::Jev => "jev",
+            };
+            let handling = match diagnostic.handling {
+                ClassifierInputHandling::Full => "full",
+                ClassifierInputHandling::Reduced => "reduced",
+                ClassifierInputHandling::Skipped => "skipped",
+            };
+            let reason = diagnostic.reason.map(|reason| match reason {
+                ClassifierInputReason::ByteLimit => "byte_limit",
+                ClassifierInputReason::TokenLimit => "token_limit",
+            });
+            transaction.execute(
+                "INSERT INTO classifier_inputs (request_id, classifier, handling, reason) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![record.request_id, classifier, handling, reason],
+            )?;
         }
 
         if let Some(decision) = &record.decision {
@@ -1172,6 +1424,7 @@ fn insert_decision(
         "INSERT INTO decisions (
             request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
             hint_value, heuristic_score, heuristic_threshold, fallbacks,
+            task_tokens, task_code_block_count, task_message_count,
             est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
             requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
             reasoning_marker_count, technical_term_count, simple_indicator_count,
@@ -1182,6 +1435,7 @@ fn insert_decision(
          ) VALUES (
             :request_id, :upstream, :model, :pool, :decision_kind, :rule_id, :hint_kind,
             :hint_value, :heuristic_score, :heuristic_threshold, :fallbacks,
+            :task_tokens, :task_code_block_count, :task_message_count,
             :est_input_tokens, :conversation_tokens, :message_count, :tool_count, :has_images,
             :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
             :reasoning_marker_count, :technical_term_count, :simple_indicator_count,
@@ -1204,6 +1458,9 @@ fn insert_decision(
             ":fallbacks": decision.fallbacks,
             ":est_input_tokens": features.estimated_input_tokens,
             ":conversation_tokens": features.conversation_tokens,
+            ":task_tokens": features.task_tokens,
+            ":task_code_block_count": features.task_code_block_count,
+            ":task_message_count": features.task_message_count,
             ":message_count": features.message_count,
             ":tool_count": features.tool_count,
             ":has_images": features.has_images,
@@ -1296,6 +1553,7 @@ fn decided_by(
             kind: hint_kind(column, hint_kind_value.unwrap_or(""))?,
             value: hint_value.unwrap_or_default(),
         }),
+        "classifier" => Ok(RecordedDecidedBy::Classifier),
         "heuristic" => Ok(RecordedDecidedBy::Heuristic {
             score: score.unwrap_or(0),
             matched_band_at_least: threshold.unwrap_or(0),
@@ -1492,6 +1750,9 @@ impl SqliteStore {
             if seed.persisted_request_id.is_empty() {
                 continue;
             }
+            seed.view.classifier_input =
+                read_classifier_input(&connection, &seed.persisted_request_id)
+                    .map_err(|error| format!("request classifier input decode: {error}"))?;
             seed.view.decision = read_decision(&connection, &seed.persisted_request_id)
                 .map_err(|error| format!("request decision decode: {error}"))?;
             seed.view.attempt_records = read_attempts(&connection, &seed.persisted_request_id)
@@ -1521,6 +1782,7 @@ pub(crate) fn read_usage_observation(
         .transpose()
 }
 
+#[allow(clippy::too_many_lines)] // The fixed read model follows the query column order.
 fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
     let database_id = row.get::<_, i64>(0)?;
     let persisted_request_id = row.get::<_, String>(1)?;
@@ -1621,8 +1883,45 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
             decision: None,
             attempt_records: Vec::new(),
             conversion_reports: Vec::new(),
+            classifier_input: None,
         },
     })
+}
+
+fn read_classifier_input(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<ClassifierInputDiagnostic>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT classifier, handling, reason FROM classifier_inputs WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                let classifier = match row.get::<_, String>(0)?.as_str() {
+                    "scx" => ClassifierKind::Scx,
+                    "jev" => ClassifierKind::Jev,
+                    other => return Err(invalid_enum(0, "classifier", other)),
+                };
+                let handling = match row.get::<_, String>(1)?.as_str() {
+                    "full" => ClassifierInputHandling::Full,
+                    "reduced" => ClassifierInputHandling::Reduced,
+                    "skipped" => ClassifierInputHandling::Skipped,
+                    other => return Err(invalid_enum(1, "classifier input handling", other)),
+                };
+                let reason = match row.get::<_, Option<String>>(2)?.as_deref() {
+                    None => None,
+                    Some("byte_limit") => Some(ClassifierInputReason::ByteLimit),
+                    Some("token_limit") => Some(ClassifierInputReason::TokenLimit),
+                    Some(other) => return Err(invalid_enum(2, "classifier input reason", other)),
+                };
+                Ok(ClassifierInputDiagnostic {
+                    classifier,
+                    handling,
+                    reason,
+                })
+            },
+        )
+        .optional()
 }
 
 fn read_decision(
@@ -1639,7 +1938,8 @@ fn read_decision(
                     code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
                     question_count, system_format_hint,
                     quota_reset_ms, quota_remaining_permille, quota_headroom_permille,
-                    quota_pressured, quota_exhausted
+                    quota_pressured, quota_exhausted,
+                    task_tokens, task_code_block_count, task_message_count
                FROM decisions WHERE request_id = ?1",
             [request_id],
             |row| {
@@ -1676,6 +1976,9 @@ fn read_decision(
                     features: RequestFeatures {
                         estimated_input_tokens: row.get(10)?,
                         conversation_tokens: row.get(11)?,
+                        task_tokens: row.get(33)?,
+                        task_code_block_count: row.get(34)?,
+                        task_message_count: row.get(35)?,
                         message_count: row.get(12)?,
                         tool_count: row.get(13)?,
                         has_images: row.get(14)?,
@@ -1901,6 +2204,126 @@ mod fallback_reason_catalogue_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn classifier_input_round_trips_per_request_and_duplicate_writes_do_not_replace_it() {
+        use token_station_metrics::{
+            ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+            ClassifierKind,
+        };
+        let path = scratch("classifier-input");
+        std::fs::remove_file(&path).ok();
+        let diagnostics = [
+            ClassifierInputDiagnostic {
+                classifier: ClassifierKind::Scx,
+                handling: ClassifierInputHandling::Full,
+                reason: None,
+            },
+            ClassifierInputDiagnostic {
+                classifier: ClassifierKind::Jev,
+                handling: ClassifierInputHandling::Reduced,
+                reason: Some(ClassifierInputReason::ByteLimit),
+            },
+            ClassifierInputDiagnostic {
+                classifier: ClassifierKind::Scx,
+                handling: ClassifierInputHandling::Skipped,
+                reason: Some(ClassifierInputReason::TokenLimit),
+            },
+        ];
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            for (index, diagnostic) in diagnostics.iter().enumerate() {
+                let mut record = receipt(&format!("diagnostic-{index}"), index as u64);
+                record.classifier_input = Some(*diagnostic);
+                if index == 2 {
+                    record.status = 503;
+                    record.error_code = Some(ErrorCode::UpstreamUnavailable);
+                    record.decision = None;
+                    record.routing = None;
+                    record.attempts = 0;
+                    record.attempt_records.clear();
+                }
+                store.insert(&record).unwrap();
+                record.classifier_input = Some(diagnostics[(index + 1) % diagnostics.len()]);
+                store.insert(&record).unwrap();
+            }
+            let connection = store.connection.lock().unwrap();
+            for (column, value) in [
+                ("classifier", "private-canary"),
+                ("handling", "private-canary"),
+                ("reason", "private-canary"),
+            ] {
+                assert!(
+                    connection
+                        .execute(
+                            &format!("UPDATE classifier_inputs SET {column} = ?1"),
+                            [value]
+                        )
+                        .is_err()
+                );
+            }
+        }
+        let recent = SqliteStore::recent_receipts(&path, 5).unwrap();
+        assert_eq!(recent.len(), 3);
+        for row in &recent {
+            assert_eq!(
+                row.classifier_input,
+                Some(diagnostics[usize::try_from(row.started_at_ms).unwrap()])
+            );
+        }
+        let page = SqliteStore::receipt_page(&path, &ReceiptQuery::default(), 10, 0).unwrap();
+        assert_eq!(page.items, recent);
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains("private-canary")
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn v15_classifier_input_migration_preserves_unknown_history_and_is_idempotent() {
+        let path = scratch("migrate-v15-classifier-input");
+        std::fs::remove_file(&path).ok();
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch(V3_SCHEMA).unwrap();
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=15).contains(&migration.to))
+            {
+                connection.execute_batch(migration.sql).unwrap();
+            }
+            connection.pragma_update(None, "user_version", 15).unwrap();
+            connection.execute("INSERT INTO requests (request_id,started_at_ms,latency_ms,protocol,requested_model,stream,status,attempts) VALUES ('legacy-input',1,2,'openai','auto',0,200,0)", []).unwrap();
+        }
+        for _ in 0..2 {
+            let rows = SqliteStore::recent_receipts(&path, 5).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].classifier_input, None);
+            assert_eq!(rows[0].request_id, "legacy-input");
+            assert_eq!(rows[0].latency_ms, 2);
+            let json = serde_json::to_value(&rows[0]).unwrap();
+            let old_view: token_station_metrics::ReceiptView =
+                serde_json::from_value(json).unwrap();
+            assert_eq!(old_view.classifier_input, None);
+        }
+        let backup = path.with_extension("v15.bak");
+        let connection = rusqlite::Connection::open(&backup).unwrap();
+        let version: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 15);
+        let table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'classifier_inputs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+        drop(connection);
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(backup).ok();
+    }
+
     use super::{ReceiptQuery, SqliteStore, recent_receipts};
     use token_station_metrics::{
         AttemptRecord, ConversionOutcome, ConversionRecord, ConversionStage, CostKind,
@@ -1992,6 +2415,91 @@ mod tests {
         drop(store);
         std::fs::remove_file(path.with_extension("v13.bak")).ok();
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn task_scope_survives_storage_and_v16_rows_keep_unknown_scope() {
+        let path = scratch("task-scope-v17");
+        std::fs::remove_file(&path).ok();
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            let old = receipt("old-task", 1);
+            store.record(&old);
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute_batch(
+                    "ALTER TABLE decisions DROP COLUMN task_tokens;
+                ALTER TABLE decisions DROP COLUMN task_code_block_count;
+                ALTER TABLE decisions DROP COLUMN task_message_count;
+                ALTER TABLE requests DROP COLUMN subscription_billing;
+                PRAGMA user_version = 16;",
+                )
+                .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let old = store.read_recent(5).unwrap();
+        assert_eq!(old[0].decision.as_ref().unwrap().features.task_tokens, None);
+        let mut current = receipt("new-task", 2);
+        let features = &mut current.decision.as_mut().unwrap().features;
+        features.task_tokens = Some(7);
+        features.task_code_block_count = Some(0);
+        features.task_message_count = Some(1);
+        store.record(&current);
+        let rows = store.read_recent(5).unwrap();
+        assert_eq!(rows[0].decision, current.decision);
+        assert!(path.with_extension("v16.bak").exists());
+        drop(store);
+        std::fs::remove_file(path.with_extension("v16.bak")).ok();
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn v18_receipts_survive_root_rpc_reason_migration() {
+        let path = scratch("root-rpc-v19");
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("v18.bak")).ok();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../tests/fixtures/metrics-v18.sql"))
+            .unwrap();
+        connection.execute_batch("INSERT INTO requests (request_id,started_at_ms,latency_ms,protocol,requested_model,stream,status,attempts) VALUES ('old-rpc-history',1,12,'openai-chat-completions','auto',0,200,1);
+            INSERT INTO attempts (request_id,ordinal,upstream,model,latency_ms,http_status,stream_outcome,provider_call_engine,south_fallback_reason,fallback_allowed) VALUES ('old-rpc-history',1,'historical-upstream','historical-model',12,200,'complete','legacy','headers',0);").unwrap();
+        let before = super::read_attempts(&connection, "old-rpc-history").unwrap();
+        drop(connection);
+        let store = SqliteStore::open(&path).unwrap();
+        let old_rows = store.read_recent(5).unwrap();
+        assert_eq!(old_rows.len(), 1);
+        assert_eq!(old_rows[0].attempt_records, before);
+        let mut new = receipt("new-rpc-history", 2);
+        new.attempt_records[0].south_fallback_reason =
+            Some(token_station_metrics::SouthFallbackReason::RootRpcPath);
+        store.record(&new);
+        let rows = store.read_recent(5).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the new reason must not discard the whole request transaction"
+        );
+        assert_eq!(
+            rows[0].attempt_records[0].south_fallback_reason,
+            Some(token_station_metrics::SouthFallbackReason::RootRpcPath)
+        );
+        assert_eq!(&rows[1..], old_rows.as_slice());
+        assert!(path.with_extension("v18.bak").exists());
+        assert!(
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE attempts SET south_fallback_reason='unknown-new-reason'",
+                    []
+                )
+                .is_err()
+        );
+        drop(store);
+        std::fs::remove_file(path.with_extension("v18.bak")).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -2119,6 +2627,156 @@ mod tests {
     }
 
     #[test]
+    fn classifier_decisions_round_trip_without_diagnostic_payloads() {
+        let path = scratch("classifier-decision");
+        std::fs::remove_file(&path).ok();
+        let mut record = receipt("classifier-new", 10);
+        record.decision.as_mut().unwrap().decided_by = RecordedDecidedBy::Classifier;
+        record.routing.as_mut().unwrap().decided_by = RecordedDecidedBy::Classifier;
+        {
+            let store = SqliteStore::open(&path).expect("creates");
+            store.record(&record);
+            let connection = store.connection.lock().expect("lock");
+            let details: (String, i64) = connection
+                .query_row(
+                    "SELECT decision_kind,
+                    (rule_id IS NULL AND hint_kind IS NULL AND hint_value IS NULL
+                     AND heuristic_score IS NULL AND heuristic_threshold IS NULL)
+                 FROM decisions WHERE request_id = 'classifier-new'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("classifier decision persists");
+            assert_eq!(details, ("classifier".to_owned(), 1));
+            let flat_reason: String = connection
+                .query_row(
+                    "SELECT tier FROM requests WHERE request_id = 'classifier-new'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("flat routing reason persists");
+            assert_eq!(flat_reason, "classifier");
+        }
+        let receipts = recent_receipts(&path, 10).expect("reads after reopening");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].decision, record.decision);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep the historical schema fixture and preservation assertions together."
+    )]
+    fn v14_classifier_migration_preserves_complete_existing_receipts() {
+        let path = scratch("migrate-v14-classifier");
+        std::fs::remove_file(&path).ok();
+        let old_receipts = {
+            let connection = rusqlite::Connection::open(&path).expect("opens");
+            connection.execute_batch(V3_SCHEMA).expect("v3 schema");
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=14).contains(&migration.to))
+            {
+                connection
+                    .execute_batch(migration.sql)
+                    .expect("migrates to v14");
+            }
+            connection
+                .pragma_update(None, "user_version", 14)
+                .expect("stamps v14");
+            // Temporarily provide new writer columns, then remove them before
+            // migration. The on-disk fixture remains an exact v14 schema.
+            connection
+                .execute_batch(
+                    "ALTER TABLE decisions ADD COLUMN task_tokens INTEGER;
+                ALTER TABLE decisions ADD COLUMN task_code_block_count INTEGER;
+                ALTER TABLE decisions ADD COLUMN task_message_count INTEGER;
+                ALTER TABLE requests ADD COLUMN subscription_billing INTEGER NOT NULL DEFAULT 0;",
+                )
+                .unwrap();
+            let store = SqliteStore {
+                connection: std::sync::Mutex::new(connection),
+                _lifecycle: super::metrics_lifecycle_lock(&path, false).unwrap(),
+            };
+            let mut old = receipt("old-quota", 1);
+            let decision = old.decision.as_mut().unwrap();
+            decision.decided_by = RecordedDecidedBy::Quota;
+            decision.quota = Some(QuotaDecisionSnapshot {
+                reset_ms: Some(123_456),
+                remaining_permille: Some(456),
+                headroom_permille: 789,
+                pressured: true,
+                exhausted: false,
+            });
+            store.record(&old);
+            let mut heuristic = receipt("old-heuristic", 2);
+            heuristic.decision.as_mut().unwrap().decided_by = RecordedDecidedBy::Heuristic {
+                score: 55,
+                matched_band_at_least: 22,
+            };
+            store.record(&heuristic);
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "ALTER TABLE decisions DROP COLUMN task_tokens;
+                 ALTER TABLE decisions DROP COLUMN task_code_block_count;
+                 ALTER TABLE decisions DROP COLUMN task_message_count;
+                 ALTER TABLE requests DROP COLUMN subscription_billing;",
+                )
+                .unwrap();
+            // The current reader requires the new diagnostic table. Build its
+            // expected view separately while leaving the v14 fixture untouched.
+            let reference_path = scratch("migrate-v14-reference");
+            std::fs::remove_file(&reference_path).ok();
+            let reference = SqliteStore::open(&reference_path).expect("reference store");
+            reference.record(&old);
+            reference.record(&heuristic);
+            let expected = reference.read_recent(10).expect("reference receipts read");
+            drop(reference);
+            std::fs::remove_file(reference_path).ok();
+            expected
+        };
+        assert_eq!(old_receipts.len(), 2);
+        {
+            let store = SqliteStore::open(&path).expect("v14 migrates");
+            assert_eq!(
+                store.read_recent(10).expect("migrated receipts read"),
+                old_receipts
+            );
+            let mut new = receipt("new-classifier", 3);
+            new.decision.as_mut().unwrap().decided_by = RecordedDecidedBy::Classifier;
+            store.record(&new);
+            let receipts = store.read_recent(10).expect("all receipts read");
+            assert_eq!(receipts.len(), 3);
+            assert_eq!(receipts[0].decision, new.decision);
+            assert_eq!(&receipts[1..], old_receipts.as_slice());
+            let connection = store.connection.lock().expect("lock");
+            let version: u32 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, super::SCHEMA_VERSION);
+            assert!(connection.execute(
+                "UPDATE decisions SET decision_kind = 'unrecognized' WHERE request_id = 'new-classifier'", []
+            ).is_err(), "the widened enum remains closed");
+        }
+        let backup = path.with_extension("v14.bak");
+        let backup_connection = rusqlite::Connection::open(&backup).expect("backup exists");
+        let old_version: u32 = backup_connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old_version, 14);
+        drop(backup_connection);
+        let store = SqliteStore::open(&path).expect("reopens without another migration");
+        assert_eq!(store.read_recent(10).unwrap().len(), 3);
+        drop(store);
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(backup).ok();
+    }
+
+    #[test]
     fn a_quota_decision_snapshot_round_trips_through_the_store() {
         let path = scratch("quota-decision");
         std::fs::remove_file(&path).ok();
@@ -2243,7 +2901,13 @@ mod tests {
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
             assert_eq!(version, super::SCHEMA_VERSION, "brought up to current");
-            for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+            for table in [
+                "requests",
+                "decisions",
+                "attempts",
+                "conversion_reports",
+                "classifier_inputs",
+            ] {
                 let exists: i64 = connection
                     .query_row(
                         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -2537,6 +3201,11 @@ mod tests {
         std::fs::remove_file(&path).ok();
         let store = SqliteStore::open(&path).expect("creates");
         let mut record = receipt("req-rollback", 1);
+        record.classifier_input = Some(super::ClassifierInputDiagnostic {
+            classifier: super::ClassifierKind::Jev,
+            handling: super::ClassifierInputHandling::Reduced,
+            reason: Some(super::ClassifierInputReason::ByteLimit),
+        });
         record.attempt_records[1].ordinal = record.attempt_records[0].ordinal;
 
         assert!(
@@ -2544,7 +3213,13 @@ mod tests {
             "duplicate child ordinal fails"
         );
         let connection = store.connection.lock().expect("lock");
-        for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+        for table in [
+            "requests",
+            "decisions",
+            "attempts",
+            "conversion_reports",
+            "classifier_inputs",
+        ] {
             let count: i64 = connection
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
                     row.get(0)
@@ -2783,6 +3458,7 @@ mod tests {
             record.usage_observation =
                 observed.then_some(token_station_metrics::UsageObservation {
                     incomplete: id == "incomplete-observation",
+                    cost_requires_attempt_pricing: false,
                     input_tokens: Some(10),
                     output_tokens: (id != "missing-observed-output").then_some(2),
                     cache_read_tokens: Some(cache_read),
@@ -2834,6 +3510,88 @@ mod tests {
             0
         );
         drop(store);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn subscription_receipts_never_acquire_api_costs_during_insert_or_backfill() {
+        use crate::pricing::{ModelPrice, PriceTable};
+        use std::collections::BTreeMap;
+        let path = scratch("subscription-price-backfill");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for (id, subscription, initial_kind, initial_cost) in [
+            ("plan-unknown", true, CostKind::Unknown, None),
+            ("plan-estimate", true, CostKind::Estimated, Some(500)),
+            ("plan-zero", true, CostKind::Actual, Some(0)),
+            ("api-unknown", false, CostKind::Unknown, None),
+        ] {
+            let mut record = receipt(id, 1);
+            record.subscription_billing = subscription;
+            let routing = record.routing.as_mut().unwrap();
+            // The name has no subscription prefix. The same model also has an API price.
+            routing.upstream = "ordinary-name".into();
+            routing.model = "shared-model".into();
+            record.usage = Some(Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 10,
+                ..Usage::default()
+            });
+            record.cost_kind = initial_kind;
+            record.cost_micros = initial_cost;
+            record.price_version = initial_cost.map(|_| 1);
+            store.record(&record);
+        }
+        drop(store);
+        let pricing = PriceTable {
+            version: 7,
+            models: BTreeMap::from([
+                (
+                    "shared-model".into(),
+                    ModelPrice {
+                        input_per_mtok: 200_000,
+                        ..ModelPrice::default()
+                    },
+                ),
+                (
+                    "ordinary-name/shared-model".into(),
+                    ModelPrice {
+                        input_per_mtok: 900_000,
+                        ..ModelPrice::default()
+                    },
+                ),
+            ]),
+        };
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).unwrap(),
+            1
+        );
+        let rows = SqliteStore::recent_receipts(&path, 10).unwrap();
+        for row in rows {
+            if row.request_id.starts_with("plan-") {
+                assert_eq!(
+                    (row.cost_kind, row.cost_micros, row.price_version),
+                    (CostKind::Unknown, None, None)
+                );
+            } else {
+                assert_eq!(row.cost_micros, Some(900_000));
+            }
+        }
+        // Reopening and changing the price table cannot classify subscription history as API spend.
+        let pricing = PriceTable {
+            version: 8,
+            models: BTreeMap::from([(
+                "shared-model".into(),
+                ModelPrice {
+                    input_per_mtok: 800_000,
+                    ..ModelPrice::default()
+                },
+            )]),
+        };
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).unwrap(),
+            0
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -3003,7 +3761,13 @@ mod tests {
         let mut statement = connection
             .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
             .expect("prepares");
-        for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+        for table in [
+            "requests",
+            "decisions",
+            "attempts",
+            "conversion_reports",
+            "classifier_inputs",
+        ] {
             let columns = statement
                 .query_map([table], |row| row.get::<_, String>(0))
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)

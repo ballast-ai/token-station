@@ -3,7 +3,7 @@
 use super::*;
 
 // Include schema input in receipts without changing frozen routing policy.
-fn estimated_input_with_schemas(
+pub(super) fn estimated_input_with_schemas(
     request: &ChatRequest,
     hints: &[token_station_protocol::AgentHint],
 ) -> u32 {
@@ -422,6 +422,63 @@ impl Gateway {
         (Some(unix_millis()), session_key())
     }
 
+    pub(super) fn route_with_semantics(
+        &self,
+        ctx: &RequestContext,
+        router: &Router,
+        request: &ChatRequest,
+        hints: &[token_station_protocol::AgentHint],
+        candidates: &[Candidate],
+        session: &str,
+    ) -> Result<Decision, NoRoute> {
+        use crate::semantic::{Outcome, Tier};
+        let baseline = self.route_with_mode(router, request, hints, candidates, session);
+        // An enabled cloud classifier owns this request's one classification
+        // attempt. Failures retain baseline routing without stacking SCX work.
+        if self.jev.is_enabled() {
+            return self.route_with_jev(ctx, router, request, hints, candidates, baseline);
+        }
+        let Some(classifier) = &self.semantic else {
+            return baseline;
+        };
+        let baseline_tier = baseline
+            .as_ref()
+            .ok()
+            .and_then(|decision| Tier::from_pool(&decision.pool));
+        if !router.accepts_classifier(request, hints)
+            || !["tier_low", "tier_mid", "tier_high"]
+                .iter()
+                .all(|pool| router.config().pools.contains_key(*pool))
+        {
+            classifier.bypass(baseline_tier, Outcome::Overridden);
+            return baseline;
+        }
+        let Some(suggestion) = classifier.classify(request, baseline_tier, ctx) else {
+            return baseline;
+        };
+        if !classifier.is_current(&suggestion) {
+            return baseline;
+        }
+        // Input projection only admits text. Every capability, health and recovery
+        // check is still owned by router-core, including tool/schema requirements.
+        if let Ok(mut decision) = router.route_with_classifier_pool(
+            request,
+            hints,
+            candidates,
+            Some(suggestion.tier.pool()),
+        ) && decision.decided_by == token_station_router_core::DecidedBy::Classifier
+            && decision.pool == suggestion.tier.pool()
+        {
+            decision.features.estimated_input_tokens = estimated_input_with_schemas(request, hints);
+            retain_free_fallbacks(&mut decision, &self.free_upstreams);
+            classifier.finish(suggestion, true);
+            Ok(decision)
+        } else {
+            classifier.finish(suggestion, false);
+            baseline
+        }
+    }
+
     /// The shared routing step: Tiered consults the router alone; Quota-first
     /// additionally seeds it with the conversation's last-serving account.
     pub(super) fn route_with_mode(
@@ -515,6 +572,25 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        // A retry can consume billable tokens before failing. Share the same
+        // accumulator with host tool loops, without resetting earlier rounds.
+        ctx.begin_host_loop_accounting();
+        // A plan selection never authorizes another account or billing source.
+        let mut bounded_decision = decision.clone();
+        let is_plan = |target: &UpstreamModel| {
+            self.upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| {
+                    crate::config::is_subscription_provider(&upstream.config.provider)
+                })
+        };
+        if is_plan(&decision.chosen) {
+            record.subscription_billing = true;
+            bounded_decision.fallbacks.clear();
+        } else {
+            bounded_decision.fallbacks.retain(|target| !is_plan(target));
+        }
+        let decision = &bounded_decision;
         record_route_decision(record, decision);
         // In quota mode, record why this account was chosen — its window/rate
         // picture at decision time — for the receipt ("why this account").
@@ -624,7 +700,7 @@ impl Gateway {
                     u64::try_from(ctx.remaining().as_millis()).unwrap_or(u64::MAX),
                 ),
             };
-            record.attempts = budget.attempts;
+            record.attempts = record.attempts.saturating_add(1);
             record_actual_attempt_target(record, decision, target);
             let attempt_clock = Instant::now();
             let mut upstream_http_status = None;
@@ -728,7 +804,7 @@ impl Gateway {
             let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
             let attempt = attempt_receipt_for_result(
                 target,
-                budget.attempts,
+                record.attempts,
                 latency_ms,
                 upstream_http_status,
                 provider_call_engine,
@@ -862,6 +938,7 @@ impl Gateway {
         );
         Self::finish_attempt_accounting(ctx, record, &result);
         self.settle_attempt_quota(target, unix_millis(), record, &result);
+        ctx.aggregate_host_attempt(record, *upstream_http_status, target, &self.pricing);
         result
     }
 
@@ -870,8 +947,8 @@ impl Gateway {
         record: &mut RequestRecord,
         result: &Result<StreamOutcome, ErrorEnvelope>,
     ) {
-        ctx.finish_accounting(record);
-        if !matches!(result, Ok(StreamOutcome::Complete)) {
+        let reported_terminal_usage = ctx.finish_accounting(record);
+        if !matches!(result, Ok(StreamOutcome::Complete)) && !reported_terminal_usage {
             if record.usage_observation.is_none() && record.usage.is_some() {
                 record.usage_observation = Some(token_station_metrics::UsageObservation::default());
             }
@@ -910,7 +987,7 @@ impl Gateway {
                 )
             })?;
 
-        let request = match payload {
+        let mut request = match payload {
             AttemptPayload::AnthropicNative {
                 body,
                 headers,
@@ -958,6 +1035,14 @@ impl Gateway {
                 Self::request_for_attempt(upstream, target, request)
             }
         };
+        let aliases = if crate::config::is_subscription_provider(&upstream.config.provider) {
+            super::tool_names::alias_client_tools(&mut request)
+        } else {
+            BTreeMap::new()
+        };
+        // Managed search can already own a mapping. Do not replace it with
+        // an empty inner scope when its wire names are already valid.
+        let _tool_alias_scope = (!aliases.is_empty()).then(|| ctx.tool_alias_scope(aliases));
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
         ctx.capture_upstream_request(target.upstream.as_str(), &target.model, &descriptor);
 
@@ -1025,8 +1110,8 @@ impl Gateway {
         // headers off this successful response and record them for the account.
         // Mode-agnostic (cheap; only read in quota-first mode) so the data is
         // already warm whenever the user is in quota mode. Never touches the body.
-        let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
-        self.quota.lock().expect("quota lock").note_authoritative(
+        let windows = crate::quota_headers::parse_quota_reports(&response.headers, unix_millis());
+        self.quota.lock().expect("quota lock").note_header_reports(
             target.upstream.as_str(),
             unix_millis(),
             windows,
@@ -1162,6 +1247,10 @@ mod cancelled_settlement_tests {
             south_runtime: None,
             recorder: Arc::new(token_station_metrics::NoopRecorder),
             body_log: None,
+            semantic: None,
+            jev: crate::jev::JevController::shared(&config.data.dir),
+            search: crate::search::SearchController::shared(&config.data.dir),
+            search_policy_cache: std::sync::Mutex::new(super::search_policy::Cache::default()),
         }
     }
 
@@ -1217,6 +1306,7 @@ mod cancelled_settlement_tests {
                 url: "data:image/png;base64,cGl4ZWxz".into(),
                 detail: None,
             },
+            cache_control: None,
         }]));
         for mode in ["tiered", "quota_first"] {
             for exact in [false, true] {
@@ -1332,7 +1422,7 @@ mod cancelled_settlement_tests {
         );
         gateway.settle_quota("conversation", &record, &result);
         let (served, outcome) = result.unwrap();
-        gateway.settle(&mut record, &served, outcome);
+        gateway.settle(&ctx, &mut record, &served, outcome);
 
         let quota = gateway.quota.lock().unwrap();
         let snapshots = quota.snapshot(&["a".to_owned(), "b".to_owned()], 1_000);
@@ -1357,7 +1447,7 @@ mod cancelled_settlement_tests {
         let result = Gateway::cancel_before_attempt(&ctx, &pending, &mut |_| true, &record);
         gateway.settle_quota("unstarted", &record, &result);
         let (served, outcome) = result.unwrap();
-        gateway.settle(&mut record, &served, outcome);
+        gateway.settle(&ctx, &mut record, &served, outcome);
         let quota = gateway.quota.lock().unwrap();
         assert_eq!(
             quota.snapshot(&["b".to_owned()], 1_000)[0].windows[0].used,
@@ -1820,6 +1910,10 @@ mod schema_estimate_tests {
             south_runtime: None,
             recorder: Arc::new(token_station_metrics::NoopRecorder),
             body_log: None,
+            semantic: None,
+            jev: crate::jev::JevController::shared(&config.data.dir),
+            search: crate::search::SearchController::shared(&config.data.dir),
+            search_policy_cache: std::sync::Mutex::new(super::search_policy::Cache::default()),
         }
     }
 
@@ -1885,6 +1979,8 @@ mod schema_estimate_tests {
                 name: "lookup".to_owned(),
                 description: Some("Read a record".to_owned()),
                 parameters: schema,
+                cache_control: None,
+                strict: None,
             });
         }
         request

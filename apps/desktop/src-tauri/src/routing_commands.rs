@@ -230,6 +230,14 @@ pub(crate) fn set_quota_accounts(
         if upstream.is_empty() || model.is_empty() {
             return Err(format!("额度优先账户 #{} 缺少供应商或模型", index + 1));
         }
+        let provider = &inner.draft["upstreams"][upstream];
+        if token_station_cli::config::is_subscription_provider(
+            provider["provider"].as_str().unwrap_or_default(),
+        ) || provider["auth"]["chatgpt_account"].is_string()
+            || provider["auth"]["codex_account"].is_string()
+        {
+            return Err("订阅账户不支持额度轮换".to_owned());
+        }
         inner.validate_route_target(upstream, model)?;
         if seen.insert((upstream.to_owned(), model.to_owned())) {
             clean.push(json!({ "upstream": upstream, "model": model }));
@@ -245,11 +253,95 @@ pub(crate) fn set_quota_accounts(
     Ok(inner.snapshot())
 }
 
-/// Declares (or clears) a provider's quota plan for local estimation: one reset
-/// window (`len_ms` + `limit`), the unit it counts in, and an optional
-/// requests-per-minute rate limit. A zero limit or window clears the plan (the
-/// account falls back to non-windowed / authoritative-only). Written under
-/// `upstreams[name].quota_plan`, feeding the account ledger's estimate.
+const MAX_QUOTA_WINDOWS: usize = 16;
+const MAX_SAFE_QUOTA_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn validate_quota_plan(
+    windows: &[token_station_cli::quota_tracker::QuotaWindowSpec],
+    unit: &str,
+    rate_limit_per_min: Option<u64>,
+) -> Result<(), String> {
+    let unit = match unit {
+        "tokens" => token_station_cli::quota_tracker::PlanUnit::Tokens,
+        "requests" => token_station_cli::quota_tracker::PlanUnit::Requests,
+        _ => return Err(format!("未知额度单位：{unit}")),
+    };
+    if windows.iter().any(|window| {
+        window.len_ms > MAX_SAFE_QUOTA_INTEGER || window.limit > MAX_SAFE_QUOTA_INTEGER
+    }) || rate_limit_per_min.is_some_and(|rate| rate > MAX_SAFE_QUOTA_INTEGER)
+    {
+        return Err("额度计划数值必须是安全整数".to_owned());
+    }
+    token_station_cli::quota_tracker::QuotaPlan {
+        windows: windows.to_vec(),
+        unit,
+        rate_limit_per_min,
+    }
+    .validate()
+}
+
+fn write_quota_plan(
+    inner: &mut AppInner,
+    upstream: &str,
+    windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec>,
+    unit: String,
+    rate_limit_per_min: Option<u64>,
+) -> Result<StateView, String> {
+    inner.ensure_editable()?;
+    let provider = &inner.draft["upstreams"][upstream];
+    if !provider.is_object() {
+        return Err(format!("未知供应商 `{upstream}`"));
+    }
+    if token_station_cli::config::is_subscription_provider(
+        provider["provider"].as_str().unwrap_or_default(),
+    ) || provider["auth"]["chatgpt_account"].is_string()
+        || provider["auth"]["codex_account"].is_string()
+    {
+        return Err("订阅账户不支持额度轮换计划".to_owned());
+    }
+    validate_quota_plan(&windows, &unit, rate_limit_per_min)?;
+    let previous = provider.clone();
+    if windows.is_empty() {
+        inner.draft["upstreams"][upstream]
+            .as_object_mut()
+            .unwrap()
+            .remove("quota_plan");
+    } else {
+        inner.draft["upstreams"][upstream]["quota_plan"] = json!({
+            "windows": windows, "unit": unit, "rate_limit_per_min": rate_limit_per_min,
+        });
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][upstream] = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+/// Save a complete local estimate plan. An empty window list clears the plan.
+#[tauri::command]
+pub(crate) fn set_quota_plan_full(
+    state: State<'_, AppStateManaged>,
+    upstream: String,
+    windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec>,
+    unit: String,
+    rate_limit_per_min: Option<u64>,
+) -> Result<StateView, String> {
+    if windows.len() > MAX_QUOTA_WINDOWS {
+        return Err("额度计划最多支持 16 个窗口".to_owned());
+    }
+    let mut inner = state.0.lock().unwrap();
+    write_quota_plan(
+        &mut inner,
+        upstream.trim(),
+        windows,
+        unit,
+        rate_limit_per_min,
+    )
+}
+
+/// Legacy single-window edit. Keep other windows and preserve an omitted rate.
+/// A zero limit or period retains the legacy plan-clearing behavior.
 #[tauri::command]
 pub(crate) fn set_quota_plan(
     state: State<'_, AppStateManaged>,
@@ -259,36 +351,23 @@ pub(crate) fn set_quota_plan(
     unit: String,
     rate_limit_per_min: Option<u64>,
 ) -> Result<StateView, String> {
-    let upstream = upstream.trim().to_owned();
-    if unit != "tokens" && unit != "requests" {
-        return Err(format!("未知额度单位：{unit}"));
-    }
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    if !inner.draft["upstreams"][&upstream].is_object() {
-        return Err(format!("未知供应商 `{upstream}`"));
-    }
-
-    let previous = inner.draft["upstreams"][&upstream].clone();
-    if limit == 0 || len_ms == 0 {
-        if let Some(up) = inner.draft["upstreams"][&upstream].as_object_mut() {
-            up.remove("quota_plan");
-        }
+    let upstream = upstream.trim();
+    let previous = &inner.draft["upstreams"][upstream]["quota_plan"];
+    let rate = rate_limit_per_min.or_else(|| previous["rate_limit_per_min"].as_u64());
+    let mut windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec> =
+        serde_json::from_value(previous["windows"].clone()).unwrap_or_default();
+    if len_ms == 0 || limit == 0 {
+        windows.clear();
     } else {
-        let mut plan = json!({
-            "windows": [{ "len_ms": len_ms, "limit": limit }],
-            "unit": unit,
-        });
-        if let Some(rate) = rate_limit_per_min.filter(|rate| *rate > 0) {
-            plan["rate_limit_per_min"] = json!(rate);
+        let first = token_station_cli::quota_tracker::QuotaWindowSpec { len_ms, limit };
+        if windows.is_empty() {
+            windows.push(first);
+        } else {
+            windows[0] = first;
         }
-        inner.draft["upstreams"][&upstream]["quota_plan"] = plan;
     }
-    if let Err(error) = inner.observe_draft() {
-        inner.draft["upstreams"][&upstream] = previous;
-        return Err(error);
-    }
-    Ok(inner.snapshot())
+    write_quota_plan(&mut inner, upstream, windows, unit, rate)
 }
 
 /// Live quota snapshot for the viewer: queries the running gateway's
@@ -383,6 +462,7 @@ pub(crate) fn set_agent_route_mode(
         Ok(())
     })?;
     inner.agent_route_drafts.remove(&agent_id);
+    inner.agent_harness_enabled_drafts.remove(&agent_id);
     Ok(inner.snapshot())
 }
 
@@ -414,13 +494,7 @@ pub(crate) fn set_agent_harness_model_mapping_enabled(
     }
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    if !inner.draft["agent_routes"].is_object() {
-        inner.draft["agent_routes"] = json!({});
-    }
-    if !inner.draft["agent_routes"][&agent_id].is_object() {
-        inner.draft["agent_routes"][&agent_id] = json!({ "mode": "inherit" });
-    }
-    inner.draft["agent_routes"][&agent_id]["harness_model_mapping_enabled"] = json!(enabled);
+    inner.agent_harness_enabled_drafts.insert(agent_id, enabled);
     Ok(inner.snapshot())
 }
 
@@ -492,136 +566,139 @@ pub(crate) fn restart_agent_route(
     agents: State<'_, AgentCommandState>,
     agent_id: String,
 ) -> Result<StateView, String> {
-    let current_runtime = runtime_from_app(state.inner()).ok();
-    let mut transition_runtime = current_runtime.clone();
-    let snapshot = {
-        let mut inner = state.0.lock().unwrap();
-        if !supported_agent_ids().contains(&agent_id) {
-            return Err(format!("未知 Agent：{agent_id}"));
-        }
-        if matches!(
-            inner.server,
-            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
-        ) {
-            return Err("apply_in_progress: 配置正在应用，请完成后再保存 Agent 路由".to_owned());
-        }
-        let applying_direct = inner.draft["agent_routes"][&agent_id]["routing_mode"]
+    restart_agent_route_impl(state.inner(), agents.inner(), &agent_id, false)
+}
+
+/// Save only the Harness editing draft, then publish its safe runtime contract.
+#[tauri::command]
+pub(crate) fn restart_agent_harness_routes(
+    state: State<'_, AppStateManaged>,
+    agents: State<'_, AgentCommandState>,
+    agent_id: String,
+) -> Result<StateView, String> {
+    restart_agent_route_impl(state.inner(), agents.inner(), &agent_id, true)
+}
+
+fn restart_agent_route_impl(
+    state: &AppStateManaged,
+    agents: &AgentCommandState,
+    agent_id: &str,
+    harness_only: bool,
+) -> Result<StateView, String> {
+    use crate::agent_integration::commands::{model_metadata_for_reload, runtime_from_inner};
+    // Discovery can launch version probes. Never run it under the App lock.
+    let scan = if runtime_from_app(state).is_ok() {
+        Some(
+            agents
+                .metadata_refresh_scan()
+                .map_err(|error| error.message)?,
+        )
+    } else {
+        None
+    };
+    let mut inner = state.0.lock().unwrap();
+    ensure_known_agent_id(agent_id)?;
+    if matches!(
+        inner.server,
+        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
+    ) {
+        return Err(
+            "apply_in_progress: Finish the current config apply before saving an Agent route."
+                .to_owned(),
+        );
+    }
+    let current_runtime = runtime_from_inner(&inner).ok();
+    if current_runtime.is_some() && scan.is_none() {
+        return Err("The proxy started during route preparation. Try again.".to_owned());
+    }
+    let previous = inner.draft.clone();
+    let mut committed = false;
+    let mut metadata_attempted = false;
+    let result = (|| {
+        let applying_direct = inner.draft["agent_routes"][agent_id]["routing_mode"]
             .as_str()
             .unwrap_or_else(|| inner.home_routing_mode())
             == "direct";
-        // Tier editor drafts are a separate axis from Direct routing. Applying a
-        // Direct target must neither validate nor silently commit an incomplete
-        // hidden tier draft; keep it in memory for when the operator switches back.
-        if !applying_direct {
-            inner.promote_agent_route_draft(&agent_id)?;
+        if harness_only {
+            inner.begin_agent_harness_route_draft(agent_id);
+            inner.promote_agent_harness_route_draft(agent_id)?;
+        } else if !applying_direct {
+            inner.promote_agent_route_draft(agent_id)?;
         }
-        // Prepare every fallible hot-reload step before persisting. A successful
-        // config save must never be followed by a recoverable router-build failure,
-        // which would split the durable route from the running Gateway.
         let config = inner.materialize()?;
-        let router = config.custom_router_for_agent(&agent_id)?;
-        let harness = config.harness_router_for_agent(&agent_id)?;
-        let prepared = match &inner.server {
-            ServerLifecycle::Running { server, .. } => Some(
-                server
-                    .prepare_agent_router_reload(&agent_id, router, harness)
-                    .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?,
-            ),
-            ServerLifecycle::Stopped { .. }
-            | ServerLifecycle::Failed { .. }
-            | ServerLifecycle::Stopping { .. } => None,
-            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
-                unreachable!("transitional lifecycles were rejected before editing")
+        let router = config.custom_router_for_agent(agent_id)?;
+        let harness = config.harness_router_for_agent(agent_id)?;
+        let (prepared, pending_metadata) = match &inner.server {
+            ServerLifecycle::Running { server, .. } => {
+                let prepared = server.prepare_agent_router_reload(
+                    agent_id,
+                    router.clone(),
+                    harness.clone(),
+                )?;
+                let metadata = model_metadata_for_reload(
+                    server,
+                    router.as_ref(),
+                    harness.as_ref().map(|overlay| &overlay.router),
+                )?;
+                (Some(prepared), metadata)
             }
+            _ => (None, None),
         };
-
-        // Move every connected client to a budget safe for both the old and
-        // pending routes before the gateway changes. If either metadata or the
-        // external config transaction fails, the route is not applied.
-        if let Some(runtime) = transition_runtime.as_mut() {
-            let pending_metadata = model_metadata_for_config(&config, &agent_id)?;
-            let transition_metadata = runtime
-                .model_metadata(&agent_id)
+        if let (Some(current), Some(scan)) = (current_runtime.as_ref(), scan.as_ref()) {
+            let mut transition = current.clone();
+            let safe = current
+                .model_metadata(agent_id)
                 .zip(pending_metadata.as_ref())
                 .map(|(current, next)| transition_model_metadata(current, next))
                 .or(pending_metadata);
-            runtime.replace_model_metadata(&agent_id, transition_metadata);
+            transition.replace_model_metadata(agent_id, safe);
+            metadata_attempted = true;
             agents
-                .refresh_model_metadata(Some(&agent_id), runtime)
-                .map_err(|error| {
-                    format!(
-                        "Agent 路由未应用：无法先写入安全的过渡模型容量：{}",
-                        error.message
-                    )
-                })?;
+                .refresh_model_metadata_from_scan(Some(agent_id), &transition, scan.clone())
+                .map_err(|error| format!("The Agent route was not applied: {}", error.message))?;
         }
-
-        if let Err(error) = inner.save_draft() {
-            if let Some(runtime) = current_runtime.as_ref() {
-                let _ = agents.refresh_model_metadata(Some(&agent_id), runtime);
-            }
-            return Err(error);
-        }
-        if !applying_direct {
-            inner.agent_route_drafts.remove(&agent_id);
+        inner.save_draft()?;
+        committed = true;
+        if harness_only {
+            inner.agent_harness_route_drafts.remove(agent_id);
+            inner.agent_harness_enabled_drafts.remove(agent_id);
+        } else if !applying_direct {
+            inner.agent_route_drafts.remove(agent_id);
         }
         if let (Some(prepared), ServerLifecycle::Running { server, .. }) =
             (prepared, &mut inner.server)
         {
             server.install_prevalidated_agent_router(prepared);
         }
-        inner.snapshot()
-    };
-    if let Ok(runtime) = runtime_from_app(state.inner()) {
-        agents
-            .refresh_model_metadata(Some(&agent_id), &runtime)
-            .map_err(|error| {
-                format!("Agent 路由已应用，但模型元数据刷新失败：{}", error.message)
-            })?;
-    }
-    Ok(snapshot)
-}
-
-/// Save one Agent's Harness model mappings without changing its routing mode
-/// or tier source. Hot-reload the Agent router when the proxy is running.
-#[tauri::command]
-pub(crate) fn restart_agent_harness_routes(
-    state: State<'_, AppStateManaged>,
-    agent_id: String,
-) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    ensure_known_agent_id(&agent_id)?;
-    if matches!(
-        inner.server,
-        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
-    ) {
-        return Err("apply_in_progress: 配置正在应用，请完成后再保存 Harness 映射".to_owned());
-    }
-    inner.begin_agent_harness_route_draft(&agent_id);
-    inner.promote_agent_harness_route_draft(&agent_id)?;
-    let config = inner.materialize()?;
-    let router = config.custom_router_for_agent(&agent_id)?;
-    let harness = config.harness_router_for_agent(&agent_id)?;
-    let prepared = match &inner.server {
-        ServerLifecycle::Running { server, .. } => Some(
-            server
-                .prepare_agent_router_reload(&agent_id, router, harness)
-                .map_err(|error| format!("热重启 Harness 映射失败：{error}"))?,
-        ),
-        ServerLifecycle::Stopped { .. }
-        | ServerLifecycle::Failed { .. }
-        | ServerLifecycle::Stopping { .. } => None,
-        ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
-            unreachable!("transitional lifecycles were rejected before editing")
+        if let (Ok(runtime), Some(scan)) = (runtime_from_inner(&inner), scan.as_ref()) {
+            agents
+                .refresh_model_metadata_from_scan(Some(agent_id), &runtime, scan.clone())
+                .map_err(|error| {
+                    format!(
+                        "The Agent route was applied, but model metadata refresh failed: {}",
+                        error.message
+                    )
+                })?;
         }
-    };
-    inner.save_draft()?;
-    inner.agent_harness_route_drafts.remove(&agent_id);
-    if let (Some(prepared), ServerLifecycle::Running { server, .. }) = (prepared, &mut inner.server)
-    {
-        server.install_prevalidated_agent_router(prepared);
+        Ok(inner.snapshot())
+    })();
+    if !committed && result.is_err() {
+        inner.draft = previous;
+        inner.observe_draft()?;
+        if metadata_attempted {
+            if let (Some(runtime), Some(scan)) = (current_runtime.as_ref(), scan.as_ref()) {
+                agents
+                    .refresh_model_metadata_from_scan(Some(agent_id), runtime, scan.clone())
+                    .map_err(|error| {
+                        format!(
+                            "The route was not applied. Restoring Agent metadata failed: {}",
+                            error.message
+                        )
+                    })?;
+            }
+        }
     }
-    Ok(inner.snapshot())
+    result
 }
 
 #[tauri::command]
@@ -630,10 +707,22 @@ pub(crate) fn apply_home_route_to_all_agents(
     agents: State<'_, AgentCommandState>,
 ) -> Result<StateView, String> {
     let agent_ids = supported_agent_ids();
-    let current_runtime = runtime_from_app(state.inner()).ok();
-    let mut transition_runtime = current_runtime.clone();
+    let scan = if runtime_from_app(state.inner()).is_ok() {
+        Some(
+            agents
+                .metadata_refresh_scan()
+                .map_err(|error| error.message)?,
+        )
+    } else {
+        None
+    };
     let snapshot = {
         let mut inner = state.0.lock().unwrap();
+        let current_runtime = crate::agent_integration::commands::runtime_from_inner(&inner).ok();
+        if current_runtime.is_some() && scan.is_none() {
+            return Err("The proxy started during route preparation. Try again.".to_owned());
+        }
+        let mut transition_runtime = current_runtime.clone();
         if matches!(
             inner.server,
             ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
@@ -671,7 +760,14 @@ pub(crate) fn apply_home_route_to_all_agents(
 
         if let Some(runtime) = transition_runtime.as_mut() {
             for agent_id in &agent_ids {
-                let pending_metadata = model_metadata_for_config(&config, agent_id)?;
+                let pending_metadata = match &inner.server {
+                    ServerLifecycle::Running { server, .. } => {
+                        crate::agent_integration::commands::model_metadata_for_reload(
+                            server, None, None,
+                        )?
+                    }
+                    _ => model_metadata_for_config(&config, agent_id)?,
+                };
                 let transition_metadata = runtime
                     .model_metadata(agent_id)
                     .zip(pending_metadata.as_ref())
@@ -680,7 +776,11 @@ pub(crate) fn apply_home_route_to_all_agents(
                 runtime.replace_model_metadata(agent_id, transition_metadata);
             }
             agents
-                .refresh_model_metadata(None, runtime)
+                .refresh_model_metadata_from_scan(
+                    None,
+                    runtime,
+                    scan.as_ref().expect("a running runtime has a scan").clone(),
+                )
                 .map_err(|error| {
                     format!(
                         "Home 路由未应用：无法先写入安全的过渡模型容量：{}",
@@ -691,11 +791,16 @@ pub(crate) fn apply_home_route_to_all_agents(
 
         if let Err(error) = inner.save_draft() {
             if let Some(runtime) = current_runtime.as_ref() {
-                let _ = agents.refresh_model_metadata(None, runtime);
+                let _ = agents.refresh_model_metadata_from_scan(
+                    None,
+                    runtime,
+                    scan.as_ref().expect("a running runtime has a scan").clone(),
+                );
             }
             return Err(error);
         }
         inner.agent_route_drafts.clear();
+        inner.agent_harness_enabled_drafts.clear();
         if let ServerLifecycle::Running { server, .. } = &mut inner.server {
             for prepared in prepared {
                 server.install_prevalidated_agent_router(prepared);
@@ -704,14 +809,18 @@ pub(crate) fn apply_home_route_to_all_agents(
         inner.snapshot()
     };
     if let Ok(runtime) = runtime_from_app(state.inner()) {
-        agents
-            .refresh_model_metadata(None, &runtime)
-            .map_err(|error| {
-                format!(
-                    "The Home route was applied, but the model metadata refresh failed: {}",
-                    error.message
-                )
-            })?;
+        crate::agent_integration::commands::refresh_current_model_metadata(
+            state.inner(),
+            agents.inner(),
+            None,
+            Some(&runtime),
+        )
+        .map_err(|error| {
+            format!(
+                "The Home route was applied, but the model metadata refresh failed: {}",
+                error.message
+            )
+        })?;
     }
     Ok(snapshot)
 }

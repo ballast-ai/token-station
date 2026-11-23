@@ -412,7 +412,7 @@ fn run_probe_with_before_send(
 ) -> Result<(VisionReport, ProbeIdentity), String> {
     // Retain these values until diagnostics have been redacted. A later read can
     // refer to a rotated key, even when the post-request identity check passed.
-    let snapshot = secrets::SecretStore::snapshot_for_config(config, &config.data.dir)
+    let snapshot = secrets::SecretStore::snapshot_for_upstream(config, &config.data.dir, name)
         .map_err(|_| "Cannot capture the image check credentials".to_owned())?;
     let credentials = ProbeCredentials::from_snapshot(config, name, &snapshot)?;
     let identity = ProbeIdentity::capture(config, &credentials)?;
@@ -711,6 +711,11 @@ mod tests {
                 manifest["name"] = json!(package);
                 if wasm == "component.wasm" {
                     manifest["providers"] = json!(["vision-security-fixture"]);
+                    // Family-keyed declarations must name declared families.
+                    if let Some(object) = manifest.as_object_mut() {
+                        object.remove("config_schema");
+                        object.remove("model_parameters");
+                    }
                 }
                 std::fs::write(
                     target.join("manifest.json"),

@@ -38,6 +38,10 @@ jobs:
             .
             plugins/official/provider-openai-compatible-v2
             plugins/official/provider-anthropic-v2
+            plugins/official/provider-chatgpt-plan-v2
+            plugins/official/provider-claude-plan-v2
+            plugins/official/provider-copilot-plan-v2
+            plugins/official/provider-codeassist-v2
       - run: node tests/south-dependency-policy.mjs
       - name: Prepare official plugins for gateway tests
         run: scripts/prepare-desktop-test-plugins.sh
@@ -46,12 +50,31 @@ jobs:
         run: |
           for manifest in \
             plugins/official/provider-openai-compatible-v2/Cargo.toml \
-            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            plugins/official/provider-anthropic-v2/Cargo.toml \
+            plugins/official/provider-chatgpt-plan-v2/Cargo.toml \
+            plugins/official/provider-claude-plan-v2/Cargo.toml \
+            plugins/official/provider-copilot-plan-v2/Cargo.toml \
+            plugins/official/provider-codeassist-v2/Cargo.toml; do
             cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
           done
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Test northbound Agent adapters
+        shell: bash
+        run: |
+          for adapter in agent-anthropic agent-openai agent-openai-responses agent-gemini; do
+            cargo test --locked --manifest-path "plugins/official/$adapter/Cargo.toml"
+          done
+      - run: cargo test --locked --manifest-path plugins/official/provider-chatgpt-plan-v2/Cargo.toml
+      - name: Test local subscription components
+        shell: bash
+        run: |
+          for component in provider-claude-plan-v2 provider-copilot-plan-v2 provider-codeassist-v2; do
+            cargo test --locked --manifest-path "plugins/official/$component/Cargo.toml"
+            cargo clippy --locked --manifest-path "plugins/official/$component/Cargo.toml" --all-targets -- -D warnings
+          done
+      - run: python3 tests/provider-fixture-provenance.py
       - name: Test builtin official South paths
         run: >-
           cargo test -p token-station-cli --features builtin-plugins
@@ -80,6 +103,10 @@ jobs:
             .
             plugins/official/provider-openai-compatible-v2
             plugins/official/provider-anthropic-v2
+            plugins/official/provider-chatgpt-plan-v2
+            plugins/official/provider-claude-plan-v2
+            plugins/official/provider-copilot-plan-v2
+            plugins/official/provider-codeassist-v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7
@@ -90,7 +117,11 @@ jobs:
         run: |
           for manifest in \
             plugins/official/provider-openai-compatible-v2/Cargo.toml \
-            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            plugins/official/provider-anthropic-v2/Cargo.toml \
+            plugins/official/provider-chatgpt-plan-v2/Cargo.toml \
+            plugins/official/provider-claude-plan-v2/Cargo.toml \
+            plugins/official/provider-copilot-plan-v2/Cargo.toml \
+            plugins/official/provider-codeassist-v2/Cargo.toml; do
             cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
           done
       - run: >-
@@ -182,15 +213,26 @@ jobs:
       - name: Root advisories from the lockfile alone
         if: ${{ !cancelled() }}
         run: cargo audit
+      - name: Frontend advisories from the locked dependency graph
+        if: ${{ !cancelled() }}
+        run: npm --prefix apps/desktop audit --package-lock-only --audit-level=low
       - name: Desktop RustSec exception ledger
         if: ${{ !cancelled() }}
         run: node scripts/check-rustsec-exceptions.mjs
+      - name: Published Linux desktop dependency family
+        if: ${{ !cancelled() }}
+        run: node tests/linux-desktop-dependencies.mjs
+      - name: Verify adapted desktop dependency sources
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-desktop-vendor.py
+      - name: RustSec exception policy regressions
+        if: ${{ !cancelled() }}
+        run: node tests/rustsec-exceptions.mjs
       - name: Desktop advisories
         if: ${{ !cancelled() }}
         run: >-
           cargo audit -D unsound
           --file apps/desktop/src-tauri/Cargo.lock
-          --ignore RUSTSEC-2024-0429
       - name: Desktop licenses and sources
         if: ${{ !cancelled() }}
         run: >-
@@ -273,5 +315,6 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
       - run: npm --prefix apps/desktop ci
       - run: node tests/agent-sensitive-boundary.mjs
+      - run: node --test tests/dev-desktop-packages.mjs
       - run: npm --prefix apps/desktop run test:coverage
       - run: npm --prefix apps/desktop run build

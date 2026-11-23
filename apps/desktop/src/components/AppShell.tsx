@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { Activity, Boxes, Search, Settings, X } from "lucide-react";
+import { Activity, Boxes, ChevronRight, CreditCard, Search, Settings, X } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { hasManagedInstallation } from "../agentManagement";
 import { useLanguage } from "./LanguageProvider";
+import { Separator } from "./ui/separator";
 import TokenStationMark from "./TokenStationMark";
 import { usePageTransition } from "./use-page-transition";
 import { Button } from "./ui/button";
@@ -44,6 +45,7 @@ interface AppShellProps {
   onModelEntryOpenChange: (open: boolean) => void;
   onNavigate: (view: AppView) => void;
   onToggleServe: () => void;
+  onConnectSubscriptions?: () => void;
   children: ReactNode;
 }
 
@@ -77,6 +79,7 @@ export default function AppShell({
   onModelEntryOpenChange,
   onNavigate,
   onToggleServe,
+  onConnectSubscriptions,
   children,
 }: AppShellProps) {
   const { t, copy } = useLanguage();
@@ -127,6 +130,7 @@ export default function AppShell({
                 disabled={commandBusy && !selected}
                 aria-current={selected ? "page" : undefined}
                 aria-label={label}
+                data-model-entry-trigger={item.view === "providers" ? "" : undefined}
                 data-onboarding-return-focus={item.view === "overview" ? "" : undefined}
                 data-onboarding-target={
                   item.view === "overview"
@@ -255,6 +259,19 @@ export default function AppShell({
               </span>
             </button>
           </div>
+          <div className="model-entry-plan-heading"><span>{copy("Use an existing plan", "使用已有套餐", "使用現有方案", "既存のプランを使用")}</span><Separator /></div>
+          <div className="model-entry-plan-options">
+            <button type="button" aria-label={copy("Subscriptions", "订阅", "訂閱", "サブスクリプション")}
+              onClick={() => { onModelEntryOpenChange(false); onConnectSubscriptions?.(); }}>
+              <span className="model-entry-plan-icon"><CreditCard aria-hidden="true" /></span>
+              <span className="model-entry-plan-copy">
+                <strong>{copy("Subscriptions", "订阅", "訂閱", "サブスクリプション")}</strong>
+                <small>{copy("Connect Claude, ChatGPT, Copilot, Gemini CLI, and Antigravity accounts.", "接入 Claude、ChatGPT、Copilot、Gemini CLI 和 Antigravity 账号。", "接入 Claude、ChatGPT、Copilot、Gemini CLI 和 Antigravity 帳號。", "Claude、ChatGPT、Copilot、Gemini CLI、Antigravity のアカウントを接続します。")}</small>
+              </span>
+              <ChevronRight aria-hidden="true" />
+            </button>
+          </div>
+          <p className="model-entry-plan-note">{copy("Plan connections share account allowance, not API credit.", "套餐接入共享账号额度，不使用 API 余额。", "方案接入共用帳號額度，不使用 API 餘額。", "プラン接続はアカウントの利用枠を共有します。API クレジットではありません。")}</p>
         </DialogContent>
       </Dialog>
     </div>

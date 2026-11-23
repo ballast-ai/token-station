@@ -1,4 +1,4 @@
-//! The four layers, in the order they are promised to fire, and the one
+//! The routing layers, in the order they are promised to fire, and the one
 //! property that outlives every request: a decision cannot carry content.
 
 use std::collections::BTreeMap;
@@ -112,6 +112,8 @@ fn tool() -> ToolDef {
         name: "get_weather".to_owned(),
         description: None,
         parameters: serde_json::json!({}),
+        cache_control: None,
+        strict: None,
     }
 }
 
@@ -144,6 +146,187 @@ fn candidates() -> Vec<Candidate> {
 
 fn ask(text: &str) -> ChatRequest {
     ChatRequest::new("auto", vec![Message::text(Role::User, text)])
+}
+
+#[test]
+fn classifier_pool_precedes_heuristic_and_default() {
+    let request = ask("hello");
+    for heuristic in [config().heuristic, None] {
+        let router = Router::new(RouterConfig {
+            heuristic,
+            ..config()
+        })
+        .expect("valid");
+        assert!(router.accepts_classifier(&request, &[]));
+        let decision = router
+            .route_with_classifier_pool(&request, &[], &candidates(), Some("sota"))
+            .expect("the classifier selects a configured pool");
+        assert_eq!(decision.pool, "sota");
+        assert_eq!(decision.decided_by, DecidedBy::Classifier);
+        assert_eq!(decision.chosen, target("openai_personal", "gpt-5.5"));
+    }
+}
+
+#[test]
+fn rules_and_hints_precede_classifier_selection() {
+    let router = router();
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+    for (request, hints, classifier_pool) in [
+        (ask("Give a proof."), hints.as_slice(), "cheap"),
+        (ask("hello"), hints.as_slice(), "sota"),
+    ] {
+        assert!(!router.accepts_classifier(&request, hints));
+        assert_eq!(
+            router.route_with_classifier_pool(
+                &request,
+                hints,
+                &candidates(),
+                Some(classifier_pool)
+            ),
+            router.route(&request, hints, &candidates())
+        );
+    }
+    assert!(router.accepts_classifier(
+        &ask("hello"),
+        &[AgentHint::new(HintKind::StepType, "unmatched")]
+    ));
+}
+
+#[test]
+fn exact_model_pins_precede_classifier_selection() {
+    let router = Router::new(RouterConfig {
+        honor_exact_model: true,
+        ..config()
+    })
+    .expect("valid");
+    let mut request = ask("hello");
+    request.model = "gpt-5.5".to_owned();
+    assert!(!router.accepts_classifier(&request, &[]));
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("cheap")),
+        router.route(&request, &[], &candidates())
+    );
+    request.model = "auto".to_owned();
+    assert!(!router.accepts_classifier(&request, &[]));
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("cheap")),
+        router.route(&request, &[], &candidates())
+    );
+}
+
+#[test]
+fn quota_mode_does_not_accept_a_classifier_pool() {
+    let router = Router::new(RouterConfig {
+        routing_mode: RoutingMode::QuotaFirst,
+        quota_accounts: vec![target("openai_personal", "gpt-5.5")],
+        ..config()
+    })
+    .expect("valid");
+    let request = ask("hello");
+    assert!(!router.accepts_classifier(&request, &[]));
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("sota")),
+        router.route(&request, &[], &candidates())
+    );
+}
+
+#[test]
+fn absent_empty_and_unknown_classifier_pools_preserve_normal_routing() {
+    let router = router();
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+    for request in [ask("hello"), ask("Give a proof."), ask(&"x".repeat(20_000))] {
+        for hints in [&[][..], hints.as_slice()] {
+            let normal = router.route(&request, hints, &candidates());
+            for pool in [None, Some(""), Some("unknown"), Some(" sota ")] {
+                assert_eq!(
+                    router.route_with_classifier_pool(&request, hints, &candidates(), pool),
+                    normal
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn classifier_selection_preserves_capability_failure_and_does_not_escape_to_recovery() {
+    let router = Router::new(RouterConfig {
+        recovery: RecoveryPolicy::Ordered {
+            pools: vec!["sota".to_owned()],
+        },
+        ..config()
+    })
+    .expect("valid");
+    let mut request = ask("hello");
+    request.response_format = Some(ResponseFormat::JsonObject);
+    let expected = NoRoute::Unsatisfiable {
+        pool: "cheap".to_owned(),
+        reason: UnmetRequirement::JsonSchema,
+    };
+    assert_eq!(
+        router.route_with_classifier_pool(&request, &[], &candidates(), Some("cheap")),
+        Err(expected)
+    );
+}
+
+#[test]
+fn classifier_selection_preserves_ordered_recovery_candidates() {
+    let router = Router::new(RouterConfig {
+        recovery: RecoveryPolicy::Ordered {
+            pools: vec!["cheap".to_owned()],
+        },
+        ..config()
+    })
+    .expect("valid");
+    let request = ask(&"x".repeat(20_000));
+    let mut normal = router
+        .route(&request, &[], &candidates())
+        .expect("routable");
+    let classified = router
+        .route_with_classifier_pool(&request, &[], &candidates(), Some("sota"))
+        .expect("routable");
+    normal.decided_by = DecidedBy::Classifier;
+    assert_eq!(classified, normal);
+    assert_eq!(
+        classified.fallbacks.last(),
+        Some(&target("ollama_local", "llama3.3"))
+    );
+}
+
+#[test]
+fn classifier_selection_preserves_local_only_and_missing_candidate_failures() {
+    let local = Router::new(local_only_config(false)).expect("valid");
+    let request = ask(&"x".repeat(20_000));
+    let existing_failure = local.route(&request, &[], &candidates());
+    assert!(existing_failure.is_err());
+    assert_eq!(
+        local.route_with_classifier_pool(&request, &[], &candidates(), Some("sota")),
+        existing_failure
+    );
+    let router = router();
+    assert_eq!(
+        router.route_with_classifier_pool(&ask("hello"), &[], &[], Some("sota")),
+        Err(NoRoute::Unsatisfiable {
+            pool: "sota".to_owned(),
+            reason: UnmetRequirement::Unknown,
+        })
+    );
+}
+
+#[test]
+fn classifier_reason_is_a_content_free_json_token() {
+    let decision = router()
+        .route_with_classifier_pool(&ask("private text"), &[], &candidates(), Some("sota"))
+        .expect("routable");
+    let encoded = serde_json::to_value(&decision).expect("serializable");
+    assert_eq!(
+        encoded["decided_by"],
+        serde_json::json!({"tier": "classifier"})
+    );
+    assert!(!encoded.to_string().contains("private text"));
+    assert_eq!(
+        serde_json::from_value::<token_station_router_core::Decision>(encoded).unwrap(),
+        decision
+    );
 }
 
 #[test]
@@ -308,6 +491,8 @@ fn a_decision_cannot_carry_the_prompt_that_produced_it() {
         name: CANARY.to_owned(),
         description: Some(CANARY.to_owned()),
         parameters: serde_json::json!({ "secret": CANARY }),
+        cache_control: None,
+        strict: None,
     }];
     let hints = [AgentHint::new(HintKind::StepType, CANARY)];
 
@@ -383,6 +568,7 @@ fn an_all_ejected_pool_degrades_to_last_resort_and_an_incapable_one_hard_fails()
                 url: "https://example/cat.png".to_owned(),
                 detail: None,
             },
+            cache_control: None,
         },
     ]));
     let mut cheap_only = config();
@@ -958,4 +1144,199 @@ fn quota_first_reports_unavailable_when_every_account_is_ejected() {
         .route_quota_first(&ask("hi"), &accounts, None)
         .expect_err("all ejected");
     assert!(matches!(error, NoRoute::Unavailable { .. }));
+}
+
+fn locality_route(
+    quota: bool,
+    local_only: bool,
+    cloud_fallback: bool,
+    candidates: &[Candidate],
+    request: &ChatRequest,
+) -> Result<token_station_router_core::Decision, NoRoute> {
+    let router = Router::new(RouterConfig {
+        honor_exact_model: !quota,
+        routing_mode: if quota {
+            RoutingMode::QuotaFirst
+        } else {
+            RoutingMode::Tiered
+        },
+        local_only,
+        allow_cloud_fallback: cloud_fallback,
+        quota_accounts: candidates
+            .iter()
+            .map(|candidate| candidate.target.clone())
+            .collect(),
+        ..config()
+    })
+    .expect("valid locality configuration");
+    if quota {
+        router.route_quota_first(request, candidates, None)
+    } else {
+        router.route(request, &[], candidates)
+    }
+}
+
+#[test]
+fn exact_and_quota_strict_locality_reject_cloud_only_candidates() {
+    let cloud = quota_candidate("cloud", QuotaState::default());
+    for quota in [false, true] {
+        assert!(
+            matches!(
+                locality_route(
+                    quota,
+                    true,
+                    false,
+                    std::slice::from_ref(&cloud),
+                    &ask_model("shared-model", "hello")
+                ),
+                Err(NoRoute::Unsatisfiable {
+                    reason: UnmetRequirement::LocalOnly,
+                    ..
+                })
+            ),
+            "quota={quota}"
+        );
+    }
+}
+
+#[test]
+fn exact_and_quota_strict_locality_excludes_cloud_fallbacks() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate("local", QuotaState::default()).local(true),
+        quota_candidate("local_backup", QuotaState::default()).local(true),
+    ];
+    for quota in [false, true] {
+        let decision = locality_route(
+            quota,
+            true,
+            false,
+            &candidates,
+            &ask_model("shared-model", "hello"),
+        )
+        .unwrap();
+        assert_eq!(decision.chosen, candidates[1].target, "quota={quota}");
+        assert_eq!(decision.fallbacks, vec![candidates[2].target.clone()]);
+    }
+}
+
+#[test]
+fn exact_and_quota_authorized_cloud_fallback_follows_usable_locals() {
+    let mut local = quota_candidate("local", QuotaState::default()).local(true);
+    local.health = Health::Degraded;
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate("cloud_backup", QuotaState::default()),
+        local,
+        quota_candidate("local_backup", QuotaState::default()).local(true),
+    ];
+    for quota in [false, true] {
+        let decision = locality_route(
+            quota,
+            true,
+            true,
+            &candidates,
+            &ask_model("shared-model", "hello"),
+        )
+        .unwrap();
+        let ordered: Vec<_> = std::iter::once(decision.chosen)
+            .chain(decision.fallbacks)
+            .collect();
+        let expected_local = if quota {
+            vec![candidates[2].target.clone(), candidates[3].target.clone()]
+        } else {
+            vec![candidates[3].target.clone(), candidates[2].target.clone()]
+        };
+        assert_eq!(ordered[..2], expected_local, "quota={quota}");
+        assert_eq!(
+            ordered[2..],
+            [candidates[0].target.clone(), candidates[1].target.clone()]
+        );
+    }
+}
+
+#[test]
+fn exact_and_quota_locality_preserves_capability_and_health_refusals() {
+    for quota in [false, true] {
+        for incapable in [false, true] {
+            let mut local = quota_candidate("local", QuotaState::default()).local(true);
+            let mut request = ask_model("shared-model", "hello");
+            if incapable {
+                local.capability.tool = false;
+                local.capability.tool_state = Some(CapabilityState::Unsupported);
+                request.tools.push(tool());
+            } else {
+                local.health = Health::Unavailable;
+            }
+            let candidates = vec![quota_candidate("cloud", QuotaState::default()), local];
+            assert!(locality_route(quota, true, false, &candidates, &request).is_err());
+            let decision = locality_route(quota, true, true, &candidates, &request).unwrap();
+            assert_eq!(decision.chosen, candidates[0].target);
+            assert!(decision.fallbacks.is_empty());
+        }
+    }
+}
+
+#[test]
+fn exact_and_quota_locality_off_keeps_original_priority() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate("local", QuotaState::default()).local(true),
+    ];
+    for quota in [false, true] {
+        let decision = locality_route(
+            quota,
+            false,
+            false,
+            &candidates,
+            &ask_model("shared-model", "hello"),
+        )
+        .unwrap();
+        assert_eq!(decision.chosen, candidates[0].target);
+        assert_eq!(decision.fallbacks, vec![candidates[1].target.clone()]);
+    }
+}
+
+#[test]
+fn exact_locality_does_not_substitute_a_different_local_model() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        Candidate::new(
+            target("local", "other-model"),
+            capable(200_000),
+            Health::Healthy,
+        )
+        .local(true),
+    ];
+    let request = ask_model("shared-model", "hello");
+    assert!(locality_route(false, true, false, &candidates, &request).is_err());
+    assert_eq!(
+        locality_route(false, true, true, &candidates, &request)
+            .unwrap()
+            .chosen,
+        candidates[0].target
+    );
+}
+
+#[test]
+fn quota_locality_does_not_revive_an_exhausted_local_account() {
+    let candidates = vec![
+        quota_candidate("cloud", QuotaState::default()),
+        quota_candidate(
+            "local",
+            QuotaState {
+                exhausted: true,
+                ..QuotaState::default()
+            },
+        )
+        .local(true),
+    ];
+    let request = ask_model("shared-model", "hello");
+    assert!(matches!(
+        locality_route(true, true, false, &candidates, &request),
+        Err(NoRoute::Unavailable { .. })
+    ));
+    let decision = locality_route(true, true, true, &candidates, &request).unwrap();
+    assert_eq!(decision.chosen, candidates[0].target);
+    assert!(decision.fallbacks.is_empty());
 }

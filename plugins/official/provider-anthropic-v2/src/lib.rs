@@ -3,6 +3,34 @@
 //! implementation. See the manifest and the South design records
 //! (`2026-08-21-provider-runtime.md`) for the contract.
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn build_http_request(chat_request: &str, provider_config: &str) -> Result<String, String> {
+    // The pinned South reference ignores this IR field. Preserve its constraint
+    // by refusing unsupported formats before returning a transport descriptor.
+    if serde_json::from_str::<serde_json::Value>(chat_request)
+        .ok()
+        .is_some_and(|request| {
+            matches!(
+                request
+                    .pointer("/response_format/type")
+                    .and_then(serde_json::Value::as_str),
+                Some("json_object" | "json_schema")
+            )
+        })
+    {
+        return Err(serde_json::json!({
+            "code":"capability",
+            "http_status":400,
+            "message":"The official Anthropic provider does not support structured response formats."
+        }).to_string());
+    }
+    south_component_conformance::abi::build_http_request_json(
+        &south_component_conformance::reference_anthropic::AnthropicReferenceV1,
+        chat_request,
+        provider_config,
+    )
+}
+
 #[cfg(target_arch = "wasm32")]
 mod shell {
     use std::sync::Mutex;
@@ -50,7 +78,7 @@ mod shell {
             chat_request: String,
             provider_config: String,
         ) -> Result<String, String> {
-            abi::build_http_request_json(&AnthropicReferenceV1, &chat_request, &provider_config)
+            super::build_http_request(&chat_request, &provider_config)
         }
 
         fn parse_response(response_parts: String) -> Result<String, String> {
@@ -74,6 +102,56 @@ mod shell {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn structured_output_is_rejected_instead_of_silently_downgraded() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures-anthropic/provider.request.chat.input.json"
+        ))
+        .unwrap();
+        for stream in [false, true] {
+            for format in [
+                serde_json::json!({"type":"json_object"}),
+                serde_json::json!({"type":"json_schema","json_schema":{"name":"result","schema":{"type":"object"},"strict":true}}),
+            ] {
+                let mut request = fixture["chat_request"].clone();
+                request["stream"] = serde_json::json!(stream);
+                request["response_format"] = format;
+                let error = super::build_http_request(
+                    &request.to_string(),
+                    &fixture["provider_config"].to_string(),
+                )
+                .unwrap_err();
+                let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+                assert_eq!(error["code"], "capability");
+                assert_eq!(error["http_status"], 400);
+            }
+        }
+    }
+
+    #[test]
+    fn text_and_unconstrained_requests_keep_the_reference_descriptor() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures-anthropic/provider.request.chat.input.json"
+        ))
+        .unwrap();
+        for format in [None, Some(serde_json::json!({"type":"text"}))] {
+            let mut request = fixture["chat_request"].clone();
+            if let Some(format) = format {
+                request["response_format"] = format;
+            }
+            let request = request.to_string();
+            let config = fixture["provider_config"].to_string();
+            assert_eq!(
+                super::build_http_request(&request, &config),
+                south_component_conformance::abi::build_http_request_json(
+                    &south_component_conformance::reference_anthropic::AnthropicReferenceV1,
+                    &request,
+                    &config
+                )
+            );
+        }
+    }
+
     /// The vendored WIT must stay byte-for-byte the South-owned source; a
     /// drift here would compile this shell against a world the runtime does
     /// not instantiate.

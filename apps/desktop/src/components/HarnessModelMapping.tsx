@@ -3,6 +3,7 @@ import type {
   HarnessModelTarget,
   ProviderView,
 } from "../api";
+import { providerDisplayName, upstreamDisplayName } from "../providerPresentation";
 import { ProviderIcon } from "../brandIcons";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
 import { Switch } from "./ui/switch";
@@ -122,10 +123,10 @@ export default function HarnessModelMapping({
           const selectedProviderOption: CompactComboboxOption[] = target.upstream
             ? [{
                 value: target.upstream,
-                label: providerMissing ? `${target.upstream}${staleSuffix}` : target.upstream,
+                label: `${upstreamDisplayName(target.upstream, providers)}${providerMissing ? staleSuffix : ""}`,
                 icon: <ProviderIcon
                   id={provider?.brand_id}
-                  label={target.upstream}
+                  label={upstreamDisplayName(target.upstream, providers)}
                   size={20}
                 />,
                 hint: providerMissing
@@ -142,8 +143,8 @@ export default function HarnessModelMapping({
               .filter((candidate) => candidate.name !== target.upstream)
               .map((candidate) => ({
                 value: candidate.name,
-                label: candidate.name,
-                icon: <ProviderIcon id={candidate.brand_id} label={candidate.name} size={20} />,
+                label: providerDisplayName(candidate, providers),
+                icon: <ProviderIcon id={candidate.brand_id} label={providerDisplayName(candidate, providers)} size={20} />,
                 hint: candidate.access_tier === "free"
                   ? copy("Free", "免费", "免費", "無料")
                   : undefined,

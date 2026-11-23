@@ -1,0 +1,24 @@
+{
+  "method": "POST",
+  "url": "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "openai.gpt-oss-120b-1:0",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "provider_api_key"
+  }
+}

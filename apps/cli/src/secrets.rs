@@ -208,6 +208,15 @@ enum Source {
     Store,
     Env(String),
     File(PathBuf),
+    ChatGpt(String),
+    LocalSubscription {
+        reference: crate::config::LocalSubscriptionReference,
+        manager: crate::local_subscriptions::AccountManager,
+    },
+    Codex {
+        reference: String,
+        account_id: String,
+    },
 }
 
 /// Resolves configured credential slots to their values at request time.
@@ -222,6 +231,7 @@ pub struct SecretStore {
     /// A store-backed source must surface an authoritative load failure rather
     /// than treating corrupt or unreadable credential data as an empty store.
     store_error: Option<String>,
+    data_dir: PathBuf,
 }
 
 /// An immutable, memory-only resolver for exactly the slots captured from a config.
@@ -260,7 +270,26 @@ impl Drop for SecretStore {
     }
 }
 
-fn source_of(auth: &AuthConfig) -> Option<Source> {
+fn source_of(
+    auth: &AuthConfig,
+    identity: Option<&crate::config::CodexIdentity>,
+    data_dir: &Path,
+) -> Option<Source> {
+    if let Some(reference) = &auth.local_subscription {
+        return Some(Source::LocalSubscription {
+            reference: reference.clone(),
+            manager: crate::local_subscriptions::AccountManager::new(data_dir, reference.kind),
+        });
+    }
+    if let Some(reference) = &auth.codex_account {
+        return Some(Source::Codex {
+            reference: reference.clone(),
+            account_id: identity.map_or_else(String::new, |i| i.account_id.clone()),
+        });
+    }
+    if let Some(account) = &auth.chatgpt_account {
+        return Some(Source::ChatGpt(account.clone()));
+    }
     if auth.store {
         Some(Source::Store)
     } else {
@@ -273,7 +302,22 @@ fn source_of(auth: &AuthConfig) -> Option<Source> {
     }
 }
 
+fn resolve_codex_token(
+    root: &Path,
+    reference: &str,
+    expected_account: &str,
+) -> Result<String, String> {
+    let manager = crate::codex_accounts::AccountManager::new(root);
+    if expected_account.is_empty() || manager.account(reference)?.account_id != expected_account {
+        return Err("The Codex account identity changed. Reconnect the local session.".into());
+    }
+    manager.access_token(reference)
+}
+
 impl SecretStore {
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
     /// Resolve each configured Provider and egress slot once into immutable memory.
     /// No files or environment variables are written. Unconfigured slots stay unavailable.
     ///
@@ -284,7 +328,12 @@ impl SecretStore {
         data_dir: &Path,
     ) -> Result<SecretSnapshot, String> {
         let live = Self::from_config(config, data_dir);
-        let mut frozen = Self::default();
+        let mut frozen = Self {
+            sources: BTreeMap::new(),
+            store: BTreeMap::new(),
+            store_error: None,
+            data_dir: data_dir.to_path_buf(),
+        };
         let slots = config
             .upstreams
             .iter()
@@ -300,6 +349,9 @@ impl SecretStore {
             if usize::from(auth.store)
                 + usize::from(auth.env.is_some())
                 + usize::from(auth.file.is_some())
+                + usize::from(auth.chatgpt_account.is_some())
+                + usize::from(auth.codex_account.is_some())
+                + usize::from(auth.local_subscription.is_some())
                 != 1
             {
                 return Err("A snapshot credential must have exactly one source".to_owned());
@@ -313,6 +365,24 @@ impl SecretStore {
         Ok(SecretSnapshot(frozen))
     }
 
+    /// Capture only the selected Provider and egress credentials for a short probe.
+    /// Other account registrations are not read or refreshed.
+    ///
+    /// # Errors
+    /// The Provider is unknown or a selected credential cannot be resolved.
+    pub fn snapshot_for_upstream(
+        config: &ClientConfig,
+        data_dir: &Path,
+        upstream: &str,
+    ) -> Result<SecretSnapshot, String> {
+        if !config.upstreams.contains_key(upstream) {
+            return Err("The snapshot Provider does not exist".to_owned());
+        }
+        let mut scoped = config.clone();
+        scoped.upstreams.retain(|name, _| name == upstream);
+        Self::snapshot_for_config(&scoped, data_dir)
+    }
+
     /// Build the resolver from a full client config, loading the local secrets
     /// store from `data_dir` for any slot that lives in it.
     #[must_use]
@@ -320,13 +390,13 @@ impl SecretStore {
         let mut sources = BTreeMap::new();
         for (upstream, entry) in &config.upstreams {
             if let Some(auth) = &entry.auth
-                && let Some(source) = source_of(auth)
+                && let Some(source) = source_of(auth, entry.codex_identity.as_ref(), data_dir)
             {
                 sources.insert((upstream.clone(), auth.slot.clone()), source);
             }
         }
         if let Some(egress_auth) = &config.egress.auth
-            && let Some(source) = source_of(&egress_auth.credential)
+            && let Some(source) = source_of(&egress_auth.credential, None, data_dir)
         {
             sources.insert(
                 (
@@ -344,6 +414,7 @@ impl SecretStore {
             sources,
             store,
             store_error,
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
@@ -352,7 +423,7 @@ impl SecretStore {
     pub fn from_egress_config(egress: &EgressConfig, data_dir: &Path) -> Self {
         let mut sources = BTreeMap::new();
         if let Some(egress_auth) = &egress.auth
-            && let Some(source) = source_of(&egress_auth.credential)
+            && let Some(source) = source_of(&egress_auth.credential, None, data_dir)
         {
             sources.insert(
                 (
@@ -370,6 +441,7 @@ impl SecretStore {
             sources,
             store,
             store_error,
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
@@ -413,6 +485,12 @@ impl SecretStore {
                     path.display()
                 )
             }),
+            Source::Codex { reference, account_id } => {
+                resolve_codex_token(&self.data_dir, reference, account_id)
+            }
+            Source::LocalSubscription { reference, manager } => manager.access_token(&reference.id),
+            Source::ChatGpt(account) => crate::chatgpt_accounts::AccountManager::new(&self.data_dir)
+                .access_token(account),
         }?;
 
         let value = value.trim();
@@ -422,6 +500,46 @@ impl SecretStore {
             ));
         }
         Ok(value.to_owned())
+    }
+
+    /// Resolve rotating credentials without blocking the asynchronous transport executor.
+    ///
+    /// # Errors
+    /// Credential renewal or the configured source can fail.
+    pub async fn resolve_async(&self, upstream: &str, slot: &str) -> Result<String, String> {
+        if let Some(Source::LocalSubscription { reference, manager }) =
+            self.sources.get(&(upstream.to_owned(), slot.to_owned()))
+        {
+            let manager = manager.clone();
+            let reference = reference.clone();
+            return tokio::task::spawn_blocking(move || manager.access_token(&reference.id))
+                .await
+                .map_err(|_| "Subscription credential worker failed".to_owned())?;
+        }
+        if let Some(Source::ChatGpt(account)) =
+            self.sources.get(&(upstream.to_owned(), slot.to_owned()))
+        {
+            let manager = crate::chatgpt_accounts::AccountManager::new(&self.data_dir);
+            let account = account.clone();
+            return tokio::task::spawn_blocking(move || manager.access_token(&account))
+                .await
+                .map_err(|_| "ChatGPT credential worker failed".to_owned())?;
+        }
+        if let Some(Source::Codex {
+            reference,
+            account_id,
+        }) = self.sources.get(&(upstream.to_owned(), slot.to_owned()))
+        {
+            let root = self.data_dir.clone();
+            let reference = reference.clone();
+            let account_id = account_id.clone();
+            return tokio::task::spawn_blocking(move || {
+                resolve_codex_token(&root, &reference, &account_id)
+            })
+            .await
+            .map_err(|_| "Codex credential worker failed".to_owned())?;
+        }
+        self.resolve(upstream, slot)
     }
 
     /// Resolve the configured proxy credential without coupling it to an

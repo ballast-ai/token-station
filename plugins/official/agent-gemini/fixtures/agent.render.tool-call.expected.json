@@ -1,7 +1,7 @@
 {
   "candidates": [{
     "index": 0,
-    "content": {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Beijing"}}}]},
+    "content": {"role": "model", "parts": [{"functionCall": {"id": "call-1", "name": "get_weather", "args": {"city": "Beijing"}}}]},
     "finishReason": "STOP"
   }],
   "usageMetadata": {"promptTokenCount": 8, "candidatesTokenCount": 4, "totalTokenCount": 12, "cachedContentTokenCount": 2},

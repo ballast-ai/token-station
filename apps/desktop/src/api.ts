@@ -17,7 +17,7 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
-  credential_source?: "store" | "env" | "file" | "none";
+  credential_source?: "store" | "env" | "file" | "chatgpt_account" | "codex_account" | "local_subscription" | "none";
   credential_reference?: string;
   provider_call?: ProviderCallEngine;
   south_v1_available?: boolean;
@@ -39,9 +39,24 @@ export type ProviderCallEngine =
   | "south_v1_buffered_streaming"
   | "south_v1_buffered_streaming_header_auth";
 
-export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth";
+export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth" | "provider_call" | "root_rpc_path";
+
+export interface QuotaWindowSpec {
+  len_ms: number;
+  limit: number;
+}
+
+export interface QuotaPlanInput {
+  windows: QuotaWindowSpec[];
+  unit: "tokens" | "requests";
+  rate_limit_per_min: number | null;
+}
+
+export type SaveQuotaPlan = (upstream: string, plan: QuotaPlanInput) => void | Promise<boolean>;
 
 export interface QuotaPlanView {
+  /** All windows. Optional only for compatibility with older desktop hosts. */
+  windows?: QuotaWindowSpec[];
   len_ms: number;
   limit: number;
   unit: "tokens" | "requests";
@@ -217,6 +232,7 @@ export type ReceiptDecidedByView =
   | { tier: "rule"; rule: string }
   | { tier: "hint"; kind: "step_type" | "task_type" | "preference" | "capability"; value: string }
   | { tier: "heuristic"; score: number; matched_band_at_least: number }
+  | { tier: "classifier" }
   | { tier: "default" }
   | { tier: "exact_model"; model: string }
   | { tier: "quota" };
@@ -284,6 +300,13 @@ export interface ReceiptConversionView {
     | null;
 }
 
+/** Content-free input handling recorded for this request, never inferred from shared classifier status. */
+export interface ClassifierInputView {
+  classifier: "scx" | "jev";
+  handling: "full" | "reduced" | "skipped";
+  reason: "byte_limit" | "token_limit" | null;
+}
+
 export interface ReceiptView {
   usage_observation?: (Partial<Record<keyof ReceiptUsageView | "cache_write_5m_tokens" | "cache_write_1h_tokens", number | null>> & { incomplete?: boolean }) | null;
   request_id: string;
@@ -315,6 +338,7 @@ export interface ReceiptView {
   running_revision: number | null;
   cost_kind: ReceiptCostKind;
   decision: ReceiptRouteView | null;
+  classifier_input?: ClassifierInputView | null;
   attempt_records: ReceiptAttemptView[];
   conversion_reports: ReceiptConversionView[];
 }
@@ -403,6 +427,42 @@ export type TierSlot = "high" | "mid" | "low";
 
 export type RoutingMode = "direct" | "tiered" | "quota_first";
 
+/** Content-free cloud classification state. The saved key is never returned to the renderer. */
+export interface JevStatus {
+  enabled: boolean;
+  has_key: boolean;
+  model: string;
+  timeout_ms: number;
+  confidence_threshold: number;
+  last_outcome: string | null;
+  last_tier: "low" | "medium" | "high" | null;
+  last_latency_ms: number | null;
+}
+
+export type SemanticMode = "off" | "observe" | "route";
+
+export interface SemanticObservation {
+  id: number;
+  mode: Exclude<SemanticMode, "off">;
+  baseline_tier: string | null;
+  suggested_tier: string | null;
+  applied: boolean;
+  latency_ms: number | null;
+  outcome: string;
+}
+
+export interface SemanticStatus {
+  available: boolean;
+  enabled: boolean;
+  mode: SemanticMode;
+  state: "unprepared" | "preparing" | "loading" | "ready" | "off" | "error";
+  error: string | null;
+  model_ready: boolean;
+  timeout_ms: number;
+  observations: SemanticObservation[];
+  counts: { classified: number; disagreements: number; fallbacks: number };
+}
+
 export interface DirectRouteTarget {
   upstream: string;
   /** Null preserves a known provider when its previously selected model was removed. */
@@ -445,7 +505,7 @@ export interface QuotaAccount {
 }
 
 /** Runtime quota source: authoritative provider headers, local ledger estimate, or no data. */
-export type QuotaSource = "authoritative" | "estimated" | "none";
+export type QuotaSource = "authoritative" | "stale" | "estimated" | "none";
 
 export interface QuotaWindowSnapshot {
   len_ms: number;
@@ -456,6 +516,8 @@ export interface QuotaWindowSnapshot {
 }
 
 export interface QuotaAccountSnapshot {
+  provider_observed_at_ms?: number | null;
+  provider_age_ms?: number | null;
   /** Completed requests with missing token usage in retained local history. */
   unknown_usage_requests?: number;
   history?: "new" | "recovered" | "plan_changed" | "unavailable";
@@ -583,7 +645,7 @@ export interface AgentDiscoveryView {
   agent_id: AgentId;
   executable_path: string;
   canonical_path: string;
-  binary_source: "homebrew" | "npm_global" | "microsoft_store" | "path" | "known_path" | "env_override";
+  binary_source: "homebrew" | "npm_global" | "microsoft_store" | "path" | "known_path" | "env_override" | "managed_record";
   modified_at_ms: number | null;
   binary_sha256: string | null;
   upgrade_command: string | null;
@@ -591,7 +653,7 @@ export interface AgentDiscoveryView {
   version_normalized: string | null;
   environment: AgentPlatform;
   evidence: Array<{
-    source: "known_path" | "package_manager" | "path" | "env_override";
+    source: "known_path" | "package_manager" | "path" | "env_override" | "managed_record";
     observed_path: string;
     is_path_default: boolean;
   }>;
@@ -750,6 +812,7 @@ export interface AggView {
   output_reported_requests?: number;
   total_reported_requests?: number;
   incomplete_usage_requests?: number;
+  subscription_requests?: number;
   missing_price_requests?: number;
   missing_usage_requests?: number;
   actual_cost_requests?: number;
@@ -942,6 +1005,17 @@ export interface DiagnosticPreview {
 }
 
 export const getState = () => invoke<StateView>("get_state");
+export const getJevStatus = () => invoke<JevStatus>("get_jev_status");
+export const saveJevKey = (apiKey: string) => invoke<JevStatus>("save_jev_key", { apiKey });
+export const clearJevKey = () => invoke<JevStatus>("clear_jev_key");
+export const setJevEnabled = (enabled: boolean) => invoke<JevStatus>("set_jev_enabled", { enabled });
+export const testJevConnection = () => invoke<JevStatus>("test_jev_connection");
+export const getSemanticStatus = () => invoke<SemanticStatus>("get_semantic_status");
+export const setSemanticEnabled = (enabled: boolean) =>
+  invoke<SemanticStatus>("set_semantic_enabled", { enabled });
+export const setSemanticMode = (mode: SemanticMode) =>
+  invoke<SemanticStatus>("set_semantic_mode", { mode });
+export const prepareSemanticModel = () => invoke<SemanticStatus>("prepare_semantic_model");
 export const setDockThemeIcon = (theme: "light" | "dark") =>
   invoke<void>("set_dock_theme_icon", { theme });
 export const getRecoveryState = () => invoke<RecoveryState>("get_recovery_state");
@@ -1050,6 +1124,15 @@ export const setQuotaPlan = (
     limit,
     unit,
     rateLimitPerMin,
+  });
+
+/** Save every local estimate window and RPM. Empty windows clear the plan. */
+export const setQuotaPlanFull = (upstream: string, plan: QuotaPlanInput) =>
+  invoke<StateView>("set_quota_plan_full", {
+    upstream,
+    windows: plan.windows,
+    unit: plan.unit,
+    rateLimitPerMin: plan.rate_limit_per_min,
   });
 
 /**
@@ -1360,6 +1443,10 @@ export const discardAgentPlan = (
 
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
+
+/** Plan snapshot-backed restoration after explicit confirmation of managed drift. */
+export const planAgentForcedDisconnect = (agentId: AgentId, installationPath: string) =>
+  invoke<ConfigPlanView>("plan_agent_forced_disconnect", { agentId, installationPath });
 
 /**
  * Restore official configuration and disconnect by removing TS-managed fields

@@ -1,0 +1,94 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -135,41 +135,41 @@
+ version = "^1.0"
+ 
+ [dependencies.cairo-rs]
+-version = "^0.18.0"
++version = "0.22"
+ 
+ [dependencies.ffi]
+ version = "2.0.1"
+ package = "webkit2gtk-sys"
+ 
+ [dependencies.gdk]
+-version = "^0.18.0"
++version = "0.19"
+ 
+ [dependencies.gdk-sys]
+-version = "^0.18.0"
++version = "0.19"
+ 
+ [dependencies.gio]
+-version = "^0.18.0"
++version = "0.22"
+ 
+ [dependencies.gio-sys]
+-version = "^0.18.0"
++version = "0.22"
+ 
+ [dependencies.glib]
+-version = "^0.18.0"
++version = "0.22"
+ 
+ [dependencies.glib-sys]
+-version = "^0.18.0"
++version = "0.22"
+ 
+ [dependencies.gobject-sys]
+-version = "^0.18.0"
++version = "0.22"
+ 
+ [dependencies.gtk]
+-version = "^0.18.0"
++version = "0.19"
+ 
+ [dependencies.gtk-sys]
+-version = "^0.18.0"
++version = "0.19"
+ 
+ [dependencies.java_script_core]
+-version = "=1.1"
++version = "2.0"
+ package = "javascriptcore-rs"
+ 
+ [dependencies.libc]
+@@ -179,5 +179,5 @@
+ version = "1.8"
+ 
+ [dependencies.soup]
+-version = "0.5"
++version = "0.9"
+ package = "soup3"
+--- a/src/web_context.rs
++++ b/src/web_context.rs
+@@ -4,7 +4,7 @@
+ use super::{NetworkProxyMode, NetworkProxySettings};
+ #[cfg(feature = "v2_6")]
+ use glib::translate::{FromGlibPtrNone, IntoGlib, ToGlibPtr, ToGlibPtrMut};
+-use glib::IsA;
++use glib::object::IsA;
+ 
+ use super::WebContext;
+ 
+--- a/src/web_view.rs
++++ b/src/web_view.rs
+@@ -5,7 +5,7 @@
+ #[cfg(feature = "v2_6")]
+ use crate::WebContext;
+ use crate::WebView;
+-use glib::IsA;
++use glib::object::IsA;
+ 
+ pub trait WebViewExtManual {
+   #[cfg(feature = "v2_6")]
+@@ -26,8 +26,8 @@
+   ) -> Self {
+     use glib::{
+       object::Cast,
++      prelude::StaticType,
+       translate::{FromGlibPtrNone, IntoGlib, ToGlibPtr},
+-      StaticType,
+     };
+     use std::{ffi::CString, ptr};
+     assert_initialized_main_thread!();

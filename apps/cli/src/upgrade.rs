@@ -204,22 +204,84 @@ const MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
 const MAX_METADATA_DOWNLOAD: u64 = 1024 * 1024;
 const MAX_SIGNATURE_DOWNLOAD: u64 = 64 * 1024;
 
+/// Metadata and artifacts share a bounded redirect policy. The loopback branch
+/// supports local release mirrors and deterministic transport tests.
+fn redirect_allowed(initial: &url::Url, current: &url::Url, next: &url::Url) -> bool {
+    if !next.username().is_empty() || next.password().is_some() {
+        return false;
+    }
+    let secure = next.scheme() == "https";
+    let loopback = next.scheme() == "http"
+        && matches!(next.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
+        || next.scheme() == "http"
+            && matches!(next.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback());
+    if next.origin() == current.origin() {
+        return secure || (loopback && next.origin() == initial.origin());
+    }
+    let github_origin = |value: &url::Url| {
+        value.scheme() == "https"
+            && value.port_or_known_default() == Some(443)
+            && matches!(
+                value.host_str(),
+                Some(
+                    "github.com"
+                        | "release-assets.githubusercontent.com"
+                        | "objects.githubusercontent.com"
+                )
+            )
+    };
+    initial.scheme() == "https"
+        && initial.host_str() == Some("github.com")
+        && initial.port_or_known_default() == Some(443)
+        && github_origin(current)
+        && github_origin(next)
+}
+
 fn raw_http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
-    let http = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .proxy(None)
-            .build(),
-    );
-    http.get(url)
-        // The GitHub API requires a User-Agent; ours says only what asked.
-        .header(
-            "user-agent",
-            concat!("token-station-cli/", env!("CARGO_PKG_VERSION")),
-        )
-        .call()
-        .map_err(|error| format!("GET {url}: {error}"))
+    const MAX_REDIRECTS: usize = 5;
+    let initial = url::Url::parse(url).map_err(|error| format!("invalid release URL: {error}"))?;
+    let mut current = initial.clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
+    for hop in 0..=MAX_REDIRECTS {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| "release download deadline exceeded".to_owned())?;
+        let http = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .max_redirects(0)
+                .proxy(None)
+                .timeout_global(Some(remaining))
+                .build(),
+        );
+        let response = http
+            .get(current.as_str())
+            .header(
+                "user-agent",
+                concat!("token-station-cli/", env!("CARGO_PKG_VERSION")),
+            )
+            .call()
+            .map_err(|error| format!("GET {url}: {error}"))?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        if hop == MAX_REDIRECTS {
+            return Err("release download redirect limit exceeded".to_owned());
+        }
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "release redirect has no valid Location".to_owned())?;
+        let next = current
+            .join(location)
+            .map_err(|_| "release redirect has an invalid Location".to_owned())?;
+        if !redirect_allowed(&initial, &current, &next) {
+            return Err("release redirect destination is not allowed".to_owned());
+        }
+        current = next;
+    }
+    unreachable!("the last redirect is refused")
 }
 
 fn http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
@@ -378,6 +440,37 @@ mod tests {
             assert_eq!(expected.len(), 64);
             assert!(expected.bytes().all(|byte| byte.is_ascii_hexdigit()));
             assert_eq!(expected, expected.to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn official_redirect_policy_allows_cdn_without_allowing_downgrades_or_lookalikes() {
+        let initial = url::Url::parse(
+            "https://github.com/ballast-ai/token-station/releases/download/v9.9.9/manifest.json",
+        )
+        .unwrap();
+        for (destination, allowed) in [
+            (
+                "https://release-assets.githubusercontent.com/asset?signature=synthetic",
+                true,
+            ),
+            ("https://objects.githubusercontent.com/asset", true),
+            ("https://github.com/next", true),
+            ("http://release-assets.githubusercontent.com/asset", false),
+            ("https://github.com.attacker.invalid/asset", false),
+            (
+                "https://release-assets.githubusercontent.com:444/asset",
+                false,
+            ),
+            ("https://user:password@github.com/asset", false),
+            ("http://127.0.0.1/asset", false),
+        ] {
+            let next = url::Url::parse(destination).unwrap();
+            assert_eq!(
+                super::redirect_allowed(&initial, &initial, &next),
+                allowed,
+                "{destination}"
+            );
         }
     }
 

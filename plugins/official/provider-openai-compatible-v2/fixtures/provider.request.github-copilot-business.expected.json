@@ -1,0 +1,30 @@
+{
+  "method": "POST",
+  "url": "https://api.business.githubcopilot.com/chat/completions",
+  "headers": {
+    "content-type": "application/json",
+    "copilot-integration-id": "copilot-developer-cli",
+    "editor-plugin-version": "copilot-chat/0.43.0",
+    "editor-version": "vscode/1.123.0",
+    "openai-intent": "conversation-panel",
+    "x-github-api-version": "2025-04-01",
+    "x-vscode-user-agent-library-version": "electron-fetch"
+  },
+  "body": {
+    "model": "gpt-5.5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "provider_api_key"
+  }
+}

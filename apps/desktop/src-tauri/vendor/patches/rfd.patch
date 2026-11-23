@@ -1,0 +1,21 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -92,15 +92,15 @@
+ default-features = false
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies.glib-sys]
+-version = "0.18.0"
++version = "0.22"
+ optional = true
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies.gobject-sys]
+-version = "0.18.0"
++version = "0.22"
+ optional = true
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies.gtk-sys]
+-version = "0.18.0"
++version = "0.19"
+ features = ["v3_24"]
+ optional = true
+ 

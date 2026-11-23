@@ -1,3 +1,4 @@
+import type { ProviderView } from "../api";
 import { ArrowUpRight } from "lucide-react";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { Button } from "../components/ui/button";
@@ -5,9 +6,10 @@ import Stats from "./Stats";
 
 interface UsageWorkspaceProps {
   onOpenManagement: () => void;
+  providers?: ProviderView[];
 }
 
-export default function UsageWorkspace({ onOpenManagement }: UsageWorkspaceProps) {
+export default function UsageWorkspace({ onOpenManagement, providers }: UsageWorkspaceProps) {
   const { copy } = useLocalizedCopy();
 
   return (
@@ -25,7 +27,7 @@ export default function UsageWorkspace({ onOpenManagement }: UsageWorkspaceProps
           <ArrowUpRight aria-hidden="true" />
         </Button>
       </header>
-      <Stats embedded onOpenManagement={onOpenManagement} />
+      <Stats providers={providers} embedded onOpenManagement={onOpenManagement} />
     </div>
   );
 }

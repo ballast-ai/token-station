@@ -22,8 +22,29 @@
 
 mod anthropic_native; // Anthropic Messages passthrough: native attempts and raw SSE relay
 mod attempt_machine; // attempt lifecycle: budget, dispatch, routing, retries and quota settlement
+#[cfg(all(test, feature = "builtin-plugins"))]
+mod classifier_input_tests;
+mod component_request; // host-owned request fields: host values and replay markers
+mod jev_routing;
+#[cfg(test)]
+mod jev_tests;
+mod local_search;
+#[cfg(test)]
+mod plan_search_tests;
+mod plan_stops;
 mod provider_call; // provider transport: South/legacy calls and response translation
 mod responses_native; // OpenAI Responses passthrough for provider-hosted tools
+mod reverse_search;
+mod reverse_search_stream;
+mod search_policy;
+#[cfg(test)]
+mod search_policy_tests;
+mod search_stream;
+#[cfg(test)]
+mod semantic_tests;
+#[cfg(test)]
+mod subscription_tests;
+mod tool_names;
 mod web_search;
 
 #[allow(clippy::wildcard_imports)]
@@ -88,13 +109,12 @@ use south_core::raw::BoundedResolverV1;
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
 pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 
-/// Per-request timeout for a background quota-balance poll. Short: it must never
+/// Per-request timeout for a background quota poll. Short: it must never
 /// hold up shutdown or pile up behind a slow endpoint.
-const QUOTA_POLL_TIMEOUT_SECS: u64 = 10;
+const QUOTA_POLL_TIMEOUT_SECS: u64 = 3;
 
-/// How often the background poller refreshes balance endpoints. Balances change
-/// slowly and the endpoints are rate-limited, so a few minutes is plenty.
-pub const QUOTA_POLL_INTERVAL_SECS: u64 = 300;
+/// Refresh before authoritative readings reach their five-minute freshness TTL.
+pub const QUOTA_POLL_INTERVAL_SECS: u64 = 60;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_mins(2);
 const CANCEL_READ_POLL: Duration = Duration::from_millis(100);
@@ -118,8 +138,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const STREAM_READ: usize = 8 * 1024;
 const ANTHROPIC_PROVIDER: &str = "anthropic";
 
-/// Provider components preserve their dialect's wire usage convention. Fold
-/// that convention once when provider data enters the host's canonical IR.
+/// Anthropic's wire `input_tokens` excludes the cache buckets; the canonical
+/// IR's includes them. Only the native pass-through reads Anthropic's wire
+/// usage itself. Provider components report canonical usage already: the
+/// Anthropic component has folded the cache buckets in since South 0.40.0
+/// (south #118), so applying this to component output would count them twice.
 fn canonical_provider_usage(provider: &str, mut usage: Usage) -> Usage {
     if provider == ANTHROPIC_PROVIDER {
         usage.input_tokens = usage
@@ -128,18 +151,6 @@ fn canonical_provider_usage(provider: &str, mut usage: Usage) -> Usage {
             .saturating_add(usage.cache_write_tokens);
     }
     usage
-}
-
-fn canonical_provider_events(provider: &str, events: Vec<StreamEvent>) -> Vec<StreamEvent> {
-    events
-        .into_iter()
-        .map(|event| match event {
-            StreamEvent::Usage { usage } => StreamEvent::Usage {
-                usage: canonical_provider_usage(provider, usage),
-            },
-            event => event,
-        })
-        .collect()
 }
 
 fn absorb_record_usage(record: &mut RequestRecord, usage: Usage) {
@@ -155,6 +166,7 @@ const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
 const CONTINUATION_KEY_EXTENSION: &str = "token_station_private_continuation_key";
 const CONTINUATION_SCOPE_EXTENSION: &str = "token_station_continuation_scope";
 const TOOL_NAMESPACES_EXTENSION: &str = "responses_tool_namespaces";
+const RESPONSE_TOOLS_EXTENSION: &str = "token_station_private_response_tools";
 const NO_ATTEMPT_FALLBACK_EXTENSION: &str = "token_station_private_no_attempt_fallback";
 
 fn upstream_body_limit(ctx: &RequestContext) -> u64 {
@@ -323,7 +335,7 @@ fn content_text(content: &Content) -> impl Iterator<Item = &str> {
     };
     let parts = match content {
         Content::Parts(parts) => Some(parts.iter().filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })),
         Content::Text(_) => None,
@@ -365,7 +377,10 @@ fn replace_canonical_documents(request: &mut ChatRequest) -> DocumentFallbackSta
             continue;
         }
         let (text, extracted) = document_replacement_text(block, prefers_chinese);
-        *part = ContentPart::Text { text };
+        *part = ContentPart::Text {
+            text,
+            cache_control: None,
+        };
         if extracted {
             stats.extracted += 1;
         } else {
@@ -426,6 +441,7 @@ fn add_native_image_requirement(request: &mut ChatRequest, body: &Value) {
                 url: "https://image-routing.invalid/probe".into(),
                 detail: None,
             },
+            cache_control: None,
         }]));
         request.messages.push(message);
     }
@@ -1066,7 +1082,7 @@ fn message_text(message: &Message) -> Option<&str> {
     match message.content.as_ref()? {
         Content::Text(text) => Some(text.as_str()),
         Content::Parts(parts) => parts.iter().find_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         }),
     }
@@ -1087,6 +1103,7 @@ fn quota_session_key(request: &ChatRequest) -> String {
 }
 
 /// One configured upstream, resolved and ready to serve.
+#[derive(Clone)]
 struct Upstream {
     config: ProviderConfig,
     auth_config: Option<AuthConfig>,
@@ -1096,12 +1113,66 @@ struct Upstream {
     /// The auth shapes the admitted component declares, read from its manifest
     /// once at assembly. Transport eligibility judges by these instead of by
     /// the dialect's name.
-    auth_arms: std::collections::BTreeSet<south_provider_api::AuthArmV1>,
+    auth_arms: std::collections::BTreeSet<String>,
+    /// The secret header names the admitted component declares, parsed once.
+    secret_headers: south_contracts::DeclaredSecretHeadersV1,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
+    native_search: Option<crate::native_search::NativeSearchTransport>,
     provider_call: ConfiguredProviderCallEngine,
+}
+
+impl Upstream {
+    fn search_dialect(&self) -> ApiDialect {
+        self.native_search
+            .as_ref()
+            .map_or(self.dialect, |profile| profile.api_dialect)
+    }
+
+    /// Borrow the ordinary transport unless a hosted search uses a separate profile.
+    fn search_transport(&self, body: &Value, dialect: ApiDialect) -> std::borrow::Cow<'_, Self> {
+        let hosted = body["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| local_search::hosted(tool, dialect == ApiDialect::AnthropicNative))
+        });
+        if let Some(profile) = &self.native_search
+            && hosted
+            && profile.api_dialect == dialect
+        {
+            let mut transport = self.clone();
+            transport.config.base_url = profile.base_url.clone();
+            transport.dialect = dialect;
+            return std::borrow::Cow::Owned(transport);
+        }
+        std::borrow::Cow::Borrowed(self)
+    }
+
+    fn native_auth(&self, dialect: ApiDialect) -> Option<Auth> {
+        use crate::native_search::NativeSearchAuth;
+        let auth = self
+            .native_search
+            .as_ref()
+            .filter(|profile| {
+                profile.api_dialect == dialect && profile.base_url == self.config.base_url
+            })
+            .map_or(
+                if dialect == ApiDialect::AnthropicNative {
+                    NativeSearchAuth::XApiKey
+                } else {
+                    NativeSearchAuth::Bearer
+                },
+                |profile| profile.auth,
+            );
+        self.config.auth.clone().map(|secret| match auth {
+            NativeSearchAuth::Bearer => Auth::bearer(secret),
+            NativeSearchAuth::XApiKey => {
+                Auth::header("x-api-key", secret).expect("valid credential header")
+            }
+        })
+    }
 }
 
 /// Server-owned asynchronous capability borrowed by the synchronous gateway.
@@ -1199,17 +1270,36 @@ fn assemble_upstreams(
             .expect("the caller loaded a component for every configured dialect")
             .clone();
         let auth_arms = admitted.auth_arms();
+        let secret_headers = south_contracts::DeclaredSecretHeadersV1::try_from_names(
+            admitted.secret_headers().iter().map(String::as_str),
+        )
+        .map_err(|error| format!("upstream `{name}` secret headers: {error}"))?;
+        let component_replays = admitted
+            .declares_model_parameter(&entry.provider, component_request::CLAUDE_REPLAY_CAPABILITY);
         let plugin: Arc<dyn ProviderAdapter + Send + Sync> = admitted;
 
         let mut provider_config =
             ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
         provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
+        if let Some(identity) = &entry.codex_identity {
+            provider_config
+                .extensions
+                .insert("codex_account_id".into(), json!(identity.account_id));
+            provider_config.extensions.insert(
+                "codex_client_version".into(),
+                json!(identity.client_version),
+            );
+        }
+        if let Some(identity) = &entry.subscription_identity {
+            provider_config.extensions.extend(identity.clone());
+        }
         provider_config.models = entry
             .models
             .iter()
             .cloned()
             .map(project_capability_evidence_for_v1)
             .collect();
+        component_request::grant_replay(&mut provider_config, component_replays);
 
         // The component may refine the declared catalog; it cannot invent one,
         // having no network. This is `model_capabilities`' production call.
@@ -1217,7 +1307,17 @@ fn assemble_upstreams(
             .model_capabilities(&provider_config)
             .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
             .into_iter()
-            .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
+            .map(|capability| {
+                let mut capability =
+                    restore_configured_capability_evidence(capability, &entry.models);
+                if crate::config::is_subscription_provider(&entry.provider) {
+                    capability
+                        .extensions
+                        .insert("subscription_billing".to_owned(), json!(true));
+                    capability.extensions.remove("catalog_cost");
+                }
+                capability
+            })
             .collect();
 
         let reference = token_station_router_core::UpstreamRef::new(name.clone())
@@ -1235,8 +1335,10 @@ fn assemble_upstreams(
                 config: provider_config,
                 auth_config: entry.auth.clone(),
                 auth_arms,
+                secret_headers,
                 plugin,
                 dialect: entry.api_dialect,
+                native_search: crate::native_search::resolve(entry),
                 provider_call: entry.provider_call,
             },
         );
@@ -1467,6 +1569,9 @@ fn model_cost_with_price(
     capability: &ModelCapability,
     price: Option<&crate::pricing::ModelPrice>,
 ) -> Option<Value> {
+    if capability.extensions.get("subscription_billing") == Some(&Value::Bool(true)) {
+        return None;
+    }
     let mut cost = capability
         .extensions
         .get("catalog_cost")
@@ -1717,6 +1822,10 @@ pub struct Gateway {
     /// Optional Desktop-only body sink. It is separate from every [`Recorder`]
     /// so `RequestRecord`, `SQLite`, and the JSONL request log remain body-free.
     body_log: Option<Arc<BodyLog>>,
+    semantic: Option<Arc<crate::semantic::SemanticController>>,
+    jev: Arc<crate::jev::JevController>,
+    search: Arc<crate::search::SearchController>,
+    search_policy_cache: std::sync::Mutex<search_policy::Cache>,
 }
 
 /// An Agent router that has already passed every fallible construction step.
@@ -1776,6 +1885,12 @@ fn settle_estimated_cost(
     record: &mut RequestRecord,
     served: &UpstreamModel,
 ) {
+    if record.subscription_billing {
+        record.cost_kind = CostKind::Unknown;
+        record.cost_micros = None;
+        record.price_version = None;
+        return;
+    }
     if record.cost_kind == CostKind::Actual {
         return;
     }
@@ -1970,6 +2085,14 @@ pub fn classify_layers(signal: &ProbeSignal) -> Vec<StageResult> {
             }
         })
         .collect()
+}
+
+fn validate_provider_health_content(content: &Content) -> Result<(), String> {
+    let text = content_text(content).collect::<String>();
+    if text.trim().is_empty() {
+        return Err("Provider returned no structured text".to_owned());
+    }
+    validate_provider_health_json(&text)
 }
 
 fn validate_provider_health_json(text: &str) -> Result<(), String> {
@@ -2245,6 +2368,10 @@ impl Gateway {
             south_runtime,
             recorder,
             body_log: None,
+            semantic: None,
+            jev: crate::jev::JevController::shared(&config.data.dir),
+            search: crate::search::SearchController::shared(&config.data.dir),
+            search_policy_cache: std::sync::Mutex::new(search_policy::Cache::default()),
         })
     }
 
@@ -2260,6 +2387,16 @@ impl Gateway {
     #[must_use]
     pub fn with_body_log(mut self, body_log: Arc<BodyLog>) -> Self {
         self.body_log = Some(body_log);
+        self
+    }
+
+    /// Attaches the isolated desktop classifier without changing ordinary hosts.
+    #[must_use]
+    pub fn with_semantic_routing(
+        mut self,
+        controller: Arc<crate::semantic::SemanticController>,
+    ) -> Self {
+        self.semantic = Some(controller);
         self
     }
 
@@ -2473,12 +2610,12 @@ impl Gateway {
         json!({ "now_ms": now_ms, "accounts": accounts })
     }
 
-    /// One pass of active quota polling: for each upstream with a balance
-    /// endpoint we understand (currently `OpenRouter`'s `/key`), fetch its
-    /// remaining credits and record them as an authoritative reading. This is
+    /// One pass of active quota polling: query recognized official API-key
+    /// endpoints for balances or plan windows and retain complete reports. This is
     /// the L2 path for providers that do not stamp their allowance on chat
     /// responses. Best-effort: any upstream that errors is skipped, never
-    /// failing the pass; it touches only the balance endpoint, never chat.
+    /// failing the pass. Failed or incomplete readings preserve the last report.
+    /// It touches only read-only quota endpoints, never chat.
     ///
     /// # Panics
     ///
@@ -2495,10 +2632,28 @@ impl Gateway {
                 return;
             }
         };
-        let now_ms = unix_millis();
         for (name, upstream) in &self.upstreams {
+            if self.local_upstreams.contains(name)
+                || crate::config::is_subscription_provider(&upstream.config.provider)
+                || upstream.auth_config.as_ref().is_some_and(|auth| {
+                    auth.codex_account.is_some()
+                        || auth.chatgpt_account.is_some()
+                        || auth.local_subscription.is_some()
+                })
+            {
+                continue;
+            }
             let base = String::from(upstream.config.base_url.clone());
-            if !crate::quota_fetch::is_openrouter(&base) {
+            let Some(endpoint) = crate::quota_fetch::quota_endpoint(&base) else {
+                continue;
+            };
+            if !endpoint.accepts_models(
+                upstream
+                    .config
+                    .models
+                    .iter()
+                    .map(|model| model.model.as_str()),
+            ) {
                 continue;
             }
             let Some(auth) = upstream.config.auth.as_ref() else {
@@ -2507,24 +2662,35 @@ impl Gateway {
             let Ok(key) = self.secrets.resolve(name, auth.as_str()) else {
                 continue;
             };
-            let url = format!("{}/key", base.trim_end_matches('/'));
-            let authorization = format!("Bearer {key}");
+            // Order readings by request start. A slow old poll cannot replace
+            // a newer report, and its reset delta uses this same clock anchor.
+            let now_ms = unix_millis();
+            let authorization = endpoint.authorization(&key);
             let Ok(response) = agent
-                .get(&url)
+                .get(&endpoint.url)
                 .header("authorization", authorization.as_str())
+                .header("accept", "application/json")
                 .call()
             else {
                 continue;
             };
-            let Ok(body) = response.into_body().read_to_string() else {
+            let status = response.status().as_u16();
+            if !(200..300).contains(&status) {
+                continue;
+            }
+            let Ok(body) = response
+                .into_body()
+                .into_with_config()
+                .limit(1 << 20)
+                .read_to_string()
+            else {
                 continue;
             };
-            if let Some(window) = crate::quota_fetch::parse_openrouter_key(&body) {
-                self.quota.lock().expect("quota lock").note_authoritative(
-                    name.as_str(),
-                    now_ms,
-                    vec![window],
-                );
+            if let Some(windows) = endpoint.parse_response(status, &body, now_ms) {
+                self.quota
+                    .lock()
+                    .expect("quota lock")
+                    .note_polled(name.as_str(), now_ms, windows);
             }
         }
     }
@@ -2940,6 +3106,8 @@ impl Gateway {
                 "properties": {},
                 "additionalProperties": false
             }),
+            cache_control: None,
+            strict: None,
         });
         let response = self.probe_request(upstream_name, upstream, &request, http)?;
         if response.choices.iter().any(|choice| {
@@ -2983,16 +3151,12 @@ impl Gateway {
             }),
         });
         let response = self.probe_request(upstream_name, upstream, &request, http)?;
-        let text = response
+        let content = response
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_ref())
-            .and_then(|content| match content {
-                Content::Text(text) => Some(text.as_str()),
-                Content::Parts(_) => None,
-            })
             .ok_or_else(|| "Provider returned no structured text".to_owned())?;
-        validate_provider_health_json(text)
+        validate_provider_health_content(content)
     }
 
     fn probe_stream_feature(
@@ -3135,6 +3299,15 @@ impl Gateway {
             let health = self.health.lock().expect("health lock");
             self.catalog
                 .iter()
+                .filter(|(target, _)| {
+                    quota_now_ms.is_none()
+                        || self
+                            .upstreams
+                            .get(target.upstream.as_str())
+                            .is_none_or(|upstream| {
+                                !crate::config::is_subscription_provider(&upstream.config.provider)
+                            })
+                })
                 .map(|(target, capability)| {
                     Candidate::new(
                         target.clone(),
@@ -3523,7 +3696,7 @@ impl Gateway {
                     &mut capturing_emit,
                     &mut record,
                 ) {
-                    Ok((served, outcome)) => self.settle(&mut record, &served, outcome),
+                    Ok((served, outcome)) => self.settle(ctx, &mut record, &served, outcome),
                     Err(refusal) => {
                         // Failed before any upstream served — a whole error response
                         // the client can still receive; no upstream health verdict.
@@ -3555,7 +3728,11 @@ impl Gateway {
             }
         }
 
+        ctx.apply_host_loop_accounting(&mut record);
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // Snapshot request input handling even when routing or every attempt failed.
+        // Attempt accounting is reset between upstreams and cannot own this value.
+        record.classifier_input = ctx.classifier_input();
         if record_body
             && let Some(body_log) = &self.body_log
             && let Err(error) = body_log.record_with_http_trace(
@@ -3741,7 +3918,7 @@ impl Gateway {
             extensions,
         };
 
-        let request = match agent.plugin.normalize_inbound(&envelope) {
+        let mut request = match agent.plugin.normalize_inbound(&envelope) {
             Ok(request) => {
                 record_conversion(
                     record,
@@ -3772,13 +3949,22 @@ impl Gateway {
         // namespace) that `normalize_inbound` flattened into plain functions.
         // The gateway only transports this blob; all Codex semantics live in the
         // agent plugin, which rebuilds its restore map from it at render time.
-        let inbound_tools = envelope.body.get("tools").cloned().unwrap_or(Value::Null);
+        // Newer Codex clients carry declarations in a developer input item.
+        // Only the Responses adapter can supply this validated private handoff.
+        let projected_tools = request.extensions.remove(RESPONSE_TOOLS_EXTENSION);
+        let inbound_tools = if agent.protocol == "openai-responses" {
+            projected_tools
+        } else {
+            None
+        }
+        .unwrap_or_else(|| envelope.body.get("tools").cloned().unwrap_or(Value::Null));
         Ok((request, hints, inbound_tools))
     }
 
     /// The pipeline. Returns `Err` only before anything was emitted, so the
     /// caller can still shape a whole error response.
     #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
+    #[allow(clippy::too_many_lines)]
     fn chat_inner(
         &self,
         ctx: &RequestContext,
@@ -3792,6 +3978,20 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        if let Some(served) = self.try_search_policy(
+            ctx,
+            agent,
+            router,
+            method,
+            path,
+            headers,
+            body,
+            routing_model,
+            emit,
+            record,
+        )? {
+            return Ok(served);
+        }
         if agent.protocol == "anthropic-messages"
             && let Some(served) = self.try_web_search(
                 ctx,
@@ -3860,7 +4060,7 @@ impl Gateway {
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
         let decision = self
-            .route_with_mode(router, &request, &hints, &candidates, &session)
+            .route_with_semantics(ctx, router, &request, &hints, &candidates, &session)
             .map_err(|error| route_error(&error))?;
         eprintln!(
             "route -> {} ({:?}), {} fallback(s)",
@@ -3922,13 +4122,33 @@ impl Gateway {
     /// written. Only [`StreamOutcome::Complete`] settles as success; every other
     /// outcome records a truthful failure (or a client cancel that is nobody's
     /// fault). Nothing outside this function may set `record.status = 200`.
-    fn settle(&self, record: &mut RequestRecord, served: &UpstreamModel, outcome: StreamOutcome) {
+    fn settle(
+        &self,
+        ctx: &RequestContext,
+        record: &mut RequestRecord,
+        served: &UpstreamModel,
+        outcome: StreamOutcome,
+    ) {
         let (upstream, model) = (&served.upstream, served.model.as_str());
 
         // Price the exchange once, here, and pin the table version onto the
         // record so a later price change never re-values it. An unpriced model
         // leaves cost unknown (None), never a claimed-free zero.
-        settle_estimated_cost(&self.pricing, record, served);
+        if !ctx.apply_host_loop_accounting(record) {
+            settle_estimated_cost(&self.pricing, record, served);
+        }
+        if self
+            .upstreams
+            .get(upstream.as_str())
+            .is_some_and(|upstream| {
+                crate::config::is_subscription_provider(&upstream.config.provider)
+            })
+        {
+            record.subscription_billing = true;
+            record.cost_micros = None;
+            record.cost_kind = token_station_metrics::CostKind::Unknown;
+            record.price_version = None;
+        }
         match outcome {
             StreamOutcome::Complete => {
                 record.status = 200;
@@ -4493,7 +4713,33 @@ mod layered_health_tests {
 
 #[cfg(test)]
 mod feature_probe_tests {
-    use super::validate_provider_health_json;
+    use super::{validate_provider_health_content, validate_provider_health_json};
+    use token_station_protocol::{Content, ContentPart};
+
+    #[test]
+    fn structured_probe_reads_split_visible_text_without_using_thinking() {
+        let content = Content::Parts(vec![
+            ContentPart::Thinking {
+                thinking: "Internal reasoning".into(),
+                signature: None,
+            },
+            ContentPart::Text {
+                text: r#"{"ok":"#.into(),
+                cache_control: None,
+            },
+            ContentPart::Text {
+                text: "true}".into(),
+                cache_control: None,
+            },
+        ]);
+        assert!(validate_provider_health_content(&content).is_ok());
+        let reasoning_only = Content::Parts(vec![ContentPart::Thinking {
+            thinking: r#"{"ok":true}"#.into(),
+            signature: None,
+        }]);
+        assert!(validate_provider_health_content(&reasoning_only).is_err());
+        assert!(validate_provider_health_content(&Content::Parts(vec![])).is_err());
+    }
 
     #[test]
     fn structured_probe_requires_the_exact_requested_shape() {
@@ -5148,6 +5394,21 @@ mod estimation_eligibility_tests {
     }
 
     #[test]
+    fn subscription_usage_never_becomes_api_cost() {
+        let mut record = RequestRecord::begin(0, "openai");
+        record.subscription_billing = true;
+        record.cost_kind = CostKind::Actual;
+        record.cost_micros = Some(17);
+        record.price_version = Some(1);
+        let target = UpstreamModel::new(UpstreamRef::new("plan").unwrap(), "gpt-example");
+        settle_estimated_cost(&crate::pricing::PriceTable::builtin(), &mut record, &target);
+        assert_eq!(
+            (record.cost_kind, record.cost_micros, record.price_version),
+            (CostKind::Unknown, None, None)
+        );
+    }
+
+    #[test]
     fn estimation_eligibility_realtime_rejects_ttl_overlap_but_preserves_actual_cost() {
         let pricing = crate::pricing::PriceTable::builtin();
         let target = UpstreamModel {
@@ -5238,12 +5499,48 @@ mod estimation_eligibility_tests {
 mod credential_presentation_tests {
     use super::Gateway;
     use serde_json::json;
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
+    use std::net::TcpStream;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use token_station_protocol::{Auth, ErrorCode, HttpMethod, HttpRequestDescriptor, SecretRef};
 
     const KEY: &str = "sk-combined-test";
+    const MAX_MOCK_HEADER_BYTES: usize = 16 * 1024;
+    const MAX_MOCK_BODY_BYTES: usize = 64 * 1024;
+
+    struct MockSocket<'socket> {
+        stream: &'socket mut TcpStream,
+        deadline: Instant,
+    }
+
+    impl MockSocket<'_> {
+        fn remaining(&self) -> io::Result<Duration> {
+            self.deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    impl Read for MockSocket<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.stream.set_read_timeout(Some(self.remaining()?))?;
+            self.stream.read(bytes)
+        }
+    }
+
+    impl Write for MockSocket<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.stream.set_write_timeout(Some(self.remaining()?))?;
+            self.stream.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.remaining()?;
+            self.stream.flush()
+        }
+    }
 
     /// One upstream on `base_url` whose `provider_api_key` slot reads `KEY` from a file.
     fn gateway(base_url: &str) -> Gateway {
@@ -5303,23 +5600,122 @@ mod credential_presentation_tests {
             .into()
     }
 
+    fn read_mock_request(reader: &mut impl Read) -> io::Result<(String, Vec<u8>)> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let boundary = loop {
+            if let Some(boundary) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                if boundary + 4 > MAX_MOCK_HEADER_BYTES {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                break boundary + 4;
+            }
+            if bytes.len() > MAX_MOCK_HEADER_BYTES {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let count = reader.read(&mut chunk)?;
+            if count == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+        };
+        let mut body = bytes.split_off(boundary);
+        let head =
+            String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        let mut length = None;
+        for line in head.lines().skip(1).filter(|line| !line.is_empty()) {
+            let (name, value) = line
+                .split_once(':')
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if name.eq_ignore_ascii_case("content-length") {
+                if length.is_some() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                length = Some(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?,
+                );
+            }
+        }
+        let length = length
+            .filter(|length| *length <= MAX_MOCK_BODY_BYTES)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        if body.len() > length {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let prefetched = body.len();
+        body.resize(length, 0);
+        reader.read_exact(&mut body[prefetched..])?;
+        Ok((head, body))
+    }
+
+    #[test]
+    fn credential_mock_consumes_complete_bodies_across_every_request_split() {
+        let head = "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 19\r\n\r\n";
+        let body = br#"{"model":"gpt-5.5"}"#;
+        assert_eq!(body.len(), 19);
+        let bytes = [head.as_bytes(), body].concat();
+        for split in 0..=bytes.len() {
+            let mut reader =
+                std::io::Cursor::new(&bytes[..split]).chain(std::io::Cursor::new(&bytes[split..]));
+            let (received_head, received_body) = read_mock_request(&mut reader).unwrap();
+            assert_eq!(received_head, head);
+            assert_eq!(received_body, body, "split={split}");
+        }
+    }
+
+    #[test]
+    fn credential_mock_rejects_ambiguous_oversized_and_truncated_requests() {
+        for request in [
+            "POST / HTTP/1.1\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: 65537\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n".to_owned(),
+            "POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\n{}".to_owned(),
+            "x".repeat(MAX_MOCK_HEADER_BYTES + 1),
+        ] {
+            assert_eq!(
+                read_mock_request(&mut io::Cursor::new(request))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let truncated = "POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\n{}";
+        assert_eq!(
+            read_mock_request(&mut io::Cursor::new(truncated))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
     #[test]
     fn the_combined_arm_presents_one_secret_as_bearer_and_as_its_header() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let upstream = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut bytes = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut chunk).unwrap();
-                assert!(count > 0, "peer closed before the request head");
-                bytes.extend_from_slice(&chunk[..count]);
-            }
+            let mut stream = MockSocket {
+                stream: &mut stream,
+                deadline: Instant::now() + Duration::from_secs(5),
+            };
+            let (head, body) = read_mock_request(&mut stream).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"model":"gpt-5.5"})
+            );
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
                 .unwrap();
-            String::from_utf8(bytes).unwrap().to_ascii_lowercase()
+            stream.flush().unwrap();
+            head.to_ascii_lowercase()
         });
 
         let gateway = gateway(&base_url);

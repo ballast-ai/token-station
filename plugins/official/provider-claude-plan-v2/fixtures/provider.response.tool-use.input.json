@@ -1,0 +1,7 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": "{\"id\": \"msg_3\", \"model\": \"claude-sonnet-4\", \"content\": [{\"type\": \"text\", \"text\": \"Checking.\"}, {\"type\": \"tool_use\", \"id\": \"toolu_1\", \"name\": \"get_weather\", \"input\": {\"city\": \"Beijing\"}}], \"stop_reason\": \"tool_use\", \"usage\": {\"input_tokens\": 30, \"output_tokens\": 12}}"
+}

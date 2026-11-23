@@ -67,6 +67,7 @@ const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
         IneligibleV1::Body => SouthFallbackReason::Body,
         IneligibleV1::SecretSource => SouthFallbackReason::SecretSource,
         IneligibleV1::Headers => SouthFallbackReason::Headers,
+        IneligibleV1::RootRpcPath => SouthFallbackReason::RootRpcPath,
     }
 }
 
@@ -104,9 +105,13 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<HttpRequestDescriptor, ErrorEnvelope> {
         let provider_protocol = upstream.config.provider.as_str();
-        let descriptor = upstream
-            .plugin
-            .build_http_request(request, &upstream.config)
+        let sealed = super::component_request::seal(&upstream.config, request);
+        let descriptor = super::plan_stops::prepare(provider_protocol, &sealed)
+            .and_then(|projected| {
+                upstream
+                    .plugin
+                    .build_http_request(&projected, &upstream.config)
+            })
             .inspect_err(|error| {
                 record_conversion(
                     record,
@@ -350,6 +355,14 @@ impl Gateway {
         let mut chat_response = upstream
             .plugin
             .parse_response(&parts)
+            .and_then(|mut response| {
+                super::plan_stops::apply(
+                    upstream.config.provider.as_str(),
+                    request,
+                    &mut response,
+                )?;
+                Ok(response)
+            })
             .inspect_err(|error| {
                 record_conversion(
                     record,
@@ -360,8 +373,7 @@ impl Gateway {
                     Some(error.code),
                 );
             })?;
-        chat_response.usage =
-            canonical_provider_usage(upstream.config.provider.as_str(), chat_response.usage);
+        ctx.restore_tool_aliases(&mut chat_response);
         record_conversion(
             record,
             ConversionStage::ProviderResponse,
@@ -434,13 +446,14 @@ impl Gateway {
             body_mode,
             upstream.auth_arms.clone(),
         )
+        .with_secret_headers(upstream.secret_headers.clone())
     }
 
     /// Resolves the descriptor into a real HTTP exchange.
     ///
     /// The credential is read here, written into one header, and goes out of
     /// scope with the request. It never touches a log, an error, or the guest.
-    #[allow(clippy::too_many_arguments)] // the engine boundary keeps every eligibility fact explicit
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep the transport admission and execution boundary together.
     pub(super) fn send_provider_call(
         &self,
         ctx: &RequestContext,
@@ -452,6 +465,16 @@ impl Gateway {
         attempt_deadline: std::time::Instant,
         actual_engine: &mut ProviderCallOutcome,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        if upstream.config.provider == "claude-plan" {
+            *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::ConfiguredLegacy);
+            return self.send_claude_call(
+                upstream,
+                descriptor,
+                ctx.remaining().min(attempt_timeout),
+                Some(&ctx.token().async_token()),
+                upstream_body_limit(ctx),
+            );
+        }
         if upstream.provider_call == ConfiguredProviderCallEngine::Legacy {
             *actual_engine = ProviderCallOutcome::legacy(SouthFallbackReason::ConfiguredLegacy);
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
@@ -567,6 +590,39 @@ impl Gateway {
         }
     }
 
+    fn send_claude_call(
+        &self,
+        upstream: &Upstream,
+        descriptor: &HttpRequestDescriptor,
+        timeout: Duration,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+        max_body_bytes: u64,
+    ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        if self.egress.policy.mode != crate::config::EgressMode::Direct {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::Capability,
+                400,
+                "The local Claude process does not support the configured proxy. Use direct egress.",
+            ));
+        }
+        let reference = upstream
+            .auth_config
+            .as_ref()
+            .and_then(|auth| auth.local_subscription.as_ref())
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCode::Auth,
+                    401,
+                    "Claude requires a bound local account",
+                )
+            })?;
+        let manager =
+            crate::local_subscriptions::claude::AccountManager::new(self.secrets.data_dir());
+        manager
+            .execute(&reference.id, descriptor, timeout, cancellation)
+            .map(|parts| UpstreamResponse::from_parts_with_limit(parts, max_body_bytes))
+    }
+
     fn send(
         &self,
         ctx: &RequestContext,
@@ -589,6 +645,17 @@ impl Gateway {
         descriptor: &HttpRequestDescriptor,
         upstream_name: &str,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        if let Some(upstream) = self.upstreams.get(upstream_name)
+            && upstream.config.provider == "claude-plan"
+        {
+            return self.send_claude_call(
+                upstream,
+                descriptor,
+                Duration::from_secs(30),
+                None,
+                MAX_UPSTREAM_BODY,
+            );
+        }
         let response = self.send_raw_with(http, descriptor, upstream_name, MAX_UPSTREAM_BODY)?;
         EgressPolicy::reject_redirect(response.status)?;
         Ok(response)
@@ -743,8 +810,10 @@ impl Gateway {
                             );
                         }
                     };
-                    let events =
-                        canonical_provider_events(upstream.config.provider.as_str(), events);
+                    let mut events = events;
+                    for event in &mut events {
+                        ctx.restore_tool_event(event);
+                    }
                     for event in &events {
                         if let StreamEvent::Usage { usage } = event {
                             absorb_record_usage(record, *usage);
@@ -902,7 +971,10 @@ impl Gateway {
                         );
                     }
                 };
-                let events = canonical_provider_events(upstream.config.provider.as_str(), events);
+                let mut events = events;
+                for event in &mut events {
+                    ctx.restore_tool_event(event);
+                }
                 for event in &events {
                     if let StreamEvent::Usage { usage } = event {
                         absorb_record_usage(record, *usage);

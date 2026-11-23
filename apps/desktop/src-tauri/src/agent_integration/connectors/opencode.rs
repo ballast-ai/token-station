@@ -242,6 +242,7 @@ mod tests {
     #[test]
     fn unconfigured_route_is_rejected_before_writing() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -265,6 +266,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -292,6 +294,7 @@ mod tests {
         let mut document =
             parse_source_bytes(Some(source), DocumentFormat::Json5, "OpenCode").unwrap();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("fixture-local-key"),
             adapter_ready: true,
@@ -328,6 +331,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -385,6 +389,7 @@ mod tests {
         )
         .unwrap();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -396,6 +401,7 @@ mod tests {
         )
         .unwrap();
         let refreshed_input = ConnectInput {
+            browser_search_enabled: false,
             model_metadata: Some(&refreshed),
             ..input
         };

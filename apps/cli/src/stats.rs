@@ -88,6 +88,8 @@ pub struct Aggregate {
     /// was not covered by the price table.
     pub priced_requests: u64,
     pub unpriced_requests: u64,
+    /// Requests charged against subscription allowance, without an API dollar estimate.
+    pub subscription_requests: u64,
     pub missing_price_requests: u64,
     pub missing_usage_requests: u64,
     pub actual_cost_requests: u64,
@@ -128,13 +130,13 @@ pub fn parse_since(spec: &str) -> Result<Option<u64>, String> {
         return Ok(None);
     }
     let refused = || format!("`{spec}` is not a window; use all, <N>h or <N>d");
-    let (number, unit) = spec.split_at(spec.len().saturating_sub(1));
+    let (number, multiplier) = spec
+        .strip_suffix('h')
+        .map(|number| (number, 1))
+        .or_else(|| spec.strip_suffix('d').map(|number| (number, 24)))
+        .ok_or_else(refused)?;
     let count: u64 = number.parse().map_err(|_| refused())?;
-    let hours = match unit {
-        "h" => count,
-        "d" => count.saturating_mul(24),
-        _ => return Err(refused()),
-    };
+    let hours = count.saturating_mul(multiplier);
     Ok(Some(hours.saturating_mul(60 * 60 * 1000)))
 }
 
@@ -204,6 +206,81 @@ pub fn collect_filtered(
     {
         return Err("stats range end_ms must be after start_ms".to_string());
     }
+    let connection = open_stats_connection(db_path)?;
+    let rows = select_rows(&connection, start_ms, end_ms, filter)?;
+
+    let total = aggregate(rows.iter());
+    let groups = match group_by {
+        None => Vec::new(),
+        Some(by) => {
+            let mut buckets: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
+            for row in &rows {
+                buckets.entry(row.key(by)).or_default().push(row);
+            }
+            buckets
+                .into_iter()
+                .map(|(key, rows)| (key, aggregate(rows.into_iter())))
+                .collect()
+        }
+    };
+
+    Ok(Report { total, groups })
+}
+
+/// Constant-memory spending totals for one Agent and one budget period.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BudgetSpend {
+    pub cost_micros: Option<i64>,
+    pub unpriced_requests: u64,
+}
+
+/// Read spending without retaining latencies or imposing the percentile row limit.
+///
+/// # Errors
+/// Rejects invalid periods, unreadable stores, and incompatible schemas.
+pub fn collect_budget_spend(
+    db_path: &Path,
+    agent_id: &str,
+    start_ms: Option<u64>,
+    end_ms: Option<u64>,
+) -> Result<BudgetSpend, String> {
+    if start_ms
+        .zip(end_ms)
+        .is_some_and(|(start, end)| start >= end)
+    {
+        return Err("stats range end_ms must be after start_ms".to_owned());
+    }
+    let connection = open_stats_connection(db_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT CASE WHEN subscription_billing = 1 THEN NULL ELSE cost_micros END FROM requests
+         WHERE agent_id = ?1 AND started_at_ms >= ?2
+           AND (?3 IS NULL OR started_at_ms < ?3)",
+        )
+        .map_err(|error| format!("budget query: {error}"))?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![
+                agent_id,
+                i64::try_from(start_ms.unwrap_or(0)).unwrap_or(i64::MAX),
+                end_ms.map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+            ],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(|error| format!("budget query: {error}"))?;
+    let mut total = BudgetSpend::default();
+    for row in rows {
+        match row.map_err(|error| format!("budget query: {error}"))? {
+            Some(cost) => {
+                total.cost_micros = Some(total.cost_micros.unwrap_or(0).saturating_add(cost));
+            }
+            None => total.unpriced_requests = total.unpriced_requests.saturating_add(1),
+        }
+    }
+    Ok(total)
+}
+
+fn open_stats_connection(db_path: &Path) -> Result<Connection, String> {
     if !db_path.exists() {
         return Err(format!(
             "no metrics store at `{}` — it is created when `serve` first runs with data.metrics \
@@ -227,24 +304,7 @@ pub fn collect_filtered(
         ));
     }
 
-    let rows = select_rows(&connection, start_ms, end_ms, filter)?;
-
-    let total = aggregate(rows.iter());
-    let groups = match group_by {
-        None => Vec::new(),
-        Some(by) => {
-            let mut buckets: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
-            for row in &rows {
-                buckets.entry(row.key(by)).or_default().push(row);
-            }
-            buckets
-                .into_iter()
-                .map(|(key, rows)| (key, aggregate(rows.into_iter())))
-                .collect()
-        }
-    };
-
-    Ok(Report { total, groups })
+    Ok(connection)
 }
 
 /// Reads the receipts in `[start_ms, end_ms)` that pass `filter`, with the
@@ -272,7 +332,7 @@ fn select_rows(
                     (SELECT south_fallback_reason FROM attempts
                       WHERE attempts.request_id = requests.request_id
                       ORDER BY ordinal DESC LIMIT 1),
-                    usage_semantics, usage_observation, cost_kind
+                    usage_semantics, usage_observation, cost_kind, subscription_billing
              FROM requests
              WHERE started_at_ms >= ?1
                AND (?2 IS NULL OR started_at_ms < ?2)
@@ -317,6 +377,7 @@ fn select_rows(
                     legacy_input: row.get::<_, String>(17)? == "provider_reported_v1",
                     observation: crate::store::read_usage_observation(row, 18)?,
                     cost_kind: row.get(19)?,
+                    subscription_billing: row.get(20)?,
                 })
             },
         )
@@ -438,6 +499,7 @@ struct Row {
     legacy_input: bool,
     observation: Option<token_station_metrics::UsageObservation>,
     cost_kind: String,
+    subscription_billing: bool,
 }
 
 impl Row {
@@ -579,6 +641,13 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         bucket.reasoning_tokens = bucket
             .reasoning_tokens
             .saturating_add(row.reasoning_tokens.unwrap_or(0));
+        // Subscription allowance has no per-request API dollar price. Keep
+        // its unknown amount distinct from missing API prices or usage.
+        if row.subscription_billing {
+            bucket.subscription_requests += 1;
+            bucket.unpriced_requests += 1;
+            continue;
+        }
         if let Some(cost) = row.cost_micros {
             bucket.cost_micros = Some(bucket.cost_micros.unwrap_or(0).saturating_add(cost));
             bucket.priced_requests = bucket.priced_requests.saturating_add(1);
@@ -641,6 +710,96 @@ mod tests {
     use std::path::PathBuf;
     use token_station_metrics::{RecordedDecidedBy, Recorder, RequestRecord, RoutingRecord};
     use token_station_router_core::RequestFeatures;
+
+    #[test]
+    fn malformed_unicode_windows_return_errors_without_panicking() {
+        for input in ["1天", "小时", "💥", "1é", "24小时", "\0"] {
+            assert!(parse_since(input).is_err(), "invalid window: {input:?}");
+        }
+        assert_eq!(parse_since("0h"), Ok(Some(0)));
+        assert_eq!(parse_since("all"), Ok(None));
+    }
+
+    #[test]
+    fn subscription_usage_stays_unknown_without_claiming_missing_api_prices() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-subscription-{}.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut plan = record(100, 1, 200, Some("plan-account"), None);
+        plan.agent_id = Some("claude-code".into());
+        plan.subscription_billing = true;
+        plan.usage = Some(token_station_protocol::Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Default::default()
+        });
+        store.record(&plan);
+        let report = super::collect(&path, None, None).unwrap().total;
+        assert_eq!(report.cost_micros, None);
+        assert_eq!(report.priced_requests, 0);
+        assert_eq!(report.unpriced_requests, 1);
+        assert_eq!(report.subscription_requests, 1);
+        assert_eq!(report.missing_price_requests, 0);
+        assert_eq!(report.missing_usage_requests, 0);
+        let budget = super::collect_budget_spend(&path, "claude-code", None, None).unwrap();
+        assert_eq!(budget.cost_micros, None);
+        assert_eq!(budget.unpriced_requests, 1);
+        let mut api = record(101, 1, 200, Some("api-account"), None);
+        api.cost_kind = token_station_metrics::CostKind::Actual;
+        api.cost_micros = Some(123);
+        store.record(&api);
+        let report = super::collect(&path, None, None).unwrap().total;
+        assert_eq!(report.cost_micros, Some(123));
+        assert_eq!(report.priced_requests, 1);
+        assert_eq!(report.unpriced_requests, 1);
+        assert_eq!(report.subscription_requests, 1);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn budget_spending_preserves_unknown_zero_and_saturating_costs() {
+        let path =
+            std::env::temp_dir().join(format!("ts-budget-spend-{}.sqlite", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).unwrap();
+        let empty = super::collect_budget_spend(&path, "codex", None, None).unwrap();
+        assert_eq!(empty, super::BudgetSpend::default());
+        for cost in [Some(0), None, Some(i64::MAX), Some(1)] {
+            let mut receipt = record(100, 1, 200, Some("provider"), None);
+            receipt.agent_id = Some("codex".into());
+            receipt.cost_micros = cost;
+            receipt.cost_kind = if cost.is_some() {
+                token_station_metrics::CostKind::Actual
+            } else {
+                token_station_metrics::CostKind::Unknown
+            };
+            store.record(&receipt);
+        }
+        let spend = super::collect_budget_spend(&path, "codex", Some(100), Some(101)).unwrap();
+        assert_eq!(spend.cost_micros, Some(i64::MAX));
+        assert_eq!(spend.unpriced_requests, 1);
+        let historical = super::collect_filtered(
+            &path,
+            Some(100),
+            Some(101),
+            None,
+            StatsFilter {
+                agent_id: Some("codex"),
+                ..StatsFilter::default()
+            },
+        )
+        .unwrap()
+        .total;
+        assert_eq!(spend.cost_micros, historical.cost_micros);
+        assert_eq!(spend.unpriced_requests, historical.unpriced_requests);
+        assert!(super::collect_budget_spend(&path, "codex", Some(101), Some(100)).is_err());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
 
     fn record(
         started_at_ms: u64,

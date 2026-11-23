@@ -56,7 +56,45 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
 /// - v13: records whether input usage is legacy provider-reported or canonical.
-pub const SCHEMA_VERSION: u32 = 14;
+/// - v14: adds allowlisted usage observations.
+/// - v15: admits the content-free classifier decision reason.
+/// - v16: records request-scoped classifier input handling without content.
+/// - v17: preserves optional task-scoped heuristic counts for replay.
+/// - v18: marks subscription allowance so API prices cannot backfill its receipts.
+/// - v19: records the explicit Host transport boundary for root RPC action paths.
+pub const SCHEMA_VERSION: u32 = 19;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierKind {
+    Scx,
+    Jev,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierInputHandling {
+    Full,
+    Reduced,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierInputReason {
+    ByteLimit,
+    TokenLimit,
+}
+
+/// Input handling for this request, recorded before classification can fail.
+/// Full refers only to eligible text, not excluded system or tool content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassifierInputDiagnostic {
+    pub classifier: ClassifierKind,
+    pub handling: ClassifierInputHandling,
+    pub reason: Option<ClassifierInputReason>,
+}
 
 /// Allowlisted numeric observations. Missing fields remain unknown, including
 /// for receipts written before this metadata existed. Input is inclusive.
@@ -65,6 +103,10 @@ pub struct UsageObservation {
     /// True when parsing or the attempt did not produce a complete observation.
     #[serde(default)]
     pub incomplete: bool,
+    /// This aggregate cannot be repriced from its final model and total tokens.
+    /// Earlier attempts used other prices or reported an actual charge.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cost_requires_attempt_pricing: bool,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
@@ -78,6 +120,7 @@ impl UsageObservation {
     /// Merge snapshots field by field. An explicitly reported zero is a value.
     pub fn absorb(&mut self, later: Self) {
         self.incomplete |= later.incomplete;
+        self.cost_requires_attempt_pricing |= later.cost_requires_attempt_pricing;
         macro_rules! keep {
             ($($field:ident),+ $(,)?) => {$(
                 if later.$field.is_some() { self.$field = later.$field; }
@@ -160,6 +203,7 @@ pub enum RecordedDecidedBy {
         kind: token_station_protocol::HintKind,
         value: String,
     },
+    Classifier,
     Heuristic {
         score: u32,
         matched_band_at_least: u32,
@@ -179,6 +223,7 @@ impl From<&DecidedBy> for RecordedDecidedBy {
                 kind: *kind,
                 value: value.clone(),
             },
+            DecidedBy::Classifier => Self::Classifier,
             DecidedBy::Heuristic { score, threshold } => Self::Heuristic {
                 score: *score,
                 matched_band_at_least: *threshold,
@@ -318,6 +363,8 @@ pub enum SouthFallbackReason {
     SecretSource,
     /// A descriptor header fails the safe-header contract.
     Headers,
+    /// The provider requires a root RPC action path that South cannot represent.
+    RootRpcPath,
     /// The provider dialect is outside the South slice.
     ///
     /// Retired: eligibility stopped matching a provider's *name* against a
@@ -353,6 +400,7 @@ impl SouthFallbackReason {
             Self::Body => "body",
             Self::SecretSource => "secret_source",
             Self::Headers => "headers",
+            Self::RootRpcPath => "root_rpc_path",
             Self::ProviderDialect => "provider_dialect",
             Self::ProviderPackageUnapproved => "provider_package_unapproved",
             Self::ResponseMetadata => "response_metadata",
@@ -367,7 +415,7 @@ impl SouthFallbackReason {
     /// `None` for a retired token and the row read failed, so `stats` and the
     /// desktop usage view errored for exactly the users who had history worth
     /// looking at. The three in [`Self::RETIRED`] stay here for that reason.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::ConfiguredLegacy,
         Self::BufferedModeCannotStream,
         Self::UnauthenticatedUpstream,
@@ -381,6 +429,7 @@ impl SouthFallbackReason {
         Self::Body,
         Self::SecretSource,
         Self::Headers,
+        Self::RootRpcPath,
         Self::ProviderDialect,
         Self::ProviderPackageUnapproved,
         Self::ResponseMetadata,
@@ -568,6 +617,47 @@ pub struct ConversionRecord {
     pub reason_detail: Option<ConversionReasonDetail>,
 }
 
+/// Content-free browser search outcomes. Never store a query or page content here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserSearchOutcome {
+    Succeeded,
+    InvalidArguments,
+    LimitExceeded,
+    Busy,
+    Timeout,
+    VerificationRequired,
+    NoResults,
+    BrowserUnavailable,
+    BrowserFailure,
+}
+
+/// A single bounded host search operation in the request log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSearchRecord {
+    pub ordinal: u32,
+    pub elapsed_ms: u64,
+    pub outcome: BrowserSearchOutcome,
+    /// The actual retrieval backend. The surrounding field name is retained for compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<u32>,
+}
+
+/// The selected search execution path. No external content is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchExecution {
+    Native,
+    Local,
+    LocalProtocolFallback,
+    LocalRejectionFallback,
+    LocalCachedFallback,
+}
+
 /// Everything one request leaves behind. One per request, exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestRecord {
@@ -623,6 +713,15 @@ pub struct RequestRecord {
     /// Ordered, content-free conversion stage outcomes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversion_reports: Vec<ConversionRecord>,
+    /// Browser operations, including recoverable failures. Available in the request log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browser_searches: Vec<BrowserSearchRecord>,
+    /// Content-free search execution path and local fallback reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_execution: Option<SearchExecution>,
+    /// Content-free classifier input handling. Missing historical data is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_input: Option<ClassifierInputDiagnostic>,
     /// `None` when the upstream reported none (or the stream carried no usage
     /// event). Absence is information; it is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -630,6 +729,10 @@ pub struct RequestRecord {
     /// Field presence observed before provider normalization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_observation: Option<UsageObservation>,
+    /// This request used subscription allowance, not usage-based API billing.
+    /// Numeric API costs and later price-table backfill must remain unavailable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subscription_billing: bool,
     /// Micro-units of the account currency. `None` when the model has no price
     /// (an unknown cost, never a claimed-free zero).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -667,8 +770,12 @@ impl RequestRecord {
             decision: None,
             attempt_records: Vec::new(),
             conversion_reports: Vec::new(),
+            browser_searches: Vec::new(),
+            search_execution: None,
+            classifier_input: None,
             usage: None,
             usage_observation: None,
+            subscription_billing: false,
             cost_micros: None,
             cost_kind: CostKind::Unknown,
             price_version: None,
@@ -732,6 +839,8 @@ pub struct ReceiptView {
     pub attempt_records: Vec<AttemptRecord>,
     #[serde(default)]
     pub conversion_reports: Vec<ConversionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_input: Option<ClassifierInputDiagnostic>,
 }
 
 /// The routing decision, flattened for storage.
@@ -780,6 +889,40 @@ impl Recorder for NoopRecorder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn classifier_input_diagnostics_are_closed_and_legacy_records_remain_unknown() {
+        use super::{
+            ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+            ClassifierKind,
+        };
+        let diagnostic = ClassifierInputDiagnostic {
+            classifier: ClassifierKind::Jev,
+            handling: ClassifierInputHandling::Reduced,
+            reason: Some(ClassifierInputReason::ByteLimit),
+        };
+        let value = serde_json::to_value(diagnostic).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"classifier":"jev","handling":"reduced","reason":"byte_limit"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClassifierInputDiagnostic>(value).unwrap(),
+            diagnostic
+        );
+        for value in [
+            serde_json::json!({"classifier":"caller-content","handling":"full","reason":null}),
+            serde_json::json!({"classifier":"scx","handling":"caller-content","reason":null}),
+            serde_json::json!({"classifier":"scx","handling":"skipped","reason":"caller-content"}),
+        ] {
+            assert!(serde_json::from_value::<ClassifierInputDiagnostic>(value).is_err());
+        }
+        let old = super::RequestRecord::begin(1, "openai");
+        let mut value = serde_json::to_value(old).unwrap();
+        value.as_object_mut().unwrap().remove("classifier_input");
+        let restored: super::RequestRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.classifier_input, None);
+    }
+
     use super::{ProviderCallEngine, RequestRecord, RoutingRecord};
     use token_station_protocol::Usage;
     use token_station_router_core::{
@@ -816,6 +959,23 @@ mod tests {
         assert_eq!(record.pool, "sota");
         assert_eq!(record.fallbacks, 1);
         assert_eq!(record.features.estimated_input_tokens, 42);
+    }
+
+    #[test]
+    fn classifier_reason_records_only_its_stable_token() {
+        let mut decision = decision();
+        decision.decided_by = DecidedBy::Classifier;
+        let record = RoutingRecord::from(&decision);
+        let encoded = serde_json::to_value(&record).expect("serializable record");
+        assert_eq!(
+            encoded["decided_by"],
+            serde_json::json!({"tier": "classifier"})
+        );
+        assert_eq!(
+            serde_json::from_value::<RoutingRecord>(encoded).expect("valid record"),
+            record
+        );
+        assert_eq!(record.decided_by, super::RecordedDecidedBy::Classifier);
     }
 
     #[test]

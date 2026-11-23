@@ -1,0 +1,16 @@
+{
+  "auth": "local_subscription_token",
+  "base_url": "https://cloudcode-pa.googleapis.com",
+  "google_client_version": "0.61.0",
+  "google_project": "fixture-project",
+  "models": [
+    {
+      "context_window": 128000,
+      "json_schema": true,
+      "model": "gemini-fixture",
+      "tool": true,
+      "vision": true
+    }
+  ],
+  "provider": "gemini-cli-plan"
+}

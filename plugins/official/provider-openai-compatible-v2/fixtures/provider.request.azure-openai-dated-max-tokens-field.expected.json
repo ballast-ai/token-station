@@ -1,0 +1,22 @@
+{
+  "method": "POST",
+  "url": "https://my-resource.openai.azure.com/openai/deployments/gpt-5-5-deployment/chat/completions?api-version=2024-10-21",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "gpt-5-5-deployment",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "max_tokens": 321
+  },
+  "auth": {
+    "scheme": "header",
+    "name": "api-key",
+    "secret": "provider_api_key"
+  }
+}

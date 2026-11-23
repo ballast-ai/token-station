@@ -1,0 +1,6 @@
+{
+  "chunks": [
+    "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}}\n\n",
+    "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"MAX_TOKENS\"}]}}\n\n"
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "provider_config": {
+    "provider": "anthropic",
+    "base_url": "https://api.anthropic.com",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "claude-x",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 200000,
+        "supported_parameters": []
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "claude-x",
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "Rules."
+          },
+          {
+            "type": "text",
+            "text": "Long reference text.",
+            "cache_control": {
+              "type": "ephemeral",
+              "ttl": "1h"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ],
+    "sampling": {
+      "max_output_tokens": 64
+    }
+  }
+}

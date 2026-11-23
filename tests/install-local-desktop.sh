@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly test_scx_experiment="${TOKEN_STATION_TEST_SCX_EXPERIMENT:-0}"
 readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/token-station-install-test.XXXXXX")"
 background_pid_one=""
 background_pid_two=""
@@ -36,8 +37,16 @@ make_fixture() {
   applications="$fixture/Applications"
   state="$fixture/state"
   fake_bin="$fixture/bin"
-  installed_app="$applications/token-station.app"
-  built_app="$repo/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/token-station.app"
+  local app_name="token-station.app"
+  test_bundle_id="com.tokenstation.desktop"
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    app_name="Token Station.app"
+    test_bundle_id="com.tokenstation.desktop.scx"
+  fi
+  installed_app="$applications/$app_name"
+  legacy_app="$applications/Token Station SCX.app"
+  stable_app="$applications/token-station.app"
+  built_app="$repo/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/$app_name"
 
   mkdir -p \
     "$repo/scripts" \
@@ -48,6 +57,10 @@ make_fixture() {
   touch "$built_app/Contents/Info.plist"
   touch "$installed_app/Contents/Info.plist" "$installed_app/Contents/MacOS/token-station"
   echo "old" > "$installed_app/old.version"
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    mkdir -p "$stable_app"
+    echo "protected-stable-version" > "$stable_app/stable.version"
+  fi
 
   cat > "$built_app/Contents/MacOS/token-station" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -59,7 +72,9 @@ exit 0
 SCRIPT
 
   sed \
-    -e "s|/Applications/token-station.app|$installed_app|g" \
+    -e "s|/Applications/token-station.app|$stable_app|g" \
+    -e "s|/Applications/Token Station SCX.app|$legacy_app|g" \
+    -e "s|/Applications/Token Station.app|$installed_app|g" \
     -e "s|/usr/libexec/PlistBuddy|$fake_bin/PlistBuddy|g" \
     "$project_root/scripts/install-local-desktop.sh" \
     > "$repo/scripts/install-local-desktop.sh"
@@ -69,6 +84,9 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 echo "$$" >> "$TEST_STATE/build.log"
+if [[ "${FAIL_BUILD:-0}" == "1" ]]; then
+  exit 33
+fi
 if [[ "${WAIT_BUILD:-0}" == "1" ]]; then
   while [[ ! -e "$TEST_STATE/release-build" ]]; do
     sleep 0.01
@@ -92,13 +110,17 @@ SCRIPT
 if [[ "$*" == *"CFBundleExecutable"* ]]; then
   echo token-station
 else
-  echo com.tokenstation.desktop
+  if [[ -f "$3.bundle-id" ]]; then
+    cat "$3.bundle-id"
+  else
+    echo "$TEST_BUNDLE_ID"
+  fi
 fi
 SCRIPT
 
   cat > "$fake_bin/codesign" <<'SCRIPT'
 #!/usr/bin/env bash
-if [[ "${FAIL_INSTALLED_CODESIGN:-0}" == "1" && "$*" == *"/Applications/token-station.app"* ]]; then
+if [[ "${FAIL_INSTALLED_CODESIGN:-0}" == "1" && "$*" == *"$TEST_INSTALLED_APP"* ]]; then
   exit 31
 fi
 exit 0
@@ -112,10 +134,16 @@ if [[ "${DITTO_FAIL:-0}" == "1" ]]; then
 fi
 mkdir -p "$2"
 cp -R "$1"/. "$2"/
+if [[ "${OCCUPY_TARGET_DURING_COPY:-0}" == "1" ]]; then
+  mkdir -p "$TEST_INSTALLED_APP"
+  echo "unrelated" > "$TEST_INSTALLED_APP/unrelated.version"
+fi
 SCRIPT
 
   cat > "$fake_bin/osascript" <<'SCRIPT'
 #!/usr/bin/env bash
+echo "quit" >> "$TEST_STATE/quit.log"
+rm -f "$TEST_STATE/legacy-running"
 exit 0
 SCRIPT
 
@@ -137,6 +165,10 @@ SCRIPT
 
   cat > "$fake_bin/pgrep" <<'SCRIPT'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TEST_STATE/pgrep.log"
+if [[ -e "$TEST_STATE/legacy-running" && "$*" == *"$TEST_LEGACY_APP/Contents/MacOS/token-station"* ]]; then
+  exit 0
+fi
 if [[ -e "$TEST_STATE/opened" && "${RUNNING_AFTER_OPEN:-0}" == "1" ]]; then
   exit 0
 fi
@@ -150,9 +182,24 @@ SCRIPT
 }
 
 run_installer() {
+  local installer_args=("$repo/scripts/install-local-desktop.sh")
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    installer_args+=(--scx-experiment)
+    local config_dir="$fixture/Library/Application Support/com.tokenstation.desktop.scx"
+    mkdir -p "$config_dir"
+    if [[ -f "$fixture/token-station.json" ]]; then
+      cp "$fixture/token-station.json" "$config_dir/token-station.json"
+    fi
+  fi
   env \
+    HOME="$fixture" \
     PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     TEST_STATE="$state" \
+    TEST_BUNDLE_ID="$test_bundle_id" \
+    TEST_INSTALLED_APP="$installed_app" \
+    TEST_LEGACY_APP="$legacy_app" \
+    FAIL_BUILD="${FAIL_BUILD:-0}" \
+    OCCUPY_TARGET_DURING_COPY="${OCCUPY_TARGET_DURING_COPY:-0}" \
     DITTO_FAIL="${DITTO_FAIL:-0}" \
     FAIL_INSTALLED_CODESIGN="${FAIL_INSTALLED_CODESIGN:-0}" \
     RUNNING_AFTER_OPEN="${RUNNING_AFTER_OPEN:-0}" \
@@ -162,7 +209,20 @@ run_installer() {
     WAIT_BUILD="${WAIT_BUILD:-0}" \
     TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS=0 \
     TOKEN_STATION_LAUNCH_CHECK_SAMPLES=2 \
-    "$repo/scripts/install-local-desktop.sh"
+    "${installer_args[@]}"
+}
+
+test_target_name_matches_the_selected_identity() {
+  make_fixture "target-name"
+  local args=(--print-target)
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    args+=(--scx-experiment)
+  fi
+  "$repo/scripts/install-local-desktop.sh" "${args[@]}" > "$fixture/target"
+  [[ "$(sed -n '1p' "$fixture/target")" == "$installed_app" ]] \
+    || fail "the installer reported the wrong product path"
+  [[ "$(sed -n '2p' "$fixture/target")" == "$test_bundle_id" ]] \
+    || fail "the product rename changed its bundle identity"
 }
 
 test_copy_failure_preserves_old_app() {
@@ -261,6 +321,10 @@ test_stable_launch_succeeds() {
     || fail "successful installation kept the old App as the active version"
   grep -q "installed and launched" "$fixture/output" \
     || fail "successful installation omitted the success message"
+  if [[ "$test_scx_experiment" == "1" ]]; then
+    [[ "$(cat "$stable_app/stable.version")" == "protected-stable-version" ]] \
+      || fail "experimental installation changed the stable App"
+  fi
 }
 
 test_a_transient_launch_refusal_is_retried_not_rolled_back() {
@@ -292,9 +356,122 @@ test_a_launch_that_never_succeeds_still_rolls_back() {
     || fail "a permanently failing launch must restore the old App"
 }
 
-# 不带参数保留完整验收；Rust 短测逐场景运行，各自应用硬截止。
+test_legacy_name_migrates_without_recreating_the_absent_stable_app() {
+  make_fixture "legacy-success"
+  mv "$installed_app" "$legacy_app"
+  rm -rf "$stable_app"
+  touch "$state/legacy-running"
+
+  RUNNING_AFTER_OPEN=1 run_installer >"$fixture/output" 2>&1 \
+    || fail "the legacy App did not migrate to the new product name"
+  [[ -d "$installed_app" && ! -e "$legacy_app" ]] \
+    || fail "successful migration did not leave exactly the new App path"
+  [[ ! -e "$stable_app" ]] \
+    || fail "migration recreated the previously removed stable App"
+  [[ -f "$state/quit.log" ]] \
+    || fail "migration did not quit the legacy App"
+  grep -Fq "$legacy_app/Contents/MacOS/token-station" "$state/pgrep.log" \
+    || fail "migration did not wait for the legacy executable to exit"
+}
+
+test_legacy_failures_restore_the_original_path() {
+  local failure
+  for failure in signature launch; do
+    make_fixture "legacy-rollback-$failure"
+    mv "$installed_app" "$legacy_app"
+    local signature_failure=0
+    [[ "$failure" != "signature" ]] || signature_failure=1
+    if FAIL_INSTALLED_CODESIGN="$signature_failure" run_installer >"$fixture/output" 2>&1; then
+      fail "legacy $failure failure unexpectedly reported success"
+    fi
+    [[ -f "$legacy_app/old.version" && ! -e "$installed_app" ]] \
+      || fail "legacy $failure failure did not restore the original path"
+    grep -q "旧版本已恢复" "$fixture/output" \
+      || fail "legacy $failure failure did not report rollback"
+    [[ "$(cat "$stable_app/stable.version")" == "protected-stable-version" ]] \
+      || fail "legacy rollback changed the stable App"
+  done
+}
+
+test_legacy_app_is_untouched_until_build_audit_and_staging_succeed() {
+  local failure
+  for failure in build audit copy; do
+    make_fixture "legacy-preflight-$failure"
+    mv "$installed_app" "$legacy_app"
+    local build_failure=0 copy_failure=0
+    case "$failure" in
+      build) build_failure=1 ;;
+      audit) echo "org.example.unrelated" > "$built_app/Contents/Info.plist.bundle-id" ;;
+      copy) copy_failure=1 ;;
+    esac
+    if FAIL_BUILD="$build_failure" DITTO_FAIL="$copy_failure" RUNNING_AFTER_OPEN=1 \
+      run_installer >"$fixture/output" 2>&1; then
+      fail "legacy $failure preflight failure unexpectedly reported success"
+    fi
+    [[ -f "$legacy_app/old.version" && ! -e "$installed_app" && ! -e "$state/quit.log" ]] \
+      || fail "$failure failure touched the previously usable legacy App"
+  done
+}
+
+test_two_product_paths_are_rejected_without_touching_either_app() {
+  make_fixture "two-product-paths"
+  cp -R "$installed_app" "$legacy_app"
+  if RUNNING_AFTER_OPEN=1 run_installer >"$fixture/output" 2>&1; then
+    fail "two current product paths were silently resolved"
+  fi
+  [[ -f "$installed_app/old.version" && -f "$legacy_app/old.version" && ! -e "$state/quit.log" ]] \
+    || fail "the two-path conflict changed an installed App"
+  grep -q "Both current and legacy App paths exist" "$fixture/output" \
+    || fail "the two-path conflict did not explain the refusal"
+}
+
+test_unrelated_new_or_legacy_apps_are_rejected() {
+  local location
+  for location in current legacy; do
+    make_fixture "unrelated-$location"
+    local occupied_app="$installed_app"
+    if [[ "$location" == "legacy" ]]; then
+      mv "$installed_app" "$legacy_app"
+      occupied_app="$legacy_app"
+    fi
+    echo "org.example.unrelated" > "$occupied_app/Contents/Info.plist.bundle-id"
+    if RUNNING_AFTER_OPEN=1 run_installer >"$fixture/output" 2>&1; then
+      fail "an unrelated $location App was replaced"
+    fi
+    [[ -f "$occupied_app/old.version" && ! -e "$state/quit.log" ]] \
+      || fail "the unrelated $location App was changed or stopped"
+    grep -q "unexpected bundle id" "$fixture/output" \
+      || fail "the unrelated App refusal omitted the identity mismatch"
+  done
+}
+
+test_a_dangling_new_path_is_not_treated_as_absent() {
+  make_fixture "dangling-target"
+  mv "$installed_app" "$legacy_app"
+  ln -s "$fixture/missing.app" "$installed_app"
+  if RUNNING_AFTER_OPEN=1 run_installer >"$fixture/output" 2>&1; then
+    fail "a dangling target link was silently replaced"
+  fi
+  [[ -L "$installed_app" && -f "$legacy_app/old.version" && ! -e "$state/quit.log" ]] \
+    || fail "a dangling target conflict modified either path"
+}
+
+test_a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy() {
+  make_fixture "late-target-conflict"
+  mv "$installed_app" "$legacy_app"
+  if OCCUPY_TARGET_DURING_COPY=1 RUNNING_AFTER_OPEN=1 run_installer >"$fixture/output" 2>&1; then
+    fail "a target created during staging was silently replaced"
+  fi
+  [[ -f "$legacy_app/old.version" && -f "$installed_app/unrelated.version" ]] \
+    || fail "late conflict rollback removed the foreign target or lost the legacy App"
+  grep -q "target App path became occupied" "$fixture/output" \
+    || fail "the late target conflict did not explain its refusal"
+}
+
+# Run all scenarios by default. Rust tests select individual scenarios.
 case "${1:-all}" in
   all)
+    test_target_name_matches_the_selected_identity
     test_copy_failure_preserves_old_app
     test_immediate_exit_restores_old_app
     test_incompatible_candidate_preserves_old_app
@@ -302,7 +479,17 @@ case "${1:-all}" in
     test_stable_launch_succeeds
     test_a_transient_launch_refusal_is_retried_not_rolled_back
     test_a_launch_that_never_succeeds_still_rolls_back
+    if [[ "$test_scx_experiment" == "1" ]]; then
+      test_legacy_name_migrates_without_recreating_the_absent_stable_app
+      test_legacy_failures_restore_the_original_path
+      test_legacy_app_is_untouched_until_build_audit_and_staging_succeed
+      test_two_product_paths_are_rejected_without_touching_either_app
+      test_unrelated_new_or_legacy_apps_are_rejected
+      test_a_dangling_new_path_is_not_treated_as_absent
+      test_a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy
+    fi
     ;;
+  target_name_matches_the_selected_identity) test_target_name_matches_the_selected_identity ;;
   copy_failure_preserves_old_app) test_copy_failure_preserves_old_app ;;
   immediate_exit_restores_old_app) test_immediate_exit_restores_old_app ;;
   incompatible_candidate_preserves_old_app) test_incompatible_candidate_preserves_old_app ;;
@@ -310,6 +497,13 @@ case "${1:-all}" in
   stable_launch_succeeds) test_stable_launch_succeeds ;;
   a_transient_launch_refusal_is_retried_not_rolled_back) test_a_transient_launch_refusal_is_retried_not_rolled_back ;;
   a_launch_that_never_succeeds_still_rolls_back) test_a_launch_that_never_succeeds_still_rolls_back ;;
+  legacy_name_migrates_without_recreating_the_absent_stable_app) test_legacy_name_migrates_without_recreating_the_absent_stable_app ;;
+  legacy_failures_restore_the_original_path) test_legacy_failures_restore_the_original_path ;;
+  legacy_app_is_untouched_until_build_audit_and_staging_succeed) test_legacy_app_is_untouched_until_build_audit_and_staging_succeed ;;
+  two_product_paths_are_rejected_without_touching_either_app) test_two_product_paths_are_rejected_without_touching_either_app ;;
+  unrelated_new_or_legacy_apps_are_rejected) test_unrelated_new_or_legacy_apps_are_rejected ;;
+  a_dangling_new_path_is_not_treated_as_absent) test_a_dangling_new_path_is_not_treated_as_absent ;;
+  a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy) test_a_late_target_conflict_keeps_the_foreign_app_and_restores_legacy ;;
   *) fail "unknown installer test scenario: $1" ;;
 esac
 

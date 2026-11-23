@@ -1,0 +1,36 @@
+[
+  {
+    "content": "Let me check.",
+    "index": 0,
+    "type": "delta"
+  },
+  {
+    "arguments_delta": "{\"city\"",
+    "id": "call_1",
+    "index": 0,
+    "name": "get_weather",
+    "type": "tool_call_delta"
+  },
+  {
+    "arguments_delta": ": \"Beijing\"}",
+    "index": 0,
+    "type": "tool_call_delta"
+  },
+  {
+    "finish_reason": "tool_calls",
+    "type": "finish"
+  },
+  {
+    "type": "usage",
+    "usage": {
+      "cache_read_tokens": 11,
+      "cache_write_tokens": 2,
+      "input_tokens": 33,
+      "output_tokens": 32,
+      "reasoning_tokens": 7
+    }
+  },
+  {
+    "type": "done"
+  }
+]

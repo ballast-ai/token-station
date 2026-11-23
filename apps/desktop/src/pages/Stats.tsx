@@ -1,3 +1,5 @@
+import { upstreamDisplayName } from "../providerPresentation";
+import type { ProviderView } from "../api";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   AgentUiMetadataView,
@@ -216,7 +218,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
   );
 }
 
-export default function Stats({ onBack, embedded = false, onOpenManagement }: { onBack?: () => void; embedded?: boolean; onOpenManagement?: () => void }) {
+export default function Stats({ onBack, embedded = false, onOpenManagement, providers = [] }: { onBack?: () => void; embedded?: boolean; onOpenManagement?: () => void; providers?: ProviderView[] }) {
   const { language, copy } = useLocalizedCopy();
   const { showError } = useErrorToast();
   const sinceOptions = [
@@ -463,7 +465,7 @@ export default function Stats({ onBack, embedded = false, onOpenManagement }: { 
             value={upstreamFilter}
             options={[
               { value: "", label: copy("All providers", "全部供应商", "所有供應商", "すべてのプロバイダー") },
-              ...visibleUpstreams.map((upstream) => ({ value: upstream, label: upstream })),
+              ...visibleUpstreams.map((upstream) => ({ value: upstream, label: upstreamDisplayName(upstream, providers) })),
             ]}
             onChange={(value) => {
               setUpstreamFilter(value);
@@ -616,7 +618,7 @@ export default function Stats({ onBack, embedded = false, onOpenManagement }: { 
                     <tr key={name}>
                       <td><span className="usage-row-mark" />{activeGroup === "agent"
                         ? displayName(groupDisplayName(name, activeGroup, copy))
-                        : groupDisplayName(name, activeGroup, copy)}</td>
+                        : activeGroup === "upstream" ? upstreamDisplayName(name, providers) : groupDisplayName(name, activeGroup, copy)}</td>
                       <td>{item.requests.toLocaleString()}</td>
                       <td>{successRate(item)}</td>
                       <td title={usageText(item, "total", language, copy, true)}>{usageText(item, "total", language, copy)}</td>

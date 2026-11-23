@@ -1,0 +1,34 @@
+{
+  "provider_config": {
+    "provider": "chatgpt-plan",
+    "base_url": "https://api.openai.com/v1",
+    "auth": "chatgpt_access_token",
+    "models": [
+      {
+        "model": "plan-model",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 200000
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "plan-model",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Follow the user."
+      },
+      {
+        "role": "user",
+        "content": "hello"
+      }
+    ],
+    "sampling": {
+      "max_output_tokens": 256,
+      "temperature": 0.2
+    },
+    "stream": false
+  }
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "model": "claude-fixture",
+    "tool": true,
+    "vision": false,
+    "json_schema": false,
+    "supported_parameters": [
+      "max_output_tokens"
+    ],
+    "context_window": 0
+  }
+]

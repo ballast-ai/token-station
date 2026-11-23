@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "internal",
+    "http_status": 500,
+    "message": "the `api_version` configuration value is not a dated API version"
+  }
+}

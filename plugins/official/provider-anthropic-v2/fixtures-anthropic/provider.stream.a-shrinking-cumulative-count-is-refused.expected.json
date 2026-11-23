@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "provider_protocol_error",
+    "http_status": 502,
+    "message": "the upstream stream usage shrank a cumulative token count"
+  }
+}

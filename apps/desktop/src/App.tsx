@@ -1,3 +1,4 @@
+import { upstreamDisplayName } from "./providerPresentation";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addKeyword,
@@ -24,7 +25,7 @@ import {
   setDirectRoute,
   setLocalRouting,
   setQuotaAccounts,
-  setQuotaPlan,
+  setQuotaPlanFull,
   setRoutingMode,
   setTier,
   verifyEnterpriseRoute,
@@ -38,6 +39,7 @@ import {
   type TierSlot,
 } from "./api";
 import { DraftNavigationBoundary, useDraftNavigation } from "./components/DraftNavigation";
+import SubscriptionsDialog from "./components/SubscriptionsDialog";
 import AppShell, { type AppView } from "./components/AppShell";
 import FirstRunGuide, {
   FirstRunCompletionDialog,
@@ -82,6 +84,7 @@ const UsageWorkspace = lazy(() => import("./pages/UsageWorkspace"));
 const BudgetPricingPage = lazy(() => import("./pages/BudgetPricingPage"));
 import "./App.css";
 import { humanizeAppError } from "./errors";
+import { autoConnectCodexProvider } from "./codexAccountsApi";
 import { resolveStatusMenuNavigation } from "./statusMenuNavigation";
 import {
   AlertDialog,
@@ -281,6 +284,7 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const confirmNavigation = useDraftNavigation();
   const [view, setView] = useState<AppView>("overview");
   const [modelEntryOpen, setModelEntryOpen] = useState(false);
+  const [subscriptionsOpen, setSubscriptionsOpen] = useState(false);
   const [directRouteDraftDirty, setDirectRouteDraftDirty] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<AppView | null>(null);
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
@@ -336,7 +340,17 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   const pendingApplyRevisionRef = useRef<number | null>(null);
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
   const firstRunGuideCheckedRef = useRef(false);
-  const startupLoadStartedRef = useRef(false);
+  const startupRequestsRef = useRef<{
+    state: Promise<StateView>;
+    discovery: Promise<
+      { ok: true; value: [AgentUiMetadataView[], AgentView[]] }
+      | { ok: false; caught: unknown }
+    >;
+  } | null>(null);
+  const startupStateAppliedRef = useRef(false);
+  const startupAgentsAppliedRef = useRef(false);
+  const codexDiscoveryRef = useRef<Promise<StateView | null> | null>(null);
+  const codexDiscoveryAppliedRef = useRef(false);
   const startupSettledRef = useRef(false);
   const agentRevealTimerRef = useRef<number | null>(null);
 
@@ -540,31 +554,36 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
   }, [refreshCachedAgents]);
 
   useEffect(() => {
-    if (startupLoadStartedRef.current) return undefined;
-    startupLoadStartedRef.current = true;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    const load = async () => {
-      const discoveryLoad = Promise.all([
-        listAgentRegistry(),
-        scanAgents(),
-      ]).then(
+    // Keep requests across effect replay, but attach a live subscriber each time.
+    // StrictMode must not discard the only startup response after cleanup.
+    startupRequestsRef.current ??= {
+      state: getState(),
+      discovery: Promise.all([listAgentRegistry(), scanAgents()]).then(
         (value) => ({ ok: true as const, value }),
         (caught: unknown) => ({ ok: false as const, caught }),
-      );
+      ),
+    };
+    const requests = startupRequestsRef.current;
+    const load = async () => {
       try {
-        const nextState = await getState();
+        const nextState = await requests.state;
         if (disposed) return;
-        const effectiveServe = pendingServeRef.current ?? nextState.serve;
-        observedServeRef.current = {
-          ready: effectiveServe.app_runtime === "running" && effectiveServe.listener_reachable,
-          instanceId: effectiveServe.instance_id,
-          phase: effectiveServe.phase,
-        };
-        setState(pendingServeRef.current ? { ...nextState, serve: effectiveServe } : nextState);
+        if (!startupStateAppliedRef.current) {
+          startupStateAppliedRef.current = true;
+          const effectiveServe = pendingServeRef.current ?? nextState.serve;
+          observedServeRef.current = {
+            ready: effectiveServe.app_runtime === "running" && effectiveServe.listener_reachable,
+            instanceId: effectiveServe.instance_id,
+            phase: effectiveServe.phase,
+          };
+          setState(pendingServeRef.current ? { ...nextState, serve: effectiveServe } : nextState);
+        }
 
-        const discoveryResult = await discoveryLoad;
-        if (disposed) return;
+        const discoveryResult = await requests.discovery;
+        if (disposed || startupAgentsAppliedRef.current) return;
+        startupAgentsAppliedRef.current = true;
         if (!discoveryResult.ok) {
           setError(errorText(discoveryResult.caught));
           return;
@@ -602,6 +621,37 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       unlisten?.();
     };
   }, [observeServeRuntime, revealAgents, showError]);
+
+  const coreStateReady = state !== null;
+  useEffect(() => {
+    if (!coreStateReady || codexDiscoveryAppliedRef.current) return;
+    let disposed = false;
+    // Registration and its configuration read run once, without blocking startup.
+    codexDiscoveryRef.current ??= autoConnectCodexProvider().then(
+      (added) => added ? getState() : null,
+    );
+    void codexDiscoveryRef.current.then((next) => {
+      if (disposed) return;
+      codexDiscoveryAppliedRef.current = true;
+      if (!next) return;
+      setState((current) => {
+        if (!current) return current;
+        // A user command may have published a newer draft while IPC was pending.
+        if (current.draft_revision > next.draft_revision || current.saved_revision > next.saved_revision) return current;
+        return { ...next, serve: pendingServeRef.current ?? current.serve };
+      });
+    }).catch(() => {
+      if (disposed) return;
+      codexDiscoveryAppliedRef.current = true;
+      showError(copy(
+        "Could not connect local Codex automatically. Use Add model to check the local login and retry.",
+        "无法自动接入本机 Codex。请通过“添加模型”检查本机登录并重试。",
+        "無法自動接入本機 Codex。請透過「新增模型」檢查本機登入並重試。",
+        "ローカル Codex を自動接続できません。モデル追加でサインインを確認して再試行してください。",
+      ), "codex-auto-discovery");
+    });
+    return () => { disposed = true; };
+  }, [coreStateReady, copy, showError]);
 
   useEffect(() => {
     let disposed = false;
@@ -735,8 +785,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
         ), "config-apply");
       } else {
         showSuccess(copy(
-          `Configuration applied · revision ${targetRevision}`,
-          `配置已应用 · revision ${targetRevision}`, `配置已應用 · revision ${targetRevision}`, `設定が適用されました · revision ${targetRevision}`
+          "Configuration applied",
+          "配置已应用", "配置已應用", "設定が適用されました"
         ), "config-apply");
       }
       return undefined;
@@ -994,12 +1044,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
     }, undefined, true);
 
   // Store provider quota plans in the draft for local estimates; the next Save and Apply activates them.
-  const saveQuotaPlan = (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void run(() => setQuotaPlan(upstream, lenMs, limit, unit, null));
+  const saveQuotaPlan = (upstream: string, plan: import("./api").QuotaPlanInput) =>
+    run(() => setQuotaPlanFull(upstream, plan), copy("Quota plan saved to draft.", "额度计划已保存到草稿。", "額度計畫已儲存到草稿。", "クォータプランを下書きに保存しました。"));
 
   const handleProviderAdded = (next: StateView, message: string) => {
     const defaultTarget = firstProviderDefaultTarget(state.providers.length, next);
@@ -1026,8 +1072,8 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       await setDirectRoute(defaultTarget.upstream, defaultTarget.model);
       return serveStart();
     }, copy(
-      `Provider added. Global routing now uses ${defaultTarget.upstream} / ${defaultTarget.model}.`,
-      `供应商已添加，全局路由已默认使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`, `供應商已加入。全域性路由已預設使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`, `プロバイダーが追加されました。グローバルルーティングは ${defaultTarget.upstream} / ${defaultTarget.model} がデフォルトです。`
+      `Provider added. Global routing now uses ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model}.`,
+      `供应商已添加，全局路由已默认使用 ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model}。`, `供應商已加入。全域性路由已預設使用 ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model}。`, `プロバイダーが追加されました。グローバルルーティングは ${upstreamDisplayName(defaultTarget.upstream, next.providers)} / ${defaultTarget.model} がデフォルトです。`
     ), true);
     viewHistoryRef.current = [];
     if (firstRunSetupStep === "provider") {
@@ -1049,9 +1095,13 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       modelEntryOpen={modelEntryOpen}
       suppressModelEntryAutoOpen={firstRunGuideOpen}
       onModelEntryOpenChange={setModelEntryOpen}
+      onConnectSubscriptions={() => setSubscriptionsOpen(true)}
       onNavigate={navigate}
       onToggleServe={() => void toggleServe()}
     >
+      <SubscriptionsDialog open={subscriptionsOpen} onClose={() => setSubscriptionsOpen(false)}
+        onChanged={async () => { showState(await getState()); }}
+        onConnected={() => { setSubscriptionsOpen(false); navigate("providers"); }} />
       <Suspense fallback={<div role="status" className="page-stack">{copy("Loading page…", "正在加载页面…", "正在載入頁面…", "ページを読み込み中…")}</div>}>
       {view === "overview" && (
         <OverviewPage
@@ -1244,10 +1294,10 @@ function StationApp({ onStartupSettled, launchComplete = true }: AppProps) {
       )}
 
       {view === "usage" && (
-        <UsageWorkspace onOpenManagement={() => navigate("usage-management")} />
+        <UsageWorkspace providers={state.providers} onOpenManagement={() => navigate("usage-management")} />
       )}
       {view === "usage-management" && (
-        <BudgetPricingPage onBack={navigateBack} />
+        <BudgetPricingPage providers={state.providers} onBack={navigateBack} />
       )}
       {view === "quota-usage" && (
         <QuotaUsagePage providers={state.providers} onBack={navigateBack} />

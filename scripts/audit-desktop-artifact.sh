@@ -12,6 +12,9 @@ bundle_root=""
 source_root=""
 rust_sysroot=""
 private_cargo_home=""
+scx_experiment=false
+expected_bundle_id="com.tokenstation.desktop"
+expected_app_name="token-station.app"
 unsigned_windows=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,11 +24,17 @@ while [[ $# -gt 0 ]]; do
     --source-root) source_root=${2:-}; shift 2 ;;
     --rust-sysroot) rust_sysroot=${2:-}; shift 2 ;;
     --private-cargo-home) private_cargo_home=${2:-}; shift 2 ;;
+    --scx-experiment) scx_experiment=true; shift ;;
     --unsigned-windows) unsigned_windows=true; shift ;;
     *) usage ;;
   esac
 done
 [[ "$mode" == "local" || "$mode" == "preview" || "$mode" == "production" ]] || usage
+if [[ "$scx_experiment" == "true" ]]; then
+  [[ "$mode" == "local" && "$(uname -s)" == "Darwin" ]] || usage
+  expected_bundle_id="com.tokenstation.desktop.scx"
+  expected_app_name="Token Station.app"
+fi
 [[ -n "$binary" && -n "$bundle_root" && -n "$source_root" && -n "$rust_sysroot" && -n "$private_cargo_home" ]] || usage
 [[ "$unsigned_windows" != "true" || "$mode" == "production" ]] || usage
 [[ -f "$binary" ]] || { echo "desktop executable missing: $binary" >&2; exit 1; }
@@ -48,7 +57,7 @@ esac
   [[ -s "$self_test_report" ]] && sed -n '1,120p' "$self_test_report" >&2
   exit 1
 }
-node - "$self_test_report" "$expected_ids" <<'NODE'
+node - "$self_test_report" "$expected_ids" "$expected_bundle_id" <<'NODE'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const expected = fs.readFileSync(process.argv[3], "utf8").trim().split(/\r?\n/);
@@ -57,7 +66,7 @@ const actual = Array.isArray(report.plugins)
   : [];
 if (
   report.passed !== true ||
-  report.bundle?.id !== "com.tokenstation.desktop" ||
+  report.bundle?.id !== process.argv[4] ||
   report.storage?.data_directory_private !== true ||
   report.storage?.private_file_verified !== true ||
   report.storage?.credential_read !== false ||
@@ -108,12 +117,14 @@ done < <("$source_root/scripts/official-packages.py" --field id)
 
 case "$(uname -s)" in
   Darwin)
+    app="$bundle_root/macos/$expected_app_name"
+    [[ -d "$app" ]] || { echo "macOS app bundle missing under $bundle_root/macos" >&2; exit 1; }
+    actual_bundle_id=$(/usr/libexec/PlistBuddy -c Print:CFBundleIdentifier "$app/Contents/Info.plist")
+    [[ "$actual_bundle_id" == "$expected_bundle_id" ]] || { echo "macOS App identity mismatch." >&2; exit 1; }
     [[ "$unsigned_windows" != "true" ]] || {
       echo "--unsigned-windows is valid only on Windows" >&2
       exit 1
     }
-    app="$(find "$bundle_root/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
-    [[ -n "$app" ]] || { echo "macOS app bundle missing under $bundle_root/macos" >&2; exit 1; }
     codesign --verify --deep --strict --verbose=2 "$app"
     entitlements="$(codesign --display --entitlements :- "$app" 2>&1)"
     grep -Fq "com.apple.security.cs.allow-unsigned-executable-memory" <<<"$entitlements" || {

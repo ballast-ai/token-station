@@ -37,6 +37,17 @@ function renderMapping(element: React.ReactElement) {
 }
 
 describe("HarnessModelMapping", () => {
+  it("keeps account IDs in harness mappings while displaying subscription names", async () => {
+    const user = userEvent.setup();
+    const name = "antigravity_plan_" + "a".repeat(64);
+    const onChange = vi.fn();
+    renderMapping(<HarnessModelMapping agentId="claude-code" enabled providers={[{ ...providers[1], name, provider: "antigravity-plan" }]} routes={{ balanced: { upstream: name, model: "gpt-5.5" } }} onChange={onChange} />);
+    expect(screen.getByRole("combobox", { name: "Sonnet 供应商" })).toHaveTextContent("Antigravity-plan");
+    await user.click(screen.getByRole("combobox", { name: "Haiku 供应商" }));
+    await user.click(screen.getByRole("option", { name: "Antigravity-plan" }));
+    expect(onChange).toHaveBeenCalledWith("fast", { upstream: name, model: "gpt-5.5" });
+  });
+
   it("defaults populated legacy mappings to off and requires explicit opt-in", async () => {
     const user = userEvent.setup();
     const onEnabledChange = vi.fn();

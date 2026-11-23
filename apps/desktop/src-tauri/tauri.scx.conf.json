@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Token Station",
+  "identifier": "com.tokenstation.desktop.scx",
+  "app": {
+    "windows": [
+      {
+        "title": "Token Station",
+        "width": 1040,
+        "height": 720,
+        "minWidth": 900,
+        "minHeight": 600
+      }
+    ]
+  },
+  "plugins": {
+    "updater": { "pubkey": "", "endpoints": [] }
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "shortDescription": "Smart routing with local task classification"
+  }
+}

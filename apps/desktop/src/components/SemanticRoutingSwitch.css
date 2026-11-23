@@ -1,0 +1,11 @@
+.semantic-routing-switch-note,
+.semantic-routing-switch-state {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.semantic-routing-switch-state.is-error {
+  color: var(--danger);
+}

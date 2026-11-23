@@ -1,0 +1,69 @@
+{
+  "provider_config": {
+    "provider": "codex-plan",
+    "base_url": "https://chatgpt.com/backend-api/codex",
+    "auth": "codex_access_token",
+    "models": [
+      {
+        "model": "plan-model",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 200000
+      }
+    ],
+    "codex_account_id": "account-fixture-123",
+    "codex_client_version": "0.162.0"
+  },
+  "chat_request": {
+    "model": "plan-model",
+    "messages": [
+      {
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call-123",
+            "name": "read",
+            "arguments": "{\"path\":\"file.txt\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call-123",
+        "content": "actual result"
+      }
+    ],
+    "sampling": {
+      "max_output_tokens": 256,
+      "temperature": 0.2
+    },
+    "stream": false,
+    "tools": [
+      {
+        "name": "read",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "tool_choice": "required",
+    "parallel_tool_calls": false,
+    "reasoning_effort": "low",
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        },
+        "strict": true
+      }
+    }
+  }
+}

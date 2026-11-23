@@ -112,10 +112,9 @@ impl fmt::Display for UpstreamModel {
 
 /// Which layer of the router decided, and on what.
 ///
-/// The four layers of the routing design, in priority order: user rules, agent
-/// hints, the heuristic, then the configured default. The learned classifier
-/// (`C3#2`) will arrive as a fifth variant between `Hint` and `Heuristic`; the
-/// cascade layer is explicitly out of scope for the local client.
+/// After exact model pins, tier selection checks user rules, Agent hints, an
+/// optional host classifier pool, the heuristic, and the configured default.
+/// The cascade layer is outside the scope of the local client.
 ///
 /// Every string in here comes from [`crate::RouterConfig`] — a rule the operator
 /// named, a hint value the operator's routing table keys on. None of it comes
@@ -134,6 +133,9 @@ pub enum DecidedBy {
     /// configured key means an agent cannot write arbitrary text into a record
     /// that is destined for the metrics store by putting it in a hint header.
     Hint { kind: HintKind, value: String },
+    /// A host classifier selected a configured pool. Scores and model details
+    /// remain outside the deterministic core and its decision record.
+    Classifier,
     /// Nothing matched, so the request was scored.
     Heuristic { score: u32, threshold: u32 },
     /// No rule, no hint, no heuristic configured.

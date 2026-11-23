@@ -87,6 +87,9 @@ fn runtime() -> PluginRuntime {
     .expect("engine builds")
 }
 
+#[path = "official_plugins/recovery.rs"]
+mod recovery;
+
 fn envelope(protocol: &str, body: serde_json::Value) -> AgentRequestEnvelope {
     AgentRequestEnvelope {
         protocol: protocol.to_owned(),
@@ -319,6 +322,7 @@ fn gemini_parallel_tool_fragments_finish_with_complete_objects() {
                     id: None,
                     name: name.map(str::to_owned),
                     arguments_delta: arguments.to_owned(),
+                    signature: None,
                 },
                 &context,
             )
@@ -558,6 +562,8 @@ fn responses_custom_tool_round_trips() {
         .description
         .as_deref()
         .unwrap_or_default();
+    assert!(description.starts_with("run code\n"));
+    assert!(description.contains("additional JSON object"));
     assert!(description.contains("Original tool definition:"));
     assert!(description.contains("\"name\":\"code_exec\""));
 
@@ -721,6 +727,7 @@ fn responses_stream_restores_custom_and_namespace_tool_calls() {
             id: id.map(str::to_owned),
             name: name.map(str::to_owned),
             arguments_delta: args.to_owned(),
+            signature: None,
         };
 
     // Custom tool: announced as a custom_tool_call with a ctc_ id, and its
@@ -877,7 +884,7 @@ fn responses_tool_search_round_trips() {
 }
 
 #[test]
-fn chat_completions_structured_output_is_rejected_by_the_real_wasm() {
+fn chat_completions_structured_output_is_preserved_by_the_real_wasm() {
     let plugin = AgentPlugin::load(&runtime(), agent_package()).expect("loads clean");
     let request = |format: serde_json::Value| {
         envelope(
@@ -893,12 +900,25 @@ fn chat_completions_structured_output_is_rejected_by_the_real_wasm() {
     let plain = plugin
         .normalize_inbound(&request(serde_json::json!({"type": "text"})))
         .expect("plain text remains supported");
-    assert_eq!(plain.response_format, None);
+    assert_eq!(plain.response_format, Some(ResponseFormat::Text));
 
     for format in [
-        serde_json::json!({"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}),
-        serde_json::json!({"type": "json_object"}),
+        serde_json::json!({"type":"json_schema","json_schema":{"name":"session_title","description":"Session title","strict":true,"schema":{"type":"object","properties":{"title":{"type":"string","maxLength":80}},"required":["title"],"additionalProperties":false}}}),
+        serde_json::json!({"type":"json_object"}),
+    ] {
+        let normalized = plugin
+            .normalize_inbound(&request(format.clone()))
+            .expect("Existing Canonical formats must be preserved");
+        assert_eq!(
+            serde_json::to_value(normalized.response_format).unwrap(),
+            format
+        );
+    }
+    for format in [
         serde_json::json!({"type": "future_structured_format"}),
+        serde_json::json!({"type":"text","unknown":true}),
+        serde_json::json!({"type":"json_object","json_schema":{}}),
+        serde_json::json!({"type":"json_schema","json_schema":{"name":"answer","schema":{},"unknown":true}}),
     ] {
         let error = plugin
             .normalize_inbound(&request(format))
@@ -1074,17 +1094,25 @@ fn anthropic_output_config_effort_maps_to_reasoning_effort() {
         let normalized = plugin
             .normalize_inbound(&request(serde_json::json!(input)))
             .expect("normalizes");
+        // Since protocol 0.6.0 the `reasoning_effort` wire key is the typed
+        // `ChatRequest::reasoning` effort, not an extension.
         assert_eq!(
-            normalized.extensions.get("reasoning_effort"),
-            Some(&serde_json::json!(expected)),
+            normalized
+                .reasoning
+                .effort
+                .as_ref()
+                .map(token_station_protocol::ReasoningEffort::as_str),
+            Some(expected),
             "effort {input} should map to reasoning_effort {expected}"
         );
+        assert_eq!(normalized.extensions.get("reasoning_effort"), None);
     }
 
     // Unknown effort values are dropped rather than sent verbatim.
     let unknown = plugin
         .normalize_inbound(&request(serde_json::json!("turbo")))
         .expect("normalizes");
+    assert_eq!(unknown.reasoning.effort, None);
     assert_eq!(unknown.extensions.get("reasoning_effort"), None);
 }
 
@@ -1113,8 +1141,8 @@ fn anthropic_adaptive_thinking_normalizes_without_losing_compatibility_metadata(
             Some(&json!({"type": kind}))
         );
         assert_eq!(
-            normalized.extensions.get("reasoning_effort"),
-            Some(&json!("medium"))
+            normalized.reasoning.effort,
+            Some(token_station_protocol::ReasoningEffort::Medium)
         );
     }
 
@@ -1361,6 +1389,7 @@ fn responses_stream_assigns_global_output_indices_by_first_appearance() {
             id: id.map(str::to_owned),
             name: name.map(str::to_owned),
             arguments_delta: arguments.to_owned(),
+            signature: None,
         };
 
     let text_first = response_sse_events(
@@ -1458,6 +1487,7 @@ fn responses_stream_keeps_tool_first_output_order() {
                     id: Some("call-first".to_owned()),
                     name: Some("read_first".to_owned()),
                     arguments_delta: "{}".to_owned(),
+                    signature: None,
                 },
                 &context,
             )

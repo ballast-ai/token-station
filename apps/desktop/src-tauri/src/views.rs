@@ -30,10 +30,10 @@ pub(crate) struct ProviderView {
     pub(crate) quota_plan: Option<QuotaPlanView>,
 }
 
-/// A provider's declared quota plan, flattened to its primary reset window for
-/// the UI (the common case is one window, e.g. a token allowance per 5 hours).
+/// Complete local estimate plan. Single-window fields remain for older clients.
 #[derive(Serialize)]
 pub(crate) struct QuotaPlanView {
+    pub(crate) windows: Vec<token_station_cli::quota_tracker::QuotaWindowSpec>,
     pub(crate) len_ms: u64,
     pub(crate) limit: u64,
     pub(crate) unit: String,
@@ -258,6 +258,7 @@ pub(crate) struct AggView {
     pub(crate) cost_micros: Option<i64>,
     pub(crate) priced_requests: u64,
     pub(crate) unpriced_requests: u64,
+    pub(crate) subscription_requests: u64,
     pub(crate) missing_price_requests: u64,
     pub(crate) missing_usage_requests: u64,
     pub(crate) actual_cost_requests: u64,
@@ -291,6 +292,7 @@ impl AggView {
             cost_micros: None,
             priced_requests: 0,
             unpriced_requests: 0,
+            subscription_requests: 0,
             missing_price_requests: 0,
             missing_usage_requests: 0,
             actual_cost_requests: 0,
@@ -323,6 +325,7 @@ impl AggView {
             cost_micros: a.cost_micros,
             priced_requests: a.priced_requests,
             unpriced_requests: a.unpriced_requests,
+            subscription_requests: a.subscription_requests,
             missing_price_requests: a.missing_price_requests,
             missing_usage_requests: a.missing_usage_requests,
             actual_cost_requests: a.actual_cost_requests,

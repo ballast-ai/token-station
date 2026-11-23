@@ -1,0 +1,956 @@
+//! Opt-in managed retrieval. Browser search uses an isolated, host-owned Chrome profile.
+
+mod backend;
+#[cfg(test)]
+pub(crate) mod backend_tests;
+mod browser;
+mod tavily;
+pub use backend::{SearchBackend, SearchError, SearchErrorKind};
+mod filters;
+mod html;
+mod page;
+mod queue;
+pub(crate) use filters::DomainFilter;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write as _;
+
+    #[test]
+    fn filters_decoded_links_before_selecting_five_results() {
+        let filter = DomainFilter::new(&["example.com".into()], &[]).unwrap();
+        let mut html = String::new();
+        for index in 0..6 {
+            write!(
+                html,
+                "<li class='b_algo'><h2><a href='https://evil.org/{index}'>Wrong</a></h2></li>"
+            )
+            .unwrap();
+        }
+        html.push_str(
+            "<li class='b_algo'><h2><a href='https://docs.example.com/'>Allowed</a></h2></li>",
+        );
+        let results = parse_filtered_results(&html, Engine::Bing, &filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://docs.example.com/");
+        let html = "<div class='result'><a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fevil.org%2F%3Fnext%3Dexample.com'>Bad redirect</a></div>";
+        assert!(
+            parse_filtered_results(html, Engine::Duckduckgo, &filter)
+                .unwrap_err()
+                .contains("domain filters")
+        );
+    }
+
+    #[test]
+    fn queued_controller_searches_keep_filters_and_release_capacity_after_failure() {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        *controller.fixture.lock().unwrap() = Some(Ok(vec![SearchResult {
+            title: "Wrong source".into(),
+            url: "https://evil.org/".into(),
+            snippet: String::new(),
+        }]));
+        let filter = DomainFilter::new(&["example.com".into()], &[]).unwrap();
+        let held = controller
+            .queue
+            .acquire(&|| false, 8, Duration::from_secs(1))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let search = scope.spawn(|| controller.search_filtered("test", &filter, &|| false));
+            drop(held);
+            assert!(
+                search
+                    .join()
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("domain filters")
+            );
+        });
+        assert!(!controller.status().busy);
+        *controller.fixture.lock().unwrap() = Some(Err("Simulated browser failure".into()));
+        assert!(controller.search("test", &|| false).is_err());
+        assert!(!controller.status().busy);
+        *controller.fixture.lock().unwrap() = Some(Ok(vec![SearchResult {
+            title: "Allowed".into(),
+            url: "https://example.com/".into(),
+            snippet: String::new(),
+        }]));
+        assert_eq!(
+            controller
+                .search_filtered("test", &filter, &|| false)
+                .unwrap()
+                .results
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn extracts_only_public_search_results_and_decodes_text() {
+        let html = r#"<ol><li class="b_algo"><h2><a href="https://www.rust-lang.org/">Rust &amp; tools</a></h2><p>Official language site.</p></li><li class="b_algo"><h2><a href="http://127.0.0.1/private">Private</a></h2></li><li class="b_algo"><h2><a href="javascript:alert(1)">Bad</a></h2></li></ol>"#;
+        let results = parse_results(html, Engine::Bing).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Rust & tools");
+        assert_eq!(results[0].snippet, "Official language site.");
+    }
+
+    #[test]
+    fn tokenizer_search_preserves_redirects_entities_and_omitted_rows() {
+        use base64::Engine as _;
+        let destination = "https://example.com/path?a=1&b=2";
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(destination);
+        let bing = format!(
+            "<ol><li class='b_algo other'><h2><a href='https://www.bing.com/ck/a?u=a1{encoded}&amp;other=1'>Caf&eacute; &#x754C;</a></h2><p>First &amp; snippet<li class='b_algo'><h2><a href='https://example.com/two'>Second</a></h2><p>Two</ol>"
+        );
+        let results = parse_results(&bing, Engine::Bing).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, destination);
+        assert_eq!(results[0].title, "Café 界");
+        assert_eq!(results[0].snippet, "First & snippet");
+        let duck = "<div class='result'><a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath%3Fa%3D1%26b%3D2&amp;rut=x'>Docs &amp; tools</a><a class='result__snippet'>Read &#169; documentation</a></div>";
+        let results = parse_results(duck, Engine::Duckduckgo).unwrap();
+        assert_eq!(results[0].url, destination);
+        assert_eq!(results[0].title, "Docs & tools");
+        assert_eq!(results[0].snippet, "Read © documentation");
+    }
+
+    #[test]
+    fn nested_list_items_preserve_the_outer_search_row() {
+        let input = "<ul><li class='b_algo'><ul><li>metadata</li></ul><h2><a href='https://docs.rs/'>Rust</a></h2><p>Readable snippet</p></li></ul>";
+        let results = parse_results(input, Engine::Bing).unwrap();
+        assert_eq!(results[0].url, "https://docs.rs/");
+        assert_eq!(results[0].snippet, "Readable snippet");
+    }
+
+    #[test]
+    fn search_html_parsing_checks_execution_budget() {
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let input = format!("<body>{}</body>", "<p>text</p>".repeat(100));
+        assert!(
+            parse_filtered_results_checked(&input, Engine::Bing, &DomainFilter::default(), &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() >= 50 {
+                    Err("Browser search timed out.".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err()
+            .contains("timed out")
+        );
+        assert_eq!(calls.get(), 50);
+    }
+
+    #[test]
+    fn challenge_and_unknown_layout_are_errors() {
+        assert!(
+            parse_results("<html>Verify you are human</html>", Engine::Bing)
+                .unwrap_err()
+                .contains("verification")
+        );
+        assert!(parse_results("<html><p>Hello</p></html>", Engine::Bing).is_err());
+    }
+
+    #[test]
+    fn query_is_encoded_and_bounded() {
+        let url = search_url(Engine::Bing, "rust & tokio #latest").unwrap();
+        assert_eq!(
+            url.query_pairs().find(|(key, _)| key == "q").unwrap().1,
+            "rust & tokio #latest"
+        );
+        assert!(search_url(Engine::Bing, " ").is_err());
+        assert!(search_url(Engine::Bing, &"x".repeat(501)).is_err());
+    }
+
+    #[test]
+    fn legacy_preferences_migrate_to_native_first_and_modes_persist() {
+        let root = temporary_dir().unwrap();
+        std::fs::write(
+            root.0.join("search-settings.json"),
+            r#"{"enabled":true,"engine":"bing"}"#,
+        )
+        .unwrap();
+        let controller = SearchController::shared(&root.0);
+        assert_eq!(controller.settings().mode, SearchMode::Auto);
+        for mode in [SearchMode::Native, SearchMode::Local, SearchMode::Auto] {
+            let revision = controller.revision();
+            controller
+                .save(SearchSettings {
+                    mode,
+                    ..controller.settings()
+                })
+                .unwrap();
+            assert!(controller.revision() > revision);
+            let saved: SearchSettings = serde_json::from_slice(
+                &std::fs::read(root.0.join("search-settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved.mode, mode);
+        }
+    }
+
+    #[test]
+    fn preview_defaults_off_and_persists_without_changing_routes() {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        assert!(!controller.settings().enabled);
+        let settings = SearchSettings {
+            enabled: true,
+            mode: SearchMode::Local,
+            engine: Engine::Duckduckgo,
+            ..SearchSettings::default()
+        };
+        controller.save(settings.clone()).unwrap();
+        assert_eq!(controller.settings(), settings);
+        drop(controller);
+        assert_eq!(SearchController::shared(&root.0).settings(), settings);
+    }
+
+    #[test]
+    fn cancelled_search_does_not_start_a_browser_or_hold_capacity() {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        assert!(
+            controller
+                .search("Rust", &|| true)
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        assert!(!controller.status().busy);
+    }
+
+    #[test]
+    fn private_and_non_web_links_are_rejected() {
+        for url in [
+            "file:///tmp/a",
+            "http://localhost/x",
+            "http://192.168.0.1",
+            "http://[::1]/",
+            "https://u:p@example.com",
+            "https://printer.local",
+        ] {
+            assert!(public_url(url).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires installed Chrome and public network access"]
+    fn live_documentation_benchmark() {
+        use crate::search_quality::{DOCUMENTATION_CASES, matches_target};
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        let engine =
+            if std::env::var("TOKEN_STATION_SEARCH_TEST_ENGINE").as_deref() == Ok("duckduckgo") {
+                Engine::Duckduckgo
+            } else {
+                Engine::Bing
+            };
+        controller
+            .save(SearchSettings {
+                enabled: false,
+                mode: SearchMode::Local,
+                engine,
+                ..SearchSettings::default()
+            })
+            .unwrap();
+        let mut observations = Vec::new();
+        let mut hits = 0;
+        let mut completed = 0;
+        for case in DOCUMENTATION_CASES {
+            let observation = match controller.search(case.query, &|| false) {
+                Ok(response) => {
+                    completed += 1;
+                    let rank = response
+                        .results
+                        .iter()
+                        .position(|result| matches_target(&result.url, case.expected_source))
+                        .map(|index| index + 1);
+                    hits += usize::from(rank.is_some());
+                    serde_json::json!({"query":case.query,"expected_source":case.expected_source,"execution":"completed","target_rank":rank,"elapsed_ms":response.elapsed_ms,"sources":response.results})
+                }
+                Err(error) => {
+                    serde_json::json!({"query":case.query,"expected_source":case.expected_source,"execution":"failed","error":error})
+                }
+            };
+            observations.push(observation);
+        }
+        println!(
+            "{}",
+            serde_json::json!({"engine":engine,"cases":observations,"completed":completed,"target_hits":hits,"total":DOCUMENTATION_CASES.len(),"scope":"Source presence only. No freshness or factual-support assessment."})
+        );
+        assert_eq!(
+            completed,
+            DOCUMENTATION_CASES.len(),
+            "Some browser searches failed. Inspect the report."
+        );
+        assert_eq!(
+            hits,
+            DOCUMENTATION_CASES.len(),
+            "Some target sources were missing. Execution alone is not success."
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires installed Chrome and public network access"]
+    fn live_concurrent_filtered_searches() {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (query, domain) in [
+                ("Python documentation", "docs.python.org"),
+                ("Rust Cargo documentation", "doc.rust-lang.org"),
+            ] {
+                let controller = &controller;
+                let barrier = &barrier;
+                handles.push(scope.spawn(move || {
+                    let filter = DomainFilter::new(&[domain.into()], &[]).unwrap();
+                    barrier.wait();
+                    let started = Instant::now();
+                    let response = controller.search_filtered(query, &filter, &|| false);
+                    println!("{}", serde_json::json!({"query":query,"domain":domain,"total_elapsed_ms":started.elapsed().as_millis(),"response":response}));
+                    let response = response.unwrap();
+                    assert!(!response.results.is_empty());
+                    assert!(response.results.iter().all(|result| filter.allows(&result.url)));
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+        assert!(!controller.status().busy);
+    }
+
+    #[test]
+    #[ignore = "Requires installed Chrome and public network access"]
+    fn live_chrome_search() {
+        let root = temporary_dir().unwrap();
+        let controller = SearchController::shared(&root.0);
+        if std::env::var("TOKEN_STATION_SEARCH_TEST_ENGINE").as_deref() == Ok("duckduckgo") {
+            controller
+                .save(SearchSettings {
+                    enabled: false,
+                    mode: SearchMode::Local,
+                    engine: Engine::Duckduckgo,
+                    ..SearchSettings::default()
+                })
+                .unwrap();
+        }
+        let result = controller
+            .search("Python official documentation", &|| false)
+            .unwrap();
+        assert!(!result.results.is_empty());
+        println!("{}", serde_json::to_string(&result).unwrap());
+    }
+}
+
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Command, Stdio};
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
+use url::{Host, Url};
+
+const MAX_HTML: u64 = 4 * 1024 * 1024;
+const TIMEOUT: Duration = Duration::from_secs(35);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    #[default]
+    Bing,
+    Duckduckgo,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    #[default]
+    Auto,
+    Native,
+    Local,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchSettings {
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: SearchMode,
+    pub engine: Engine,
+    #[serde(default)]
+    pub backend: SearchBackend,
+    #[serde(default)]
+    pub browser_fallback: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchStatus {
+    pub settings: SearchSettings,
+    pub chrome_available: bool,
+    pub tavily_configured: bool,
+    pub busy: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    pub source: &'static str,
+    pub content_type: &'static str,
+    pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<page::PageText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<SearchErrorKind>,
+}
+
+pub struct SearchController {
+    data_dir: PathBuf,
+    settings: Mutex<SearchSettings>,
+    queue: queue::SearchQueue,
+    api_queue: queue::SearchQueue,
+    #[cfg(test)]
+    pub(crate) tavily_endpoint: Mutex<Option<String>>,
+    revision: AtomicU64,
+    #[cfg(test)]
+    pub(crate) fixture: Mutex<Option<Result<Vec<SearchResult>, String>>>,
+    #[cfg(test)]
+    pub(super) page_fixture: Mutex<Option<(String, String)>>,
+}
+
+impl SearchController {
+    #[must_use]
+    pub fn shared(data_dir: &Path) -> Arc<Self> {
+        static REGISTRY: OnceLock<Mutex<BTreeMap<PathBuf, Weak<SearchController>>>> =
+            OnceLock::new();
+        let mut registry = REGISTRY
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(controller) = registry.get(data_dir).and_then(Weak::upgrade) {
+            return controller;
+        }
+        let settings = std::fs::read(data_dir.join("search-settings.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let controller = Arc::new(Self {
+            data_dir: data_dir.to_path_buf(),
+            settings: Mutex::new(settings),
+            queue: queue::SearchQueue::default(),
+            api_queue: queue::SearchQueue::default(),
+            #[cfg(test)]
+            tavily_endpoint: Mutex::new(None),
+            revision: AtomicU64::new(0),
+            #[cfg(test)]
+            fixture: Mutex::new(None),
+            #[cfg(test)]
+            page_fixture: Mutex::new(None),
+        });
+        registry.insert(data_dir.to_path_buf(), Arc::downgrade(&controller));
+        controller
+    }
+
+    #[must_use]
+    pub fn settings(&self) -> SearchSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn status(&self) -> SearchStatus {
+        SearchStatus {
+            settings: self.settings(),
+            chrome_available: chrome_path().is_some(),
+            busy: self.queue.busy() || self.api_queue.busy(),
+            tavily_configured: self.tavily_key().is_ok(),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error when private preferences cannot be saved.
+    pub fn save(&self, settings: SearchSettings) -> Result<SearchStatus, String> {
+        let mut current = self
+            .settings
+            .lock()
+            .map_err(|_| "Cannot save search settings.")?;
+        crate::private_fs::ensure_private_dir(&self.data_dir)
+            .map_err(|_| "Cannot create the search settings directory.")?;
+        let bytes = serde_json::to_vec(&settings).map_err(|_| "Cannot encode search settings.")?;
+        crate::private_fs::write_atomic_private(
+            &self.data_dir.join("search-settings.json"),
+            &bytes,
+        )
+        .map_err(|_| "Cannot save search settings.")?;
+        *current = settings;
+        self.revision.fetch_add(1, Ordering::Release);
+        drop(current);
+        Ok(self.status())
+    }
+
+    /// A manual connection test may run while automatic interception is disabled.
+    /// # Errors
+    /// Returns an error on invalid input, cancellation, browser failure, or result extraction failure.
+    #[allow(clippy::too_many_lines)]
+    pub fn search(
+        &self,
+        query: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<SearchResponse, String> {
+        self.search_filtered(query, &DomainFilter::default(), cancelled)
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct OwnedBrowser {
+    child: std::process::Child,
+    profile: TemporaryProfile,
+}
+impl Drop for OwnedBrowser {
+    fn drop(&mut self) {
+        stop_browser(&mut self.child);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn browse(
+    browser: &mut OwnedBrowser,
+    url: &Url,
+    engine: Engine,
+    filter: &DomainFilter,
+    start: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<SearchResult>, String> {
+    let check = || {
+        if cancelled() {
+            Err("Browser search was cancelled.".to_owned())
+        } else if start.elapsed() >= TIMEOUT {
+            Err("Browser search timed out.".to_owned())
+        } else {
+            Ok(())
+        }
+    };
+    let port = loop {
+        check()?;
+        if let Ok(text) = std::fs::read_to_string(browser.profile.0.join("DevToolsActivePort"))
+            && let Some(port) = text
+                .lines()
+                .next()
+                .and_then(|line| line.parse::<u16>().ok())
+        {
+            break port;
+        }
+        if browser
+            .child
+            .try_wait()
+            .map_err(|_| "Cannot wait for Chrome.")?
+            .is_some()
+        {
+            return Err("Chrome exited before search started.".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let agent = ureq::Agent::config_builder()
+        .proxy(None)
+        .timeout_global(Some(Duration::from_secs(2)))
+        .build()
+        .new_agent();
+    let text = agent
+        .get(format!("http://127.0.0.1:{port}/json/list"))
+        .call()
+        .map_err(|_| "Cannot connect to the search browser.")?
+        .body_mut()
+        .read_to_string()
+        .map_err(|_| "Invalid browser connection response.")?;
+    let pages: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| "Invalid browser connection response.")?;
+    let endpoint = pages
+        .as_array()
+        .and_then(|pages| pages.iter().find(|page| page["type"] == "page"))
+        .and_then(|page| page["webSocketDebuggerUrl"].as_str())
+        .ok_or("The search browser has no page.")?;
+    let endpoint_url = Url::parse(endpoint).map_err(|_| "Invalid browser endpoint.")?;
+    if endpoint_url.host_str() != Some("127.0.0.1") || endpoint_url.port() != Some(port) {
+        return Err("Invalid browser endpoint.".into());
+    }
+    let socket = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_secs(2),
+    )
+    .map_err(|_| "Cannot connect to Chrome.")?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| "Cannot set browser timeout.")?;
+    socket
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| "Cannot set browser timeout.")?;
+    let (mut connection, _) =
+        tungstenite::client(endpoint, socket).map_err(|_| "Cannot open the browser connection.")?;
+    connection.set_config(|config| {
+        config.max_message_size = Some(8 * 1024 * 1024);
+        config.max_frame_size = Some(8 * 1024 * 1024);
+    });
+    cdp(
+        &mut connection,
+        1,
+        "Page.navigate",
+        &serde_json::json!({"url":url.as_str()}),
+        &check,
+    )?;
+    let mut id = 2;
+    let mut last_error = "No search results could be extracted.".to_owned();
+    loop {
+        check()?;
+        let result = cdp(
+            &mut connection,
+            id,
+            "Runtime.evaluate",
+            &serde_json::json!({"expression":"document.documentElement.outerHTML.slice(0, 4194305)", "returnByValue":true}),
+            &check,
+        )?;
+        id += 1;
+        if let Some(html) = result["result"]["value"].as_str() {
+            if html.len() as u64 > MAX_HTML {
+                return Err("The search page exceeded the size limit.".into());
+            }
+            match parse_filtered_results_checked(html, engine, filter, &check) {
+                Ok(results) => return Ok(results),
+                Err(error) if error.contains("verification") => {
+                    return Err(error);
+                }
+                Err(error) => last_error = error,
+            }
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            return Err(last_error);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+fn cdp(
+    connection: &mut tungstenite::WebSocket<std::net::TcpStream>,
+    id: u64,
+    method: &str,
+    params: &serde_json::Value,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<serde_json::Value, String> {
+    connection
+        .send(tungstenite::Message::Text(
+            serde_json::json!({"id":id,"method":method,"params":params})
+                .to_string()
+                .into(),
+        ))
+        .map_err(|_| "Cannot send a browser command.")?;
+    loop {
+        check()?;
+        match connection.read() {
+            Ok(tungstenite::Message::Text(text)) => {
+                let reply: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|_| "Invalid browser reply.")?;
+                if reply["id"].as_u64() == Some(id) {
+                    if reply.get("error").is_some() {
+                        return Err("The browser command failed.".into());
+                    }
+                    return Ok(reply["result"].clone());
+                }
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return Err("The browser connection closed.".into()),
+        }
+    }
+}
+
+fn stop_browser(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // The child owns this new process group. Never signal a personal browser.
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+struct TemporaryProfile(PathBuf);
+impl Drop for TemporaryProfile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+fn temporary_dir() -> Result<TemporaryProfile, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| "Cannot create a private browser profile.")?;
+    let id = u128::from_le_bytes(bytes).to_string();
+    let path = std::env::temp_dir().join(format!("token-station-search-{id}"));
+    crate::private_fs::ensure_private_dir(&path)
+        .map_err(|_| "Cannot create a private browser profile.")?;
+    Ok(TemporaryProfile(path))
+}
+
+fn chrome_path() -> Option<PathBuf> {
+    let mut paths = vec![
+        PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        PathBuf::from("/usr/bin/google-chrome"),
+        PathBuf::from("/usr/bin/chromium"),
+        PathBuf::from("/usr/bin/chromium-browser"),
+    ];
+    #[cfg(windows)]
+    for root in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+        if let Some(dir) = std::env::var_os(root) {
+            paths.push(PathBuf::from(dir).join("Google/Chrome/Application/chrome.exe"));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(
+            PathBuf::from(home).join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        );
+    }
+    paths.into_iter().find(|path| path.is_file())
+}
+
+fn search_url(engine: Engine, query: &str) -> Result<Url, String> {
+    let query = query.trim();
+    if query.is_empty() || query.chars().count() > 500 {
+        return Err("Enter a search query with 1 to 500 characters.".into());
+    }
+    let mut url = Url::parse(match engine {
+        Engine::Bing => "https://www.bing.com/search",
+        Engine::Duckduckgo => "https://html.duckduckgo.com/html/",
+    })
+    .map_err(|_| "Invalid search engine.")?;
+    url.query_pairs_mut().append_pair("q", query);
+    Ok(url)
+}
+
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // URL hosts are normalized domain names.
+pub(crate) fn public_url(raw: &str) -> Option<String> {
+    let url = Url::parse(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    match url.host()? {
+        Host::Ipv4(ip)
+            if ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_broadcast() =>
+        {
+            return None;
+        }
+        Host::Ipv6(_) => return None,
+        Host::Domain(host)
+            if !host.contains('.') || host.ends_with(".local") || host.ends_with(".localhost") =>
+        {
+            return None;
+        }
+        _ => {}
+    }
+    Some(url.to_string())
+}
+
+#[cfg(test)]
+fn parse_results(html: &str, engine: Engine) -> Result<Vec<SearchResult>, String> {
+    parse_filtered_results(html, engine, &DomainFilter::default())
+}
+
+fn filter_results(
+    results: Vec<SearchResult>,
+    filter: &DomainFilter,
+) -> Result<Vec<SearchResult>, String> {
+    let filtered: Vec<_> = results
+        .into_iter()
+        .filter(|result| filter.allows(&result.url))
+        .take(5)
+        .collect();
+    if filtered.is_empty() && !filter.is_empty() {
+        return Err("No search results match the domain filters.".into());
+    }
+    Ok(filtered)
+}
+
+#[cfg(test)]
+fn parse_filtered_results(
+    html: &str,
+    engine: Engine,
+    filter: &DomainFilter,
+) -> Result<Vec<SearchResult>, String> {
+    parse_filtered_results_checked(html, engine, filter, &|| Ok(()))
+}
+
+fn resolve_search_link(href: &str, engine: Engine) -> String {
+    if engine == Engine::Duckduckgo {
+        Url::parse("https://duckduckgo.com")
+            .ok()
+            .and_then(|base| base.join(href).ok())
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(key, _)| key == "uddg")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .unwrap_or_else(|| href.to_owned())
+    } else if href.starts_with("https://www.bing.com/ck/a?") {
+        use base64::Engine as _;
+        Url::parse(href)
+            .ok()
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(key, _)| key == "u")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .and_then(|value| {
+                value.strip_prefix("a1").and_then(|encoded| {
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(encoded)
+                        .ok()
+                })
+            })
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default()
+    } else {
+        href.to_owned()
+    }
+}
+
+fn parse_filtered_results_checked(
+    input: &str,
+    engine: Engine,
+    filter: &DomainFilter,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<Vec<SearchResult>, String> {
+    let document = html::parse(input, usize::try_from(MAX_HTML).unwrap(), check)?;
+    let mut seen = BTreeSet::new();
+    let mut results = Vec::new();
+    for row in 0..document.len() {
+        check()?;
+        let row_node = document.node(row);
+        let is_row = match engine {
+            Engine::Bing => row_node.name == "li" && html::has_class(row_node, "b_algo"),
+            Engine::Duckduckgo => html::has_class(row_node, "result"),
+        };
+        if !is_row {
+            continue;
+        }
+        let end = document.end(row);
+        let link = match engine {
+            Engine::Bing => {
+                let heading = document.first(row + 1, end, |node| node.name == "h2", check)?;
+                match heading {
+                    Some(heading) => document.first(
+                        heading + 1,
+                        document.end(heading),
+                        |node| node.name == "a",
+                        check,
+                    )?,
+                    None => None,
+                }
+            }
+            Engine::Duckduckgo => document.first(
+                row + 1,
+                end,
+                |node| node.name == "a" && html::has_class(node, "result__a"),
+                check,
+            )?,
+        };
+        let Some(link) = link else {
+            continue;
+        };
+        let Some(href) = document.node(link).href.as_deref() else {
+            continue;
+        };
+        let resolved = resolve_search_link(href, engine);
+        let Some(url) = public_url(&resolved) else {
+            continue;
+        };
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        let title = document
+            .text(link + 1, document.end(link), 250, &[], check)?
+            .0;
+        if title.is_empty() {
+            continue;
+        }
+        let snippet_node = document.first(
+            row + 1,
+            end,
+            |node| match engine {
+                Engine::Bing => node.name == "p",
+                Engine::Duckduckgo => html::has_class(node, "result__snippet"),
+            },
+            check,
+        )?;
+        let snippet = match snippet_node {
+            Some(index) => {
+                document
+                    .text(index + 1, document.end(index), 1000, &[], check)?
+                    .0
+            }
+            None => String::new(),
+        };
+        results.push(SearchResult {
+            title: title.chars().take(250).collect(),
+            url,
+            snippet: snippet.chars().take(1000).collect(),
+        });
+        if results.len() == 50 {
+            break;
+        }
+    }
+    if results.is_empty() {
+        let lower = input.to_lowercase();
+        if [
+            "verify you are human",
+            "captcha",
+            "unusual traffic",
+            "challenge-form",
+        ]
+        .iter()
+        .any(|text| lower.contains(text))
+        {
+            return Err(
+                "The search engine requires human verification. Try another engine or retry later."
+                    .into(),
+            );
+        }
+        return Err("No search results could be extracted. The page may be blocked or its layout may have changed.".into());
+    }
+    filter_results(results, filter)
+}

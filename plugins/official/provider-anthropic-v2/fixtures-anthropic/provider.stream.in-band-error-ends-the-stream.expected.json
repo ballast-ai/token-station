@@ -1,0 +1,26 @@
+[
+  {
+    "type": "usage",
+    "usage": {
+      "input_tokens": 12,
+      "output_tokens": 1,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0
+    }
+  },
+  {
+    "type": "delta",
+    "content": "par",
+    "index": 0
+  },
+  {
+    "type": "error",
+    "error": {
+      "code": "capacity",
+      "http_status": 502,
+      "message": "the upstream failed",
+      "provider_message": "Overloaded"
+    }
+  }
+]

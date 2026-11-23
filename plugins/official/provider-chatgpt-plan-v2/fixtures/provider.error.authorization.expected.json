@@ -1,0 +1,5 @@
+{
+  "code": "auth",
+  "http_status": 401,
+  "message": "ChatGPT account authorization was rejected. Sign in again."
+}

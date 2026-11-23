@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/build-desktop.sh <--local|--preview|--production> [--unsigned-windows] [--target <target-triple>] [--test-version <version>]" >&2
+  echo "usage: scripts/build-desktop.sh <--local|--preview|--production> [--unsigned-windows] [--target <target-triple>] [--test-version <version>] [--scx-experiment]" >&2
   exit 2
 }
 
@@ -18,6 +18,7 @@ export TOKEN_STATION_BUILD_CHANNEL="$mode"
 
 target=""
 test_version=""
+scx_experiment=false
 unsigned_windows=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,9 +36,25 @@ while [[ $# -gt 0 ]]; do
       test_version=$2
       shift 2
       ;;
+    --scx-experiment)
+      scx_experiment=true
+      shift
+      ;;
     *) usage ;;
   esac
 done
+
+export TOKEN_STATION_SCX_EXPERIMENT=0
+export VITE_TOKEN_STATION_SCX_EXPERIMENT=0
+if [[ "$scx_experiment" == "true" ]]; then
+  [[ "$mode" == "local" && "$(uname -s)" == "Darwin" ]] || {
+    echo "SCX experiments require a local macOS build." >&2
+    exit 2
+  }
+  export TOKEN_STATION_SCX_EXPERIMENT=1
+  export VITE_TOKEN_STATION_SCX_EXPERIMENT=1
+  unset TOKEN_STATION_UPDATER_ENDPOINT TOKEN_STATION_UPDATER_PUBKEY
+fi
 
 if [[ -n "$test_version" ]]; then
   [[ "$mode" == "local" ]] || {
@@ -259,6 +276,9 @@ cargo test --locked \
   desktop_bundled_plugins_load_without_an_external_plugin_directory
 
 tauri_args=(build --ci --features bundled-plugins)
+if [[ "$scx_experiment" == "true" ]]; then
+  tauri_args+=(--config "$root/apps/desktop/src-tauri/tauri.scx.conf.json")
+fi
 macos_bundle_kind=""
 if [[ "$enable_updater_artifacts" == "true" ]]; then
   updater_artifact_config="$stage/updater-artifacts.json"
@@ -388,6 +408,9 @@ audit_args=(
   --rust-sysroot "$rust_sysroot"
   --private-cargo-home "$private_cargo_home"
 )
+if [[ "$scx_experiment" == "true" ]]; then
+  audit_args+=(--scx-experiment)
+fi
 if [[ "$unsigned_windows" == "true" ]]; then
   audit_args+=(--unsigned-windows)
 fi

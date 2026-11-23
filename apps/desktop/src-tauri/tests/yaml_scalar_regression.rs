@@ -96,6 +96,7 @@ fn hermes_disconnect_projection_removes_missing_owned_fields_only() {
 #[test]
 fn hermes_reuses_every_safe_empty_model_spelling_without_losing_comments() {
     let input = ConnectInput {
+        browser_search_enabled: false,
         base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
         token: Some("fixture-empty-parent-secret"),
         adapter_ready: true,
@@ -138,6 +139,7 @@ fn hermes_reuses_safe_empty_model_spellings_at_eof_without_a_newline() {
         prepare_owned_paths_for_write(&mut document, &HermesConnector.owned_paths()).unwrap();
         let operations = HermesConnector
             .connect_patch(&ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("fixture-secret"),
                 adapter_ready: true,
@@ -167,6 +169,7 @@ fn hermes_keeps_ambiguous_model_shapes_blocked() {
             HermesConnector.validate_source(&document).is_err()
                 || HermesConnector
                     .connect_patch(&ConnectInput {
+                        browser_search_enabled: false,
                         base_url: "http://127.0.0.1:8787/v1",
                         token: Some("fixture-secret"),
                         adapter_ready: true,

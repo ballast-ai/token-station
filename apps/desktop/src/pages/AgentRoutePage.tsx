@@ -23,6 +23,7 @@ import {
   openAgentBackupDirectory,
   planAgentConnection,
   planAgentDisconnect,
+  planAgentForcedDisconnect,
   restartAgentHarnessRoutes,
   restartAgentRoute,
   restoreCursorProvider,
@@ -39,10 +40,12 @@ import {
   type AgentView,
   type ProviderView,
   type QuotaAccount,
+  type SaveQuotaPlan,
   type RoutingMode,
   type StateView,
   type TierSlot,
 } from "../api";
+import { upstreamDisplayName } from "../providerPresentation";
 import TierRouteEditor from "../components/TierRouteEditor";
 import HarnessModelMapping from "../components/HarnessModelMapping";
 import InstallationPicker from "../components/InstallationPicker";
@@ -101,12 +104,7 @@ interface AgentRoutePageProps {
   onRefreshAgents: () => void | Promise<void>;
   onConnectInFlightChange?: (inFlight: boolean) => void;
   onSaveQuota: (accounts: QuotaAccount[]) => void;
-  onSaveQuotaPlan: (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void;
+  onSaveQuotaPlan: SaveQuotaPlan;
   onViewQuotaUsage: () => void;
   onSetRoutingMode?: (mode: RoutingMode) => void;
   onApplyDirect?: (upstream: string, model: string) => void | Promise<boolean>;
@@ -216,16 +214,21 @@ export function compactDiscoveryPath(path: string): string {
   return `${prefix}${start}${separator}…${separator}${end}`;
 }
 
-function connectedRouteDetail(route: AgentRouteView, copy: LocalizedCopy): string {
+function directRouteLabel(route: AgentRouteView, providers: ProviderView[]): string | null {
+  const target = route.direct_target;
+  if (!target?.upstream || !target.model) return null;
+  return `${upstreamDisplayName(target.upstream, providers)} / ${target.model}`;
+}
+
+function connectedRouteDetail(route: AgentRouteView, providers: ProviderView[], copy: LocalizedCopy): string {
   if (route.routing_mode === "direct") {
-    const upstream = route.direct_target?.upstream;
-    const model = route.direct_target?.model;
-    if (upstream && model) {
+    const target = directRouteLabel(route, providers);
+    if (target) {
       return copy(
-        `Gateway ready · ${upstream} / ${model}`,
-        `网关正常 · ${upstream} / ${model}`,
-        `閘道正常 · ${upstream} / ${model}`,
-        `ゲートウェイ正常 · ${upstream} / ${model}`,
+        `Gateway ready · ${target}`,
+        `网关正常 · ${target}`,
+        `閘道正常 · ${target}`,
+        `ゲートウェイ正常 · ${target}`,
       );
     }
     return copy(
@@ -259,6 +262,7 @@ function statusCopy(
   copy: LocalizedCopy,
   language: Language,
   serveRunning: boolean,
+  providers: ProviderView[],
 ) {
   const usesCursorDatabaseIntegration = metadata.agent_id === "cursor"
     && installation?.compatibility.reason_code === "CONNECTOR_BINDING_NOT_UNIQUE";
@@ -276,6 +280,18 @@ function statusCopy(
       detail: copy(
         "Multiple installations found. Select a version.",
         "检测到多份安装，请选择版本。", "檢測到多份安裝，請選擇版本。", "複数のインストールがあります。バージョンを選択してください。"
+      ),
+    };
+  }
+  if (installation?.managed && installation.discovery.binary_source === "managed_record") {
+    return {
+      tone: "warning",
+      label: copy("Previous connection needs recovery", "旧连接待恢复", "舊連線待恢復", "以前の接続を復元"),
+      detail: copy(
+        "The previous installation is no longer discovered. Restore its pre-connection configuration and disconnect, then select the current installation to reconnect.",
+        "旧安装已不在扫描结果中。请先恢复接入前配置并断开，再选择当前安装重新接入。",
+        "舊安裝已不在掃描結果中。請先恢復連線前設定並中斷連線，再選擇目前安裝重新連線。",
+        "以前のインストールは検出されなくなりました。接続前の設定を復元して切断し、現在のインストールを選択して再接続してください。",
       ),
     };
   }
@@ -354,7 +370,7 @@ function statusCopy(
     return {
       tone: "success",
       label: copy("Connected", "已接入", "已接入", "接続済み"),
-      detail: connectedRouteDetail(route, copy),
+      detail: connectedRouteDetail(route, providers, copy),
     };
   }
   if (metadata.agent_id === "cursor" && installation) {
@@ -508,12 +524,12 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const discoveredStatus = statusCopy(metadata, agent, installation, route, copy, language, serveRunning);
+  const discoveredStatus = statusCopy(metadata, agent, installation, route, copy, language, serveRunning, providers);
   const status = metadata.agent_id === "cursor" && cursorStatus?.state === "connected"
     ? {
       tone: "success" as const,
       label: copy("Connected", "已接入", "已接入", "接続済み"),
-      detail: connectedRouteDetail(route, copy),
+      detail: connectedRouteDetail(route, providers, copy),
     }
     : metadata.agent_id === "cursor" && cursorStatus?.state === "repair_required"
       ? {
@@ -558,10 +574,9 @@ export default function AgentRoutePage({
     : route.routing_mode === "quota_first"
       ? copy("Quota first", "额度优先", "額度優先", "クォータ優先")
       : copy("Smart tiers", "智能分档", "智慧分檔", "スマート階層");
+  const directTargetLabel = directRouteLabel(route, providers);
   const inheritedStrategyDetail = route.routing_mode === "direct"
-    ? route.direct_target?.upstream && route.direct_target.model
-      ? `${route.direct_target.upstream} / ${route.direct_target.model}`
-      : copy("Uses the global target", "使用全局目标", "使用全域目標", "グローバルターゲットを使用")
+    ? directTargetLabel ?? copy("Uses the global target", "使用全局目标", "使用全域目標", "グローバルターゲットを使用")
     : route.routing_mode === "quota_first"
       ? copy("Uses the global quota queue", "使用全局额度队列", "使用全域額度佇列", "グローバルクォータキューを使用")
       : copy("Uses the global high, mid, and low tiers", "使用全局高、中、低三档", "使用全域高、中、低三檔", "グローバルの高・中・低階層を使用");
@@ -747,7 +762,7 @@ export default function AgentRoutePage({
     if (!installation || busy) return;
     setBusy(true);
     try {
-      const plan = await planAgentDisconnect(
+      const plan = await (applyImmediately ? planAgentForcedDisconnect : planAgentDisconnect)(
         metadata.agent_id,
         installation.discovery.canonical_path,
       );
@@ -949,7 +964,12 @@ export default function AgentRoutePage({
               ? runState(ensureServeRunning)
               : previewConnection())}
             title={managed
-              ? copy(
+              ? metadata.agent_id !== "cursor" ? copy(
+                "Restore this Agent's managed fields to their pre-connection values, then disconnect. Unrelated fields are preserved.",
+                "将此 Agent 的受管字段恢复为接入前的值，然后断开；其他字段保持不变。",
+                "將此 Agent 的受管欄位恢復為連線前的值，然後中斷連線；其他欄位保持不變。",
+                "この Agent の管理フィールドを接続前の値に戻して切断します。他のフィールドは保持されます。",
+              ) : copy(
                 "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
                 "剥掉 Token Station 注入的字段，让 Agent 回到官方默认配置，并清除接管记录。", "剝掉 Token Station 注入的欄位，讓 Agent 回到官方預設配置，並清除接管記錄。", "Token Station が注入したフィールドを除去し、Agent を公式のデフォルト設定に戻し、管理記録を削除してください。"
               )
@@ -958,7 +978,9 @@ export default function AgentRoutePage({
             {busy
               ? copy("Working…", "处理中…", "處理中…", "処理中…")
               : managed
-                ? copy("Restore official configuration & disconnect", "恢复官方配置并断开", "恢復官方配置並斷開", "公式設定を復元し、接続を解除")
+                ? metadata.agent_id !== "cursor"
+                  ? copy("Restore pre-connection configuration & disconnect", "恢复接入前配置并断开", "恢復連線前設定並中斷連線", "接続前の設定を復元して切断")
+                  : copy("Restore official configuration & disconnect", "恢复官方配置并断开", "恢復官方配置並斷開", "公式設定を復元し、接続を解除")
                 : needsProxyStart
                   ? copy("Start proxy", "启动代理", "啟動代理", "プロキシを起動")
                 : cursorRepairRequired
@@ -990,6 +1012,7 @@ export default function AgentRoutePage({
         key={metadata.agent_id}
         metadata={metadata}
         route={route}
+        directTargetLabel={directTargetLabel}
         connected={metadata.agent_id === "cursor" ? cursorStatus?.state === "connected" : installation?.connected === true}
       />
 
@@ -1118,9 +1141,7 @@ export default function AgentRoutePage({
           <span aria-hidden="true">{routeNeedsAttention ? "!" : <RouteIcon />}</span>
           <div>
             <strong>{copy("Route preview after connection", "接入后的路由预览", "接入後路由預覽", "接続後のルーティングプレビュー")}</strong>
-            <code>{route.direct_target?.upstream && route.direct_target.model
-              ? `${route.direct_target.upstream} / ${route.direct_target.model}`
-              : copy("Complete global routing before connection", "请先完成全局路由", "完成全域性路由後再進行連線", "グローバルルーティングを完了してから接続してください")}</code>
+            <code>{directTargetLabel ?? copy("Complete global routing before connection", "请先完成全局路由", "完成全域性路由後再進行連線", "グローバルルーティングを完了してから接続してください")}</code>
           </div>
         </div>
       </section>

@@ -37,6 +37,17 @@ const tiers: Record<TierSlot, TierView> = {
 };
 
 describe("TierRouteEditor", () => {
+  it("keeps account IDs in tier selections while displaying subscription names", async () => {
+    const user = userEvent.setup();
+    const name = "codex_" + "a".repeat(64);
+    const onTierChange = vi.fn();
+    render(<TierRouteEditor providers={[{ ...providers[1], name, provider: "codex-plan" }]} tiers={{ ...tiers, high: { upstream: name, model: "gpt-5.5" } }} onTierChange={onTierChange} />);
+    expect(screen.getByLabelText("上档供应商")).toHaveTextContent("Codex-plan");
+    await user.click(screen.getByLabelText("下档供应商"));
+    await user.click(screen.getByRole("option", { name: "Codex-plan" }));
+    expect(onTierChange).toHaveBeenCalledWith("low", name, "gpt-5.5");
+  });
+
   it("shows provider brands in the selected control and dropdown options", async () => {
     const user = userEvent.setup();
     render(

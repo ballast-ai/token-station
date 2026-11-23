@@ -18,6 +18,13 @@ Do not use Quota first when the workload must stay on the device. That path does
 
 ## Providers
 
+The Models page offers **Local Codex login** and **ChatGPT plan** as separate experimental subscription connections.
+Local Codex reuses an existing file-backed login without browser authorization. The separate ChatGPT login remains available.
+At startup, a supported local Codex login automatically creates its provider and current model catalog.
+Existing routes remain unchanged. Explicitly deleted or disconnected local Codex connections are not restored automatically.
+Both use subscription accounting, exclude quota rotation, and stop instead of falling back to paid APIs.
+See [subscription setup and verification](guides/chatgpt-plan.md).
+
 Start from 40+ editable official, managed, and local presets, or add a custom OpenAI-compatible endpoint. The app can discover and compare models, record capabilities and limits, and run model-level health checks.
 
 Before a selected free or trial entry is added, a real completion validates reachability and protocol behavior. That check does not prove later requests stay free. Offer availability and billing stay under provider control.
@@ -30,7 +37,27 @@ South is the default Provider execution engine: buffered and streaming calls, Be
 
 Anthropic-wire upstreams (`provider: anthropic`, the Anthropic API itself or a compatible `/anthropic/v1` endpoint) are translated through the Anthropic provider component like every other upstream: thinking, a forced `tool_choice`, and server-tool history blocks all round-trip. One thing the Canonical IR cannot carry is a tool the upstream executes itself (`web_search`, `web_fetch`, `code_execution`, `tool_search`, `mcp`, `advisor`). For that, set `"api_dialect": "anthropic-native"` on the upstream: an Anthropic Messages request that declares such a tool is then forwarded verbatim to `base_url` + `/messages` (only `model` is rewritten), while every other request to that upstream still takes the translated path. The setting requires `provider: anthropic` and a `base_url` ending at the version segment. It is edited in the configuration file; the desktop does not offer it.
 
-Codex live Web Search requires a provider that implements the native OpenAI Responses API. Set `"api_dialect": "responses-native"` on an explicitly selected `provider: openai-compatible` upstream whose `base_url` ends at the API version segment, such as `https://api.openai.com/v1`. A Responses request with an active `web_search` tool is then forwarded to `base_url` + `/responses`; Token Station preserves the request and response formats, including `web_search_call` JSON items and SSE events, and rewrites only `model`. Requests without active Web Search use the configured routing policy. Image turns, including continuations with retained images, use the Responses endpoint when the selected upstream uses `responses-native`. Other requests use the translated path. Native continuations replay bounded local input history without sending another account's response ID. A translated upstream still rejects provider-hosted tools before network I/O. The desktop does not currently expose this advanced setting.
+For native Responses passthrough, Codex live Web Search requires a provider that implements the native OpenAI Responses API. Set `"api_dialect": "responses-native"` on an explicitly selected `provider: openai-compatible` upstream whose `base_url` ends at the API version segment, such as `https://api.openai.com/v1`. A Responses request with an active `web_search` tool is then forwarded to `base_url` + `/responses`; Token Station preserves the request and response formats, including `web_search_call` JSON items and SSE events, and rewrites only `model`. Requests without active Web Search use the configured routing policy. Image turns, including continuations with retained images, use the Responses endpoint when the selected upstream uses `responses-native`. Other requests use the translated path. Native continuations replay bounded local input history without sending another account's response ID. A translated upstream still rejects provider-hosted tools before network I/O. The desktop does not currently expose this advanced setting.
+
+With Web Search enabled, Auto and Native modes also bridge hosted search between Anthropic Messages and OpenAI Responses.
+The reverse bridge supports text, ordinary client functions, search history, compatible tool choices, and domain allow lists.
+It maps explicit `reasoning.effort=none` to disabled thinking.
+It rejects images, persisted response IDs, strict function schemas, other reasoning controls, and unsupported fields.
+Both bridges stream answer text before completion. Some search results and citations are finalized at the terminal event.
+The Anthropic-facing bridge returns portable source URLs. It does not invent provider-encrypted citation handles.
+Failures, cancellation, and truncated streams do not produce a successful terminal event.
+
+Local search uses one browser slot and a FIFO queue with eight waiting positions and a 60-second wait limit.
+Each request permits three operations, shared between searches and page reads. Searches return at most five snippets.
+Domain allow or block lists accept up to 20 DNS names, including subdomains. Returned URLs are filtered independently of engine hints.
+The internal search function accepts `query` to search, or `url` to open an exact source returned in the same request.
+An optional `pattern` counts case-sensitive literal matches within returned page text. It cannot be combined with `query`.
+Page reading supports static HTML and UTF-8 plain text. It does not implement a general Anthropic `web_fetch` hosted tool.
+It uses public IPv4 addresses on default HTTP/HTTPS ports, with DNS validation, no proxy or credentials, and at most three checked redirects.
+Each read has a 15-second network budget, a 2 MiB transfer limit, and a 24,000-character text limit. Truncation is explicit.
+PDF, JavaScript rendering, authenticated pages, geographic targeting, and cached-only local search remain unsupported.
+A successful request does not establish source relevance, freshness, or factual support.
+
 
 ## Desktop
 
@@ -43,6 +70,9 @@ On macOS, closing the main window hides it. The process stays resident and a run
 Background mode is not a system daemon, a login item, or an automatic crash-restart service.
 
 ## Agents
+
+A supported connector does not certify every upstream release. Read-only preflight checks installation and configuration.
+Verify conversation, tool execution, images, and search separately after an Agent update.
 
 | Agent | Integration | Inbound protocol |
 |---|---|---|
@@ -57,17 +87,19 @@ Background mode is not a system daemon, a login item, or an automatic crash-rest
 | [OpenClaw](https://github.com/openclaw/openclaw) | Built-in connector | OpenAI Chat Completions |
 | [WorkBuddy](https://www.workbuddy.ai/) | Built-in connector | OpenAI Chat Completions |
 | [OpenCode](https://github.com/anomalyco/opencode) | Built-in connector | OpenAI Chat Completions |
-| [Cursor](https://github.com/cursor/cursor) | Dedicated setup on macOS only | OpenAI-compatible endpoint |
+| [Cursor](https://github.com/cursor/cursor) | Discovery only; no supported connection | — |
 
 Claude Desktop does not currently have a public product repository. Its link opens Anthropic's official GitHub organization.
 
 DeepSeek Harness discovery covers both a normal `dsh` command and the bounded npm cache layout created by `npx @deepseek-ai/dsh web`. Token Station reads existing cache entries only. It never runs `npx` or installs the package during a scan.
 
-Grok Build uses `~/.grok/config.toml`, or `$GROK_HOME/config.toml` when `GROK_HOME` is set. Kimi Code uses `~/.kimi-code/config.toml`, or `$KIMI_CODE_HOME/config.toml` when `KIMI_CODE_HOME` is set. DeepSeek Harness uses `~/.dsh/settings.yaml` and `~/.dsh/.credentials.yaml`. When `DSH_HOME` is set, both files use that directory. All three connectors route OpenAI Chat Completions through the built-in `agent-openai` ingress.
+Grok Build uses `~/.grok/config.toml`, or `$GROK_HOME/config.toml` when `GROK_HOME` is set. Kimi Code uses `~/.kimi-code/config.toml`, or `$KIMI_CODE_HOME/config.toml` when `KIMI_CODE_HOME` is set. DeepSeek Harness uses `~/.dsh/cordis.patch.yml` and `~/.dsh/.credentials.yaml`. When `DSH_HOME` is set, both files use that directory. All three connectors route OpenAI Chat Completions through the built-in `agent-openai` ingress.
+
+DeepSeek Harness requires an identified version of `0.2.0-rc.2` or later. The connector edits Cordis rows by stable `id` and preserves other plugins and providers. Use a YAML block array or a JSON array. Commented YAML flow arrays fail before write. The credentials file uses mode `0600`. Restart DSH after connection or restoration. Disconnect existing `settings.yaml` ownership before reconnecting. Existing snapshots remain recoverable.
 
 For the eleven built-in connectors, clicking **Connect** is consent to apply a bounded plan immediately. Token Station starts the gateway when needed and shows the fields changed by the first connection. Connector availability depends on the agent and operating system. It does not imply that Token Station publishes an installer for that platform.
 
-Cursor uses a separate macOS-only path. Quit Cursor first. Token Station privately backs up the relevant SQLite records, writes the OpenAI-compatible endpoint, virtual key, and enablement flag, verifies the result, and restores the previous values if verification fails. Restart Cursor afterward and choose a model that supports its custom OpenAI key path. Windows and Linux builds do not advertise this setup until their native credential and database paths have an equivalent backend. This path is not covered by standard connector ownership or managed disconnect.
+Cursor remains in the discovery registry for legacy installations. It is excluded from connection, routing, and visibility controls. Historical SQLite setup code does not represent a supported connection flow.
 
 ## Workloads that must stay on the device
 
@@ -86,6 +118,19 @@ The quota page distinguishes new, recovered, changed-plan, and unavailable histo
 
 If quota persistence fails, Token Station reports the failure instead of starting with empty counters. Restore `quota.sqlite` from a known backup before removing the `quota-state-unavailable` marker. Do not remove that marker to claim a recovered balance.
 
+## Local backup and restore
+
+Use `token-station-cli backup <directory>` to copy the configuration and a consistent metrics snapshot.
+Online backup is supported. New backup directories and output files have owner-only permissions.
+Existing destination directory permissions remain unchanged.
+
+Before `token-station-cli restore <directory>`, stop all CLI and desktop instances that use the destination database.
+Close external SQLite tools too. Restore preserves the previous files as `<file>.pre-restore`.
+Current builds refuse restoration while a participating database writer holds its lifecycle lock.
+Older builds and external SQLite tools do not participate in that lock protocol.
+Keep the `metrics.sqlite.lifecycle.lock` sidecar in place. Do not delete it to bypass a busy-database error.
+Database paths with multiple hard links are refused because different names can bypass path-based coordination.
+
 ## Security
 
 | Boundary | Current behavior |
@@ -97,7 +142,7 @@ If quota persistence fails, Token Station reports the failure instead of startin
 | Provider credentials | The default store is plaintext `secrets.json` with owner-only permissions. Other processes running as the same operating-system user may still read it. Environment-variable and standalone-file sources are supported. Credential values are excluded from logs, errors, and sandboxed plugins. |
 | Plugin sandbox | WASM adapters receive no direct network, filesystem, environment, arguments, inherited standard I/O, or plaintext credential access. Memory and call time are limited. |
 | Outbound authorization | Before attaching a credential, the host checks that the destination origin, path boundary, and credential slot match the configured provider. |
-| Agent configuration | Built-in connectors use revision and ownership checks, private AES-256-GCM snapshots, atomic private writes, and recovery flows. The snapshot key is an owner-only local file, not an operating-system keychain entry. Cursor uses the separate SQLite path above. |
+| Agent configuration | Built-in connectors use revision and ownership checks, private AES-256-GCM snapshots, atomic private writes, and recovery flows. The snapshot key is an owner-only local file, not an operating-system keychain entry. |
 
 The Settings page can disable request-body capture with `data.request_body_capture: false`. The change applies when the gateway starts with the saved settings. Existing configurations keep capture enabled. Requests already in flight keep their original capture policy. Disabling capture keeps metadata receipts and does not immediately delete existing bodies. Retention cleanup still applies to existing bodies.
 

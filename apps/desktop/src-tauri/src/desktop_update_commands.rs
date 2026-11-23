@@ -3,6 +3,9 @@ use crate::*;
 pub(crate) fn desktop_updater<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<tauri_plugin_updater::Updater, String> {
+    if experimental::is_scx_experiment() {
+        return Err(experimental::UPDATES_DISABLED.to_owned());
+    }
     let endpoint = official_update_manifest_endpoint()?
         .parse()
         .map_err(|error| format!("更新地址无效：{error}"))?;
@@ -21,7 +24,7 @@ pub(crate) fn desktop_update_platform_unsupported_message() -> Option<&'static s
 
 #[cfg(target_os = "macos")]
 pub(crate) fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
-    None
+    experimental::is_scx_experiment().then_some(experimental::UPDATES_DISABLED)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

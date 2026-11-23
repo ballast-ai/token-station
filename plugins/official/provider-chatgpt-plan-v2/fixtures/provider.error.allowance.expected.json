@@ -1,0 +1,5 @@
+{
+  "code": "payment_required",
+  "http_status": 429,
+  "message": "ChatGPT plan allowance is unavailable."
+}

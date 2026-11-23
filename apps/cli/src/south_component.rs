@@ -9,14 +9,16 @@
 //! here. Nothing in this module opens a socket: translation and transport are
 //! separate seams (see `south_provider_call`).
 
+use std::io::Read;
 use std::path::Path;
+use std::sync::Mutex;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use south_provider_api::{AuthArmV1, HostExpectationsV1};
+use south_provider_api::{ComponentManifestV1, HostRangeV1, RUNTIME_ABI};
 use south_provider_runtime::{
-    CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, LoadedComponentV1, NoSecretsV1,
-    RuntimeLimitsV1,
+    CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, HostCompatibilityV1, LoadedComponentV1,
+    NoSecretsV1, RuntimeLimitsV1,
 };
 use token_station_protocol::{
     ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, HttpRequestDescriptor, HttpResponseParts,
@@ -101,40 +103,54 @@ pub fn south_component_runtime() -> Result<ComponentRuntimeV1, String> {
         .map_err(|error| format!("south component runtime: {error:#}"))
 }
 
-/// What this host was built against, for the tuple handshake South's loader
-/// now requires.
+/// What this host admits, declared in one place.
 ///
-/// **The one place.** Every component this host admits is judged against these
-/// four values, so a second copy would be a second opinion. South owns the
-/// comparison; the host owns the expectation.
+/// South judges every component against the host's declaration; the host owns
+/// the declaration. These are constants rather than derivations because nothing
+/// in the dependency graph carries them: South exposes no release constant. A
+/// declaration that nobody checks is what let the old exact tuple rot unnoticed
+/// for three releases, so `tests/south-dependency-policy.mjs` asserts these
+/// constants against the pinned South release and every shipped manifest.
 ///
-/// These are declarations rather than derivations because nothing in the
-/// dependency graph carries them: South exposes no version constant, and the
-/// kernel revision names an upstream `token-station` commit the mirror tracks,
-/// which no crate in this build can look up. A declaration that nobody checks
-/// is exactly what let the tuple rot unnoticed for three releases, so
-/// `tests/south-dependency-policy.mjs` asserts `SOUTH_RUNTIME` against the
-/// pinned South version and the shipped manifests: drift turns a gate red
-/// rather than turning the handshake into a formality again.
-pub(crate) const IR_SCHEMA_ID: &str = "token-station-protocol@0.3.0/v0.2.0";
-pub(crate) const KERNEL_VERSION: &str = "0.2.0";
-pub(crate) const KERNEL_REVISION: &str = "72458e3a11fe157f9ac04818c44b62a3dd2cb09c";
-pub(crate) const SOUTH_RUNTIME: &str = "0.16.0";
+/// The handshake is South's range (B3, `host-zero-vendor-boundary` §8.4): a
+/// package must declare this runtime ABI and exactly these kernel contracts,
+/// and must have been verified with a South runtime from `SOUTH_RUNTIME_MIN` up
+/// to the one this host links. A package built before the range handshake
+/// declares no `runtime_abi` and is refused; the exact-tuple arm left with the
+/// last such package.
+pub(crate) const SOUTH_RUNTIME: &str = "0.85.1";
+/// The oldest South runtime a package may declare: the oldest one among the
+/// packages this host ships. Raising it is how a host enforces a release that
+/// tightened a South gate.
+pub(crate) const SOUTH_RUNTIME_MIN: &str = "0.77.0";
+/// The kernel contracts of protocol 0.7.0 (kernel mirror `ce6894d`).
+pub(crate) const KERNEL_CONTRACTS: [(&str, u32); 3] =
+    [("canonical_ir", 5), ("error_catalog", 1), ("stream", 3)];
 
-/// The expectation every component is admitted against.
+/// The admission every component is loaded through; see `SOUTH_RUNTIME`.
 #[must_use]
-pub fn host_expectations() -> HostExpectationsV1 {
-    HostExpectationsV1 {
-        ir_schema_id: IR_SCHEMA_ID.to_owned(),
-        kernel_version: KERNEL_VERSION.to_owned(),
-        kernel_revision: KERNEL_REVISION.to_owned(),
+pub fn host_admission() -> HostRangeV1 {
+    HostRangeV1 {
+        runtime_abi: RUNTIME_ABI,
+        south_runtime_min: SOUTH_RUNTIME_MIN.to_owned(),
         south_runtime: SOUTH_RUNTIME.to_owned(),
+        kernel_contracts: KERNEL_CONTRACTS
+            .iter()
+            .map(|(name, version)| ((*name).to_owned(), *version))
+            .collect(),
+        // Provider-world packages declare no South contracts; task, media,
+        // image and speech worlds are not served by this host.
+        contracts: BTreeMap::new(),
     }
 }
 
 /// A v2 component, loaded through the South gates.
 pub struct SouthComponentAdapter {
-    component: LoadedComponentV1,
+    component: Mutex<Option<LoadedComponentV1>>,
+    runtime: ComponentRuntimeV1,
+    manifest_source: String,
+    wasm: Vec<u8>,
+    manifest: ComponentManifestV1,
 }
 
 impl SouthComponentAdapter {
@@ -152,11 +168,18 @@ impl SouthComponentAdapter {
             runtime,
             manifest_source,
             wasm,
-            &host_expectations(),
+            &host_admission(),
             NoSecretsV1,
         )
         .map_err(|error| format!("south v2 component: {error}"))?;
-        Ok(Self { component })
+        let manifest = component.manifest().clone();
+        Ok(Self {
+            component: Mutex::new(Some(component)),
+            runtime: runtime.clone(),
+            manifest_source: manifest_source.to_owned(),
+            wasm: wasm.to_vec(),
+            manifest,
+        })
     }
 
     /// Loads `manifest.json` and `component.wasm` from a package directory
@@ -166,15 +189,65 @@ impl SouthComponentAdapter {
     ///
     /// The South loader's refusal, formatted with the directory.
     pub fn load_dir(runtime: &ComponentRuntimeV1, dir: &Path) -> Result<Self, String> {
-        let component = LoadedComponentV1::load(runtime, dir, &host_expectations(), NoSecretsV1)
-            .map_err(|error| format!("south v2 component at {}: {error}", dir.display()))?;
-        Ok(Self { component })
+        let snapshot = || {
+            let bytes = read_snapshot_file(&dir.join("manifest.json"), 256 * 1024)?;
+            let manifest_source = String::from_utf8(bytes)
+                .map_err(|error| format!("manifest.json is not UTF-8: {error}"))?;
+            let manifest: ComponentManifestV1 = serde_json::from_str(&manifest_source)
+                .map_err(|error| format!("manifest.json is not a manifest: {error}"))?;
+            manifest
+                .validate()
+                .map_err(|error| format!("manifest refused: {error}"))?;
+            host_admission()
+                .admit(&manifest)
+                .map_err(|error| error.to_string())?;
+            let wasm = read_snapshot_file(&dir.join("component.wasm"), 64 * 1024 * 1024)?;
+            Self::load_embedded(runtime, &manifest_source, &wasm)
+        };
+        snapshot().map_err(|error| format!("south v2 component at {}: {error}", dir.display()))
+    }
+
+    fn current<'slot>(
+        &self,
+        slot: &'slot mut Option<LoadedComponentV1>,
+    ) -> AdapterResult<&'slot LoadedComponentV1> {
+        if slot.is_none() {
+            *slot = Some(
+                LoadedComponentV1::load_embedded(
+                    &self.runtime,
+                    &self.manifest_source,
+                    &self.wasm,
+                    &host_admission(),
+                    NoSecretsV1,
+                )
+                .map_err(|error| {
+                    internal(format_args!("cannot restore provider component: {error}"))
+                })?,
+            );
+        }
+        slot.as_ref()
+            .ok_or_else(|| internal("provider component is unavailable"))
+    }
+
+    fn call(
+        &self,
+        operation: impl FnOnce(&LoadedComponentV1) -> Result<String, CallErrorV1>,
+    ) -> AdapterResult<String> {
+        let mut slot = self
+            .component
+            .lock()
+            .map_err(|_| internal("provider component lock is poisoned"))?;
+        let result = operation(self.current(&mut slot)?);
+        if result.as_ref().is_err_and(invalidates_instance) {
+            slot.take();
+        }
+        result.map_err(|error| seam_error(&error))
     }
 
     /// The provider dialect families the loaded component's manifest declares.
     #[must_use]
     pub fn dialects(&self) -> Vec<String> {
-        self.component.manifest().providers.clone()
+        self.manifest.providers.clone()
     }
 
     /// The auth shapes this component's manifest declares it can carry.
@@ -185,16 +258,73 @@ impl SouthComponentAdapter {
     /// a request the transport then refused to send. The manifest already states
     /// the answer, and admission has already verified the manifest.
     #[must_use]
-    pub fn auth_arms(&self) -> BTreeSet<AuthArmV1> {
-        self.component.manifest().auth_arms.clone()
+    pub fn auth_arms(&self) -> BTreeSet<String> {
+        self.manifest.auth_arms.clone()
+    }
+
+    /// The secret-bearing header names the manifest declares (`secret_headers`,
+    /// auth contract version five), already checked by South's manifest gate.
+    #[must_use]
+    pub fn secret_headers(&self) -> &[String] {
+        &self.manifest.secret_headers
+    }
+
+    /// Whether the manifest lets `family` models declare the dialect word `word`
+    /// (`model_parameters`, South family-model-parameters record).
+    #[must_use]
+    pub fn declares_model_parameter(&self, family: &str, word: &str) -> bool {
+        self.manifest
+            .model_parameters
+            .get(family)
+            .is_some_and(|parameters| parameters.words.iter().any(|declared| declared == word))
     }
 
     /// The package name its manifest reports, for diagnostics that have to name
     /// which of several components is being talked about.
     #[must_use]
     pub fn package_name(&self) -> String {
-        self.component.manifest().name.clone()
+        self.manifest.name.clone()
     }
+}
+
+fn read_snapshot_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let read = || -> Result<Vec<u8>, String> {
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("package entry is not a regular file".into());
+        }
+        if metadata.len() > limit {
+            return Err(format!("file exceeds the {limit} byte limit"));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path).map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("package entry is not a regular file".into());
+        }
+        if metadata.len() > limit {
+            return Err(format!("file exceeds the {limit} byte limit"));
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+            return Err(format!("file exceeds the {limit} byte limit"));
+        }
+        Ok(bytes)
+    };
+    read().map_err(|error| format!("cannot read `{}`: {error}", path.display()))
+}
+
+fn invalidates_instance(error: &CallErrorV1) -> bool {
+    matches!(error, CallErrorV1::Trap(_) | CallErrorV1::Deadline)
 }
 
 fn internal(detail: impl std::fmt::Display) -> ErrorEnvelope {
@@ -224,10 +354,8 @@ fn from_json<T: for<'de> serde::Deserialize<'de>>(json: &str) -> AdapterResult<T
 
 impl ProviderAdapter for SouthComponentAdapter {
     fn model_capabilities(&self, config: &ProviderConfig) -> AdapterResult<Vec<ModelCapability>> {
-        let out = self
-            .component
-            .call_model_capabilities(&to_json(config)?)
-            .map_err(|error| seam_error(&error))?;
+        let config = to_json(config)?;
+        let out = self.call(|component| component.call_model_capabilities(&config))?;
         from_json(&out)
     }
 
@@ -236,35 +364,37 @@ impl ProviderAdapter for SouthComponentAdapter {
         request: &ChatRequest,
         config: &ProviderConfig,
     ) -> AdapterResult<HttpRequestDescriptor> {
-        let out = self
-            .component
-            .call_build_http_request(&to_json(request)?, &to_json(config)?)
-            .map_err(|error| seam_error(&error))?;
+        let request = to_json(request)?;
+        let config = to_json(config)?;
+        let out = self.call(|component| component.call_build_http_request(&request, &config))?;
         from_json(&out)
     }
 
     fn parse_response(&self, parts: &HttpResponseParts) -> AdapterResult<ChatResponse> {
-        let out = self
-            .component
-            .call_parse_response(&to_json(parts)?)
-            .map_err(|error| seam_error(&error))?;
+        let parts = to_json(parts)?;
+        let out = self.call(|component| component.call_parse_response(&parts))?;
         from_json(&out)
     }
 
     fn map_provider_error(&self, parts: &HttpResponseParts) -> AdapterResult<ErrorEnvelope> {
-        let out = self
-            .component
-            .call_map_provider_error(&to_json(parts)?)
-            .map_err(|error| seam_error(&error))?;
+        let parts = to_json(parts)?;
+        let out = self.call(|component| component.call_map_provider_error(&parts))?;
         from_json(&out)
     }
 
     fn stream_parser(&self) -> Box<dyn StreamParser> {
-        match self.component.open_stream() {
+        let stream = self
+            .component
+            .lock()
+            .map_err(|_| internal("provider component lock is poisoned"))
+            .and_then(|mut slot| {
+                self.current(&mut slot)?
+                    .open_stream()
+                    .map_err(|error| seam_error(&error))
+            });
+        match stream {
             Ok(stream) => Box::new(SouthComponentStreamParser { stream }),
-            Err(error) => Box::new(BrokenStreamParser {
-                envelope: seam_error(&error),
-            }),
+            Err(error) => Box::new(BrokenStreamParser { envelope: error }),
         }
     }
 }
@@ -272,7 +402,7 @@ impl ProviderAdapter for SouthComponentAdapter {
 impl std::fmt::Debug for SouthComponentAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SouthComponentAdapter")
-            .field("metadata", &self.component.metadata())
+            .field("metadata", &self.manifest.metadata())
             .finish_non_exhaustive()
     }
 }
@@ -303,5 +433,93 @@ struct BrokenStreamParser {
 impl StreamParser for BrokenStreamParser {
     fn parse_chunk(&mut self, _: &StreamChunk) -> AdapterResult<Vec<StreamEvent>> {
         Err(self.envelope.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalidates_instance;
+    use south_provider_runtime::CallErrorV1;
+
+    #[test]
+    fn only_traps_and_deadlines_invalidate_a_regular_instance() {
+        for (error, invalidated) in [
+            (CallErrorV1::Trap("synthetic".into()), true),
+            (CallErrorV1::Deadline, true),
+            (CallErrorV1::Component("{}".into()), false),
+            (
+                CallErrorV1::PayloadTooLarge {
+                    limit: 16 * 1024 * 1024,
+                },
+                false,
+            ),
+            (CallErrorV1::StreamLimit, false),
+        ] {
+            assert_eq!(invalidates_instance(&error), invalidated);
+        }
+    }
+
+    fn packaged_manifest(dir: &str) -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/official")
+            .join(dir)
+            .join("manifest.json");
+        serde_json::from_str(&std::fs::read_to_string(path).expect("manifest reads"))
+            .expect("manifest parses")
+    }
+
+    fn admits(manifest: &serde_json::Value) -> Result<(), String> {
+        let manifest: super::ComponentManifestV1 =
+            serde_json::from_value(manifest.clone()).expect("a component manifest");
+        super::HostCompatibilityV1::admit(&super::host_admission(), &manifest)
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn every_shipped_component_is_admitted_through_the_arm_it_declares() {
+        for dir in [
+            "provider-anthropic-v2",
+            "provider-openai-compatible-v2",
+            "provider-chatgpt-plan-v2",
+            "provider-claude-plan-v2",
+            "provider-copilot-plan-v2",
+            "provider-codeassist-v2",
+        ] {
+            admits(&packaged_manifest(dir)).unwrap_or_else(|error| panic!("{dir}: {error}"));
+        }
+    }
+
+    #[test]
+    fn the_range_arm_refuses_runtimes_and_contracts_outside_the_host() {
+        let range = packaged_manifest("provider-anthropic-v2");
+        for (field, value) in [
+            ("south_runtime", serde_json::json!("0.76.9")),
+            ("south_runtime", serde_json::json!("0.85.2")),
+            ("runtime_abi", serde_json::json!(2)),
+            (
+                "kernel_contracts",
+                serde_json::json!({"canonical_ir": 4, "error_catalog": 1, "stream": 3}),
+            ),
+        ] {
+            let mut outside = range.clone();
+            outside["compatibility"][field] = value.clone();
+            assert!(admits(&outside).is_err(), "{field} = {value} was admitted");
+        }
+    }
+
+    #[test]
+    fn a_package_built_before_the_range_handshake_is_refused() {
+        let mut stale = packaged_manifest("provider-copilot-plan-v2");
+        let compatibility = stale["compatibility"]
+            .as_object_mut()
+            .expect("compatibility object");
+        compatibility.remove("runtime_abi");
+        compatibility.remove("kernel_contracts");
+        compatibility.insert("south_runtime".into(), serde_json::json!("0.20.0"));
+        assert!(
+            admits(&stale)
+                .unwrap_err()
+                .contains("declares no runtime_abi")
+        );
     }
 }

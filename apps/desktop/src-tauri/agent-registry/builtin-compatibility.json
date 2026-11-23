@@ -24,7 +24,7 @@
     },
     {
       "agent_id": "deepseek-harness",
-      "blocked": []
+      "blocked": [{"version_requirement": "<0.2.0", "reason": "DSH requires the Cordis overlay contract from 0.2.0-rc.2 or later. Upgrade DSH before connecting."}]
     },
     {
       "agent_id": "nous-hermes-agent",

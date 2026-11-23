@@ -55,6 +55,20 @@ describe("InstallationPicker", () => {
     expect(screen.queryByRole("button", { name: /选择版本/ })).toBeNull();
   });
 
+  it("distinguishes a recovery record from executable discovery and returns its original ownership path", async () => {
+    const previous = installation("/Users/x/npm/bin/claude.exe", null);
+    Object.assign(previous.discovery, { binary_source: "managed_record", runnable: false });
+    previous.managed = true;
+    const current = installation("/Users/x/native/2.1.294", "2.1.294");
+    const onSelect = vi.fn();
+    render(<InstallationPicker agentName="Claude Code" installations={[current, previous]} selectedPath={current.discovery.canonical_path} onSelect={onSelect} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: /选择版本/ }));
+    const option = screen.getByRole("option", { name: "claude.exe · 旧连接待恢复" });
+    expect(option).toHaveTextContent("接管记录");
+    await userEvent.setup().click(option);
+    expect(onSelect).toHaveBeenCalledWith(previous.discovery.canonical_path);
+  });
+
   it("shows only short names, versions and stable duplicate indexes", () => {
     const labels = installationLabels([
       installation("/Users/x/bin/claude.exe", "1.2.3"),

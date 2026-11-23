@@ -17,8 +17,8 @@ use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Role, Sampling,
-    StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
+    ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Reasoning, ReasoningMode,
+    Role, Sampling, StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
 };
 
 struct AnthropicClient;
@@ -35,6 +35,20 @@ const KNOWN_REQUEST_FIELDS: &[&str] = &[
     "stream",
     "thinking",
     "tool_choice",
+];
+
+// Top-level wire keys of typed Canonical IR fields. A client key with one of
+// these names must not ride in `extensions`: flattened next to the typed field
+// it would set (or collide with) that field. `host_values` is the sharp case,
+// since only the host may mint them.
+const RESERVED_IR_KEYS: &[&str] = &[
+    "host_values",
+    "parallel_tool_calls",
+    "reasoning_budget_tokens",
+    "reasoning_effort",
+    "reasoning_mode",
+    "response_format",
+    "sampling",
 ];
 
 // `anthropic_thinking` stays an adapter-local extension: it is the request's
@@ -65,6 +79,30 @@ fn invalid(detail: impl Into<String>) -> String {
 
 fn capability(detail: impl Into<String>) -> String {
     fail(&ErrorEnvelope::new(ErrorCode::Capability, 400, detail))
+}
+
+fn validate_response_format(body: &Value) -> Result<(), String> {
+    let has_format = |value: &Value| {
+        value.get("output_format").is_some()
+            || value
+                .get("output_config")
+                .is_some_and(|config| config.get("format").is_some())
+    };
+    if has_format(body)
+        || body
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages
+                    .iter()
+                    .any(|message| message["role"] == "system" && has_format(message))
+            })
+    {
+        return Err(capability(
+            "Anthropic structured response formats are not supported by this adapter",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_thinking(body: &Value) -> Result<(), String> {
@@ -175,6 +213,7 @@ fn parse_image(block: &Value) -> Result<ContentPart, String> {
 
     Ok(ContentPart::ImageUrl {
         image_url: ImageUrl { url, detail: None },
+        cache_control: None,
     })
 }
 
@@ -186,6 +225,7 @@ fn parse_plain_block(block: &Value) -> Result<ContentPart, String> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid("text block declares no text"))?
                 .to_owned(),
+            cache_control: None,
         }),
         Some("image") => parse_image(block),
         Some("thinking") => Ok(ContentPart::Thinking {
@@ -229,12 +269,13 @@ fn content_from_parts(parts: Vec<ContentPart>) -> Option<Content> {
 fn system_message(system: &Value) -> Result<Option<Message>, String> {
     match system {
         Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(Message::text(Role::System, text))),
+        Value::String(text) => Ok((!text.is_empty()).then(|| Message::text(Role::System, text))),
         Value::Array(blocks) => {
-            let parts = blocks
+            let mut parts = blocks
                 .iter()
                 .map(parse_plain_block)
                 .collect::<Result<Vec<_>, _>>()?;
+            parts.retain(|part| !matches!(part, ContentPart::Text { text, cache_control: None } if text.is_empty()));
             if parts
                 .iter()
                 .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
@@ -273,6 +314,7 @@ fn tool_call(block: &Value) -> Result<ToolCall, String> {
         id: id.to_owned(),
         name: name.to_owned(),
         arguments: serde_json::to_string(input).map_err(internal)?,
+        signature: None,
     })
 }
 
@@ -339,13 +381,66 @@ fn parse_user_blocks(blocks: &[Value]) -> Result<Vec<Message>, String> {
     Ok(messages)
 }
 
+/// The Claude signed-thinking replay markers for one assistant turn, or `None`
+/// when the turn cannot carry them.
+///
+/// South replays signatures only for a turn that names its family and lists
+/// every block in wire order (`reasoning_replay::validated_layout`). The layout
+/// admits text, `redacted_thinking`, signed thinking and tool calls. A turn
+/// with no reasoning needs no replay. A turn with an unsigned thinking block or
+/// a block the IR does not model (`server_tool_use`, …) cannot be described,
+/// so it gets no markers and the component sends it without replay, as before.
+/// The host removes the markers again for a target that cannot replay.
+fn replay_markers(
+    parts: &[ContentPart],
+    tool_calls: &[ToolCall],
+    order: &[Value],
+) -> Option<Extensions> {
+    const MAX_BLOCKS: usize = 128;
+    let reasoning = parts.iter().any(|part| {
+        matches!(
+            part,
+            ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. }
+        )
+    });
+    let replayable = parts.iter().all(|part| match part {
+        ContentPart::Text { .. } | ContentPart::RedactedThinking { .. } => true,
+        ContentPart::Thinking { signature, .. } => signature
+            .as_deref()
+            .is_some_and(|signature| !signature.is_empty()),
+        ContentPart::ImageUrl { .. } | ContentPart::Unknown(_) => false,
+    });
+    let mut ids = BTreeSet::new();
+    let unique_ids = tool_calls
+        .iter()
+        .all(|call| !call.id.is_empty() && ids.insert(call.id.as_str()));
+    if !reasoning || !replayable || !unique_ids || order.len() > MAX_BLOCKS {
+        return None;
+    }
+    let mut extensions = Extensions::new();
+    extensions.insert(
+        "reasoning_replay_protocol_family".to_owned(),
+        json!("claude-signed-thinking"),
+    );
+    extensions.insert(
+        "reasoning_replay_block_layout".to_owned(),
+        Value::Array(order.to_vec()),
+    );
+    Some(extensions)
+}
+
 fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
     let mut parts = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut order = Vec::new();
 
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
-            Some("tool_use") => tool_calls.push(tool_call(block)?),
+            Some("tool_use") => {
+                let call = tool_call(block)?;
+                order.push(json!({"kind": "tool_call", "call_id": call.id}));
+                tool_calls.push(call);
+            }
             Some("tool_result") => {
                 return Err(invalid(
                     "assistant messages cannot contain tool_result blocks",
@@ -354,17 +449,21 @@ fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
             Some("image") => {
                 return Err(invalid("assistant messages cannot contain image blocks"));
             }
-            _ => parts.push(parse_plain_block(block)?),
+            _ => {
+                order.push(json!({"kind": "content", "ordinal": parts.len()}));
+                parts.push(parse_plain_block(block)?);
+            }
         }
     }
 
+    let extensions = replay_markers(&parts, &tool_calls, &order).unwrap_or_default();
     Ok(Message {
         role: Role::Assistant,
         content: content_from_parts(parts),
         tool_calls,
         tool_call_id: None,
         name: None,
-        extensions: Extensions::new(),
+        extensions,
     })
 }
 
@@ -386,9 +485,11 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
             .ok_or_else(|| invalid("message declares no role"))?;
         match (role, raw.get("content")) {
             ("system", Some(content)) => {
-                let message = system_message(content)?
-                    .ok_or_else(|| invalid("system message declares no content"))?;
-                messages.push(message);
+                // Claude Code also sends empty system entries that carry
+                // output configuration. They contain no prompt text.
+                if let Some(message) = system_message(content)? {
+                    messages.push(message);
+                }
             }
             ("user", Some(Value::String(text))) => {
                 messages.push(Message::text(Role::User, text));
@@ -451,7 +552,7 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
             Ok(ToolDef {
                 name,
                 description,
-                parameters,
+                parameters, cache_control: None, strict: None,
             })
         })
         .collect()
@@ -480,10 +581,15 @@ fn is_anthropic_server_tool(tool_type: &str) -> bool {
 /// matching the field's optimistic passthrough, and the provider's own
 /// `reasoning_effort_allowed` gate still drops it for models that opt out.
 fn reasoning_effort_from_output_config(body: &Value) -> Option<&'static str> {
-    match body
-        .pointer("/output_config/effort")
-        .and_then(Value::as_str)?
-    {
+    let output_config = body.get("output_config").or_else(|| {
+        body.get("messages")?
+            .as_array()?
+            .iter()
+            .rev()
+            .filter(|message| message["role"] == "system")
+            .find_map(|message| message.get("output_config"))
+    })?;
+    match output_config.get("effort").and_then(Value::as_str)? {
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" | "max" => Some("high"),
@@ -496,7 +602,10 @@ fn request_extensions(body: &Value) -> Extensions {
         .as_object()
         .into_iter()
         .flatten()
-        .filter(|(key, _)| !KNOWN_REQUEST_FIELDS.contains(&key.as_str()))
+        .filter(|(key, _)| {
+            !KNOWN_REQUEST_FIELDS.contains(&key.as_str())
+                && !RESERVED_IR_KEYS.contains(&key.as_str())
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     if let Some(thinking) = body.get("thinking").filter(|value| !value.is_null()) {
@@ -506,6 +615,38 @@ fn request_extensions(body: &Value) -> Extensions {
         extensions.insert("reasoning_effort".to_owned(), json!(effort));
     }
     extensions
+}
+
+/// The client's `thinking` mode and budget as the typed protocol 0.6.0 fields.
+///
+/// `anthropic_thinking` keeps carrying the object for the plan components that
+/// read it. South 0.85.1 reads only these fields, and sends a caller's mode back
+/// to the upstream unchanged (`Thinking::Verbatim`). `validate_thinking` has
+/// already refused any other `type`.
+fn request_reasoning(body: &Value) -> Result<Reasoning, String> {
+    let Some(thinking) = body.get("thinking").and_then(Value::as_object) else {
+        return Ok(Reasoning::default());
+    };
+    let mode = match thinking.get("type").and_then(Value::as_str) {
+        Some("enabled") => Some(ReasoningMode::Enabled),
+        Some("disabled") => Some(ReasoningMode::Disabled),
+        Some("adaptive") => Some(ReasoningMode::Adaptive),
+        _ => None,
+    };
+    let budget_tokens = match thinking.get("budget_tokens") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|budget| u32::try_from(budget).ok())
+                .ok_or_else(|| invalid("thinking.budget_tokens must be a non-negative integer"))?,
+        ),
+    };
+    Ok(Reasoning {
+        mode,
+        budget_tokens,
+        ..Reasoning::default()
+    })
 }
 
 fn finish_reason_to_anthropic(reason: Option<FinishReason>) -> Value {
@@ -528,7 +669,7 @@ fn response_blocks(message: &Message) -> Result<Vec<Value>, String> {
         Some(Content::Parts(parts)) => {
             for part in parts {
                 match part {
-                    ContentPart::Text { text } => {
+                    ContentPart::Text { text, .. } => {
                         blocks.push(json!({"type": "text", "text": text}));
                     }
                     ContentPart::ImageUrl { .. } => {
@@ -810,6 +951,7 @@ impl Guest for AnthropicClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
+        validate_response_format(body)?;
         validate_thinking(body)?;
         validate_tool_choice(body)?;
         let model = body
@@ -868,10 +1010,13 @@ impl Guest for AnthropicClient {
                 top_p: body.get("top_p").and_then(Value::as_f64),
                 max_output_tokens: Some(max_output_tokens),
                 stop,
+                top_k: None,
             },
             stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
             host_values: token_station_protocol::ComponentValues::new(),
             extensions: request_extensions(body),
+            parallel_tool_calls: None,
+            reasoning: request_reasoning(body)?,
         })
     }
 
@@ -923,7 +1068,7 @@ impl Guest for AnthropicClient {
             "content": response_blocks(&choice.message)?,
             "model": response.model,
             "stop_reason": finish_reason_to_anthropic(choice.finish_reason.clone()),
-            "stop_sequence": null,
+            "stop_sequence": choice.stop_sequence,
             "usage": Value::Object(usage),
         }))
     }
@@ -1050,6 +1195,7 @@ impl Guest for AnthropicClient {
                     id,
                     name,
                     arguments_delta,
+                    ..
                 } => {
                     let state = states.get_mut(stream_id).expect("state inserted above");
                     let mut rendered = String::new();
@@ -1195,7 +1341,74 @@ export!(AnthropicClient);
 mod tests {
     use super::{fresh_input_tokens, AnthropicClient, Guest};
     use serde_json::{json, Value};
-    use token_station_protocol::{ErrorCode, ErrorEnvelope, Usage};
+    use token_station_protocol::{ErrorCode, ErrorEnvelope, ReasoningEffort, Usage};
+
+    #[test]
+    fn structured_response_constraints_are_rejected_without_affecting_effort_or_tools() {
+        let normalize = |body: Value| {
+            AnthropicClient::normalize_inbound(
+                json!({
+                    "protocol":"anthropic-messages","principal":{"subject":"fixture"},
+                    "headers":{"names":[],"values":{}},"body":body
+                })
+                .to_string(),
+            )
+        };
+        let base = json!({"model":"fixture","max_tokens":100,"messages":[{"role":"user","content":"test"}],"tools":[{"name":"read","input_schema":{"type":"object"}}]});
+        for legacy in [false, true] {
+            let mut body = base.clone();
+            let format = json!({"type":"json_schema","schema":{"type":"object"}});
+            if legacy {
+                body["output_format"] = format;
+            } else {
+                body["output_config"] = json!({"effort":"low","format":format});
+            }
+            let error: ErrorEnvelope = serde_json::from_str(&normalize(body).unwrap_err()).unwrap();
+            assert_eq!(error.code, ErrorCode::Capability);
+            assert_eq!(error.http_status, 400);
+        }
+        let mut body = base.clone();
+        body["messages"].as_array_mut().unwrap().push(json!({"role":"system","content":[],"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}));
+        assert!(normalize(body).is_err());
+        let mut body = base;
+        body["output_config"] = json!({"effort":"low"});
+        let request: super::ChatRequest = serde_json::from_str(&normalize(body).unwrap()).unwrap();
+        assert_eq!(request.reasoning.effort, Some(ReasoningEffort::Low));
+        assert!(!request.extensions.contains_key("reasoning_effort"));
+        assert_eq!(request.tools[0].parameters, json!({"type":"object"}));
+    }
+
+    #[test]
+    fn empty_system_configuration_entries_preserve_effort_without_empty_prompt_text() {
+        let body = json!({
+            "system": [{"type":"text","text":"Keep these instructions."}],
+            "messages": [
+                {"role":"system","content":[{"type":"text","text":""}]},
+                {"role":"user","content":"Read the file."},
+                {"role":"system","content":[],"output_config":{"effort":"low"}},
+                {"role":"system","content":[],"output_config":{"effort":"medium"}}
+            ]
+        });
+        let messages = super::parse_messages(&body).expect("empty configuration entries are valid");
+        assert_eq!(messages.len(), 2);
+        assert!(serde_json::to_string(&messages[0])
+            .unwrap()
+            .contains("Keep these instructions."));
+        assert_eq!(
+            super::request_extensions(&body)["reasoning_effort"],
+            "medium"
+        );
+    }
+
+    #[test]
+    fn top_level_effort_precedes_system_configuration_entries() {
+        let body = json!({"output_config":{"effort":"high"},"messages":[
+            {"role":"system","content":"A later instruction.","output_config":{"effort":"low"}},
+            {"role":"user","content":"Read the file."}
+        ]});
+        assert_eq!(super::request_extensions(&body)["reasoning_effort"], "high");
+        assert_eq!(super::parse_messages(&body).unwrap().len(), 2);
+    }
 
     #[test]
     fn canonical_input_is_denormalized_for_anthropic_wire_usage() {
@@ -1247,6 +1460,25 @@ mod tests {
         assert_eq!(rendered["usage"]["input_tokens"], json!(30));
         assert_eq!(rendered["usage"]["cache_read_input_tokens"], json!(100));
         assert_eq!(rendered["usage"]["cache_creation_input_tokens"], json!(20));
+    }
+
+    #[test]
+    fn buffered_stop_sequence_preserves_the_matched_value() {
+        for sequence in [Some("_STOP_"), None] {
+            let response = json!({"id":"fixture","model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"prefix"},"finish_reason":if sequence.is_some(){"stop_sequence"}else{"stop"},"stop_sequence":sequence}],"usage":{"input_tokens":1,"output_tokens":1}});
+            let rendered =
+                AnthropicClient::render_response(response.to_string(), "{}".into()).unwrap();
+            let rendered: Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(rendered["stop_sequence"], json!(sequence));
+            assert_eq!(
+                rendered["stop_reason"],
+                if sequence.is_some() {
+                    "stop_sequence"
+                } else {
+                    "end_turn"
+                }
+            );
+        }
     }
 
     #[test]
@@ -1330,5 +1562,101 @@ mod tests {
         assert!(second_thinking.contains(r#""thinking":"second thought""#));
         assert!(second_signature.contains(r#""index":1"#));
         assert!(second_signature.contains(r#""signature":"second signature""#));
+    }
+
+    fn normalized(body: Value) -> Result<Value, String> {
+        AnthropicClient::normalize_inbound(
+            json!({
+                "protocol":"anthropic-messages","principal":{"subject":"fixture"},
+                "headers":{"names":[],"values":{}},"body":body
+            })
+            .to_string(),
+        )
+        .map(|output| serde_json::from_str(&output).unwrap())
+    }
+
+    fn with_assistant(content: Value) -> Value {
+        json!({"model":"fixture","max_tokens":100,"messages":[
+            {"role":"user","content":"question"},
+            {"role":"assistant","content":content},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"found"}]}
+        ]})
+    }
+
+    #[test]
+    fn thinking_configuration_is_typed_and_kept_for_plan_components() {
+        let mut body = with_assistant(json!("answer"));
+        body["thinking"] = json!({"type":"enabled","budget_tokens":2048});
+        let request = normalized(body).unwrap();
+        assert_eq!(request["reasoning_mode"], "enabled");
+        assert_eq!(request["reasoning_budget_tokens"], 2048);
+        assert_eq!(request["anthropic_thinking"]["budget_tokens"], 2048);
+
+        let mut body = with_assistant(json!("answer"));
+        body["thinking"] = json!({"type":"enabled","budget_tokens":"lots"});
+        let error: ErrorEnvelope = serde_json::from_str(&normalized(body).unwrap_err()).unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn a_signed_turn_carries_its_replay_layout_in_wire_order() {
+        let request = normalized(with_assistant(json!([
+            {"type":"thinking","thinking":"plan","signature":"sig-1"},
+            {"type":"redacted_thinking","data":"opaque"},
+            {"type":"text","text":"Looking it up."},
+            {"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}
+        ])))
+        .unwrap();
+        let assistant = &request["messages"][1];
+        assert_eq!(
+            assistant["reasoning_replay_protocol_family"],
+            "claude-signed-thinking"
+        );
+        assert_eq!(
+            assistant["reasoning_replay_block_layout"],
+            json!([
+                {"kind":"content","ordinal":0},
+                {"kind":"content","ordinal":1},
+                {"kind":"content","ordinal":2},
+                {"kind":"tool_call","call_id":"toolu_1"}
+            ])
+        );
+        assert_eq!(assistant["content"][0]["signature"], "sig-1");
+    }
+
+    #[test]
+    fn turns_that_cannot_be_described_carry_no_replay_markers() {
+        for content in [
+            json!("plain answer"),
+            json!([{"type":"text","text":"no reasoning"}]),
+            json!([{"type":"thinking","thinking":"unsigned"},{"type":"text","text":"a"}]),
+            json!([{"type":"thinking","thinking":"empty","signature":""}]),
+            json!([
+                {"type":"thinking","thinking":"plan","signature":"sig-1"},
+                {"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}
+            ]),
+        ] {
+            let request = normalized(with_assistant(content.clone())).unwrap();
+            let assistant = &request["messages"][1];
+            assert!(
+                assistant.get("reasoning_replay_protocol_family").is_none()
+                    && assistant.get("reasoning_replay_block_layout").is_none(),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_keys_named_like_typed_ir_fields_stay_out_of_extensions() {
+        let mut body = with_assistant(json!("answer"));
+        body["host_values"] = json!({"end_user_hash":"client-chosen"});
+        body["reasoning_mode"] = json!("enabled");
+        body["sampling"] = json!({"temperature": 2});
+        body["metadata"] = json!({"user_id":"kept-as-data"});
+        let request = normalized(body).unwrap();
+        assert!(request.get("host_values").is_none());
+        assert!(request.get("reasoning_mode").is_none());
+        assert!(request["sampling"].get("temperature").is_none());
+        assert_eq!(request["metadata"]["user_id"], "kept-as-data");
     }
 }

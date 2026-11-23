@@ -12,11 +12,14 @@ use yaml_edit::Document as YamlEditDocument;
 
 use super::types::{ConfigPath, PatchKind, PatchOperation};
 
+mod cordis;
+
 pub enum ConfigDocument {
     Json(Value),
     Json5(Json5Document),
     Toml(Box<Document>),
     Yaml(LosslessYamlDocument),
+    CordisYaml(LosslessYamlDocument),
     Dotenv(LosslessDotenvDocument),
 }
 
@@ -40,6 +43,7 @@ pub enum DocumentFormat {
     Json5,
     Toml,
     Yaml,
+    CordisYaml,
     Dotenv,
 }
 
@@ -55,6 +59,9 @@ pub fn parse_source_bytes(
             DocumentFormat::Toml => ConfigDocument::Toml(Box::new(Document::new())),
             DocumentFormat::Yaml => ConfigDocument::Yaml(LosslessYamlDocument {
                 rendered: "{}\n".to_string(),
+            }),
+            DocumentFormat::CordisYaml => ConfigDocument::CordisYaml(LosslessYamlDocument {
+                rendered: "[]\n".into(),
             }),
             DocumentFormat::Dotenv => ConfigDocument::Dotenv(LosslessDotenvDocument {
                 rendered: String::new(),
@@ -78,6 +85,7 @@ pub fn apply_patch(
             ConfigDocument::Json5(document) => apply_json5_operation(document, operation)?,
             ConfigDocument::Toml(value) => apply_toml_operation(value, operation)?,
             ConfigDocument::Yaml(document) => apply_yaml_operation(document, operation)?,
+            ConfigDocument::CordisYaml(document) => cordis::apply(document, operation)?,
             ConfigDocument::Dotenv(document) => apply_dotenv_operation(document, operation)?,
         }
     }
@@ -140,7 +148,7 @@ pub fn prepare_owned_paths_for_write_with_reverse(
             }
             validate_yaml_rendered(&document.rendered, "YAML 空父级兼容")?;
         }
-        ConfigDocument::Toml(_) | ConfigDocument::Dotenv(_) => {
+        ConfigDocument::Toml(_) | ConfigDocument::CordisYaml(_) | ConfigDocument::Dotenv(_) => {
             for path in owned_paths {
                 strict_ancestors(path)?;
             }
@@ -337,7 +345,17 @@ fn materialized_parent_reverse(
     {
         return None;
     }
-    for length in 1..operation.path.segments.len() {
+    let start = if operation
+        .path
+        .segments
+        .first()
+        .is_some_and(|s| s == "$cordis")
+    {
+        2
+    } else {
+        1
+    };
+    for length in start..operation.path.segments.len() {
         let path = ConfigPath {
             segments: operation.path.segments[..length].to_vec(),
         };
@@ -431,6 +449,9 @@ pub fn project_owned_paths(
             }
             Ok(())
         }
+        (ConfigDocument::CordisYaml(current), ConfigDocument::CordisYaml(baseline)) => {
+            cordis::project(current, baseline, owned_paths)
+        }
         (ConfigDocument::Dotenv(current), ConfigDocument::Dotenv(baseline)) => {
             project_dotenv_paths(current, baseline, owned_paths)
         }
@@ -455,9 +476,10 @@ fn restore_null_owned_ancestors(
                 return Ok(());
             }
         }
-        ConfigDocument::Toml(_) | ConfigDocument::Yaml(_) | ConfigDocument::Dotenv(_) => {
-            return Ok(())
-        }
+        ConfigDocument::Toml(_)
+        | ConfigDocument::Yaml(_)
+        | ConfigDocument::CordisYaml(_)
+        | ConfigDocument::Dotenv(_) => return Ok(()),
     }
     let baseline_semantic = semantic_json(baseline)?;
     let mut ancestors = owned_paths
@@ -829,6 +851,9 @@ fn json5_value_as_serde(value: &JSONValue) -> Result<Value, String> {
 }
 
 pub(crate) fn semantic_value_at<'a>(root: &'a Value, path: &ConfigPath) -> Option<&'a Value> {
+    if root.is_array() && path.segments.first().is_some_and(|s| s == "$cordis") {
+        return cordis::at(root, &path.segments);
+    }
     if root.is_array() && path.segments == ["models"] {
         return Some(root);
     }
@@ -1830,7 +1855,9 @@ pub fn render_document(document: &ConfigDocument, label: &str) -> Result<String,
             |context| format!("{}{}{}", context.wsc.0, document.value, context.wsc.1),
         )),
         ConfigDocument::Toml(document) => Ok(document.to_string()),
-        ConfigDocument::Yaml(document) => Ok(document.rendered.clone()),
+        ConfigDocument::Yaml(document) | ConfigDocument::CordisYaml(document) => {
+            Ok(document.rendered.clone())
+        }
         ConfigDocument::Dotenv(document) => Ok(document.rendered.clone()),
     }
 }
@@ -1845,7 +1872,7 @@ pub fn semantic_json(document: &ConfigDocument) -> Result<Value, String> {
                 toml::from_str(&rendered).map_err(|_| "TOML 语义解析失败".to_string())?;
             serde_json::to_value(value).map_err(|_| "TOML 语义转换失败".to_string())
         }
-        ConfigDocument::Yaml(document) => {
+        ConfigDocument::Yaml(document) | ConfigDocument::CordisYaml(document) => {
             strict_yaml_semantic(&document.rendered, "YAML semantic projection")
         }
         ConfigDocument::Dotenv(document) => dotenv_semantic(&document.rendered),
@@ -1862,6 +1889,9 @@ pub fn is_empty_owned_projection(
     owned_paths: &[ConfigPath],
 ) -> Result<bool, String> {
     let mut semantic = semantic_json(document)?;
+    if matches!(document, ConfigDocument::CordisYaml(_)) {
+        return Ok(semantic.as_array().is_some_and(Vec::is_empty));
+    }
     for path in owned_paths {
         prune_empty_owned_ancestors(&mut semantic, strict_ancestors(path)?)?;
     }
@@ -1942,6 +1972,17 @@ pub fn parse_rendered(
             validate_yaml_rendered(rendered, label)?;
             Ok(ConfigDocument::Yaml(LosslessYamlDocument {
                 rendered: rendered.to_string(),
+            }))
+        }
+        DocumentFormat::CordisYaml => {
+            // Mapping documents are accepted only to restore legacy DSH snapshots.
+            // The connector rejects them for every new connection.
+            if strict_yaml_semantic(rendered, label)?.is_object() {
+                return parse_rendered(rendered, DocumentFormat::Yaml, label);
+            }
+            cordis::validate(rendered)?;
+            Ok(ConfigDocument::CordisYaml(LosslessYamlDocument {
+                rendered: rendered.into(),
             }))
         }
         DocumentFormat::Dotenv => {
@@ -3221,5 +3262,112 @@ command = "must-not-replace-current"
             .expect("duplicate dotenv keys fail closed");
         assert!(error.contains("重复键"), "{error}");
         assert!(!error.contains(marker), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod cordis_tests {
+    use super::*;
+    fn owned() -> ConfigPath {
+        ConfigPath {
+            segments: [
+                "$cordis",
+                "llm-pi-ai",
+                "config",
+                "providers",
+                "tokenstation",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        }
+    }
+    #[test]
+    fn cordis_preserves_rows_comments_and_reverses_owned_edits() {
+        let source = "# keep header\n- id: other\n  config: {keep: true} # keep inline\n- id: llm-pi-ai\n  config:\n    providers:\n      user: {api: custom} # user provider\n";
+        let mut doc = parse_rendered(source, DocumentFormat::CordisYaml, "fixture").unwrap();
+        let baseline = parse_rendered(source, DocumentFormat::CordisYaml, "fixture").unwrap();
+        let op = PatchOperation {
+            operation: PatchKind::Replace,
+            path: owned(),
+            value: Some(json!({"api":"openai-completions"})),
+        };
+        let reverse = apply_patch_with_reverse(&mut doc, &[op]).unwrap();
+        let rendered = render_document(&doc, "fixture").unwrap();
+        for comment in ["# keep header", "# keep inline", "# user provider"] {
+            assert!(rendered.contains(comment), "{rendered}");
+        }
+        assert_eq!(
+            semantic_json(&doc).unwrap()[1]["config"]["providers"]["user"]["api"],
+            "custom"
+        );
+        apply_patch(&mut doc, &reverse).unwrap();
+        assert_eq!(
+            semantic_json(&doc).unwrap(),
+            semantic_json(&baseline).unwrap()
+        );
+    }
+    #[test]
+    fn cordis_project_removes_created_rows_but_keeps_unowned_changes() {
+        let baseline = parse_source_bytes(None, DocumentFormat::CordisYaml, "fixture").unwrap();
+        let mut doc = parse_source_bytes(None, DocumentFormat::CordisYaml, "fixture").unwrap();
+        apply_patch(
+            &mut doc,
+            &[PatchOperation {
+                operation: PatchKind::Replace,
+                path: owned(),
+                value: Some(json!({"api":"custom"})),
+            }],
+        )
+        .unwrap();
+        project_owned_paths(&mut doc, &baseline, &[owned()]).unwrap();
+        assert!(is_empty_owned_projection(&doc, &[owned()]).unwrap());
+        let mut doc = parse_rendered("- id: llm-pi-ai\n  config: {providers: {tokenstation: {api: custom}, user: {keep: true}}}\n- id: new-user\n  config: {}\n", DocumentFormat::CordisYaml,"fixture").unwrap();
+        project_owned_paths(&mut doc, &baseline, &[owned()]).unwrap();
+        assert_eq!(
+            semantic_json(&doc).unwrap()[0]["config"]["providers"]["user"]["keep"],
+            true
+        );
+        assert_eq!(semantic_json(&doc).unwrap()[1]["id"], "new-user");
+    }
+    #[test]
+    fn cordis_rejects_duplicate_ids_and_normal_yaml_still_rejects_arrays() {
+        assert!(parse_rendered(
+            "- id: same\n- id: same\n",
+            DocumentFormat::CordisYaml,
+            "fixture"
+        )
+        .is_err());
+        assert!(parse_rendered("- id: unique\n", DocumentFormat::Yaml, "fixture").is_err());
+    }
+    #[test]
+    fn cordis_null_ancestors_restore_exactly_and_ids_ignore_row_order() {
+        for source in [
+            "- id: llm-pi-ai\n  config: null\n",
+            "- id: llm-pi-ai\n  config:\n    providers: null\n",
+        ] {
+            let mut doc = parse_rendered(source, DocumentFormat::CordisYaml, "fixture").unwrap();
+            let before = semantic_json(&doc).unwrap();
+            let reverse = apply_patch_with_reverse(
+                &mut doc,
+                &[PatchOperation {
+                    operation: PatchKind::Replace,
+                    path: owned(),
+                    value: Some(json!({"api":"custom"})),
+                }],
+            )
+            .unwrap();
+            apply_patch(&mut doc, &reverse).unwrap();
+            assert_eq!(semantic_json(&doc).unwrap(), before);
+        }
+        let doc = parse_rendered(
+            "- id: other\n- id: llm-pi-ai\n  config: {providers: {tokenstation: {api: custom}}}\n",
+            DocumentFormat::CordisYaml,
+            "fixture",
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_value_at(&semantic_json(&doc).unwrap(), &owned()),
+            Some(&json!({"api":"custom"}))
+        );
     }
 }

@@ -100,6 +100,17 @@ pub(crate) struct PreparedFileProjection {
 pub(crate) struct PlanOwnershipBinding {
     pub record: OwnershipRecord,
     pub disposition: OwnershipDisposition,
+    // This capability is server-only. The dedicated forced-disconnect planner sets it.
+    pub allow_owned_drift: bool,
+}
+
+impl PreparedChangePlan {
+    pub(crate) fn allows_owned_drift(&self) -> bool {
+        self.view.intent == PlanIntent::Disconnect
+            && self.ownership.as_ref().is_some_and(|binding| {
+                binding.disposition == OwnershipDisposition::Remove && binding.allow_owned_drift
+            })
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -579,6 +590,7 @@ fn build_connection_or_refresh_plan(
         ownership: ownership.map(|record| PlanOwnershipBinding {
             record: record.clone(),
             disposition: OwnershipDisposition::Update,
+            allow_owned_drift: false,
         }),
         companions,
     })
@@ -606,6 +618,46 @@ pub fn build_disconnect_plan(
     build_owned_projection_plan(
         PlanIntent::Disconnect,
         OwnershipDisposition::Remove,
+        false,
+        connector,
+        discovery,
+        compatibility,
+        target_path,
+        current,
+        ownership,
+        baseline_record,
+        baseline,
+        master_key,
+        compatibility_sequence,
+        compatibility_expires_at_ms,
+        now_ms,
+        operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_forced_disconnect_plan(
+    connector: &dyn Connector,
+    discovery: &DiscoveryRecord,
+    compatibility: &CompatibilityDecision,
+    target_path: &Path,
+    current: &ConfigSource,
+    ownership: &OwnershipRecord,
+    baseline_record: &SnapshotRecord,
+    baseline: &ConfigSource,
+    master_key: &Zeroizing<[u8; 32]>,
+    compatibility_sequence: u64,
+    compatibility_expires_at_ms: Option<u64>,
+    now_ms: u64,
+    operation_id: String,
+) -> Result<PreparedChangePlan, String> {
+    if baseline_record.snapshot_id != ownership.baseline_snapshot_id {
+        return Err("断开基线快照与 ownership 不一致".to_string());
+    }
+    build_owned_projection_plan(
+        PlanIntent::Disconnect,
+        OwnershipDisposition::Remove,
+        true,
         connector,
         discovery,
         compatibility,
@@ -682,7 +734,10 @@ pub fn attach_disconnect_companions(
             compute_owned_value_macs(&current_document, &companion.owned_paths, master_key)?;
         let baseline_macs =
             compute_owned_value_macs(&baseline_document, &companion.owned_paths, master_key)?;
-        if current_macs != companion.owned_value_macs && current_macs != baseline_macs {
+        if !plan.allows_owned_drift()
+            && current_macs != companion.owned_value_macs
+            && current_macs != baseline_macs
+        {
             return Err(COMPANION_OWNED_VALUES_CHANGED.to_string());
         }
         let (forward_operations, reverse_operations) = projection_operations(
@@ -934,6 +989,7 @@ pub fn build_snapshot_restore_plan(
     build_owned_projection_plan(
         PlanIntent::Restore,
         OwnershipDisposition::Update,
+        false,
         connector,
         discovery,
         compatibility,
@@ -954,6 +1010,7 @@ pub fn build_snapshot_restore_plan(
 fn build_owned_projection_plan(
     intent: PlanIntent,
     disposition: OwnershipDisposition,
+    allow_owned_drift: bool,
     connector: &dyn Connector,
     discovery: &DiscoveryRecord,
     compatibility: &CompatibilityDecision,
@@ -1012,7 +1069,7 @@ fn build_owned_projection_plan(
         &declared_owned_paths,
         master_key,
     )?;
-    if !matches_record && !matches_source && !matches_legacy_widening {
+    if !allow_owned_drift && !matches_record && !matches_source && !matches_legacy_widening {
         return Err(OWNED_VALUES_CHANGED.to_string());
     }
     let original_semantic = semantic_json(&current_document)?;
@@ -1120,6 +1177,7 @@ fn build_owned_projection_plan(
         ownership: Some(PlanOwnershipBinding {
             record: ownership.clone(),
             disposition,
+            allow_owned_drift,
         }),
         companions: Vec::new(),
     })
@@ -1162,7 +1220,15 @@ fn validate_management_binding(
     if discovery.conflict_group.is_some() {
         return Err("检测到多个安装实例，必须先选择精确实例".to_string());
     }
-    if !discovery.config_candidates.is_empty()
+    let legacy_dsh_target = connector.agent_id() == "deepseek-harness"
+        && target_path
+            .file_name()
+            .is_some_and(|name| name == "settings.yaml")
+        && discovery.config_candidates.iter().any(|candidate| {
+            Path::new(candidate) == target_path.with_file_name("cordis.patch.yml")
+        });
+    if !legacy_dsh_target
+        && !discovery.config_candidates.is_empty()
         && !discovery
             .config_candidates
             .iter()
@@ -1470,6 +1536,7 @@ fn format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Json5 => "json5",
         DocumentFormat::Toml => "toml",
         DocumentFormat::Yaml => "yaml",
+        DocumentFormat::CordisYaml => "cordis_yaml",
         DocumentFormat::Dotenv => "dotenv",
     }
 }
@@ -1667,6 +1734,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
@@ -1722,6 +1790,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some("fixture-null-reverse-secret"),
                 adapter_ready: true,
@@ -1766,6 +1835,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("fixture-codex-virtual-key"),
                 adapter_ready: true,
@@ -1812,6 +1882,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/codex/v1",
                 token: Some("fixture-codex-virtual-key"),
                 adapter_ready: true,
@@ -1909,6 +1980,7 @@ mod tests {
             &source,
             &baseline,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/claude-code",
                 token: Some("fixture-claude-virtual-key"),
                 adapter_ready: true,
@@ -2033,6 +2105,7 @@ model_auto_compact_token_limit = 48000
             &source,
             &baseline,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/codex/v1",
                 token: Some("fixture-codex-virtual-key"),
                 adapter_ready: true,
@@ -2097,6 +2170,7 @@ model_auto_compact_token_limit = 48000
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some("hidden"),
                 adapter_ready: true,
@@ -2124,6 +2198,7 @@ model_auto_compact_token_limit = 48000
                 target,
                 &source,
                 &ConnectInput {
+                    browser_search_enabled: false,
                     base_url: "http://127.0.0.1:8787",
                     token: Some("hidden"),
                     adapter_ready: true,
@@ -2148,6 +2223,7 @@ model_auto_compact_token_limit = 48000
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some("hidden"),
                 adapter_ready: true,

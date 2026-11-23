@@ -142,7 +142,7 @@ pub(crate) struct ProxyMenuView {
 
 impl ProxyMenuView {
     fn tooltip(&self) -> String {
-        format!("Token Station · {}", self.status)
+        format!("{} · {}", crate::experimental::app_name(), self.status)
     }
 }
 
@@ -380,7 +380,13 @@ where
         false,
         None::<&str>,
     )?;
-    let open_item = MenuItem::with_id(app, MENU_OPEN_ID, "打开 Token Station", true, None::<&str>)?;
+    let open_item = MenuItem::with_id(
+        app,
+        MENU_OPEN_ID,
+        format!("打开 {}", crate::experimental::app_name()),
+        true,
+        None::<&str>,
+    )?;
     let proxy_item = CheckMenuItem::with_id(
         app,
         MENU_PROXY_ID,
@@ -411,7 +417,13 @@ where
     let separator_before_proxy = PredefinedMenuItem::separator(app)?;
     let separator_before_actions = PredefinedMenuItem::separator(app)?;
     let separator_before_quit = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, MENU_QUIT_ID, "退出 Token Station", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(
+        app,
+        MENU_QUIT_ID,
+        format!("退出 {}", crate::experimental::app_name()),
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(
         app,
         &[
@@ -695,7 +707,7 @@ fn confirm_exit_without_tray<R: Runtime>(window: &Window<R>) {
         .message(
             "The system tray is unavailable. Exiting will stop the local gateway.\n\n系统托盘不可用。退出将停止本地网关。",
         )
-        .title("Quit Token Station?")
+        .title(format!("Quit {}?", crate::experimental::app_name()))
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Quit / 退出".to_owned(),

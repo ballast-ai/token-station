@@ -997,6 +997,7 @@ mod tests {
     fn connection_adds_token_station_auto_without_replacing_native_model_aliases() {
         let metadata = route_metadata(1_000_000, 32_768);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1120,6 +1121,7 @@ mod tests {
     fn managed_refresh_removes_only_the_legacy_token_station_model_overrides() {
         let metadata = route_metadata(200_000, 16_384);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1192,6 +1194,7 @@ mod tests {
     fn managed_refresh_rejects_a_custom_option_changed_after_connection() {
         let metadata = route_metadata(200_000, 32_768);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1234,6 +1237,7 @@ mod tests {
     fn managed_refresh_rejects_an_unowned_picker_added_after_connection() {
         let metadata = route_metadata(200_000, 32_768);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1280,6 +1284,7 @@ mod tests {
     fn managed_refresh_rejects_a_user_picker_edit_after_connection() {
         let metadata = route_metadata(200_000, 32_768);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1392,6 +1397,7 @@ mod tests {
     fn legacy_refresh_rejects_an_unowned_picker_row_with_the_managed_id() {
         let metadata = route_metadata(200_000, 32_768);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1423,6 +1429,7 @@ mod tests {
     fn managed_refresh_rejects_same_custom_id_with_user_metadata() {
         let metadata = route_metadata(200_000, 32_768);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1463,6 +1470,7 @@ mod tests {
     fn managed_refresh_tracks_the_effective_route_limits() {
         let initial_metadata = route_metadata(200_000, 32_000);
         let initial_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1482,6 +1490,7 @@ mod tests {
 
         let refreshed_metadata = route_metadata(1_000_000, 32_768);
         let refreshed_input = ConnectInput {
+            browser_search_enabled: false,
             model_metadata: Some(&refreshed_metadata),
             ..initial_input
         };
@@ -1515,6 +1524,7 @@ mod tests {
     fn context_projection_rejects_too_small_input_and_clamps_the_upper_bound() {
         let low = route_metadata(64_000, 8_000);
         let low_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1525,6 +1535,7 @@ mod tests {
 
         let high = route_metadata(2_000_000, 100_000);
         let high_input = ConnectInput {
+            browser_search_enabled: false,
             model_metadata: Some(&high),
             ..low_input
         };
@@ -1538,6 +1549,7 @@ mod tests {
     fn connection_uses_compatibility_limits_when_route_limits_are_unknown() {
         let metadata = route_metadata(0, 0);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1563,6 +1575,7 @@ mod tests {
     #[test]
     fn connection_rejects_a_route_without_any_reachable_model() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1577,6 +1590,7 @@ mod tests {
     fn connection_rejects_an_allowlist_that_would_hide_token_station_auto() {
         let metadata = route_metadata(200_000, 32_000);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1599,6 +1613,7 @@ mod tests {
     fn connection_rejects_an_invalid_existing_model_picker_without_writing() {
         let metadata = route_metadata(200_000, 32_000);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,
@@ -1626,6 +1641,7 @@ mod tests {
     fn connection_rejects_an_unowned_picker_row_with_the_managed_id() {
         let metadata = route_metadata(200_000, 32_000);
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-code",
             token: Some("local-virtual-key"),
             adapter_ready: true,

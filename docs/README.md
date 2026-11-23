@@ -1,10 +1,13 @@
 # Token Station documentation
 
+- [ChatGPT plan connection (experimental)](guides/chatgpt-plan.md)
 - [Reference](reference.md) · [中文参考](reference.zh-CN.md)
 - [Claude Code with DeepSeek](guides/claude-code-deepseek.md)
 - [Claude Code with OpenAI-compatible providers](guides/claude-code-openai-compatible-providers.md)
 - [Codex with DeepSeek](guides/codex-deepseek.md)
 - [Enterprise managed routing](guides/enterprise-managed-routing.md)
+- [Local SCX routing](guides/scx-desktop-experiment.md)
+- [Jev cloud routing](guides/jev-cloud-routing.md)
 - [Hermes Agent](guides/hermes-agent.md)
 - [OpenClaw](guides/openclaw.md)
 - [OpenCode with DeepSeek](guides/opencode-deepseek.md)

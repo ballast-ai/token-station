@@ -178,6 +178,7 @@ impl Connector for HermesConnector {
         owned_paths: &[ConfigPath],
     ) -> Result<(), String> {
         let validation_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: input.base_url,
             token: input.token,
             adapter_ready: input.adapter_ready,

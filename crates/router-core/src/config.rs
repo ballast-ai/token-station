@@ -46,10 +46,7 @@ pub struct RouterConfig {
     /// Layer 2. Consulted only when no rule matched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hint_routes: Vec<HintRoute>,
-    /// Layer 3. Consulted only when no rule and no hint matched.
-    ///
-    /// The learned classifier of `C3#2` replaces this layer, and until it ships
-    /// this *is* that layer, per the routing design's staged rollout.
+    /// Consulted when no rule, hint, or valid host classifier pool decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heuristic: Option<Heuristic>,
     /// Where a request goes when nothing above decided. Empty is legal only in
@@ -250,7 +247,7 @@ fn message_texts(request: &ChatRequest) -> impl Iterator<Item = &str> {
             match content {
                 Content::Text(text) => Box::new(std::iter::once(text.as_str())),
                 Content::Parts(parts) => Box::new(parts.iter().filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::Text { text, .. } => Some(text.as_str()),
                     // 0.3.0: reasoning/unmodeled parts stay out of context
                     // summaries — same rationale as feature extraction.
                     ContentPart::ImageUrl { .. }
@@ -271,7 +268,7 @@ pub struct HintRoute {
     pub route_to: String,
 }
 
-/// Layer 3: score the request, compare to a threshold, pick a pool.
+/// Score the request when no earlier layer selects a pool.
 ///
 /// Integer arithmetic throughout. A float score would let the local client and
 /// the server gateway disagree in the last bit and route the same request to
@@ -312,10 +309,11 @@ impl Heuristic {
     #[must_use]
     pub fn score(&self, features: &RequestFeatures) -> u32 {
         let weights = &self.weights;
-        // Score difficulty from conversation content without the system prompt. Fixed Agent scaffolding can contain thousands of system tokens
-        // prompt), or every request receives a high-tier score. See the conversation_tokens comment.
+        // Scope new requests to their current user task. Old serialized features
+        // have no task counts and retain their original replay score.
         let mut score = features
-            .conversation_tokens
+            .task_tokens
+            .unwrap_or(features.conversation_tokens)
             .saturating_div(weights.tokens_per_point.max(1));
 
         // Note: advertised tool_count(request.tools.len()) is fixed for each agent.
@@ -324,12 +322,14 @@ impl Heuristic {
         // Route requests to models that support tool calls. See route.rs. Keep per_tool weights but exclude them from scoring.
         score = score.saturating_add(
             features
-                .code_block_count
+                .task_code_block_count
+                .unwrap_or(features.code_block_count)
                 .saturating_mul(weights.per_code_block),
         );
         score = score.saturating_add(
             features
-                .message_count
+                .task_message_count
+                .unwrap_or(features.message_count)
                 .saturating_sub(1)
                 .saturating_mul(weights.per_extra_turn),
         );

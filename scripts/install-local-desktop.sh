@@ -1,19 +1,81 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+scx_experiment=false
+copy_stable_settings=false
+print_target=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scx-experiment) scx_experiment=true ;;
+    --copy-stable-settings) copy_stable_settings=true ;;
+    --print-target) print_target=true ;;
+    *) echo "Unsupported local installer argument." >&2; exit 2 ;;
+  esac
+  shift
+done
+if [[ "$copy_stable_settings" == "true" && "$scx_experiment" != "true" ]]; then
+  echo "Settings copying requires --scx-experiment." >&2
+  exit 2
+fi
+
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly bundle_id="com.tokenstation.desktop"
-readonly installed_app="/Applications/token-station.app"
+if [[ "$scx_experiment" == "true" ]]; then
+  readonly bundle_id="com.tokenstation.desktop.scx"
+  readonly installed_app="/Applications/Token Station.app"
+  readonly legacy_installed_app="/Applications/Token Station SCX.app"
+  readonly app_name="Token Station.app"
+  readonly lock_name=".token-station-scx.install.lock"
+else
+  readonly bundle_id="com.tokenstation.desktop"
+  readonly installed_app="/Applications/token-station.app"
+  readonly app_name="token-station.app"
+  readonly legacy_installed_app=""
+  readonly lock_name=".token-station.install.lock"
+fi
+if [[ "$print_target" == "true" ]]; then
+  printf '%s\n' "$installed_app" "$bundle_id"
+  exit 0
+fi
 readonly installed_parent="$(dirname "$installed_app")"
-readonly install_lock="$installed_parent/.token-station.install.lock"
+readonly install_lock="$installed_parent/$lock_name"
 readonly launch_check_interval="${TOKEN_STATION_LAUNCH_CHECK_INTERVAL_SECONDS:-1}"
 readonly launch_check_samples="${TOKEN_STATION_LAUNCH_CHECK_SAMPLES:-3}"
 readonly launch_open_attempts="${TOKEN_STATION_LAUNCH_OPEN_ATTEMPTS:-5}"
-readonly desktop_config="${TOKEN_STATION_DESKTOP_CONFIG:-$HOME/Library/Application Support/$bundle_id/token-station.json}"
+if [[ "$scx_experiment" == "true" ]]; then
+  readonly desktop_config="$HOME/Library/Application Support/$bundle_id/token-station.json"
+else
+  readonly desktop_config="${TOKEN_STATION_DESKTOP_CONFIG:-$HOME/Library/Application Support/$bundle_id/token-station.json}"
+fi
+
+stable_app_digest() {
+  python3 - "/Applications/token-station.app" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+digest = hashlib.sha256()
+if root.exists():
+    for path in [root, *sorted(root.rglob('*'))]:
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(str(path.lstat().st_mode).encode())
+        if path.is_symlink():
+            digest.update(os.readlink(path).encode())
+        elif path.is_file():
+            with path.open('rb') as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(block)
+else:
+    digest.update(b'absent')
+print(digest.hexdigest())
+PY
+}
 
 staging_app=""
 backup_app=""
+previous_app="$installed_app"
 replacement_active=0
+new_app_installed=0
 had_previous_app=0
 
 verify_app() {
@@ -70,11 +132,14 @@ rollback_installation() {
   fi
   osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
   wait_for_app_exit "$installed_app" || true
-  if [[ -e "$installed_app" ]]; then
+  if [[ "$new_app_installed" -eq 1 && ( -e "$installed_app" || -L "$installed_app" ) ]]; then
     rm -rf -- "$installed_app" || rollback_failed=1
   fi
   if [[ "$had_previous_app" -eq 1 && -d "$backup_app" ]]; then
-    if mv -- "$backup_app" "$installed_app"; then
+    if [[ -e "$previous_app" || -L "$previous_app" ]]; then
+      echo "Cannot restore the previous App because its path is occupied. Backup: $backup_app" >&2
+      rollback_failed=1
+    elif mv -- "$backup_app" "$previous_app"; then
       echo "安装失败，旧版本已恢复" >&2
     else
       echo "安装失败，且旧版本恢复失败；备份保留在：$backup_app" >&2
@@ -112,7 +177,7 @@ case "$(uname -m)" in
     ;;
 esac
 
-readonly built_app="$root/apps/desktop/src-tauri/target/$target/release/bundle/macos/token-station.app"
+readonly built_app="$root/apps/desktop/src-tauri/target/$target/release/bundle/macos/$app_name"
 
 if ! [[ "$launch_check_interval" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || ! [[ "$launch_check_samples" =~ ^[1-9][0-9]*$ ]]; then
@@ -126,9 +191,19 @@ if ! mkdir -- "$install_lock" 2>/dev/null; then
 fi
 trap cleanup EXIT
 
-"$root/scripts/build-desktop.sh" --local --target "$target"
+build_identity_args=(--local --target "$target")
+stable_before=""
+if [[ "$scx_experiment" == "true" ]]; then
+  stable_before="$(stable_app_digest)"
+  build_identity_args+=(--scx-experiment)
+fi
+"$root/scripts/build-desktop.sh" "${build_identity_args[@]}"
 
 verify_app "$built_app" "built app"
+
+if [[ "$copy_stable_settings" == "true" ]]; then
+  python3 "$root/scripts/prepare-scx-desktop.py" --copy-stable-settings
+fi
 
 built_executable=$(
   /usr/libexec/PlistBuddy -c "Print:CFBundleExecutable" \
@@ -144,12 +219,19 @@ if [[ -f "$desktop_config" ]] \
   exit 1
 fi
 
-if [[ -e "$installed_app" ]]; then
-  if [[ ! -d "$installed_app" ]]; then
-    echo "refusing to replace non-directory path: $installed_app" >&2
+if [[ -n "$legacy_installed_app" && ( -e "$legacy_installed_app" || -L "$legacy_installed_app" ) ]]; then
+  if [[ -e "$installed_app" || -L "$installed_app" ]]; then
+    echo "Both current and legacy App paths exist. Resolve the conflict before installing." >&2
     exit 1
   fi
-  verify_app "$installed_app" "installed app"
+  previous_app="$legacy_installed_app"
+fi
+if [[ -e "$previous_app" || -L "$previous_app" ]]; then
+  if [[ ! -d "$previous_app" || -L "$previous_app" ]]; then
+    echo "refusing to replace non-directory path: $previous_app" >&2
+    exit 1
+  fi
+  verify_app "$previous_app" "installed app"
   had_previous_app=1
 fi
 
@@ -162,19 +244,24 @@ verify_app "$staging_app" "staged app"
 
 if [[ "$had_previous_app" -eq 1 ]]; then
   osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
-  if ! wait_for_app_exit "$installed_app"; then
+  if ! wait_for_app_exit "$previous_app"; then
     echo "installed app is still running; refusing to replace it" >&2
     exit 1
   fi
   backup_app="$(mktemp -d "$installed_parent/.token-station.backup.XXXXXX")"
   rmdir -- "$backup_app"
   replacement_active=1
-  mv -- "$installed_app" "$backup_app"
+  mv -- "$previous_app" "$backup_app"
 else
   replacement_active=1
 fi
 
+if [[ -e "$installed_app" || -L "$installed_app" ]]; then
+  echo "The target App path became occupied. Refusing to replace it." >&2
+  exit 1
+fi
 mv -- "$staging_app" "$installed_app"
+new_app_installed=1
 staging_app=""
 verify_app "$installed_app" "installed app"
 
@@ -216,6 +303,10 @@ for _ in $(seq 1 "$launch_check_samples"); do
   fi
 done
 
+if [[ "$scx_experiment" == "true" && "$(stable_app_digest)" != "$stable_before" ]]; then
+  echo "The stable App changed during the experimental installation. Check it before continuing." >&2
+  exit 1
+fi
 replacement_active=0
 if [[ -n "$backup_app" && -d "$backup_app" ]]; then
   rm -rf -- "$backup_app"

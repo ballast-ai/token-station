@@ -399,7 +399,7 @@ fn anthropic_request_declares_server_tool(body: &Value) -> bool {
 /// to hash, but it has the same first two turns, so the key is derivable without
 /// normalising the body — which is precisely what the native path exists to
 /// avoid doing.
-fn native_quota_session_key(body: &Value) -> String {
+pub(super) fn native_quota_session_key(body: &Value) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for message in body
@@ -491,6 +491,8 @@ impl Gateway {
                 name: "anthropic_native_routing_probe".to_owned(),
                 description: None,
                 parameters: json!({}),
+                cache_control: None,
+                strict: None,
             });
         }
         // Quota-first used to bail out here, which meant a server-tool turn was
@@ -521,6 +523,41 @@ impl Gateway {
         if !anthropic_request_declares_server_tool(&body_value) {
             return Ok(None);
         }
+        // Keep the original probe's decision as the fallback. The complete
+        // projection applies only to classifier eligibility and tier admission.
+        let jev_request = self
+            .jev
+            .is_enabled()
+            .then(|| {
+                super::jev_routing::native_request(
+                    &body_value,
+                    ApiDialect::AnthropicNative,
+                    route_model,
+                )
+            })
+            .flatten();
+        let mut decision = self.route_native_with_jev(
+            ctx,
+            router,
+            jev_request.as_ref(),
+            &[],
+            &candidates,
+            decision,
+            ApiDialect::AnthropicNative,
+            false,
+        );
+        // Resolve the actual transport for this body. A Chat offering may have
+        // a compatible native search profile, but cannot receive other native tools.
+        decision.fallbacks.retain(|target| {
+            self.upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| {
+                    upstream
+                        .search_transport(&body_value, ApiDialect::AnthropicNative)
+                        .dialect
+                        == ApiDialect::AnthropicNative
+                })
+        });
         let vision_state = candidates
             .iter()
             .find(|candidate| candidate.target == decision.chosen)
@@ -551,6 +588,12 @@ impl Gateway {
         // machinery every Canonical request gets, which is the whole point of
         // folding it in here.
         let last_upstream_error = RefCell::new(None);
+        if let Some(classifier) = &self.semantic {
+            classifier.bypass(
+                crate::semantic::Tier::from_pool(&decision.pool),
+                crate::semantic::Outcome::Unsupported,
+            );
+        }
         let result = self.execute_routed_attempt(
             ctx,
             agent,
@@ -626,6 +669,8 @@ impl Gateway {
                     format!("upstream `{}` vanished from configuration", target.upstream),
                 )
             })?;
+        let transport = upstream.search_transport(body, ApiDialect::AnthropicNative);
+        let upstream = transport.as_ref();
 
         // Verbatim body, except the caller's model is remapped to the routed one.
         let mut forwarded = body.clone();
@@ -639,9 +684,7 @@ impl Gateway {
         );
         descriptor.headers = headers.clone();
         descriptor.body = Some(forwarded);
-        descriptor.auth = upstream.config.auth.clone().map(|secret| {
-            Auth::header("x-api-key", secret).expect("x-api-key is a credential header")
-        });
+        descriptor.auth = upstream.native_auth(ApiDialect::AnthropicNative);
 
         // The same exfiltration gate as build_provider_request: the URL must sit
         // inside base_url and the credential slot must match, checked before the
@@ -723,8 +766,8 @@ impl Gateway {
         }
 
         // L2 authoritative quota: harvest remaining/reset headers, never the body.
-        let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
-        self.quota.lock().expect("quota lock").note_authoritative(
+        let windows = crate::quota_headers::parse_quota_reports(&response.headers, unix_millis());
+        self.quota.lock().expect("quota lock").note_header_reports(
             target.upstream.as_str(),
             unix_millis(),
             windows,
@@ -811,10 +854,12 @@ impl Gateway {
             {
                 record.usage = Some(usage);
             }
-            emit(Reply::BeginJson(JsonReply {
+            if !emit(Reply::BeginJson(JsonReply {
                 status: parts.status,
                 body: parts.body,
-            }));
+            })) {
+                return Ok(StreamOutcome::ClientCancelled);
+            }
             Ok(StreamOutcome::Complete)
         }
     }
@@ -994,7 +1039,7 @@ impl Gateway {
     /// dropped. `SafeHeaders::try_new` additionally rejects any credential or
     /// host-owned header fail-closed, so the client's own auth can never ride
     /// upstream even if this list regressed.
-    fn curate_passthrough_headers(
+    pub(super) fn curate_passthrough_headers(
         raw_headers: &[(String, String)],
     ) -> Result<SafeHeaders, ErrorEnvelope> {
         const FORWARD: [&str; 4] = [

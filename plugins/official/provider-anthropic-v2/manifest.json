@@ -1,6 +1,6 @@
 {
   "name": "provider-anthropic",
-  "version": "1.0.1",
+  "version": "1.4.11",
   "api_version": "provider-adapter-v2",
   "providers": [
     "anthropic"
@@ -13,6 +13,69 @@
   "auth_arms": [
     "header_secret"
   ],
+  "request_facts": {
+    "anthropic": {
+      "output_cap": [
+        "/max_tokens"
+      ],
+      "model": {
+        "body": "/model"
+      },
+      "stream": {
+        "body": "/stream"
+      }
+    }
+  },
+  "immutable_request_headers": {
+    "anthropic": [
+      "anthropic-version"
+    ]
+  },
+  "endpoint": {
+    "anthropic": "https://api.anthropic.com"
+  },
+  "north_passthrough": {
+    "anthropic": "messages"
+  },
+  "north_request_passthrough": {
+    "anthropic": "messages"
+  },
+  "forwarded_client_headers": {
+    "anthropic": [
+      "anthropic-beta"
+    ]
+  },
+  "count_tokens": {
+    "anthropic": {
+      "protocol": "messages",
+      "path_suffix": {
+        "from": "/v1/messages",
+        "to": "/v1/messages/count_tokens"
+      }
+    }
+  },
+  "model_parameters": {
+    "anthropic": {
+      "words": [
+        "anthropic.effort.xhigh",
+        "anthropic.sampling.exclusive",
+        "anthropic.sampling.none",
+        "anthropic.thinking.adaptive",
+        "anthropic.thinking.budget",
+        "anthropic.tool_choice.auto_only",
+        "reasoning_replay.claude.v1"
+      ],
+      "exclusive": [
+        [
+          "anthropic.thinking.adaptive",
+          "anthropic.thinking.budget"
+        ]
+      ]
+    }
+  },
+  "drops_unsigned_thinking": [
+    "anthropic"
+  ],
   "permissions": {
     "network": false,
     "filesystem": false,
@@ -20,15 +83,24 @@
       "provider_api_key"
     ]
   },
+  "host_values": [
+    "end_user_hash"
+  ],
   "conformance": {
     "required_suite": "south.provider-component.v1",
     "fixtures": "fixtures-anthropic/"
   },
   "compatibility": {
-    "ir_schema_id": "token-station-protocol@0.3.0/v0.2.0",
-    "kernel_version": "0.2.0",
-    "kernel_revision": "72458e3a11fe157f9ac04818c44b62a3dd2cb09c",
+    "ir_schema_id": "token-station-protocol@0.7.0/v0.6.0",
+    "kernel_version": "0.6.0",
+    "kernel_revision": "a04925518b95c6557374252db7fbe7f026688bde",
     "wit_package": "token-station:adapter@2.0.0",
-    "south_runtime": "0.16.0"
+    "south_runtime": "0.77.0",
+    "runtime_abi": 1,
+    "kernel_contracts": {
+      "canonical_ir": 5,
+      "error_catalog": 1,
+      "stream": 3
+    }
   }
 }

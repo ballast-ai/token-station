@@ -27,6 +27,7 @@ function jobBody(workflowName, jobName) {
 const prefetch = [
   "plugins/official/provider-openai-compatible-v2/Cargo.toml",
   "plugins/official/provider-anthropic-v2/Cargo.toml",
+  "plugins/official/provider-chatgpt-plan-v2/Cargo.toml",
   'cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"',
 ];
 

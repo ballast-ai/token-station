@@ -1,0 +1,22 @@
+{
+  "method": "POST",
+  "url": "https://api.kimi.com/coding/v1/chat/completions",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "kimi-k2-0905-preview",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "temperature": 0.2,
+    "max_tokens": 1024
+  },
+  "auth": {
+    "scheme": "bearer",
+    "secret": "provider_api_key"
+  }
+}

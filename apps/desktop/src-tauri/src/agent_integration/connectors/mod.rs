@@ -124,6 +124,7 @@ impl AgentModelMetadata {
 }
 
 pub struct ConnectInput<'a> {
+    pub browser_search_enabled: bool,
     pub base_url: &'a str,
     pub token: Option<&'a str>,
     pub adapter_ready: bool,
@@ -470,7 +471,7 @@ mod tests {
             ("codex-v1", b"keep = \"codex\"\n", "codex"),
             (
                 "deepseek-harness-v1",
-                b"# keep DeepSeek comment\nkeep: deepseek-harness\n",
+                b"# keep DeepSeek comment\n- id: keep\n  config: {value: deepseek-harness}\n",
                 "deepseek-harness",
             ),
             ("gemini-cli-v1", b"KEEP=gemini\n", "gemini"),
@@ -508,6 +509,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/lifecycle/v1",
             token: Some("fixture-lifecycle-secret"),
             adapter_ready: true,
@@ -575,6 +577,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/grok-build/v1",
             token: Some("fixture-grok-key"),
             adapter_ready: true,
@@ -628,6 +631,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
             token: Some("fixture-kimi-key"),
             adapter_ready: true,
@@ -690,6 +694,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
             token: Some("fixture-kimi-key"),
             adapter_ready: true,
@@ -717,6 +722,7 @@ mod tests {
     fn kimi_code_connector_rejects_a_route_without_reachable_models() {
         let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
             token: Some("fixture-kimi-key"),
             adapter_ready: true,
@@ -742,6 +748,7 @@ mod tests {
                 cost: None,
             };
             let input = ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
                 token: Some("fixture-kimi-key"),
                 adapter_ready: true,
@@ -764,6 +771,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
             token: Some("fixture-kimi-key"),
             adapter_ready: true,
@@ -789,6 +797,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
             token: Some("fixture-kimi-key"),
             adapter_ready: true,
@@ -819,7 +828,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let primary = root.join("settings.yaml");
+        let primary = root.join("cordis.patch.yml");
         let credentials = root.join(".credentials.yaml");
         std::fs::write(&credentials, b"USER_API_KEY: keep-me\n").unwrap();
         let metadata = AgentModelMetadata {
@@ -833,6 +842,7 @@ mod tests {
             cost: None,
         };
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/deepseek-harness/v1",
             token: Some("fixture-dsh-key"),
             adapter_ready: true,
@@ -840,7 +850,7 @@ mod tests {
         };
         let mut document = parse_source_bytes(
             Some(
-                b"# keep DeepSeek comment\nllm-pi-ai:\n  providers:\n    user:\n      api: anthropic-messages\nkeep: deepseek-harness\n",
+                b"# keep DeepSeek comment\n- id: llm-pi-ai\n  config:\n    providers:\n      user:\n        api: anthropic-messages\n- id: keep\n  config: {value: deepseek-harness}\n",
             ),
             connector.format(),
             connector.label(),
@@ -851,7 +861,14 @@ mod tests {
         validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
         apply_patch(&mut document, &patch).unwrap();
         connector.validate_projected(&document, &input).unwrap();
-        let semantic = semantic_json(&document).unwrap();
+        let rows = semantic_json(&document).unwrap();
+        let semantic: serde_json::Value = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["id"].as_str().unwrap().to_string(), r["config"].clone()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
         assert_eq!(
             semantic["agent-default-model"]["provider"],
             json!("tokenstation")
@@ -904,40 +921,22 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_harness_accepts_the_stock_onboarding_settings_file() {
-        let connector = find_connector("deepseek-harness-v1")
-            .expect("DeepSeek Harness connector is registered");
-        let input = ConnectInput {
-            base_url: "http://127.0.0.1:8787/agents/deepseek-harness/v1",
-            token: Some("fixture-dsh-key"),
-            adapter_ready: true,
-            model_metadata: None,
-        };
-        let mut document = parse_source_bytes(
+    fn deepseek_harness_rejects_legacy_mapping_for_new_connections() {
+        let connector = find_connector("deepseek-harness-v1").unwrap();
+        let document = parse_source_bytes(
             Some(b"ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\n"),
             connector.format(),
             connector.label(),
         )
-        .expect("the stock DSH settings file is valid YAML");
-
-        connector
+        .unwrap();
+        assert!(connector
             .validate_source(&document)
-            .expect("the stock DSH settings file is safe to extend");
-        prepare_owned_paths_for_write(&mut document, &connector.owned_paths())
-            .expect("the Token Station paths are safe to create");
-        let patch = connector.connect_patch(&input).unwrap();
-        apply_patch(&mut document, &patch).unwrap();
-        connector.validate_projected(&document, &input).unwrap();
-
-        let semantic = semantic_json(&document).unwrap();
-        assert_eq!(
-            semantic["ui-onboarding"]["welcomeNoticeVersion"],
-            json!("2026-08-13.1")
-        );
-        assert_eq!(
-            semantic["llm-pi-ai"]["providers"]["tokenstation"]["api"],
-            json!("openai-completions")
-        );
+            .unwrap_err()
+            .contains("YAML array"));
+        assert!(connector.capabilities().restart_required);
+        assert!(connector
+            .config_path(std::path::Path::new("/home/user"))
+            .ends_with(".dsh/cordis.patch.yml"));
     }
 
     #[test]
@@ -945,6 +944,7 @@ mod tests {
         let connector = find_connector("gemini-cli-v1").unwrap();
         let source = b"# user comment\nUNKNOWN=keep-me\n";
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/gemini-cli",
             token: Some("vk-gemini-sensitive"),
             adapter_ready: true,
@@ -993,6 +993,7 @@ mod tests {
         )
         .unwrap();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/gemini-cli",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
@@ -1048,6 +1049,7 @@ mod tests {
         let primary = root.join(".env");
         let settings = root.join("settings.json");
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/gemini-cli",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
@@ -1088,6 +1090,7 @@ mod tests {
           "unknown": {"keep": true}
         }"#;
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
@@ -1150,6 +1153,7 @@ mod tests {
     fn workbuddy_connector_recovers_null_optional_model_arrays() {
         let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
@@ -1188,6 +1192,7 @@ mod tests {
           {"id":"user-model","name":"Keep me","url":"http://example.test/v1/chat/completions"}
         ]"#;
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
@@ -1217,6 +1222,7 @@ mod tests {
             cost: None,
         };
         let refresh_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: input.base_url,
             token: input.token,
             adapter_ready: true,
@@ -1251,6 +1257,7 @@ mod tests {
     fn opencode_connection_advertises_image_attachments_for_the_auto_route() {
         let connector = find_connector("opencode-v1").unwrap();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
@@ -1331,6 +1338,7 @@ mod tests {
         };
 
         let codex_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("fixture-codex-key"),
             adapter_ready: true,
@@ -1356,6 +1364,7 @@ mod tests {
         );
 
         let openclaw_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/openclaw/v1",
             token: Some("fixture-openclaw-key"),
             adapter_ready: true,
@@ -1385,6 +1394,7 @@ mod tests {
         assert_ne!(model["cost"]["input"], json!(0));
 
         let workbuddy_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
@@ -1410,6 +1420,7 @@ mod tests {
         assert_eq!(workbuddy[0]["supportsReasoning"], json!(true));
 
         let hermes_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
             token: Some("fixture-hermes-key"),
             adapter_ready: true,
@@ -1450,6 +1461,7 @@ mod tests {
         };
 
         let opencode_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("fixture-key"),
             adapter_ready: true,
@@ -1474,6 +1486,7 @@ mod tests {
         );
 
         let workbuddy_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-key"),
             adapter_ready: true,
@@ -1494,6 +1507,7 @@ mod tests {
 
         for connector in [&CodexConnector as &dyn Connector, &HermesConnector] {
             let input = ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("fixture-key"),
                 adapter_ready: true,
@@ -1514,6 +1528,7 @@ mod tests {
     #[test]
     fn metadata_refresh_removes_stale_managed_limits_when_metadata_becomes_unknown() {
         let codex_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("fixture-codex-key"),
             adapter_ready: true,
@@ -1544,6 +1559,7 @@ experimental_bearer_token = "fixture-codex-key"
         assert!(codex.get("model_auto_compact_token_limit").is_none());
 
         let hermes_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
             token: Some("fixture-hermes-key"),
             adapter_ready: true,
@@ -1568,6 +1584,7 @@ experimental_bearer_token = "fixture-codex-key"
     #[test]
     fn first_codex_connection_with_unknown_metadata_preserves_user_limits() {
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("fixture-codex-key"),
             adapter_ready: true,
@@ -1605,6 +1622,7 @@ experimental_bearer_token = "fixture-codex-key"
             cost: None,
         };
         let opencode_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("fixture-key"),
             adapter_ready: true,
@@ -1622,6 +1640,7 @@ experimental_bearer_token = "fixture-codex-key"
         assert_eq!(model["modalities"]["input"], json!(["text"]));
 
         let workbuddy_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-key"),
             adapter_ready: true,
@@ -1647,6 +1666,7 @@ experimental_bearer_token = "fixture-codex-key"
     fn connectors_recover_only_null_optional_object_containers() {
         let metadata = standard_test_metadata();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
@@ -1710,6 +1730,7 @@ experimental_bearer_token = "fixture-codex-key"
         ];
         let metadata = standard_test_metadata();
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
@@ -1735,7 +1756,9 @@ experimental_bearer_token = "fixture-codex-key"
                 DocumentFormat::Json => b"{invalid-json".as_slice(),
                 DocumentFormat::Json5 => b"{invalid-json5".as_slice(),
                 DocumentFormat::Toml => b"invalid = [".as_slice(),
-                DocumentFormat::Yaml => b"model:\n  broken: [\n".as_slice(),
+                DocumentFormat::Yaml | DocumentFormat::CordisYaml => {
+                    b"model:\n  broken: [\n".as_slice()
+                }
                 DocumentFormat::Dotenv => b"BROKEN".as_slice(),
             };
             let malformed =
@@ -1760,24 +1783,28 @@ experimental_bearer_token = "fixture-codex-key"
         let home = Path::new("/fixture/home");
         let metadata = standard_test_metadata();
         let good = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
             model_metadata: Some(&metadata),
         };
         let wrong = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:9999/v1",
             token: Some("wrong-key"),
             adapter_ready: true,
             model_metadata: Some(&metadata),
         };
         let not_ready = ConnectInput {
+            browser_search_enabled: false,
             base_url: good.base_url,
             token: good.token,
             adapter_ready: false,
             model_metadata: Some(&metadata),
         };
         let missing_token = ConnectInput {
+            browser_search_enabled: false,
             base_url: good.base_url,
             token: None,
             adapter_ready: true,
@@ -1872,6 +1899,7 @@ experimental_bearer_token = "fixture-codex-key"
 unknown = "preserved"
 "#;
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("fixture-codex-virtual-key"),
             adapter_ready: true,
@@ -1911,6 +1939,7 @@ unknown = "preserved"
     fn openclaw_connector_preserves_json5_comments_and_restores_only_owned_paths() {
         let source = include_bytes!("../../../tests/fixtures/config/openclaw/openclaw.input.json5");
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-openclaw-secret"),
             adapter_ready: true,
@@ -1963,6 +1992,7 @@ unknown = "preserved"
     fn hermes_connector_preserves_yaml_comments_and_restores_only_owned_paths() {
         let source = include_bytes!("../../../tests/fixtures/config/hermes/config.input.yaml");
         let input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-hermes-secret"),
             adapter_ready: true,

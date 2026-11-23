@@ -132,6 +132,9 @@ impl PackageSource {
 /// A package's parsed, validated manifest — one of the two schemas the
 /// directory scan dispatches on.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// One value exists per installed package, parsed once per directory scan, so
+// the variant size gap costs nothing. Boxing either side only moves the gap.
+#[allow(clippy::large_enum_variant)]
 pub enum PackageManifest {
     /// `agent-adapter-v1`, this repository's schema.
     Agent(AdapterManifest),
@@ -1268,11 +1271,16 @@ mod tests {
             // host moved on, and a fixture that disagrees with the host tests
             // nothing once the handshake is enforced.
             "compatibility": {
-                "ir_schema_id": crate::south_component::IR_SCHEMA_ID,
-                "kernel_version": crate::south_component::KERNEL_VERSION,
-                "kernel_revision": crate::south_component::KERNEL_REVISION,
+                "ir_schema_id": "token-station-protocol@0.7.0/v0.6.0",
+                "kernel_version": "0.6.0",
+                "kernel_revision": "a04925518b95c6557374252db7fbe7f026688bde",
                 "wit_package": "token-station:adapter@2.0.0",
-                "south_runtime": crate::south_component::SOUTH_RUNTIME
+                "south_runtime": crate::south_component::SOUTH_RUNTIME,
+                "runtime_abi": south_provider_api::RUNTIME_ABI,
+                "kernel_contracts": crate::south_component::KERNEL_CONTRACTS
+                    .iter()
+                    .map(|(name, version)| ((*name).to_owned(), serde_json::json!(version)))
+                    .collect::<serde_json::Map<_, _>>()
             }
         })
         .to_string()

@@ -1,0 +1,73 @@
+{
+  "chat_request": {
+    "messages": [
+      {
+        "content": "Is 91 prime?",
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "thinking": "7 x 13 = 91.",
+            "type": "thinking"
+          },
+          {
+            "text": "No, 91 = 7 x 13.",
+            "type": "text"
+          }
+        ],
+        "reasoning_replay_block_layout": [
+          {
+            "index": 0,
+            "kind": "reasoning_item"
+          },
+          {
+            "kind": "content",
+            "ordinal": 1
+          }
+        ],
+        "reasoning_replay_protocol_family": "openai-encrypted-reasoning",
+        "responses_opaque_reasoning_items": [
+          {
+            "encrypted_content": "gAAAAABo-replay-one",
+            "id": "rs_68af0a1d1a2b8190b3c4d5e6f7a8b9c0",
+            "summary": [
+              {
+                "text": "7 x 13 = 91.",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning"
+          }
+        ],
+        "role": "assistant"
+      },
+      {
+        "content": "And 97?",
+        "role": "user"
+      }
+    ],
+    "model": "claude-sonnet-4",
+    "sampling": {},
+    "stream": false
+  },
+  "provider_config": {
+    "auth": "provider_api_key",
+    "base_url": "https://api.anthropic.com",
+    "models": [
+      {
+        "context_window": 200000,
+        "json_schema": true,
+        "model": "claude-sonnet-4",
+        "supported_parameters": [
+          "stop",
+          "temperature",
+          "top_p"
+        ],
+        "tool": true,
+        "vision": true
+      }
+    ],
+    "provider": "anthropic"
+  }
+}

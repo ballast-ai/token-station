@@ -33,6 +33,9 @@ pub enum StreamEvent {
     /// Incremental tool-call arguments. `index` is the tool-call index within
     /// its choice. `id` and `name` arrive on the first fragment of a call and
     /// are absent afterwards, matching how providers stream them.
+    /// `signature` is the provider's opaque per-call signature (see
+    /// [`crate::ToolCall::signature`]); it rides on whichever fragment of the
+    /// call the provider sent it with, and is absent on the others.
     ToolCallDelta {
         index: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +43,8 @@ pub enum StreamEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         arguments_delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     /// Token accounting. Most providers emit this once, just before `done` —
     /// but a stream may legitimately carry it **more than once** (Anthropic
@@ -148,6 +153,7 @@ mod tests {
             index: 0,
             id: None,
             name: None,
+            signature: None,
             arguments_delta: r#"ing"}"#.to_owned(),
         };
         let json = serde_json::to_value(&event).expect("serializable event");
@@ -303,6 +309,7 @@ mod tests {
                 id: Some("call_1".to_owned()),
                 name: Some("get_weather".to_owned()),
                 arguments_delta: "{\"city".to_owned(),
+                signature: None,
             },
             StreamEvent::Usage {
                 usage: Usage {

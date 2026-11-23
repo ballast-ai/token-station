@@ -1,0 +1,7 @@
+{
+  "code": "rate_limit",
+  "http_status": 429,
+  "message": "the upstream rate limited this request",
+  "provider_message": "Number of requests has exceeded your rate limit",
+  "retry_after_ms": 2000
+}

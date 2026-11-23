@@ -1,5 +1,8 @@
 //! Content-free accounting observations from provider response envelopes.
 
+mod aggregate;
+pub(crate) use aggregate::Aggregate;
+
 use serde_json::{Value, value::RawValue};
 use token_station_metrics::{CostKind, RequestRecord, UsageObservation};
 use token_station_protocol::Usage;
@@ -95,6 +98,7 @@ fn observe(body: &Value) -> UsageObservation {
         });
     UsageObservation {
         incomplete,
+        cost_requires_attempt_pricing: false,
         input_tokens: input,
         output_tokens: output,
         cache_read_tokens: cache_read,
@@ -186,6 +190,7 @@ enum UsageStage {
 pub(crate) struct AccountingTap {
     observation: UsageObservation,
     stage: UsageStage,
+    parsed_terminal_usage: bool,
     actual_usd: Option<i64>,
     trusted_usd: bool,
     mode: BodyMode,
@@ -223,9 +228,31 @@ impl AccountingTap {
     }
 
     fn parse_event(&mut self, bytes: &[u8]) {
+        // A previous envelope cannot certify a terminal that failed full-frame parsing.
+        self.parsed_terminal_usage = false;
         let Ok(body) = serde_json::from_slice::<Value>(bytes) else {
             return;
         };
+        let terminal = match self.mode {
+            BodyMode::Json => Some(&body),
+            BodyMode::Stream
+                if matches!(
+                    body.get("type").and_then(Value::as_str),
+                    Some("response.completed" | "response.failed" | "response.incomplete")
+                ) =>
+            {
+                body.get("response")
+            }
+            _ => None,
+        };
+        self.parsed_terminal_usage = terminal
+            .and_then(|response| response.get("usage"))
+            .is_some_and(|usage| {
+                usage.get("input_tokens").and_then(Value::as_u64).is_some()
+                    && usage.get("output_tokens").and_then(Value::as_u64).is_some()
+                    // Certify only the envelope used by the accounting observer.
+                    && usage_object(&body) == Some(usage)
+            });
         let cost = if self.trusted_usd {
             serde_json::from_slice::<RawCostEnvelope<'_>>(bytes)
                 .ok()
@@ -319,7 +346,8 @@ impl AccountingTap {
         }
     }
 
-    pub(crate) fn finish(mut self, record: &mut RequestRecord) {
+    /// Certify terminal usage only from its successfully parsed, retained envelope.
+    pub(crate) fn finish(mut self, record: &mut RequestRecord) -> bool {
         if self.mode == BodyMode::Abandoned {
             // Keep the adapter's final values, but do not certify an incomplete observation.
             record.usage_observation = Some(UsageObservation {
@@ -331,7 +359,7 @@ impl AccountingTap {
                 record.cost_micros = Some(cost);
                 record.price_version = None;
             }
-            return;
+            return false;
         }
         if self.mode == BodyMode::Json {
             let bytes = std::mem::take(&mut self.json);
@@ -355,6 +383,8 @@ impl AccountingTap {
             record.cost_micros = Some(cost);
             record.price_version = None;
         }
+        self.parsed_terminal_usage
+            && (self.mode != BodyMode::Stream || self.decoder.finish().is_ok())
     }
 }
 

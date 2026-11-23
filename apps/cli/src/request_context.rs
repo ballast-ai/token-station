@@ -27,8 +27,25 @@ pub struct RequestContext {
     per_attempt_timeout: Duration,
     upstream_response_limit: Option<u64>,
     http_trace: Mutex<Option<HttpTraceCapture>>,
-    accounting: Mutex<crate::accounting::AccountingTap>,
+    tool_aliases: Mutex<BTreeMap<String, String>>,
+    accounting: Mutex<AttemptAccounting>,
+    host_loop_accounting: Mutex<Option<crate::accounting::Aggregate>>,
     error_diagnostic: Mutex<Option<ErrorDiagnosticCapture>>,
+    classifier_input: Mutex<Option<token_station_metrics::ClassifierInputDiagnostic>>,
+}
+
+#[derive(Default)]
+struct AttemptAccounting {
+    tap: crate::accounting::AccountingTap,
+    reported_terminal_usage: bool,
+}
+
+/// One provider attempt or host-tool round owns this map. It never enters provider extensions.
+pub(crate) struct ToolAliasScope<'a>(&'a RequestContext);
+impl Drop for ToolAliasScope<'_> {
+    fn drop(&mut self) {
+        self.0.tool_aliases.lock().unwrap().clear();
+    }
 }
 
 const MAX_HTTP_TRACE_BODY_BYTES: usize = 1024 * 1024;
@@ -122,6 +139,63 @@ impl HttpTraceCapture {
 }
 
 impl RequestContext {
+    pub(crate) fn begin_host_loop_accounting(&self) {
+        self.host_loop_accounting
+            .lock()
+            .unwrap()
+            .get_or_insert_with(crate::accounting::Aggregate::default);
+    }
+
+    pub(crate) fn aggregate_host_attempt(
+        &self,
+        record: &token_station_metrics::RequestRecord,
+        status: Option<u16>,
+        target: &token_station_router_core::UpstreamModel,
+        pricing: &crate::pricing::PriceTable,
+    ) {
+        if let Some(aggregate) = self.host_loop_accounting.lock().unwrap().as_mut() {
+            aggregate.absorb(record, status, target, pricing);
+        }
+    }
+
+    /// True means the host loop already priced each attempt against its own model.
+    pub(crate) fn apply_host_loop_accounting(
+        &self,
+        record: &mut token_station_metrics::RequestRecord,
+    ) -> bool {
+        if let Some(aggregate) = self.host_loop_accounting.lock().unwrap().as_ref() {
+            aggregate.apply(record);
+            true
+        } else {
+            false
+        }
+    }
+    pub(crate) fn tool_alias_scope(&self, aliases: BTreeMap<String, String>) -> ToolAliasScope<'_> {
+        *self.tool_aliases.lock().unwrap() = aliases;
+        ToolAliasScope(self)
+    }
+
+    pub(crate) fn restore_tool_aliases(&self, response: &mut token_station_protocol::ChatResponse) {
+        let aliases = self.tool_aliases.lock().unwrap();
+        for choice in &mut response.choices {
+            for call in &mut choice.message.tool_calls {
+                if let Some(name) = aliases.get(&call.name) {
+                    call.name.clone_from(name);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn restore_tool_event(&self, event: &mut token_station_protocol::StreamEvent) {
+        if let token_station_protocol::StreamEvent::ToolCallDelta {
+            name: Some(name), ..
+        } = event
+            && let Some(original) = self.tool_aliases.lock().unwrap().get(name)
+        {
+            name.clone_from(original);
+        }
+    }
+
     /// Build a request-scoped context under a server's drain token.
     #[must_use]
     pub fn new(drain: &CancelToken, total: Duration, per_attempt: Duration) -> Self {
@@ -131,8 +205,11 @@ impl RequestContext {
             per_attempt_timeout: per_attempt,
             upstream_response_limit: None,
             http_trace: Mutex::new(None),
+            tool_aliases: Mutex::new(BTreeMap::new()),
             error_diagnostic: Mutex::new(None),
-            accounting: Mutex::new(crate::accounting::AccountingTap::default()),
+            classifier_input: Mutex::new(None),
+            accounting: Mutex::new(AttemptAccounting::default()),
+            host_loop_accounting: Mutex::new(None),
         }
     }
 
@@ -226,12 +303,48 @@ impl RequestContext {
     }
 
     pub(crate) fn begin_accounting(&self, endpoint: &str) {
-        *self.accounting.lock().expect("accounting lock") =
-            crate::accounting::AccountingTap::new(endpoint);
+        *self.accounting.lock().expect("accounting lock") = AttemptAccounting {
+            tap: crate::accounting::AccountingTap::new(endpoint),
+            reported_terminal_usage: false,
+        };
     }
 
-    pub(crate) fn finish_accounting(&self, record: &mut token_station_metrics::RequestRecord) {
-        std::mem::take(&mut *self.accounting.lock().expect("accounting lock")).finish(record);
+    /// Record this request's classifier input handling, independently of attempts.
+    ///
+    /// # Panics
+    /// Panics if the classifier input lock is poisoned.
+    pub fn set_classifier_input(
+        &self,
+        diagnostic: token_station_metrics::ClassifierInputDiagnostic,
+    ) {
+        *self.classifier_input.lock().expect("classifier input lock") = Some(diagnostic);
+    }
+
+    /// Snapshot this request's classifier input handling without consuming it.
+    ///
+    /// # Panics
+    /// Panics if the classifier input lock is poisoned.
+    #[must_use]
+    pub fn classifier_input(&self) -> Option<token_station_metrics::ClassifierInputDiagnostic> {
+        *self.classifier_input.lock().expect("classifier input lock")
+    }
+
+    /// A parsed native terminal reported both token counts after a complete read.
+    /// This preserves the tap's validation, including any incomplete observation.
+    pub(crate) fn mark_reported_terminal_usage(&self) {
+        self.accounting
+            .lock()
+            .expect("accounting lock")
+            .reported_terminal_usage = true;
+    }
+
+    pub(crate) fn finish_accounting(
+        &self,
+        record: &mut token_station_metrics::RequestRecord,
+    ) -> bool {
+        let accounting = std::mem::take(&mut *self.accounting.lock().expect("accounting lock"));
+        let complete_envelope = accounting.tap.finish(record);
+        accounting.reported_terminal_usage && complete_envelope
     }
 
     fn captured_headers<'a>(
@@ -383,6 +496,7 @@ impl RequestContext {
         self.accounting
             .lock()
             .expect("accounting lock")
+            .tap
             .head(status, content_type);
         let mut trace = self.http_trace.lock().unwrap();
         let Some(trace) = trace.as_mut() else {
@@ -412,7 +526,11 @@ impl RequestContext {
             let remaining = 8192usize.saturating_sub(body.len());
             body.extend_from_slice(&value[..value.len().min(remaining)]);
         }
-        self.accounting.lock().expect("accounting lock").push(value);
+        self.accounting
+            .lock()
+            .expect("accounting lock")
+            .tap
+            .push(value);
         let mut trace = self.http_trace.lock().unwrap();
         let Some(trace) = trace.as_mut() else {
             return;
@@ -500,6 +618,68 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_usage_evidence_is_attempt_scoped() {
+        let ctx = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        for mark_terminal in [true, false] {
+            ctx.mark_reported_terminal_usage();
+            ctx.begin_accounting("https://example.test/v1");
+            ctx.capture_upstream_response_head(200, &BTreeMap::new());
+            ctx.append_upstream_response_body(
+                br#"{"usage":{"input_tokens":10,"output_tokens":2}}"#,
+            );
+            if mark_terminal {
+                ctx.mark_reported_terminal_usage();
+            }
+            assert_eq!(
+                ctx.finish_accounting(&mut token_station_metrics::RequestRecord::begin(
+                    1, "openai"
+                )),
+                mark_terminal,
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_input_is_request_scoped_and_survives_attempt_accounting() {
+        use token_station_metrics::{
+            ClassifierInputDiagnostic, ClassifierInputHandling, ClassifierInputReason,
+            ClassifierKind, RequestRecord,
+        };
+        let first = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let second = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let diagnostic = ClassifierInputDiagnostic {
+            classifier: ClassifierKind::Jev,
+            handling: ClassifierInputHandling::Reduced,
+            reason: Some(ClassifierInputReason::ByteLimit),
+        };
+        first.set_classifier_input(diagnostic);
+        for _ in 0..2 {
+            first.begin_accounting("https://example.test/v1");
+            first.finish_accounting(&mut RequestRecord::begin(1, "openai"));
+            assert_eq!(first.classifier_input(), Some(diagnostic));
+            assert_eq!(second.classifier_input(), None);
+        }
+        first.cancel();
+        assert_eq!(first.classifier_input(), Some(diagnostic));
+        let second_diagnostic = ClassifierInputDiagnostic {
+            classifier: ClassifierKind::Scx,
+            handling: ClassifierInputHandling::Skipped,
+            reason: Some(ClassifierInputReason::TokenLimit),
+        };
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for (context, expected) in [(&first, diagnostic), (&second, second_diagnostic)] {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    context.set_classifier_input(expected);
+                    barrier.wait();
+                    assert_eq!(context.classifier_input(), Some(expected));
+                });
+            }
+        });
+    }
+
     use super::{CappedJsonWriter, MAX_HTTP_TRACE_BODY_BYTES, RequestContext};
     use crate::bodylog::{HttpTraceSnapshot, MAX_BODY_BYTES};
     use crate::cancel::{CancelReason, CancelToken};
@@ -507,6 +687,30 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
     use token_station_protocol::{Auth, HttpMethod, HttpRequestDescriptor, SafeHeaders, SecretRef};
+
+    #[test]
+    fn tool_aliases_are_round_scoped_and_do_not_change_arguments_or_other_requests() {
+        let first = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let second = RequestContext::detached(Duration::from_secs(10), Duration::from_secs(1));
+        let original: token_station_protocol::ChatResponse = serde_json::from_value(json!({"id":"response","model":"test","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_a","name":"alias","arguments":"alias"}]}}]})).unwrap();
+        {
+            let _scope =
+                first.tool_alias_scope(BTreeMap::from([("alias".into(), "client_tool".into())]));
+            let mut response = original.clone();
+            first.restore_tool_aliases(&mut response);
+            assert_eq!(
+                response.choices[0].message.tool_calls[0].name,
+                "client_tool"
+            );
+            assert_eq!(response.choices[0].message.tool_calls[0].arguments, "alias");
+            let mut untouched = original.clone();
+            second.restore_tool_aliases(&mut untouched);
+            assert_eq!(untouched, original);
+        }
+        let mut response = original.clone();
+        first.restore_tool_aliases(&mut response);
+        assert_eq!(response, original);
+    }
 
     #[test]
     fn error_diagnostics_are_opt_in_bounded_and_exclude_success() {

@@ -1,0 +1,123 @@
+import { useEffect, useId, useRef, useState } from "react";
+import { getSemanticStatus, setSemanticEnabled, type SemanticStatus } from "../api";
+import { useLocalizedCopy } from "./LanguageProvider";
+import RoutingClassifierCard from "./RoutingClassifierCard";
+import "./SemanticRoutingSwitch.css";
+
+export default function SemanticRoutingSwitch({ overriddenByJev = false }: { overriddenByJev?: boolean }) {
+  const { copy } = useLocalizedCopy();
+  const id = useId();
+  const [status, setStatus] = useState<SemanticStatus | null>(null);
+  const [pending, setPending] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const [readFailed, setReadFailed] = useState(false);
+  const mounted = useRef(false);
+  const mutating = useRef(false);
+  const revision = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+    mounted.current = true;
+    const poll = async () => {
+      if (polling || mutating.current) return;
+      polling = true;
+      const startedAt = revision.current;
+      try {
+        const next = await getSemanticStatus();
+        if (active && startedAt === revision.current) {
+          setStatus(next);
+          setReadFailed(false);
+          if (!next.available) window.clearInterval(timer);
+        }
+      } catch {
+        if (active && startedAt === revision.current) setReadFailed(true);
+      } finally {
+        polling = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 2_000);
+    void poll();
+    return () => {
+      active = false;
+      mounted.current = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const changeEnabled = async (enabled: boolean) => {
+    if (mutating.current || !status?.available) return;
+    mutating.current = true;
+    revision.current += 1;
+    setPending(true);
+    setSaveFailed(false);
+    try {
+      const next = await setSemanticEnabled(enabled);
+      if (mounted.current) {
+        setStatus(next);
+        setReadFailed(false);
+      }
+    } catch {
+      if (mounted.current) setSaveFailed(true);
+    } finally {
+      mutating.current = false;
+      if (mounted.current) setPending(false);
+    }
+  };
+
+  if (!status?.available) return null;
+
+  const hasError = saveFailed || readFailed || status.state === "error";
+  const message = saveFailed
+    ? copy("Setting was not saved. Try again.", "设置未保存，请重试。", "設定未儲存，請重試。", "設定を保存できませんでした。再試行してください。")
+    : readFailed
+      ? copy("Cannot read the current status. Try again shortly.", "暂时无法读取状态，请稍后重试。", "暫時無法讀取狀態，請稍後重試。", "現在の状態を取得できません。しばらくしてから再試行してください。")
+      : overriddenByJev
+        ? null
+      : status.state === "error"
+        ? copy("Local classification is unavailable. Existing rules remain active.", "本地分档暂不可用，继续使用原有规则。", "本機分檔暫時無法使用，繼續使用原有規則。", "ローカル分類を利用できません。既存のルールを使用します。")
+        : status.enabled && status.state === "preparing"
+          ? copy("Preparing the model. Existing rules remain active.", "正在准备模型，暂用原有规则。", "正在準備模型，暫用原有規則。", "モデルを準備中です。既存のルールを使用します。")
+          : status.enabled && status.state === "loading"
+            ? copy("Loading the model. Existing rules remain active.", "正在加载模型，暂用原有规则。", "正在載入模型，暫用原有規則。", "モデルを読み込み中です。既存のルールを使用します。")
+            : null;
+
+  return (
+    <RoutingClassifierCard
+      id={id} title={copy("Local smart tiers", "本地智能分档", "本機智慧分檔", "ローカルスマート分層")}
+      summary={!status.model_ready
+        ? copy("First download ≈ 2.5 GB · Requires uv", "首次下载约 2.5 GB · 需要 uv", "首次下載約 2.5 GB · 需要 uv", "初回約 2.5 GB · uv が必要")
+        : overriddenByJev
+          ? copy("Jev takes priority · Local preference kept", "Jev 优先 · 保留本地设置", "Jev 優先 · 保留本機設定", "Jev を優先 · ローカル設定を保持")
+          : copy("On-device · Off releases memory", "本机运行 · 关闭后释放内存", "本機執行 · 關閉後釋放記憶體", "デバイスで実行 · オフでメモリ解放")}
+      statusLabel={hasError
+        ? copy("Needs attention", "需处理", "需處理", "要確認")
+        : overriddenByJev && status.enabled && !status.model_ready
+          ? copy("Jev takes priority", "Jev 优先", "Jev 優先", "Jev を優先")
+          : status.state === "preparing" || status.state === "loading"
+            ? copy("Preparing", "准备中", "準備中", "準備中")
+            : status.model_ready
+              ? copy("Model ready", "模型就绪", "模型就緒", "モデル準備済み")
+              : copy("Not prepared", "待准备", "待準備", "未準備")}
+      settingsLabel={copy("Local tier settings", "本地分档设置", "本機分檔設定", "ローカル分層設定")}
+      enabled={status.enabled} disabled={pending} busy={pending}
+      describedBy={`${id}-note${!status.model_ready ? ` ${id}-setup` : ""}${message ? ` ${id}-state` : ""}`}
+      onEnabledChange={(enabled) => void changeEnabled(enabled)}
+      feedback={message && <p className={`semantic-routing-switch-state${hasError ? " is-error" : ""}`} id={`${id}-state`} role={hasError ? "alert" : "status"}>{message}</p>}
+    >
+      <p className="semantic-routing-switch-note" id={`${id}-note`}>
+        {overriddenByJev
+          ? copy("Jev takes priority. This switch keeps your local preference. Jev failures use existing rules without local classification.", "Jev 优先，本地开关仅保留设置。Jev 失败时使用原有规则，不调用本地分档。", "Jev 優先，本機開關僅保留設定。Jev 失敗時使用原有規則，不呼叫本機分檔。", "Jev を優先します。このスイッチはローカル設定を保持します。Jev が失敗した場合、ローカル分類を呼ばずに既存のルールを使用します。")
+          : copy("Off releases model memory and uses the original routing rules.", "关闭后释放模型内存，使用原有路由规则。", "關閉後釋放模型記憶體，使用原有規則。", "オフにするとモデルのメモリを解放し、既存のルールを使用します。")}
+      </p>
+      {!status.model_ready && <p className="semantic-routing-switch-note" id={`${id}-setup`}>
+        {copy(
+          "First enable prepares a local runtime and downloads about 2.5 GB of model files. Install uv first. Classification then runs on this device.",
+          "首次开启会准备本地运行环境并下载约 2.5 GB 模型文件，请先安装 uv。准备完成后，分类在本机运行。",
+          "首次啟用會準備本機執行環境並下載約 2.5 GB 模型檔案，請先安裝 uv。準備完成後，分類在本機執行。",
+          "初回の有効化時にローカル実行環境を準備し、約 2.5 GB のモデルをダウンロードします。事前に uv をインストールしてください。準備後の分類はこのデバイスで実行します。",
+        )}
+      </p>}
+    </RoutingClassifierCard>
+  );
+}

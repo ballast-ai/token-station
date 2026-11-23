@@ -2091,8 +2091,13 @@ fn config_shape(candidate: &ResolvedConfigCandidate) -> Result<String, ReasonCod
                 toml::from_str(text).map_err(|_| ReasonCode::ConfigParseFailed)?;
             Ok(format!("toml:{}", toml_shape(&value)))
         }
-        ConfigFormat::Yaml => {
-            let document = parse_rendered(text, DocumentFormat::Yaml, "YAML discovery")
+        ConfigFormat::Yaml | ConfigFormat::CordisYaml => {
+            let format = if candidate.format == ConfigFormat::CordisYaml {
+                DocumentFormat::CordisYaml
+            } else {
+                DocumentFormat::Yaml
+            };
+            let document = parse_rendered(text, format, "YAML discovery")
                 .map_err(|_| ReasonCode::ConfigParseFailed)?;
             let value = semantic_json(&document).map_err(|_| ReasonCode::ConfigParseFailed)?;
             Ok(format!("yaml:{}", json_shape(&value)))
@@ -3222,6 +3227,34 @@ mod tests {
         }
         std::fs::write(path, b"fixture executable").unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_finds_nested_codex_bundle_without_shell_path() {
+        let root = scratch("codex-nested-bundle");
+        let executable_path = root.join("Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+        executable(&executable_path);
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|entry| entry.agent_id == "codex")
+            .unwrap()
+            .clone();
+        // Isolate the user installation from any real system Applications directory.
+        descriptor
+            .known_install_locations
+            .get_mut(&Platform::Macos)
+            .unwrap()
+            .retain(|path| path.starts_with("${HOME}/"));
+        let mut context = environment(&root);
+        context.path_entries.clear();
+        let records = DiscoveryScanner::new(context, FixedProbe).scan_descriptor(&descriptor);
+        assert!(records.iter().any(|record| record.executable_path
+            == executable_path.to_string_lossy()
+            && record.version_normalized.as_deref() == Some("1.2.3")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

@@ -1,12 +1,77 @@
-//! Cross-platform owner-only filesystem primitives for Token Station state.
+//! Cross-platform owner-only storage and private pipe primitives for Token Station.
 //!
 //! Unix keeps the established `0700` directory / `0600` file contract.
 //! Windows uses a protected DACL containing exactly one full-control ACE for
 //! the object owner, and verifies that ACL before sensitive bytes are renamed
 //! into their final path.
+//! Windows pipe peer checks protect local process I/O before sensitive data transfer.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Verifies that a connected local named pipe client is this process.
+/// The borrowed server handle remains live during the synchronous process query.
+#[cfg(windows)]
+pub fn verify_named_pipe_client_is_current_process(
+    handle: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+
+    let mut client_process_id = 0;
+    if unsafe { GetNamedPipeClientProcessId(handle.as_raw_handle(), &mut client_process_id) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if client_process_id != std::process::id() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "The named pipe client does not match the current process.",
+        ));
+    }
+    Ok(())
+}
+
+/// Cancels pending operations and disconnects an owned server pipe.
+/// This function requests cancellation. It does not wait for completion.
+/// The pipe library must retain its operation storage until completion.
+/// # Errors
+/// Returns an error if cancellation or disconnection fails.
+#[cfg(windows)]
+pub fn cancel_and_disconnect_named_pipe(
+    handle: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_DATA, ERROR_NOT_FOUND, ERROR_PIPE_NOT_CONNECTED,
+    };
+    use windows_sys::Win32::System::{IO::CancelIoEx, Pipes::DisconnectNamedPipe};
+
+    let cancel = || {
+        if unsafe { CancelIoEx(handle.as_raw_handle(), std::ptr::null()) } != 0 {
+            return Ok(());
+        }
+        let failure = std::io::Error::last_os_error();
+        if failure.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+            Ok(())
+        } else {
+            Err(failure)
+        }
+    };
+    let first = cancel();
+    let disconnected = if unsafe { DisconnectNamedPipe(handle.as_raw_handle()) } == 0 {
+        let failure = std::io::Error::last_os_error();
+        if matches!(failure.raw_os_error(), Some(code) if code == ERROR_PIPE_NOT_CONNECTED as i32 || code == ERROR_NO_DATA as i32)
+        {
+            Ok(())
+        } else {
+            Err(failure)
+        }
+    } else {
+        Ok(())
+    };
+    let last = cancel();
+    first.and(disconnected).and(last)
+}
 
 /// Creates or hardens a real directory for owner-only state.
 pub fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
@@ -53,6 +118,28 @@ pub fn harden_private_file(path: &Path) -> std::io::Result<()> {
     verify_private_file(path)
 }
 
+/// Verifies that a regular file has one filesystem name. Path-based lifecycle
+/// locks require this check because a hard link can select a different lock.
+pub fn verify_single_link_file(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(invalid("single-link target is not a real regular file"));
+    }
+    #[cfg(unix)]
+    let count = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink()
+    };
+    #[cfg(windows)]
+    let count = windows::link_count(path)?;
+    #[cfg(not(any(unix, windows)))]
+    let count = 1;
+    if count != 1 {
+        return Err(invalid("file has multiple hard links"));
+    }
+    Ok(())
+}
+
 /// Creates a new owner-only file without ever writing sensitive bytes before
 /// the final path is protected. Returns `false` when another process won the
 /// create race; the existing file is verified before that result is returned.
@@ -60,6 +147,11 @@ pub fn create_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("private target has no parent"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     ensure_real_parent_dir(parent)?;
     let mut file = match create_new_private(path) {
         Ok(file) => file,
@@ -91,6 +183,11 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("private target has no parent"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     ensure_real_parent_dir(parent)?;
     match std::fs::symlink_metadata(path) {
         Ok(_) => harden_private_file(path)?,
@@ -116,6 +213,28 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::remove_file(&temporary).ok();
     }
     result
+}
+
+/// Opens a new empty owner-only file for callers that manage their own atomic
+/// transaction. Existing paths are never replaced. The handle is private before
+/// the caller can write the first byte.
+pub fn open_new_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("private target has no parent"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    ensure_real_parent_dir(parent)?;
+    let file = create_new_private(path)?;
+    if let Err(error) = verify_private_file(path) {
+        drop(file);
+        std::fs::remove_file(path).ok();
+        return Err(error);
+    }
+    Ok(file)
 }
 
 fn create_new_private(path: &Path) -> std::io::Result<std::fs::File> {
@@ -263,21 +382,12 @@ fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let source = windows::wide(source)?;
+    let target = windows::wide(target)?;
     // SAFETY: both owned buffers are NUL-terminated and remain alive for the
     // synchronous Win32 call.
     let result = unsafe {
@@ -337,6 +447,26 @@ mod windows {
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+    pub(super) fn link_count(path: &Path) -> std::io::Result<u64> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let file = std::fs::File::open(path)?;
+        let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: the live file owns the handle and the output buffer is valid.
+        if unsafe {
+            GetFileInformationByHandle(file.as_raw_handle().cast(), information.as_mut_ptr())
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the successful call initialized the complete output structure.
+        Ok(u64::from(
+            unsafe { information.assume_init() }.nNumberOfLinks,
+        ))
+    }
+
     struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
     impl Drop for SecurityDescriptor {
@@ -384,7 +514,7 @@ mod windows {
             lpSecurityDescriptor: descriptor.0,
             bInheritHandle: 0,
         };
-        let encoded = wide(path);
+        let encoded = wide(path)?;
         // SAFETY: path and security descriptor remain alive for this call.
         // CREATE_NEW cannot open or truncate an existing file.
         let handle = unsafe {
@@ -407,7 +537,7 @@ mod windows {
 
     pub(super) fn apply_owner_only_dacl(path: &Path) -> std::io::Result<()> {
         let descriptor = owner_only_descriptor()?;
-        let encoded = wide(path);
+        let encoded = wide(path)?;
         // SAFETY: both pointers remain valid for this synchronous call.
         let applied = unsafe {
             SetFileSecurityW(
@@ -426,7 +556,7 @@ mod windows {
     }
 
     pub(super) fn verify_owner_only_dacl(path: &Path) -> std::io::Result<()> {
-        let encoded = wide(path);
+        let encoded = wide(path)?;
         let mut owner = std::ptr::null_mut();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -609,8 +739,61 @@ mod windows {
         result
     }
 
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    pub(super) fn wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        if path.as_os_str().encode_wide().any(|unit| unit == 0) {
+            return Err(super::invalid("private path contains an embedded NUL"));
+        }
+        if let Some(name) = path.file_name() {
+            validate_final_component(name)?;
+        }
+        let absolute = std::path::absolute(path)?;
+        let normalized = if let Some(name) = absolute.file_name() {
+            let parent = absolute
+                .parent()
+                .ok_or_else(|| super::invalid("private path has no parent"))?;
+            std::fs::canonicalize(parent)?.join(name)
+        } else {
+            std::fs::canonicalize(&absolute)?
+        };
+        Ok(normalized
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect())
+    }
+
+    fn validate_final_component(name: &std::ffi::OsStr) -> std::io::Result<()> {
+        let name = name.to_string_lossy();
+        if name.ends_with(['.', ' ']) || name.contains(':') {
+            return Err(super::invalid(
+                "private path has an ambiguous final component",
+            ));
+        }
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(' ')
+            .to_ascii_uppercase();
+        let numbered_device = stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                let mut digits = suffix.chars();
+                matches!(
+                    digits.next(),
+                    Some('1'..='9' | '\u{00b9}' | '\u{00b2}' | '\u{00b3}')
+                ) && digits.next().is_none()
+            });
+        if numbered_device
+            || matches!(
+                stem.as_str(),
+                "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+            )
+        {
+            return Err(super::invalid("private path uses a reserved device name"));
+        }
+        Ok(())
     }
 
     fn denied(message: &'static str) -> std::io::Error {
@@ -635,17 +818,185 @@ mod tests {
         ))
     }
 
+    #[cfg(windows)]
+    fn assert_private_path_lifecycle(root: &Path, target: &Path) {
+        ensure_private_dir(root).unwrap();
+        verify_private_dir(root).unwrap();
+        assert!(create_private_file(target, b"first").unwrap());
+        verify_private_file(target).unwrap();
+        verify_single_link_file(target).unwrap();
+        assert!(!create_private_file(target, b"unchanged").unwrap());
+        assert_eq!(std::fs::read(target).unwrap(), b"first");
+        write_atomic_private(target, b"second").unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"second");
+        verify_private_file(target).unwrap();
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owner_private_operations_support_long_unicode_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let scratch = scratch();
+        let mut root = scratch.join("unicode-\u{03bb}-\u{1f4be}");
+        while root.as_os_str().encode_wide().count() < 280 {
+            root.push("long-owner-private-directory-component");
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("state-\u{03bb}-\u{1f4be}.json");
+        assert_private_path_lifecycle(&root, &target);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replacement_supports_a_long_temporary_name_for_a_short_target() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let root = scratch();
+        let mut name = String::from("state-\u{03bb}-\u{1f4be}.json");
+        while root.join(&name).as_os_str().encode_wide().count() < 238 {
+            name.insert(0, 'x');
+        }
+        let target = root.join(name);
+        let length = target.as_os_str().encode_wide().count();
+        if length >= 248 {
+            eprintln!(
+                "The temporary root cannot contain a short target. Validate a long target instead."
+            );
+        } else {
+            assert!((238..248).contains(&length));
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        assert_private_path_lifecycle(&root, &target);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_embedded_nul_cannot_create_a_truncated_private_file() {
+        let root = scratch();
+        ensure_private_dir(&root).unwrap();
+        let target = root.join("truncated\0suffix");
+        assert_eq!(
+            create_private_file(&target, b"synthetic-private-value")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ambiguous_final_components_cannot_create_aliases_or_change_existing_files() {
+        let root = scratch();
+        ensure_private_dir(&root).unwrap();
+        let existing = root.join("existing");
+        create_private_file(&existing, b"preserved").unwrap();
+        let mut names = vec![
+            "new.".to_owned(),
+            "new ".to_owned(),
+            "existing.".to_owned(),
+            "existing ".to_owned(),
+            "existing:stream".to_owned(),
+        ];
+        for stem in ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"] {
+            names.extend([
+                stem.into(),
+                format!("{stem}.txt"),
+                format!("{stem} .txt"),
+                format!("{stem}:stream"),
+            ]);
+        }
+        for prefix in ["COM", "LPT"] {
+            for digit in "123456789\u{00b9}\u{00b2}\u{00b3}".chars() {
+                let stem = format!("{prefix}{digit}");
+                names.extend([
+                    stem.clone(),
+                    format!("{stem}.txt"),
+                    format!("{stem} .txt"),
+                    format!("{stem}:stream"),
+                ]);
+            }
+        }
+        for name in names {
+            for spelling in [name.clone(), name.to_ascii_lowercase()] {
+                let path = root.join(spelling);
+                assert!(create_private_file(&path, b"changed").is_err(), "{name}");
+                assert!(write_atomic_private(&path, b"changed").is_err(), "{name}");
+                assert!(harden_private_file(&path).is_err(), "{name}");
+                assert!(verify_private_file(&path).is_err(), "{name}");
+                assert_eq!(std::fs::read(&existing).unwrap(), b"preserved", "{name}");
+                assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "{name}");
+            }
+        }
+        verify_private_file(&existing).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_peer_verification_rejects_regular_file_handles() {
+        use std::os::windows::io::AsHandle;
+
+        let root = scratch();
+        ensure_private_dir(&root).unwrap();
+        let path = root.join("not-a-pipe");
+        create_private_file(&path, b"").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(verify_named_pipe_client_is_current_process(file.as_handle()).is_err());
+        assert!(cancel_and_disconnect_named_pipe(file.as_handle()).is_err());
+        drop(file);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn new_private_files_are_protected_before_the_first_write() {
         let root = std::env::temp_dir().join(format!("private-first-write-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("empty-private-file");
         let _ = std::fs::remove_file(&path);
-        let file = super::create_new_private(&path).unwrap();
+        let file = super::open_new_private_file(&path).unwrap();
         super::verify_private_file(&path)
             .expect("creation must establish private permissions before writing");
         assert_eq!(file.metadata().unwrap().len(), 0);
+        assert_eq!(
+            super::open_new_private_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         drop(file);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bare_relative_private_paths_use_the_current_directory() {
+        let generated = scratch();
+        let path = Path::new(generated.file_name().unwrap());
+        let file = open_new_private_file(path).unwrap();
+        verify_private_file(path).unwrap();
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+        create_private_file(path, b"first").unwrap();
+        write_atomic_private(path, b"second").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"second");
+        verify_private_file(path).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hard_link_aliases_cannot_select_independent_lifecycle_locks() {
+        let root = scratch();
+        let original = root.join("original");
+        let alias = root.join("alias");
+        create_private_file(&original, b"state").unwrap();
+        super::verify_single_link_file(&original).unwrap();
+        std::fs::hard_link(&original, &alias).unwrap();
+        assert!(super::verify_single_link_file(&original).is_err());
+        assert!(super::verify_single_link_file(&alias).is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"state");
         std::fs::remove_dir_all(root).unwrap();
     }
 

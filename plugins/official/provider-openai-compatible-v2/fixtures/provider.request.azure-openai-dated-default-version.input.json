@@ -1,0 +1,26 @@
+{
+  "provider_config": {
+    "provider": "azure-openai-dated",
+    "base_url": "https://my-resource.services.ai.azure.com",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "my-deployment",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 128000
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "my-deployment",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "stream": true
+  }
+}

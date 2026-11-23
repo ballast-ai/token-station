@@ -34,6 +34,53 @@
 //! is a version mismatch and should surface as an error instead of being
 //! silently coerced. Breaking changes go to `-v2`; they never mutate `v1` in
 //! place.
+//!
+//! # Changes in 0.7.0
+//!
+//! The kernel mirror carries this surface as `canonical_ir` contract 5 and
+//! `stream` contract 3. The addition is optional on the wire: an absent field
+//! deserializes to `None`, and a `None` field is not serialized. JSON from a
+//! 0.6.0 peer still parses, and a 0.6.0 peer ignores the new field.
+//!
+//! - [`ToolCall::signature`] and the `signature` of
+//!   [`StreamEvent::ToolCallDelta`]: an opaque provider-issued signature bound
+//!   to one tool call (Gemini 3's `thoughtSignature` on a `functionCall`
+//!   part), which the provider requires back on the same call when the
+//!   conversation is replayed.
+//!
+//! Rust code that builds a [`ToolCall`] or a [`StreamEvent::ToolCallDelta`]
+//! with a struct literal, or matches the delta without `..`, must add the new
+//! field. Use [`ToolCall::new`] for a call without a signature.
+//!
+//! # Changes in 0.6.0
+//!
+//! The kernel mirror carries this surface as `canonical_ir` contract 4.
+//! Every addition is optional on the wire: an absent field deserializes to
+//! `None` or to its default, and a `None` field is not serialized. JSON from a
+//! 0.5.0 peer still parses, and a 0.5.0 peer ignores the new fields or keeps
+//! them in [`Extensions`].
+//!
+//! - [`CacheControl`] and the closed [`CacheTtl`] (`"5m"`, `"1h"`): block-level
+//!   prompt-cache markers on [`ContentPart::Text`], [`ContentPart::ImageUrl`]
+//!   and [`ToolDef::cache_control`]. An unknown TTL, an unknown `type` or an
+//!   unknown marker key is a deserialization error.
+//!   A system message keeps one text part per system block. A cached tool
+//!   result puts its marker on the last part of a [`Role::Tool`] message.
+//! - [`Sampling::top_k`].
+//! - [`ChatRequest::reasoning`] ([`Reasoning`], [`ReasoningMode`],
+//!   [`ReasoningEffort`]): one reasoning field for OpenAI `reasoning_effort`
+//!   and Anthropic `thinking`, with the caller's `budget_tokens` unchanged.
+//! - Promotions from `extensions` keys that adapters already acted on:
+//!   `reasoning_effort` becomes [`Reasoning::effort`] and
+//!   `parallel_tool_calls` becomes [`ChatRequest::parallel_tool_calls`]. Both
+//!   keep their wire key. `responses_tool_strict` becomes
+//!   [`ToolDef::strict`]. That one changes shape, from a request-level map to
+//!   a per-tool field, so a producer that still writes the old map leaves it
+//!   in `extensions` as data.
+//!
+//! Rust code that builds these types with a struct literal, or that matches
+//! `ContentPart::Text { text }` without `..`, must add the new fields. Use
+//! [`ContentPart::text`] and [`ToolDef::new`] for the common cases.
 
 #![allow(
     clippy::module_name_repetitions,
@@ -55,8 +102,9 @@ use std::collections::BTreeMap;
 
 pub use capability::{CapabilityState, ModelCapability};
 pub use chat::{
-    CanonicalArguments, ChatRequest, ChatResponse, Choice, Content, ContentPart, FinishReason,
-    ImageUrl, Message, ResponseFormat, Role, Sampling, ToolCall, ToolChoice, ToolDef,
+    CacheControl, CacheTtl, CanonicalArguments, ChatRequest, ChatResponse, Choice, Content,
+    ContentPart, FinishReason, ImageUrl, Message, Reasoning, ReasoningEffort, ReasoningMode,
+    ResponseFormat, Role, Sampling, ToolCall, ToolChoice, ToolDef,
 };
 pub use envelope::{AgentRequestEnvelope, HeaderDigest, Principal};
 pub use error::{ErrorCode, ErrorEnvelope};

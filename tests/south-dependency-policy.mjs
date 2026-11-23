@@ -6,18 +6,38 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "efbb9b655bf1b26ec639dd21bde7ade7fcdc11b8";
-const southVersion = "0.16.0";
+const southRevision = "174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f";
+const southRelease = "0.85.1";
+// South versions its crates independently: a crate whose public surface did
+// not change keeps its version across a release. One revision still pins all
+// of them, so each per-crate version is an exact expectation of that revision.
+const southPackageVersions = new Map([
+  ["south-component-conformance", "0.81.1"],
+  ["south-contracts", "0.57.0"],
+  ["south-core", southRelease],
+  ["south-host-grammars", southRelease],
+  ["south-provider-api", "0.65.0"],
+  ["south-provider-conformance", southRelease],
+  ["south-provider-runtime", southRelease],
+  ["south-testkit", southRelease],
+  ["south-transport-reqwest", southRelease],
+]);
+// The kernel contracts of protocol 0.7.0, as the kernel mirror at
+// kernelRevision records them. The host and every range-era manifest must
+// declare exactly these.
+const kernelContracts = { canonical_ir: 5, error_catalog: 1, stream: 3 };
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git";
-const kernelRevision = "ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35";
-const kernelVersion = "0.3.0";
-// South 0.16.0 pins the kernel protocol crate by revision rather than by tag
-// (south #45). The revision is unchanged; the form is stricter, because a tag
-// can be moved onto different bytes and a revision cannot. Require the stricter
-// one rather than accepting either.
+// South 0.85.1 resolves the kernel protocol crate at this revision. It is the
+// one-way mirror of this repository's crates/protocol 0.7.0.
+const kernelRevision = "ce6894d99f51283e4985d39a2d533307bda27b6a";
+const kernelVersion = "0.7.0";
+// Since South 0.16.0 (south #45), South pins the kernel protocol crate by
+// revision rather than by tag. A tag can be moved onto different bytes and a
+// revision cannot. Require the stricter form rather than accepting either.
 const kernelSource = `git+${kernelRepository}?rev=${kernelRevision}#${kernelRevision}`;
-const expectedSouthPackages = new Set([
+// The eight crates the root manifest declares directly.
+const declaredSouthPackages = new Set([
   "south-component-conformance",
   "south-contracts",
   "south-core",
@@ -26,6 +46,12 @@ const expectedSouthPackages = new Set([
   "south-provider-runtime",
   "south-testkit",
   "south-transport-reqwest",
+]);
+// The resolved closure adds south-host-grammars. Only the test-only
+// conformance and testkit crates pull it in.
+const expectedSouthPackages = new Set([
+  ...declaredSouthPackages,
+  "south-host-grammars",
 ]);
 const expectedDesktopSouthPackages = new Set([
   "south-contracts",
@@ -76,8 +102,8 @@ function validateSouthClosure(metadata, expectedPackages, scope) {
   for (const pkg of packages) {
     assert.equal(
       pkg.version,
-      southVersion,
-      `${scope} ${pkg.name} must stay on South ${southVersion}`,
+      southPackageVersions.get(pkg.name),
+      `${scope} ${pkg.name} must stay on its South ${southRelease} version`,
     );
     assert.equal(
       pkg.source,
@@ -109,14 +135,14 @@ assert.match(
   "CI must execute the declared Rust 1.96.0 minimum-version check",
 );
 
-for (const packageName of expectedSouthPackages) {
+for (const packageName of declaredSouthPackages) {
   // The pinned trio, in order, is what this gate exists for: an exact version,
   // the official repository, and a commit revision. It used to require the
   // whole line to match verbatim, which also forbade a `features` list — so
   // enabling a feature looked identical to unpinning the revision. The
   // requirement is that the pin is there and nothing else on the line
   // relaxes it, not that the line is one exact string.
-  const pinned = `${packageName} = { version = "=${southVersion}", git = "${southRepository}", rev = "${southRevision}"`;
+  const pinned = `${packageName} = { version = "=${southPackageVersions.get(packageName)}", git = "${southRepository}", rev = "${southRevision}"`;
   const declaration = rootManifest
     .split("\n")
     .find((line) => line.startsWith(`${packageName} = `));
@@ -254,7 +280,7 @@ const cli = metadata.packages.find((pkg) => pkg.name === "token-station-cli");
 assert.ok(cli, "token-station-cli must be present in workspace metadata");
 const cliSouthDependencies = new Map(
   cli.dependencies
-    .filter((dependency) => expectedSouthPackages.has(dependency.name))
+    .filter((dependency) => declaredSouthPackages.has(dependency.name))
     .map((dependency) => [dependency.name, dependency.kind ?? "normal"]),
 );
 assert.deepEqual(
@@ -290,51 +316,86 @@ assert.deepEqual(
   "only the dedicated South transport may directly own reqwest",
 );
 
-// The host declares what it was built against, and South's loader now judges
-// every component against that declaration. Nothing in the dependency graph
-// carries the value, so it is a constant — and a constant nobody checks is
-// precisely what let the compatibility tuple go unenforced for three releases.
-// Close the loop here: the declaration, the pinned South version and every
-// shipped component manifest must agree.
+// The host declares what it admits, and South's loader judges every component
+// against that declaration. Nothing in the dependency graph carries it, so it is
+// a set of constants, and a constant nobody checks is what let the tuple go
+// unenforced for three releases. Close the loop here: the declaration must
+// match the pinned South release, and every shipped manifest must fall inside
+// it.
 const southComponentSource = fs.readFileSync(
   path.join(root, "apps/cli/src/south_component.rs"),
   "utf8",
 );
-const declaredRuntime = southComponentSource.match(
-  /^(?:pub\(crate\) )?const SOUTH_RUNTIME: &str = "([^"]+)";$/m,
-)?.[1];
+const declaredConstant = (constant) =>
+  southComponentSource.match(
+    new RegExp(`^(?:pub\\(crate\\) )?const ${constant}: &str = "([^"]+)";$`, "m"),
+  )?.[1];
+const triple = (version) => version.split(".").map(Number);
+const compareVersions = (left, right) => {
+  const [a, b] = [triple(left), triple(right)];
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return 0;
+};
+
 assert.equal(
-  declaredRuntime,
-  southVersion,
-  "the host's declared SOUTH_RUNTIME must equal the pinned South version",
+  declaredConstant("SOUTH_RUNTIME"),
+  southRelease,
+  "the host's SOUTH_RUNTIME must be the South release it links",
+);
+const runtimeMin = declaredConstant("SOUTH_RUNTIME_MIN");
+assert.ok(runtimeMin, "the host must declare SOUTH_RUNTIME_MIN");
+const declaredKernelContracts = Object.fromEntries(
+  [...(southComponentSource.match(/const KERNEL_CONTRACTS[^=]*=\s*\[([^\]]*)\];/s)?.[1] ?? "")
+    .matchAll(/\("([a-z_]+)",\s*(\d+)\)/g)]
+    .map(([, name, version]) => [name, Number(version)]),
+);
+assert.deepEqual(
+  declaredKernelContracts,
+  kernelContracts,
+  "the host's KERNEL_CONTRACTS must equal the kernel mirror's contracts",
 );
 
-for (const componentDir of ["provider-openai-compatible-v2", "provider-anthropic-v2"]) {
+let oldestRangeRuntime;
+for (const { dir: componentDir } of JSON.parse(
+  fs.readFileSync(path.join(root, "plugins/official/packages.json"), "utf8"),
+).packages.filter((entry) => entry.kind === "south-component")) {
   const manifest = JSON.parse(
     fs.readFileSync(
       path.join(root, "plugins/official", componentDir, "manifest.json"),
       "utf8",
     ),
   );
+  const compatibility = manifest.compatibility;
   assert.equal(
-    manifest.compatibility.south_runtime,
-    southVersion,
-    `${componentDir} declares a south_runtime the host would refuse at load`,
+    compatibility.runtime_abi,
+    1,
+    `${componentDir} must declare runtime ABI 1; a package without one predates the range handshake`,
   );
-  for (const [field, constant] of [
-    ["ir_schema_id", "IR_SCHEMA_ID"],
-    ["kernel_version", "KERNEL_VERSION"],
-    ["kernel_revision", "KERNEL_REVISION"],
-  ]) {
-    const declared = southComponentSource.match(
-      new RegExp(`^(?:pub\\(crate\\) )?const ${constant}: &str = "([^"]+)";$`, "m"),
-    )?.[1];
-    assert.equal(
-      manifest.compatibility[field],
-      declared,
-      `${componentDir}.${field} disagrees with the host's ${constant}`,
-    );
+  assert.ok(
+    compareVersions(compatibility.south_runtime, runtimeMin) >= 0 &&
+      compareVersions(compatibility.south_runtime, southRelease) <= 0,
+    `${componentDir} declares south_runtime ${compatibility.south_runtime}, outside ${runtimeMin}..=${southRelease}`,
+  );
+  assert.deepEqual(
+    compatibility.kernel_contracts,
+    kernelContracts,
+    `${componentDir} declares kernel contracts the host does not distribute`,
+  );
+  if (
+    oldestRangeRuntime === undefined ||
+    compareVersions(compatibility.south_runtime, oldestRangeRuntime) < 0
+  ) {
+    oldestRangeRuntime = compatibility.south_runtime;
   }
 }
+// The floor is the oldest shipped runtime: lower admits packages
+// nothing tests, higher refuses one the host ships.
+assert.equal(
+  runtimeMin,
+  oldestRangeRuntime,
+  "SOUTH_RUNTIME_MIN must equal the oldest south_runtime among the shipped components",
+);
 
 console.log("South dependency and MSRV policy check: PASS");

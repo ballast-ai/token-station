@@ -408,6 +408,7 @@ mod tests {
             .companion_projections(
                 &profile,
                 &ConnectInput {
+                    browser_search_enabled: false,
                     base_url: "http://127.0.0.1:8787/agents/claude-desktop",
                     token: Some("vk-test"),
                     adapter_ready: true,
@@ -456,6 +457,7 @@ mod tests {
         );
 
         let adapter_unavailable = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/claude-desktop",
             token: Some("vk-test"),
             adapter_ready: false,
@@ -467,6 +469,7 @@ mod tests {
             .contains("网关未加载 agent-anthropic"));
 
         let token_missing = ConnectInput {
+            browser_search_enabled: false,
             base_url: adapter_unavailable.base_url,
             token: None,
             adapter_ready: true,

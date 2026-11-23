@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use token_station_private_fs::open_new_private_file;
 
 use super::config_codec::{parse_source_bytes, ConfigDocument};
 use super::ownership::{
@@ -166,19 +167,22 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
             stage: AtomicWriteStage::ParentCreate,
             target_replaced: false,
         })?;
-        let temporary = temporary_path(target).map_err(|stage| AtomicWriteFailure {
+        // Resolve the parent once. Keep the target file unresolved so revision
+        // checks still reject file links, while directory links remain usable.
+        let parent = std::fs::canonicalize(parent).map_err(|_| AtomicWriteFailure {
+            stage: AtomicWriteStage::ParentCreate,
+            target_replaced: false,
+        })?;
+        let resolved_target = parent.join(target.file_name().ok_or(AtomicWriteFailure {
+            stage: AtomicWriteStage::TempCreate,
+            target_replaced: false,
+        })?);
+        let temporary = temporary_path(&resolved_target).map_err(|stage| AtomicWriteFailure {
             stage,
             target_replaced: false,
         })?;
         let result = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary).map_err(|_| AtomicWriteFailure {
+            let mut file = open_new_private_file(&temporary).map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::TempCreate,
                 target_replaced: false,
             })?;
@@ -209,22 +213,28 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
             })?;
             drop(file);
 
-            verify_revision(target, expected_current_hash, normalize_new_owner).map_err(|_| {
-                AtomicWriteFailure {
-                    stage: AtomicWriteStage::PreReplaceRevision,
-                    target_replaced: false,
-                }
+            verify_revision(
+                target,
+                &resolved_target,
+                expected_current_hash,
+                normalize_new_owner,
+            )
+            .map_err(|_| AtomicWriteFailure {
+                stage: AtomicWriteStage::PreReplaceRevision,
+                target_replaced: false,
             })?;
-            atomic_replace(&temporary, target).map_err(|_| AtomicWriteFailure {
+            atomic_replace(&temporary, &resolved_target).map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::Replace,
                 target_replaced: false,
             })?;
             #[cfg(windows)]
-            super::safe_fs::verify_private_file(target).map_err(|_| AtomicWriteFailure {
-                stage: AtomicWriteStage::Permission,
-                target_replaced: true,
+            super::safe_fs::verify_private_file(&resolved_target).map_err(|_| {
+                AtomicWriteFailure {
+                    stage: AtomicWriteStage::Permission,
+                    target_replaced: true,
+                }
             })?;
-            sync_parent(parent).map_err(|_| AtomicWriteFailure {
+            sync_parent(&parent).map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::DirectoryFsync,
                 target_replaced: true,
             })?;
@@ -242,12 +252,12 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
         expected_current_hash: &str,
         normalize_new_owner: bool,
     ) -> Result<(), AtomicWriteFailure> {
-        verify_revision(target, expected_current_hash, normalize_new_owner).map_err(|_| {
-            AtomicWriteFailure {
+        verify_revision(target, target, expected_current_hash, normalize_new_owner).map_err(
+            |_| AtomicWriteFailure {
                 stage: AtomicWriteStage::PreReplaceRevision,
                 target_replaced: false,
-            }
-        })?;
+            },
+        )?;
         std::fs::remove_file(target).map_err(|_| AtomicWriteFailure {
             stage: AtomicWriteStage::Remove,
             target_replaced: false,
@@ -322,10 +332,13 @@ fn temporary_path(target: &Path) -> Result<PathBuf, AtomicWriteStage> {
 
 fn verify_revision(
     target: &Path,
+    source_path: &Path,
     expected_hash: &str,
     normalize_new_owner: bool,
 ) -> Result<(), String> {
-    let mut source = read_config_source(target)?;
+    // Revision identity retains the caller's path, but reads use the same
+    // resolved location as the later replacement.
+    let mut source = read_config_source(source_path)?;
     if normalize_new_owner {
         source.original_owner = None;
     }
@@ -618,7 +631,11 @@ impl<'a> TransactionEngine<'a> {
             } else {
                 false
             };
-            if !matches_record && !matches_projection && !matches_legacy_widening {
+            if !plan.allows_owned_drift()
+                && !matches_record
+                && !matches_projection
+                && !matches_legacy_widening
+            {
                 return Err(failure(
                     plan,
                     TransactionStage::Ownership,
@@ -679,7 +696,10 @@ impl<'a> TransactionEngine<'a> {
                                 "companion_ownership_check_failed",
                             )
                         })?;
-                if observed != owned.owned_value_macs && observed != projected {
+                if !plan.allows_owned_drift()
+                    && observed != owned.owned_value_macs
+                    && observed != projected
+                {
                     return Err(failure(
                         plan,
                         TransactionStage::Ownership,
@@ -1476,8 +1496,8 @@ mod tests {
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
     use crate::agent_integration::plan::{
-        build_connection_plan, build_disconnect_plan, build_metadata_refresh_plan,
-        build_snapshot_restore_plan, read_config_source, ConfigSource,
+        build_connection_plan, build_disconnect_plan, build_forced_disconnect_plan,
+        build_metadata_refresh_plan, build_snapshot_restore_plan, read_config_source, ConfigSource,
     };
     use crate::agent_integration::snapshot::{
         DecryptedSnapshot, FileSnapshotStore, MasterKeyStore, SnapshotCreateResult,
@@ -1867,6 +1887,7 @@ mod tests {
             target,
             &read_config_source(target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/gemini-cli",
                 token: Some(secret),
                 adapter_ready: true,
@@ -1888,6 +1909,7 @@ mod tests {
             target,
             &read_config_source(target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/claude-desktop",
                 token: Some(secret),
                 adapter_ready: true,
@@ -1935,6 +1957,7 @@ mod tests {
             target,
             &read_config_source(target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/agents/codex/v1",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2060,6 +2083,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2082,6 +2106,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2114,6 +2139,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
@@ -2408,6 +2434,7 @@ mod tests {
             &target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-refresh"),
                 adapter_ready: true,
@@ -2480,6 +2507,7 @@ mod tests {
             &target,
             &current,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-refresh"),
                 adapter_ready: true,
@@ -2584,6 +2612,7 @@ mod tests {
             &target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-sibling"),
                 adapter_ready: true,
@@ -2687,6 +2716,157 @@ mod tests {
         assert_eq!(disconnected["unowned"], "keep");
         assert!(ownership.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn forced_disconnect_restores_owned_drift_and_preserves_unowned_edits() {
+        for late_change in ["none", "target", "companion", "expired"] {
+            let root = scratch(&format!("forced-disconnect-{late_change}"));
+            let target = root.join(".codex/config.toml");
+            let catalog = root.join(".codex/model-catalogs/tokenstation.json");
+            write_initial(
+                &target,
+                b"model = \"original-model\"\n[user]\nkeep = true\n",
+            );
+            write_initial(
+                &catalog,
+                br#"{"schema":"original","models":[{"slug":"original-model"}]}"#,
+            );
+            let connect = prepare_codex(&target, "synthetic-forced-key");
+            let keys = Arc::new(TestKeys::available());
+            let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+            let ownership = FileOwnershipStore::new(root.join("ownership"));
+            let engine = TransactionEngine::new(
+                &snapshots,
+                &ownership,
+                keys.as_ref(),
+                &FsAtomicConfigWriter,
+                &ParseOnlyVerifier,
+                &TEST_CLOCK,
+            );
+            engine
+                .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+                .unwrap();
+            let key = OwnershipKey {
+                agent_id: "codex".to_owned(),
+                installation_path: "/opt/codex".to_owned(),
+                target_config_path: target.to_string_lossy().into_owned(),
+            };
+            let owned = ownership.load(&key).unwrap().unwrap();
+            let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
+            let source = ConfigSource {
+                existed: baseline.record.original_existed,
+                exact_bytes: baseline.exact_bytes,
+                original_permissions: baseline.record.original_permissions,
+                original_owner: baseline.record.original_owner.clone(),
+            };
+            let mut edited = std::fs::read_to_string(&target)
+                .unwrap()
+                .parse::<toml_edit::Document>()
+                .unwrap();
+            edited["model"] = toml_edit::value("manually-edited-model");
+            edited["user"]["keep"] = toml_edit::value(false);
+            std::fs::write(&target, edited.to_string()).unwrap();
+            let mut edited_catalog: Value =
+                serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+            edited_catalog["models"] = serde_json::json!([{"slug":"manually-edited-catalog"}]);
+            edited_catalog["schema"] = serde_json::json!("unowned-user-edit");
+            std::fs::write(&catalog, serde_json::to_vec(&edited_catalog).unwrap()).unwrap();
+            let current = read_config_source(&target).unwrap();
+            assert_eq!(
+                build_disconnect_plan(
+                    &CodexConnector,
+                    &codex_discovery(&target),
+                    &codex_verified(),
+                    &target,
+                    &current,
+                    &owned,
+                    &baseline.record,
+                    &source,
+                    &keys.load().unwrap(),
+                    1,
+                    None,
+                    1_003,
+                    "a1".repeat(16),
+                )
+                .err()
+                .unwrap(),
+                OWNED_VALUES_CHANGED
+            );
+            let mut forced = build_forced_disconnect_plan(
+                &CodexConnector,
+                &codex_discovery(&target),
+                &codex_verified(),
+                &target,
+                &current,
+                &owned,
+                &baseline.record,
+                &source,
+                &keys.load().unwrap(),
+                1,
+                None,
+                1_003,
+                "a2".repeat(16),
+            )
+            .expect("explicit forced plan must accept existing owned drift");
+            crate::agent_integration::plan::attach_disconnect_companions(
+                &mut forced,
+                &CodexConnector,
+                &owned,
+                &snapshots,
+                &keys.load().unwrap(),
+            )
+            .expect("explicit forced plan must accept existing companion drift");
+            if late_change == "target" {
+                std::fs::write(&target, "model = \"edited-after-confirmation\"\n").unwrap();
+            } else if late_change == "companion" {
+                std::fs::write(&catalog, br#"{"models":[],"late":"keep"}"#).unwrap();
+            }
+            let target_before = std::fs::read(&target).unwrap();
+            let companion_before = std::fs::read(&catalog).unwrap();
+            let now = if late_change == "expired" {
+                forced.view.expires_at_ms + 1
+            } else {
+                1_004
+            };
+            let outcome = engine.apply_disconnect(
+                &forced,
+                &confirmation_at(&forced, 1_003),
+                &admission(),
+                now,
+            );
+            if late_change == "none" {
+                outcome.expect("forced restore must commit the full file set");
+                let restored = std::fs::read_to_string(&target)
+                    .unwrap()
+                    .parse::<toml_edit::Document>()
+                    .unwrap();
+                assert_eq!(restored["model"].as_str(), Some("original-model"));
+                assert_eq!(restored["user"]["keep"].as_bool(), Some(false));
+                let restored: Value =
+                    serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+                assert_eq!(restored["models"][0]["slug"], "original-model");
+                assert_eq!(restored["schema"], "unowned-user-edit");
+                assert!(ownership.load(&key).unwrap().is_none());
+                assert!(engine
+                    .apply_disconnect(
+                        &forced,
+                        &confirmation_at(&forced, 1_003),
+                        &admission(),
+                        1_005
+                    )
+                    .is_err());
+            } else {
+                assert!(
+                    outcome.is_err(),
+                    "late change or expiry must reject before writing"
+                );
+                assert_eq!(std::fs::read(&target).unwrap(), target_before);
+                assert_eq!(std::fs::read(&catalog).unwrap(), companion_before);
+                assert!(ownership.load(&key).unwrap().is_some());
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -3977,6 +4157,7 @@ keep = true
             &target,
             &read_config_source(&target).unwrap(),
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("vk-openclaw-secret"),
                 adapter_ready: true,
@@ -4656,6 +4837,7 @@ keep = true
             cost: None,
         };
         let connect_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("managed-key"),
             adapter_ready: true,
@@ -4783,6 +4965,7 @@ keep = true
             cost: None,
         };
         let connect_input = ConnectInput {
+            browser_search_enabled: false,
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("managed-key"),
             adapter_ready: true,
@@ -5086,6 +5269,92 @@ keep = true
         assert!(!serialized.contains("vk-repair-required-secret"));
         assert_ne!(std::fs::read(&target).unwrap(), initial);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_writer_replaces_regular_file_through_directory_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = scratch("atomic-directory-link");
+        let real_parent = root.join("dotfiles");
+        let real_target = real_parent.join("settings.json");
+        write_initial(&real_target, br#"{"value":1}"#);
+        std::fs::set_permissions(&real_parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let alias = root.join("agent");
+        symlink(&real_parent, &alias).unwrap();
+        let target = alias.join("settings.json");
+        let before = read_config_source(&target).unwrap();
+        let before_hash = file_revision_hash(&target, &before).unwrap();
+        let result = FsAtomicConfigWriter.replace(
+            &target,
+            br#"{"value":2}"#,
+            before.original_permissions,
+            before.original_owner.as_deref(),
+            &before_hash,
+            false,
+        );
+        if let Err(error) = result {
+            std::fs::remove_dir_all(&root).unwrap();
+            panic!("directory link replacement failed at {:?}", error.stage);
+        }
+        assert_eq!(std::fs::read(&real_target).unwrap(), br#"{"value":2}"#);
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&real_target)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        assert_eq!(
+            std::fs::metadata(&real_parent)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(std::fs::read_dir(&real_parent).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_writer_refuses_a_target_file_changed_to_a_symlink() {
+        let root = scratch("atomic-file-link");
+        let target = root.join("settings.json");
+        let initial = br#"{"value":1}"#;
+        write_initial(&target, initial);
+        let before = read_config_source(&target).unwrap();
+        let before_hash = file_revision_hash(&target, &before).unwrap();
+        let referent = root.join("other.json");
+        std::fs::rename(&target, &referent).unwrap();
+        std::os::unix::fs::symlink(&referent, &target).unwrap();
+        let error = match FsAtomicConfigWriter.replace(
+            &target,
+            br#"{"value":2}"#,
+            before.original_permissions,
+            before.original_owner.as_deref(),
+            &before_hash,
+            false,
+        ) {
+            Ok(()) => panic!("a target file link must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(error.stage, AtomicWriteStage::PreReplaceRevision);
+        assert!(!error.target_replaced);
+        assert!(std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&referent).unwrap(), initial);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

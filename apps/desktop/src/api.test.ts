@@ -6,6 +6,7 @@ import {
   addManagedEnterpriseRoute,
   addFreeProvider,
   setLocalRouting,
+  setQuotaPlanFull,
   applyHomeRouteToAllAgents,
   applyAgentPlan,
   applySnapshotRestore,
@@ -26,6 +27,15 @@ import {
   getCachedAgentViews,
   getRouterTable,
   getState,
+  getSemanticStatus,
+  getJevStatus,
+  saveJevKey,
+  clearJevKey,
+  setJevEnabled,
+  testJevConnection,
+  setSemanticEnabled,
+  prepareSemanticModel,
+  setSemanticMode,
   getStats,
   listAgentRegistry,
   listFreeProviderPresets,
@@ -35,6 +45,7 @@ import {
   listenDesktopUpdateProgress,
   planAgentConnection,
   planAgentDisconnect,
+  planAgentForcedDisconnect,
   planSnapshotRestore,
   mountAgentProfile,
   previewProviderRemoval,
@@ -89,6 +100,39 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
+
+describe("Jev cloud routing commands", () => {
+  it("uses dedicated IPC commands and sends the key only when saving", async () => {
+    await getJevStatus();
+    await saveJevKey("synthetic-jev-key");
+    await setJevEnabled(true);
+    await testJevConnection();
+    await clearJevKey();
+    expect(invokeMock.mock.calls).toEqual([
+      ["get_jev_status"],
+      ["save_jev_key", { apiKey: "synthetic-jev-key" }],
+      ["set_jev_enabled", { enabled: true }],
+      ["test_jev_connection"],
+      ["clear_jev_key"],
+    ]);
+  });
+});
+
+describe("local semantic routing commands", () => {
+  it("uses the local control commands without request content or model credentials", async () => {
+    invokeMock.mockResolvedValue({ available: true });
+    await getSemanticStatus();
+    await setSemanticEnabled(false);
+    await setSemanticEnabled(true);
+    await prepareSemanticModel();
+    await setSemanticMode("observe");
+    expect(invokeMock).toHaveBeenCalledWith("get_semantic_status");
+    expect(invokeMock).toHaveBeenCalledWith("set_semantic_enabled", { enabled: false });
+    expect(invokeMock).toHaveBeenCalledWith("set_semantic_enabled", { enabled: true });
+    expect(invokeMock).toHaveBeenCalledWith("prepare_semantic_model");
+    expect(invokeMock).toHaveBeenCalledWith("set_semantic_mode", { mode: "observe" });
+  });
+});
 const forbiddenKeys = new Set([
   "patch",
   "patches",
@@ -173,6 +217,12 @@ describe("structured Agent IPC", () => {
       () => discardAgentPlan("operation", "confirmation"),
       "discard_agent_plan",
       { operationId: "operation", confirmationToken: "confirmation" },
+    ],
+    [
+      "plan explicitly confirmed forced disconnect",
+      () => planAgentForcedDisconnect("codex", "/opt/codex"),
+      "plan_agent_forced_disconnect",
+      { agentId: "codex", installationPath: "/opt/codex" },
     ],
     [
       "plan disconnect",
@@ -545,5 +595,24 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
     setAdminEndpoint(serveFixture({ phase: "starting", app_runtime: "running", virtual_key: "stale" }));
     await expect(getPlugins()).rejects.toThrow("无法连接本地代理");
+  });
+});
+
+
+describe("full quota plan contract", () => {
+  it("sends every window, the unit, and nullable RPM to the full-plan command", async () => {
+    const plan = {
+      windows: [{ len_ms: 18000000, limit: 5000 }, { len_ms: 86400000, limit: 24000 }],
+      unit: "tokens" as const,
+      rate_limit_per_min: 60,
+    };
+    await setQuotaPlanFull("deepseek", plan);
+    expect(invoke).toHaveBeenCalledWith("set_quota_plan_full", {
+      upstream: "deepseek", windows: plan.windows, unit: "tokens", rateLimitPerMin: 60,
+    });
+    await setQuotaPlanFull("deepseek", { windows: [], unit: "tokens", rate_limit_per_min: null });
+    expect(invoke).toHaveBeenLastCalledWith("set_quota_plan_full", {
+      upstream: "deepseek", windows: [], unit: "tokens", rateLimitPerMin: null,
+    });
   });
 });

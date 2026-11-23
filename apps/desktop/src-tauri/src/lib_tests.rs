@@ -3579,7 +3579,9 @@ fn saving_legacy_harness_mapping_does_not_enable_it() {
         draft,
         None
     )))));
-    let snapshot = restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    manage_test_agent_state(&app, &root);
+    let snapshot =
+        restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     assert!(!snapshot.agent_routes["claude-code"].harness_model_mapping_enabled);
     assert!(snapshot.agent_routes["claude-code"]
         .harness_config_error
@@ -3606,6 +3608,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         template_for_test(&root),
         None,
     )))));
+    manage_test_agent_state(&app, &root);
     add_provider(
         app.state(),
         "provider".to_owned(),
@@ -3647,7 +3650,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
     );
 
     set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
-    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     let config = ClientConfig::load(&config_path).unwrap();
     assert_eq!(
         config.agent_routes["claude-code"].harness_model_routes["claude-fable-5-1"].model,
@@ -3672,7 +3675,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), false)
             .unwrap();
     assert!(!disabled.agent_routes["claude-code"].harness_model_mapping_enabled);
-    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     let disabled_config = ClientConfig::load(&config_path).unwrap();
     assert!(disabled_config
         .harness_router_for_agent("claude-code")
@@ -3685,7 +3688,7 @@ fn harness_mapping_edit_persists_with_the_agent_route_and_compiles_to_a_pool() {
         4
     );
     set_agent_harness_model_mapping_enabled(app.state(), "claude-code".to_owned(), true).unwrap();
-    restart_agent_harness_routes(app.state(), "claude-code".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "claude-code".to_owned()).unwrap();
     assert!(ClientConfig::load(&config_path)
         .unwrap()
         .harness_router_for_agent("claude-code")
@@ -3704,6 +3707,7 @@ fn harness_mapping_save_does_not_change_the_agent_route_mode_or_tiers() {
         template_for_test(&root),
         None,
     )))));
+    manage_test_agent_state(&app, &root);
     add_provider(
         app.state(),
         "provider".to_owned(),
@@ -3725,7 +3729,7 @@ fn harness_mapping_save_does_not_change_the_agent_route_mode_or_tiers() {
     let enabled =
         set_agent_harness_model_mapping_enabled(app.state(), "opencode".to_owned(), true).unwrap();
     assert!(!enabled.agent_routes["opencode"].inherits_global);
-    restart_agent_harness_routes(app.state(), "opencode".to_owned()).unwrap();
+    restart_agent_harness_routes(app.state(), app.state(), "opencode".to_owned()).unwrap();
 
     let config = ClientConfig::load(&config_path).unwrap();
     let route = &config.agent_routes["opencode"];
@@ -7319,6 +7323,60 @@ fn purge_deleted_providers_durably_clears_retired_provider_prices_in_one_revisio
 }
 
 #[test]
+fn agent_budget_reads_large_histories_with_exact_agent_and_period_boundaries() {
+    let root = scratch_home("agent-budget-large-history");
+    let mut draft = gateway_template_for_test(&root);
+    draft["agent_budgets"] = json!({
+        "codex": {"limit_micros": 1_000_000, "warning_percent": 80, "period_start_ms": 100, "period_end_ms": 200, "expiry_warning_days": 7}
+    });
+    let data_dir = PathBuf::from(draft["data"]["dir"].as_str().unwrap());
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let db = data_dir.join("metrics.sqlite");
+    drop(SqliteStore::open(&db).unwrap());
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100001)
+        INSERT INTO requests(request_id, started_at_ms, latency_ms, protocol, requested_model, stream, status, attempts, agent_id, cost_kind, cost_micros)
+        SELECT 'other-' || n, 150, 1, 'openai', 'm', 0, 200, 1, 'claude-code', 'actual', 100 FROM seq;
+        INSERT INTO requests(request_id, started_at_ms, latency_ms, protocol, requested_model, stream, status, attempts, agent_id, cost_kind, cost_micros) VALUES
+        ('before', 99, 1, 'openai', 'm', 0, 200, 1, 'codex', 'actual', 1000),
+        ('start', 100, 1, 'openai', 'm', 0, 200, 1, 'codex', 'actual', 123),
+        ('inside', 150, 1, 'openai', 'm', 0, 200, 1, 'codex', 'estimated', 456),
+        ('unknown', 150, 1, 'openai', 'm', 0, 200, 1, 'codex', 'unknown', NULL),
+        ('end', 200, 1, 'openai', 'm', 0, 200, 1, 'codex', 'actual', 1000);").unwrap();
+    drop(connection);
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        draft,
+        None
+    )))));
+    let statuses =
+        get_agent_budgets(app.state()).expect("other Agents cannot exhaust a budget query");
+    assert_eq!(statuses[0].used_micros, 579);
+    assert_eq!(statuses[0].unpriced_requests, 1);
+    assert!(!statuses[0].routing_affected);
+    let statuses = set_agent_budget(
+        app.state(),
+        "claude-code".into(),
+        20_000_000,
+        80,
+        Some(100),
+        Some(200),
+        7,
+    )
+    .expect("the target Agent itself can have more than 100,000 receipts");
+    assert_eq!(
+        statuses
+            .iter()
+            .find(|status| status.agent_id == "claude-code")
+            .unwrap()
+            .used_micros,
+        10_000_100
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn agent_budget_commands_persist_display_only_thresholds_and_report_zero_without_a_store() {
     let root = scratch_home("agent-budget-commands");
     let inner = AppInner::new(
@@ -8777,6 +8835,181 @@ fn quota_accounts_persist_validate_dedupe_and_reject_invalid_input() {
 }
 
 #[test]
+fn full_quota_plan_round_trips_validates_and_preserves_legacy_fields() {
+    let root = scratch_home("full-quota-plan");
+    let app = tauri::test::mock_app();
+    assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+        root.join("token-station.json"),
+        template_for_test(&root),
+        None,
+    )))));
+    add_provider(
+        app.state(),
+        "deepseek".to_owned(),
+        "https://api.deepseek.com/v1".to_owned(),
+        vec!["deepseek-v4-flash".to_owned()],
+        None,
+        false,
+    )
+    .unwrap();
+    let windows = vec![
+        token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 18_000_000,
+            limit: 1_000_000,
+        },
+        token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 86_400_000,
+            limit: 3_000_000,
+        },
+    ];
+    let view = set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        windows.clone(),
+        "tokens".to_owned(),
+        Some(60),
+    )
+    .unwrap();
+    let plan = view
+        .providers
+        .iter()
+        .find(|p| p.name == "deepseek")
+        .unwrap()
+        .quota_plan
+        .as_ref()
+        .unwrap();
+    assert_eq!(plan.windows, windows);
+    assert_eq!(plan.len_ms, windows[0].len_ms);
+    assert_eq!(plan.limit, windows[0].limit);
+    assert_eq!(plan.rate_limit_per_min, Some(60));
+    let invalid_windows = [
+        vec![token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 0,
+            limit: 1,
+        }],
+        vec![token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 1,
+            limit: 0,
+        }],
+        vec![token_station_cli::quota_tracker::QuotaWindowSpec {
+            len_ms: 1,
+            limit: 9_007_199_254_740_992,
+        }],
+        vec![windows[0], windows[0]],
+        (1..=17)
+            .map(|len_ms| token_station_cli::quota_tracker::QuotaWindowSpec { len_ms, limit: 1 })
+            .collect(),
+    ];
+    for invalid in invalid_windows {
+        assert!(set_quota_plan_full(
+            app.state(),
+            "deepseek".to_owned(),
+            invalid,
+            "tokens".to_owned(),
+            Some(60)
+        )
+        .is_err());
+    }
+    assert!(set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        windows.clone(),
+        "tokens".to_owned(),
+        Some(0)
+    )
+    .is_err());
+    let unchanged = get_state(app.state());
+    assert_eq!(
+        unchanged
+            .providers
+            .iter()
+            .find(|p| p.name == "deepseek")
+            .unwrap()
+            .quota_plan
+            .as_ref()
+            .unwrap()
+            .windows,
+        windows
+    );
+    let legacy = set_quota_plan(
+        app.state(),
+        "deepseek".to_owned(),
+        18_000_000,
+        900_000,
+        "requests".to_owned(),
+        None,
+    )
+    .unwrap();
+    let plan = legacy
+        .providers
+        .iter()
+        .find(|p| p.name == "deepseek")
+        .unwrap()
+        .quota_plan
+        .as_ref()
+        .unwrap();
+    assert_eq!(plan.windows.len(), 2);
+    assert_eq!(plan.windows[1], windows[1]);
+    assert_eq!(plan.rate_limit_per_min, Some(60));
+    let no_rate = set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        windows,
+        "requests".to_owned(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        no_rate
+            .providers
+            .iter()
+            .find(|p| p.name == "deepseek")
+            .unwrap()
+            .quota_plan
+            .as_ref()
+            .unwrap()
+            .rate_limit_per_min,
+        None
+    );
+    let cleared = set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        vec![],
+        "tokens".to_owned(),
+        None,
+    )
+    .unwrap();
+    assert!(cleared
+        .providers
+        .iter()
+        .find(|p| p.name == "deepseek")
+        .unwrap()
+        .quota_plan
+        .is_none());
+    {
+        let state = app.state::<AppStateManaged>();
+        state.0.lock().unwrap().draft["upstreams"]["deepseek"]["provider"] = json!("codex-plan");
+    }
+    assert!(set_quota_plan_full(
+        app.state(),
+        "deepseek".to_owned(),
+        vec![],
+        "tokens".to_owned(),
+        None
+    )
+    .is_err());
+    assert!(set_quota_accounts(
+        app.state(),
+        vec![QuotaAccountArg {
+            upstream: "deepseek".to_owned(),
+            model: "deepseek-v4-flash".to_owned()
+        }]
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn quota_plan_declares_a_window_validates_and_clears() {
     let root = scratch_home("quota-plan");
     let inner = AppInner::new(
@@ -10048,7 +10281,7 @@ fn verify_image_transport_fixture(responses: bool) {
                 ),
                 _ => (
                     200,
-                    json!({"id":"probe-fixture","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":if attempt == 0 { colors.join(",") } else { "I cannot determine the image".to_owned() }},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10}}),
+                    json!({"id":"probe-fixture","model":"image-model","choices":[{"index":0,"message":{"role":"assistant","content":if attempt == 0 { colors.join(",") } else { "I cannot determine the image".to_owned() }},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}),
                 ),
             };
             let body = reply.to_string();
@@ -10111,4 +10344,17 @@ fn verify_image_transport_fixture(responses: bool) {
     }
     fixture.join().unwrap();
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn google_subscription_health_uses_the_actual_root_rpc_transport() {
+    let draft = json!({"plugins":{"providers":{"gemini-cli-plan":"provider-codeassist-v2","antigravity-plan":"provider-codeassist-v2"}}});
+    for provider in ["gemini-cli-plan", "antigravity-plan"] {
+        let upstream = json!({"provider":provider,"auth":{"slot":"local_subscription_token","local_subscription":{"kind":if provider == "gemini-cli-plan" { "gemini-cli" } else { "antigravity" },"id":"fixture-account"}}});
+        assert_eq!(
+            south_header_auth_v1_unavailable_reason(&draft, &upstream, true),
+            Some("root_rpc_path")
+        );
+        assert!(!provider_health_uses_south(&draft, &upstream, true));
+    }
 }

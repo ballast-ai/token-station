@@ -5,15 +5,18 @@
 //! and a different model depending on which binary served it. Everything here is
 //! arranged to make that disagreement impossible to introduce quietly.
 //!
-//! # Four layers, first to answer wins
+//! # Five tier-selection layers, first to answer wins
 //!
 //! 1. **Rules** the operator wrote. Highest priority, always — this is the
 //!    override the user is promised when the router guesses wrong.
 //! 2. **Agent hints**: the calling tool knows it is planning rather than
 //!    summarising, and the host cannot infer that.
-//! 3. **The heuristic**: score the request, compare to a threshold. Stands in
-//!    for the learned classifier until `C3#2` ships it.
-//! 4. **The default pool.**
+//! 3. **An optional host classifier pool**: accept only a configured pool name.
+//!    The host owns inference. The core applies the existing candidate filters.
+//! 4. **The heuristic**: score the request and compare it to a threshold.
+//! 5. **The default pool.**
+//!
+//! An enabled exact-model pin takes precedence over all five layers.
 //!
 //! The cascade layer — answer cheaply, then judge whether to escalate — is
 //! deliberately absent. It doubles latency and cannot be done on a streaming

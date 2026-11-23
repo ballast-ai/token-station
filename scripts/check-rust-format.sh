@@ -2,7 +2,8 @@
 set -euo pipefail
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly frozen_router_tree="98b6d616e3d508f54707da03b8292ceb96c19856"
+# Preserve reviewed routing fixes with the protocol 0.7.0 version update.
+readonly frozen_router_tree="5289a7851ccfbf01a4f581ab31de318b978c9338"
 readonly workspace_packages=(
   token-station-cli
   token-station-conformance
@@ -20,6 +21,10 @@ readonly plugin_manifests=(
   plugins/official/agent-gemini/Cargo.toml
   plugins/official/provider-openai-compatible-v2/Cargo.toml
   plugins/official/provider-anthropic-v2/Cargo.toml
+  plugins/official/provider-chatgpt-plan-v2/Cargo.toml
+  plugins/official/provider-claude-plan-v2/Cargo.toml
+  plugins/official/provider-copilot-plan-v2/Cargo.toml
+  plugins/official/provider-codeassist-v2/Cargo.toml
 )
 
 cd "$root"

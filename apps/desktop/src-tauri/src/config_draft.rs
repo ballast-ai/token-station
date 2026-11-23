@@ -22,7 +22,7 @@ pub(crate) fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path
         .expect("the built-in price table always serializes");
     json!({
         "version": 1,
-        "server": { "listen": "127.0.0.1:8787", "auth": true },
+        "server": { "listen": experimental::default_listen(), "auth": true },
         "data": { "dir": data_dir, "metrics": true },
         "plugins": {
             "dir": plugins_dir,
@@ -116,7 +116,11 @@ pub(crate) fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Pa
     // and never overwrite explicit unsupported or verified states.
     if let Some(upstreams) = draft["upstreams"].as_object_mut() {
         for upstream in upstreams.values_mut() {
-            if upstream["access_tier"].as_str() == Some("free") {
+            if upstream["access_tier"].as_str() == Some("free")
+                || token_station_cli::config::is_subscription_provider(
+                    upstream["provider"].as_str().unwrap_or_default(),
+                )
+            {
                 continue;
             }
             let Some(models) = upstream["models"].as_array_mut() else {
@@ -515,6 +519,7 @@ impl AppInner {
             config_state,
             agent_route_drafts: BTreeMap::new(),
             agent_harness_route_drafts: BTreeMap::new(),
+            agent_harness_enabled_drafts: BTreeMap::new(),
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
@@ -767,7 +772,13 @@ impl AppInner {
                     catalog_revision,
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
-                    credential_source: if up["auth"]["store"].as_bool() == Some(true) {
+                    credential_source: if up["auth"]["local_subscription"].is_object() {
+                        "local_subscription"
+                    } else if up["auth"]["codex_account"].is_string() {
+                        "codex_account"
+                    } else if up["auth"]["chatgpt_account"].is_string() {
+                        "chatgpt_account"
+                    } else if up["auth"]["store"].as_bool() == Some(true) {
                         "store"
                     } else if up["auth"]["env"].is_string() {
                         "env"
@@ -780,6 +791,9 @@ impl AppInner {
                     credential_reference: up["auth"]["env"]
                         .as_str()
                         .or_else(|| up["auth"]["file"].as_str())
+                        .or_else(|| up["auth"]["chatgpt_account"].as_str())
+                        .or_else(|| up["auth"]["codex_account"].as_str())
+                        .or_else(|| up["auth"]["local_subscription"]["id"].as_str())
                         .unwrap_or_default()
                         .to_owned(),
                     provider_call: up
@@ -800,6 +814,8 @@ impl AppInner {
                     access_tier: access_tier.to_owned(),
                     quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
                         QuotaPlanView {
+                            windows: serde_json::from_value(up["quota_plan"]["windows"].clone())
+                                .unwrap_or_default(),
                             len_ms: window["len_ms"].as_u64().unwrap_or(0),
                             limit: window["limit"].as_u64().unwrap_or(0),
                             unit: up["quota_plan"]["unit"]
@@ -1001,9 +1017,14 @@ impl AppInner {
     }
 
     pub(crate) fn agent_harness_model_mapping_enabled(&self, agent_id: &str) -> bool {
-        self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"]
-            .as_bool()
-            .unwrap_or(false)
+        self.agent_harness_enabled_drafts
+            .get(agent_id)
+            .copied()
+            .unwrap_or_else(|| {
+                self.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"]
+                    .as_bool()
+                    .unwrap_or(false)
+            })
     }
 
     pub(crate) fn agent_harness_model_routes(&self, agent_id: &str) -> BTreeMap<String, TierView> {
@@ -1327,6 +1348,7 @@ impl AppInner {
 
     /// Materialize and validate the draft as ClientConfig, returning a human-readable error on failure.
     pub(crate) fn materialize(&self) -> Result<ClientConfig, String> {
+        experimental::validate_draft(&self.config_path, &self.draft)?;
         if let Some(upstreams) = self.draft["upstreams"].as_object() {
             for (name, provider) in upstreams {
                 if provider["access_tier"].as_str() == Some("free") {
@@ -1803,13 +1825,15 @@ impl AppInner {
         &mut self,
         agent_id: &str,
     ) -> Result<(), String> {
-        if !self.agent_harness_model_mapping_enabled(agent_id) {
-            return Ok(());
-        }
-        let Some(routes) = self.agent_harness_route_drafts.get(agent_id) else {
-            return Ok(());
+        let enabled = self.agent_harness_model_mapping_enabled(agent_id);
+        let routes = if enabled {
+            self.agent_harness_route_drafts
+                .get(agent_id)
+                .map(|routes| Self::complete_harness_model_route_draft(agent_id, routes))
+                .transpose()?
+        } else {
+            None
         };
-        let routes = Self::complete_harness_model_route_draft(agent_id, routes)?;
         self.edit_validated_draft(|inner| {
             if !inner.draft["agent_routes"].is_object() {
                 inner.draft["agent_routes"] = json!({});
@@ -1817,7 +1841,10 @@ impl AppInner {
             if !inner.draft["agent_routes"][agent_id].is_object() {
                 inner.draft["agent_routes"][agent_id] = json!({ "mode": "inherit" });
             }
-            inner.draft["agent_routes"][agent_id]["harness_model_routes"] = routes;
+            inner.draft["agent_routes"][agent_id]["harness_model_mapping_enabled"] = json!(enabled);
+            if let Some(routes) = routes {
+                inner.draft["agent_routes"][agent_id]["harness_model_routes"] = routes;
+            }
             Ok(())
         })
     }

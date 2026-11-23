@@ -3,6 +3,7 @@ import {
   type DirectRouteTarget,
   type ProviderView,
   type QuotaAccount,
+  type SaveQuotaPlan,
   type RoutingMode,
   type TierSlot,
   type TierView,
@@ -12,6 +13,8 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
+import SemanticRoutingSwitch from "../components/SemanticRoutingSwitch";
+import JevRoutingControl from "../components/JevRoutingControl";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 
@@ -29,12 +32,7 @@ interface HomePageProps {
   onDirectDraftChange?: (hasUnappliedTarget: boolean) => void;
   quotaAccounts: QuotaAccount[];
   onSaveQuota: (accounts: QuotaAccount[]) => void;
-  onSaveQuotaPlan: (
-    upstream: string,
-    lenMs: number,
-    limit: number,
-    unit: "tokens" | "requests",
-  ) => void;
+  onSaveQuotaPlan: SaveQuotaPlan;
   onViewQuotaUsage: () => void;
   busy: boolean;
   applying: boolean;
@@ -83,6 +81,7 @@ export default function HomePage({
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [jevEnabled, setJevEnabled] = useState(false);
 
   const saveProfile = async () => {
     const name = profileName.trim();
@@ -123,6 +122,11 @@ export default function HomePage({
         onValueChange={onSetRoutingMode}
       />
 
+      {routingMode === "tiered" && <div className="routing-classifier-controls" role="group" aria-label={copy("Smart tier classifiers", "智能分档方式", "智慧分檔方式", "スマート分層方式")}>
+        <JevRoutingControl onEnabledChange={setJevEnabled} />
+        <SemanticRoutingSwitch overriddenByJev={jevEnabled} />
+      </div>}
+
       {routingMode === "direct" ? (
         <DirectRoutePanel
           providers={providers}
@@ -150,10 +154,6 @@ export default function HomePage({
         <div className="panel-head split-heading">
           <div>
             <h2>{copy("Smart routing", "智能路由", "智慧路由", "スマートルーティング")}</h2>
-            <p className="sub">{copy(
-              "Choose models by task complexity.",
-              "根据任务复杂度选择不同模型。", "根據任務複雜度選擇不同模型。", "タスクの複雑さに応じてモデルを選択します。"
-            )}</p>
           </div>
           <div className="route-heading-actions">
             {profiles.length > 0 && (

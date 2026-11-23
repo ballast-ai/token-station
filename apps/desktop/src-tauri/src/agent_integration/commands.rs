@@ -31,10 +31,10 @@ use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
-    build_disconnect_plan, build_metadata_refresh_plan, build_metadata_refresh_plan_with_baseline,
-    build_snapshot_restore_plan, companion_document_format, generate_operation_id,
-    read_config_source, ConfigSource, PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED,
-    OWNED_VALUES_CHANGED,
+    build_disconnect_plan, build_forced_disconnect_plan, build_metadata_refresh_plan,
+    build_metadata_refresh_plan_with_baseline, build_snapshot_restore_plan,
+    companion_document_format, generate_operation_id, read_config_source, ConfigSource,
+    PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED, OWNED_VALUES_CHANGED,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
@@ -259,7 +259,7 @@ impl From<TransactionFailure> for AgentCommandError {
 }
 
 #[derive(Clone)]
-struct ScanSnapshot {
+pub(crate) struct ScanSnapshot {
     catalog: CompatibilityCatalog,
     source: CatalogSource,
     warning: Option<String>,
@@ -355,6 +355,8 @@ struct CommandSession {
 
 #[derive(Clone)]
 pub struct AgentProxyRuntime {
+    running_revision: u64,
+    pub(crate) browser_search_enabled: bool,
     instance_id: String,
     connector_base_urls: BTreeMap<String, String>,
     connector_adapter_ready: BTreeMap<String, bool>,
@@ -391,6 +393,8 @@ impl AgentProxyRuntime {
             connector_adapter_ready.insert(capability.connector_id.to_string(), ready);
         }
         Self {
+            browser_search_enabled: false,
+            running_revision: 0,
             instance_id,
             connector_base_urls,
             connector_adapter_ready,
@@ -422,9 +426,11 @@ impl AgentProxyRuntime {
         Ok(origin)
     }
 
-    fn fingerprint(&self) -> [u8; 32] {
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"token-station-agent-proxy-binding-v1\0");
+        hash.update([u8::from(self.browser_search_enabled)]);
+        hash.update(self.running_revision.to_le_bytes());
         hash_field(&mut hash, self.instance_id.as_bytes());
         for (connector_id, base_url) in &self.connector_base_urls {
             hash_field(&mut hash, connector_id.as_bytes());
@@ -458,6 +464,7 @@ impl AgentProxyRuntime {
             AgentCommandError::boundary("unsupported_connector", "Connector 缺少运行时 URL 投影")
         })?;
         Ok(ConnectInput {
+            browser_search_enabled: self.browser_search_enabled,
             base_url,
             token: connector
                 .capabilities()
@@ -512,7 +519,12 @@ fn agent_model_metadata(
     agent_id: &str,
 ) -> Result<Option<AgentModelMetadata>, String> {
     let router = configured_router_for_agent(config, agent_id)?;
-    agent_model_metadata_for_router(config, &router)
+    let harness = config.harness_router_for_agent(agent_id)?;
+    agent_model_metadata_for_routes(
+        config,
+        &router,
+        harness.as_ref().map(|overlay| &overlay.router),
+    )
 }
 
 fn configured_router_for_agent(
@@ -574,7 +586,12 @@ pub(crate) fn model_metadata_for_config(
     agent_id: &str,
 ) -> Result<Option<AgentModelMetadata>, String> {
     let router = configured_router_for_agent(config, agent_id)?;
-    agent_model_metadata_for_router(config, &router)
+    let harness = config.harness_router_for_agent(agent_id)?;
+    agent_model_metadata_for_routes(
+        config,
+        &router,
+        harness.as_ref().map(|overlay| &overlay.router),
+    )
 }
 
 pub(crate) fn transition_model_metadata(
@@ -609,11 +626,15 @@ pub(crate) fn transition_model_metadata(
     }
 }
 
-fn agent_model_metadata_for_router(
+fn agent_model_metadata_for_routes(
     config: &token_station_cli::config::ClientConfig,
     router: &token_station_router_core::RouterConfig,
+    harness: Option<&token_station_router_core::RouterConfig>,
 ) -> Result<Option<AgentModelMetadata>, String> {
-    let candidates = reachable_model_targets(config, router);
+    let mut candidates = reachable_model_targets(config, router);
+    if let Some(harness) = harness {
+        candidates.extend(reachable_model_targets(config, harness));
+    }
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -810,6 +831,28 @@ fn serving_router_for_agent(
     }
 }
 
+pub(crate) fn model_metadata_for_reload(
+    server: &crate::serve_lifecycle::RunningServer,
+    router: Option<&token_station_router_core::RouterConfig>,
+    harness: Option<&token_station_router_core::RouterConfig>,
+) -> Result<Option<AgentModelMetadata>, String> {
+    let home = server.serving_config().home_router_config()?;
+    agent_model_metadata_for_routes(server.serving_config(), router.unwrap_or(&home), harness)
+}
+
+fn serving_harness_for_agent(
+    server: &crate::serve_lifecycle::RunningServer,
+    agent_id: &str,
+) -> Result<Option<token_station_router_core::RouterConfig>, String> {
+    match server.agent_harness_override(agent_id) {
+        Some(router) => Ok(router.cloned()),
+        None => Ok(server
+            .serving_config()
+            .harness_router_for_agent(agent_id)?
+            .map(|overlay| overlay.router)),
+    }
+}
+
 fn opencode_issue_from_inner(
     inner: &crate::AppInner,
 ) -> Result<Option<AgentConnectionIssueView>, String> {
@@ -845,6 +888,8 @@ pub struct AgentCommandState {
     token_key: hmac::Key,
     session: Mutex<CommandSession>,
     scan_in_progress: AtomicBool,
+    #[cfg(test)]
+    scan_override: Mutex<Option<ScanSnapshot>>,
     clock: SystemClock,
 }
 
@@ -1072,6 +1117,7 @@ fn validate_force_forget_reconnect(
         cost: None,
     };
     let input = ConnectInput {
+        browser_search_enabled: false,
         base_url: RECONNECT_BASE_URL,
         token: Some(RECONNECT_TOKEN),
         adapter_ready: true,
@@ -1150,6 +1196,8 @@ impl AgentCommandState {
             token_key: hmac::Key::new(hmac::HMAC_SHA256, &process_key),
             session: Mutex::new(CommandSession::default()),
             scan_in_progress: AtomicBool::new(false),
+            #[cfg(test)]
+            scan_override: Mutex::new(None),
             clock: SystemClock,
         })
     }
@@ -1219,7 +1267,7 @@ impl AgentCommandState {
         perform_scan: impl FnOnce() -> Result<ScanSnapshot, AgentCommandError>,
     ) -> Result<Vec<AgentView>, AgentCommandError> {
         let _scan_guard = self.begin_scan()?;
-        let snapshot = perform_scan()?;
+        let snapshot = self.with_managed_recovery_records(perform_scan()?);
         let views = self.views(&snapshot, runtime, opencode_issue)?;
         self.session
             .lock()
@@ -1269,15 +1317,70 @@ impl AgentCommandState {
     }
 
     fn perform_scan(&self) -> Result<ScanSnapshot, AgentCommandError> {
+        #[cfg(test)]
+        if let Some(snapshot) = self.scan_override.lock().unwrap().clone() {
+            return Ok(self.with_managed_recovery_records(snapshot));
+        }
         let catalog =
             CompatibilityCatalog::builtin(&self.registry).map_err(AgentCommandError::internal)?;
         let records = DiscoveryScanner::from_process(&self.registry).scan_registry(&self.registry);
-        Ok(ScanSnapshot {
+        Ok(self.with_managed_recovery_records(ScanSnapshot {
             catalog,
             source: CatalogSource::Builtin,
             warning: None,
             records,
-        })
+        }))
+    }
+
+    /// Keep the original ownership key reachable without claiming executable discovery.
+    /// This only enriches the read-only scan; restoration still verifies the baseline,
+    /// managed-value MACs and revision through the ordinary confirmed transaction.
+    fn with_managed_recovery_records(&self, mut snapshot: ScanSnapshot) -> ScanSnapshot {
+        let owned = ["claude-code", "deepseek-harness"]
+            .into_iter()
+            .filter_map(|agent| self.ownership.list_agent(agent).ok())
+            .flatten()
+            .collect::<Vec<_>>();
+        for ownership in owned {
+            if !matches!(
+                ownership.connector_id.as_str(),
+                "claude-code-v1" | "deepseek-harness-v1"
+            ) || snapshot.records.iter().any(|record| {
+                record.agent_id == ownership.agent_id
+                    && record.canonical_path == ownership.installation_path
+            }) {
+                continue;
+            }
+            snapshot.records.push(DiscoveryRecord {
+                runtime_paths: None,
+                agent_id: ownership.agent_id,
+                executable_path: ownership.installation_path.clone(),
+                canonical_path: ownership.installation_path.clone(),
+                binary_source: super::types::BinarySource::ManagedRecord,
+                modified_at_ms: None,
+                binary_sha256: None,
+                upgrade_command: None,
+                version_raw: None,
+                version_normalized: None,
+                environment: super::platform::current_platform(),
+                evidence: vec![super::types::DiscoveryEvidence {
+                    source: super::types::DiscoverySource::ManagedRecord,
+                    observed_path: ownership.installation_path,
+                    is_path_default: false,
+                }],
+                is_path_default: false,
+                runnable: false,
+                config_candidates: vec![ownership.target_config_path],
+                config_fingerprint: None,
+                conflict_group: None,
+                diagnostics: vec![Diagnostic {
+                    reason_code: ReasonCode::ConnectionOwnershipActive,
+                    message: "The previous Agent installation is no longer discovered. Restore its pre-connection configuration before connecting the current installation.".to_string(),
+                }],
+                scanned_at_ms: self.clock.now_ms(),
+            });
+        }
+        snapshot
     }
 
     fn refresh_scan(&self) -> Result<(), AgentCommandError> {
@@ -1290,19 +1393,22 @@ impl AgentCommandState {
         Ok(())
     }
 
-    /// Refresh route-derived model limits and capabilities in every managed
-    /// connector that projects them. The restore transaction updates the
-    /// active ownership revision but preserves the original disconnect
-    /// baseline snapshot.
-    pub(crate) fn refresh_model_metadata(
+    pub(crate) fn metadata_refresh_scan(&self) -> Result<ScanSnapshot, AgentCommandError> {
+        self.perform_scan()
+    }
+
+    pub(crate) fn refresh_model_metadata_from_scan(
         &self,
         agent_id: Option<&str>,
         runtime: &AgentProxyRuntime,
+        snapshot: ScanSnapshot,
     ) -> Result<usize, AgentCommandError> {
+        if crate::experimental::is_scx_experiment() {
+            return Ok(0);
+        }
         if let Some(agent_id) = agent_id {
             validate_short_identifier(agent_id, "agent_id")?;
         }
-        let snapshot = self.perform_scan()?;
         let mut refreshed = 0;
         for record in snapshot
             .records
@@ -1529,6 +1635,9 @@ impl AgentCommandState {
         record: &DiscoveryRecord,
         runtime: &AgentProxyRuntime,
     ) -> Result<bool, AgentCommandError> {
+        if !record.runnable {
+            return Ok(false);
+        }
         let ownership = self
             .ownership
             .list_agent_installation(&record.agent_id, &record.canonical_path)
@@ -1658,6 +1767,35 @@ impl AgentCommandState {
             ));
         }
         let target = server_target(&record)?;
+        if agent_id == "deepseek-harness"
+            && self
+                .ownership
+                .list_agent(agent_id)
+                .map_err(AgentCommandError::internal)?
+                .iter()
+                .any(|owned| Path::new(&owned.target_config_path).parent() == target.parent())
+        {
+            return Err(AgentCommandError::boundary(
+                "configuration_owned_by_other_installation",
+                "DSH 配置目录仍有旧连接。请选择旧连接，恢复原始配置并断开，再接入当前版本。",
+            ));
+        }
+        if agent_id == "claude-code"
+            && self
+                .ownership
+                .list_agent(agent_id)
+                .map_err(AgentCommandError::internal)?
+                .iter()
+                .any(|owned| {
+                    owned.target_config_path == target.to_string_lossy()
+                        && owned.installation_path != installation_path
+                })
+        {
+            return Err(AgentCommandError::boundary(
+                "configuration_owned_by_other_installation",
+                "此配置仍由旧安装的 Token Station 连接接管；请在安装选择器中选择旧连接，恢复接入前配置并断开，再连接当前安装",
+            ));
+        }
         let source = read_config_source(target).map_err(AgentCommandError::internal)?;
         let input = runtime.input_for(connector_id)?;
         let now_ms = self.clock.now_ms();
@@ -1688,6 +1826,16 @@ impl AgentCommandState {
         installation_path: &str,
         session_label: &str,
     ) -> Result<ConfigPlanView, AgentCommandError> {
+        self.plan_disconnect_with_owned_drift(agent_id, installation_path, session_label, false)
+    }
+
+    fn plan_disconnect_with_owned_drift(
+        &self,
+        agent_id: &str,
+        installation_path: &str,
+        session_label: &str,
+        allow_owned_drift: bool,
+    ) -> Result<ConfigPlanView, AgentCommandError> {
         validate_session_label(session_label)?;
         let (record, decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
@@ -1711,7 +1859,12 @@ impl AgentCommandState {
         let target = Path::new(&ownership.target_config_path);
         let current = read_config_source(target).map_err(AgentCommandError::internal)?;
         let key = self.keys.load().map_err(AgentCommandError::internal)?;
-        let mut prepared = build_disconnect_plan(
+        let planner = if allow_owned_drift {
+            build_forced_disconnect_plan
+        } else {
+            build_disconnect_plan
+        };
+        let mut prepared = planner(
             connector,
             &record,
             &decision,
@@ -1742,6 +1895,8 @@ impl AgentCommandState {
         agent_id: &str,
         installation_path: &str,
     ) -> Result<(), AgentCommandError> {
+        crate::experimental::require_force_forget_support()
+            .map_err(|message| AgentCommandError::boundary("experiment_isolation", message))?;
         validate_short_identifier(agent_id, "agent_id")?;
         let owned = self
             .ownership
@@ -2678,6 +2833,34 @@ pub(crate) fn transition_runtime_for_config(
     Ok(transition)
 }
 
+/// Scan without the App lock, then bind every write to the current published runtime.
+/// Lock order is App state, followed by Agent session or filesystem transaction locks.
+pub(crate) fn refresh_current_model_metadata(
+    state: &AppStateManaged,
+    agents: &AgentCommandState,
+    agent_id: Option<&str>,
+    expected: Option<&AgentProxyRuntime>,
+) -> Result<usize, AgentCommandError> {
+    let scan = agents.metadata_refresh_scan()?;
+    let inner = state.0.lock().map_err(|_| {
+        AgentCommandError::boundary("app_state_poisoned", "App state is unavailable.")
+    })?;
+    if !matches!(inner.server, crate::ServerLifecycle::Running { .. }) {
+        return Err(AgentCommandError::boundary(
+            "proxy_runtime_changed",
+            "Wait for the proxy transition to finish.",
+        ));
+    }
+    let runtime = runtime_from_inner(&inner)?;
+    if expected.is_some_and(|expected| expected.fingerprint() != runtime.fingerprint()) {
+        return Err(AgentCommandError::boundary(
+            "proxy_runtime_changed",
+            "The proxy changed. Try again.",
+        ));
+    }
+    agents.refresh_model_metadata_from_scan(agent_id, &runtime, scan)
+}
+
 pub(crate) fn runtime_from_app(
     state: &AppStateManaged,
 ) -> Result<AgentProxyRuntime, AgentCommandError> {
@@ -2685,6 +2868,12 @@ pub(crate) fn runtime_from_app(
         .0
         .lock()
         .map_err(|_| AgentCommandError::boundary("app_state_poisoned", "应用状态不可用"))?;
+    runtime_from_inner(&inner)
+}
+
+pub(crate) fn runtime_from_inner(
+    inner: &crate::AppInner,
+) -> Result<AgentProxyRuntime, AgentCommandError> {
     inner
         .ensure_editable()
         .map_err(AgentCommandError::internal)?;
@@ -2729,8 +2918,11 @@ pub(crate) fn runtime_from_app(
             }
             let router =
                 serving_router_for_agent(serving, agent_id).map_err(AgentCommandError::internal)?;
-            if let Some(metadata) = agent_model_metadata_for_router(config, &router)
-                .map_err(AgentCommandError::internal)?
+            let harness = serving_harness_for_agent(serving, agent_id)
+                .map_err(AgentCommandError::internal)?;
+            if let Some(metadata) =
+                agent_model_metadata_for_routes(config, &router, harness.as_ref())
+                    .map_err(AgentCommandError::internal)?
             {
                 model_metadata.insert(agent_id.to_string(), metadata);
             }
@@ -2747,7 +2939,7 @@ pub(crate) fn runtime_from_app(
             "Agent 接入需要稳定的本地虚拟 Key；请先在设置中开启本地鉴权并重启代理",
         )
     })?;
-    Ok(AgentProxyRuntime::new(
+    let mut runtime = AgentProxyRuntime::new(
         serve.instance_id.ok_or_else(|| {
             AgentCommandError::boundary("proxy_not_running", "代理运行实例身份不可用")
         })?,
@@ -2756,7 +2948,13 @@ pub(crate) fn runtime_from_app(
         adapter_readiness,
         model_metadata,
         connection_issues,
-    ))
+    );
+    runtime.running_revision = serving.running_revision();
+    runtime.browser_search_enabled =
+        token_station_cli::search::SearchController::shared(&inner.data_dir())
+            .settings()
+            .enabled;
+    Ok(runtime)
 }
 
 #[tauri::command]
@@ -2826,21 +3024,51 @@ pub(crate) fn apply_agent_plan(
     operation_id: String,
     confirmation_token: String,
 ) -> Result<TransactionOutcome, AgentCommandError> {
-    let intent = state.plan_intent(&operation_id)?;
-    let runtime = if intent == PlanIntent::Connect {
-        Some(runtime_from_app(&app_state)?)
-    } else {
-        None
-    };
-    let outcome = state.apply(
+    let outcome = apply_agent_plan_with_scan(
+        &state,
+        &app_state,
         &operation_id,
         &confirmation_token,
         window.label(),
-        &[PlanIntent::Connect, PlanIntent::Disconnect],
-        runtime.as_ref(),
+        || state.refresh_scan(),
     )?;
     crate::desktop_shell::update_agent_menu(&app);
     Ok(outcome)
+}
+
+fn apply_agent_plan_with_scan(
+    state: &AgentCommandState,
+    app_state: &AppStateManaged,
+    operation_id: &str,
+    confirmation_token: &str,
+    session_label: &str,
+    scan: impl FnOnce() -> Result<(), AgentCommandError>,
+) -> Result<TransactionOutcome, AgentCommandError> {
+    let intent = state.plan_intent(operation_id)?;
+    scan()?;
+    // Keep lifecycle replacement and stop outside the commit. Agent session and
+    // filesystem locks never acquire App state in the opposite direction.
+    let inner = app_state.0.lock().map_err(|_| {
+        AgentCommandError::boundary("app_state_poisoned", "App state is unavailable.")
+    })?;
+    let runtime = if intent == PlanIntent::Connect {
+        if !matches!(inner.server, crate::ServerLifecycle::Running { .. }) {
+            return Err(AgentCommandError::boundary(
+                "proxy_runtime_changed",
+                "Wait for the proxy transition to finish, then preview again.",
+            ));
+        }
+        Some(runtime_from_inner(&inner)?)
+    } else {
+        None
+    };
+    state.apply_from_cached_scan(
+        operation_id,
+        confirmation_token,
+        session_label,
+        &[PlanIntent::Connect, PlanIntent::Disconnect],
+        runtime.as_ref(),
+    )
 }
 
 #[tauri::command(async)]
@@ -2862,6 +3090,19 @@ pub(crate) fn plan_agent_disconnect(
 ) -> Result<ConfigPlanView, AgentCommandError> {
     state.refresh_scan()?;
     state.plan_disconnect(&agent_id, &installation_path, window.label())
+}
+
+/// Plan baseline restoration after the user explicitly confirms managed-field drift.
+/// The issued one-shot plan binds the current full revisions of every target file.
+#[tauri::command(async)]
+pub(crate) fn plan_agent_forced_disconnect(
+    state: State<'_, AgentCommandState>,
+    window: WebviewWindow,
+    agent_id: String,
+    installation_path: String,
+) -> Result<ConfigPlanView, AgentCommandError> {
+    state.refresh_scan()?;
+    state.plan_disconnect_with_owned_drift(&agent_id, &installation_path, window.label(), true)
 }
 
 /// Force-disconnect fallback: remove managed fields and ownership when a lost key blocks normal snapshot restoration.
@@ -2947,7 +3188,7 @@ mod tests {
             ("gemini-cli-v1", DocumentFormat::Dotenv, ""),
             ("grok-build-v1", DocumentFormat::Toml, ""),
             ("kimi-code-v1", DocumentFormat::Toml, ""),
-            ("deepseek-harness-v1", DocumentFormat::Yaml, "{}\n"),
+            ("deepseek-harness-v1", DocumentFormat::CordisYaml, "[]\n"),
             ("hermes-v1", DocumentFormat::Yaml, "model:\n"),
             (
                 "openclaw-v1",
@@ -3130,6 +3371,7 @@ mod tests {
             target,
             &source,
             &ConnectInput {
+                browser_search_enabled: false,
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
@@ -3185,6 +3427,182 @@ mod tests {
         assert_eq!(selected.canonical_path, conflicted.canonical_path);
         assert_eq!(decision.status, CompatibilityStatus::DetectedVerified);
         assert_eq!(decision.connector_id.as_deref(), Some("claude-code-v1"));
+    }
+
+    #[test]
+    fn harness_hot_apply_updates_managed_limits_and_rolls_back_failed_saves() {
+        use tauri::Manager;
+        let root = scratch("harness-hot-apply");
+        let path = root.join("token-station.json");
+        let plugins = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins-dist");
+        let mut draft = crate::template(&root.join("data"), &plugins);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["data"]["metrics"] = json!(false);
+        draft["plugins"]["agents"] = json!(["agent-openai"]);
+        draft["routing"] =
+            json!({"mode":"direct","direct_target":{"upstream":"large","model":"model"}});
+        for (name, context) in [("large", 200_000), ("small", 32_000)] {
+            draft["upstreams"][name] = json!({"provider":"openai-compatible","base_url":"https://example.test/v1",
+                "models":[{"model":"model","context_window":context,"max_output_tokens":8_000,"tool":true}]});
+        }
+        draft["agent_routes"]["opencode"] = json!({"mode":"inherit","harness_model_mapping_enabled":false,
+            "harness_model_routes":{"fast":{"upstream":"small","model":"model"}}});
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+        config.save(&path).unwrap();
+        let running = crate::serve_lifecycle::prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(7, BTreeMap::new())
+            .unwrap();
+        let mut inner = crate::AppInner::new(path.clone(), draft, None);
+        inner.server = crate::ServerLifecycle::Running {
+            generation: 1,
+            server: running,
+            apply_error: None,
+        };
+        let app = tauri::test::mock_app();
+        app.manage(AppStateManaged(Mutex::new(inner)));
+        let commands = state("harness-hot-managed");
+        let case = non_codex_lifecycle_cases(&root)
+            .into_iter()
+            .find(|case| case.agent_id == "opencode")
+            .unwrap();
+        seed_lifecycle_case(&case);
+        let catalog = CompatibilityCatalog::builtin(&commands.registry).unwrap();
+        install_scan(&commands, catalog, vec![lifecycle_record(&case)]);
+        *commands.scan_override.lock().unwrap() = commands.session.lock().unwrap().scan.clone();
+        let runtime = runtime_from_app(app.state::<AppStateManaged>().inner()).unwrap();
+        apply_lifecycle_connection(&commands, &case, &runtime, "main");
+        let commands_root = commands.paths.snapshot_root.parent().unwrap().to_path_buf();
+        app.manage(commands);
+        let context = || {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&case.primary.path).unwrap()).unwrap();
+            value["provider"]["tokenstation"]["models"]["fast"]["limit"]["context"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(context(), 200_000);
+        crate::set_agent_harness_model_mapping_enabled(app.state(), "opencode".into(), true)
+            .unwrap();
+        let backup = path.with_extension("before-test");
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            crate::restart_agent_harness_routes(app.state(), app.state(), "opencode".into())
+                .is_err()
+        );
+        assert_eq!(
+            context(),
+            200_000,
+            "A failed save restores the old managed contract"
+        );
+        assert!(
+            crate::get_state(app.state()).agent_routes["opencode"].harness_model_mapping_enabled
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&backup, &path).unwrap();
+        assert!(
+            !token_station_cli::config::ClientConfig::load(&path)
+                .unwrap()
+                .agent_routes["opencode"]
+                .harness_model_mapping_enabled
+        );
+        // Pending capability edits must not relax limits on the existing runtime.
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            inner.draft["upstreams"]["small"]["models"][0]["context_window"] = json!(64_000);
+            inner.observe_draft().unwrap();
+        }
+        for (enabled, expected) in [(true, 32_000), (false, 200_000), (true, 32_000)] {
+            crate::set_agent_harness_model_mapping_enabled(app.state(), "opencode".into(), enabled)
+                .unwrap();
+            crate::restart_agent_harness_routes(app.state(), app.state(), "opencode".into())
+                .unwrap();
+            assert_eq!(context(), expected);
+            let runtime = runtime_from_app(app.state::<AppStateManaged>().inner()).unwrap();
+            assert_eq!(
+                u64::from(runtime.model_metadata("opencode").unwrap().context),
+                expected
+            );
+        }
+        let state = app.state::<AppStateManaged>();
+        let old = std::mem::replace(
+            &mut state.0.lock().unwrap().server,
+            crate::ServerLifecycle::Stopped { generation: 2 },
+        );
+        if let crate::ServerLifecycle::Running { server, .. } = old {
+            server.drain_and_shutdown();
+        }
+        let saved = token_station_cli::config::ClientConfig::load(&path).unwrap();
+        let running = crate::serve_lifecycle::prepare_server(saved)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(8, BTreeMap::new())
+            .unwrap();
+        state.0.lock().unwrap().server = crate::ServerLifecycle::Running {
+            generation: 3,
+            server: running,
+            apply_error: None,
+        };
+        assert_eq!(
+            runtime_from_app(&state)
+                .unwrap()
+                .model_metadata("opencode")
+                .unwrap()
+                .context,
+            64_000
+        );
+        let old = std::mem::replace(
+            &mut state.0.lock().unwrap().server,
+            crate::ServerLifecycle::Stopped { generation: 4 },
+        );
+        if let crate::ServerLifecycle::Running { server, .. } = old {
+            server.drain_and_shutdown();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(commands_root).unwrap();
+    }
+
+    #[test]
+    fn harness_projection_bounds_the_actual_opencode_connector_patch() {
+        let root = scratch("harness-connector-limits");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"] =
+            json!({"mode":"direct","direct_target":{"upstream":"large","model":"model"}});
+        for (name, context) in [("large", 200_000), ("small", 32_000)] {
+            draft["upstreams"][name] = json!({"provider":"openai-compatible","base_url":"https://example.test/v1",
+                "models":[{"model":"model","context_window":context,"max_output_tokens":8_000,"tool":true}]});
+        }
+        draft["agent_routes"]["opencode"] = json!({"mode":"inherit","harness_model_mapping_enabled":true,
+            "harness_model_routes":{"fast":{"upstream":"small","model":"model"}}});
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+        config.validate().unwrap();
+        let metadata = model_metadata_for_config(&config, "opencode")
+            .unwrap()
+            .unwrap();
+        let patch = connector_for("opencode-v1")
+            .unwrap()
+            .connect_patch(&ConnectInput {
+                browser_search_enabled: false,
+                base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+                token: Some("fixture-token"),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            })
+            .unwrap();
+        for id in ["auto", "fast", "balanced", "power"] {
+            assert_eq!(
+                patch[0].value.as_ref().unwrap()["models"][id]["limit"]["context"],
+                json!(32_000)
+            );
+        }
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -4031,6 +4449,317 @@ mod tests {
         }
     }
 
+    #[test]
+    fn claude_installation_change_retains_snapshot_backed_recovery() {
+        let state = state("claude-installation-recovery");
+        let root = scratch("claude-installation-recovery-files");
+        let case = non_codex_lifecycle_cases(&root)
+            .into_iter()
+            .find(|case| case.agent_id == "claude-code")
+            .unwrap();
+        seed_lifecycle_case(&case);
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        let proxy = runtime("vk-recovery");
+        install_scan(&state, catalog.clone(), vec![lifecycle_record(&case)]);
+        apply_lifecycle_connection(&state, &case, &proxy, "main");
+        let managed = std::fs::read(&case.primary.path).unwrap();
+        let index = std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap();
+        let mut next = lifecycle_record(&case);
+        next.canonical_path = root
+            .join("install/native/2.1.294")
+            .to_string_lossy()
+            .into_owned();
+        next.executable_path = next.canonical_path.clone();
+        let next_path = next.canonical_path.clone();
+        *state.scan_override.lock().unwrap() = Some(ScanSnapshot {
+            catalog: catalog.clone(),
+            source: CatalogSource::Builtin,
+            warning: None,
+            records: vec![next.clone()],
+        });
+        let scan = || {
+            Ok(ScanSnapshot {
+                catalog: catalog.clone(),
+                source: CatalogSource::Builtin,
+                warning: None,
+                records: vec![next.clone()],
+            })
+        };
+        let views = state.scan_with(Some(&proxy), None, scan).unwrap();
+        let claude = views
+            .iter()
+            .find(|view| view.metadata.agent_id == "claude-code")
+            .unwrap();
+        let recovery = claude
+            .installations
+            .iter()
+            .find(|view| view.discovery.canonical_path == case.installation_path)
+            .expect("the old managed installation must remain selectable for recovery");
+        assert!(recovery.managed);
+        assert!(!recovery.connected);
+        assert!(!recovery.discovery.runnable);
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), managed);
+        assert_eq!(
+            std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap(),
+            index
+        );
+        assert!(state
+            .plan_connection(case.agent_id, &case.installation_path, None, "main", &proxy)
+            .is_err());
+        let conflict = state
+            .plan_connection(
+                case.agent_id,
+                &next_path,
+                Some(case.version),
+                "main",
+                &proxy,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(conflict.code, "configuration_owned_by_other_installation");
+        let plan = state
+            .plan_disconnect(case.agent_id, &case.installation_path, "main")
+            .unwrap();
+        state
+            .apply(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored = parse_source_bytes(
+            Some(&std::fs::read(&case.primary.path).unwrap()),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
+        let original = parse_source_bytes(
+            Some(case.primary.baseline),
+            DocumentFormat::Json,
+            "Claude Code",
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_json(&restored).unwrap(),
+            semantic_json(&original).unwrap()
+        );
+        let views = state.scan_with(Some(&proxy), None, scan).unwrap();
+        let claude = views
+            .iter()
+            .find(|view| view.metadata.agent_id == "claude-code")
+            .unwrap();
+        assert_eq!(claude.installations.len(), 1);
+        let plan = state
+            .plan_connection(
+                case.agent_id,
+                &next_path,
+                Some(case.version),
+                "main",
+                &proxy,
+            )
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&proxy),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .ownership
+                .list_agent_installation(case.agent_id, &next_path)
+                .unwrap()
+                .len(),
+            1
+        );
+        clean_lifecycle_case(&state, &root);
+    }
+
+    #[test]
+    fn claude_recovery_rejects_drift_and_stale_discovery_or_ownership() {
+        for scenario in ["drift", "rediscovered", "revision"] {
+            let state = state(scenario);
+            let root = scratch(scenario);
+            let case = non_codex_lifecycle_cases(&root)
+                .into_iter()
+                .find(|case| case.agent_id == "claude-code")
+                .unwrap();
+            seed_lifecycle_case(&case);
+            let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+            let proxy = runtime("vk-recovery-guards");
+            install_scan(&state, catalog.clone(), vec![lifecycle_record(&case)]);
+            apply_lifecycle_connection(&state, &case, &proxy, "main");
+            let snapshot = ScanSnapshot {
+                catalog: catalog.clone(),
+                source: CatalogSource::Builtin,
+                warning: None,
+                records: vec![],
+            };
+            *state.scan_override.lock().unwrap() = Some(snapshot.clone());
+            let views = state
+                .scan_with(Some(&proxy), None, || Ok(snapshot))
+                .unwrap();
+            let claude = views
+                .iter()
+                .find(|view| view.metadata.agent_id == "claude-code")
+                .unwrap();
+            assert_eq!(claude.installations.len(), 1);
+            assert!(!claude.installations[0].connected);
+            if scenario == "drift" {
+                let mut document: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&case.primary.path).unwrap()).unwrap();
+                document["modelPicker"]["options"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"model":"user-added-after-connection"}));
+                std::fs::write(&case.primary.path, serde_json::to_vec(&document).unwrap()).unwrap();
+                let before = std::fs::read(&case.primary.path).unwrap();
+                let error = state
+                    .plan_disconnect(case.agent_id, &case.installation_path, "main")
+                    .err()
+                    .unwrap();
+                assert_eq!(error.code, OWNED_VALUES_CHANGED);
+                assert_eq!(std::fs::read(&case.primary.path).unwrap(), before);
+            } else {
+                let plan = state
+                    .plan_disconnect(case.agent_id, &case.installation_path, "main")
+                    .unwrap();
+                let before = std::fs::read(&case.primary.path).unwrap();
+                if scenario == "rediscovered" {
+                    state
+                        .scan_override
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .records = vec![lifecycle_record(&case)];
+                } else {
+                    let owned = state
+                        .ownership
+                        .list_agent_installation(case.agent_id, &case.installation_path)
+                        .unwrap()
+                        .remove(0);
+                    let revision = owned.revision;
+                    state.ownership.commit(owned, Some(revision)).unwrap();
+                }
+                assert!(state
+                    .apply(
+                        &plan.plan.operation_id,
+                        &plan.confirmation_token,
+                        "main",
+                        &[PlanIntent::Disconnect],
+                        None
+                    )
+                    .is_err());
+                assert_eq!(std::fs::read(&case.primary.path).unwrap(), before);
+            }
+            assert_eq!(
+                state
+                    .ownership
+                    .list_agent_installation(case.agent_id, &case.installation_path)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            clean_lifecycle_case(&state, &root);
+        }
+    }
+
+    #[test]
+    fn delayed_claude_connection_cannot_add_a_second_owner_after_baseline_restore() {
+        let state = state("delayed-claude-owner");
+        let root = scratch("delayed-claude-owner-files");
+        let case = non_codex_lifecycle_cases(&root)
+            .into_iter()
+            .find(|case| case.agent_id == "claude-code")
+            .unwrap();
+        seed_lifecycle_case(&case);
+        let baseline = render_document(
+            &parse_rendered(
+                r#"{"env":{},"unowned":"keep"}"#,
+                DocumentFormat::Json,
+                "Claude Code",
+            )
+            .unwrap(),
+            "Claude Code",
+        )
+        .unwrap();
+        super::super::safe_fs::write_atomic_private(&case.primary.path, baseline.as_bytes())
+            .unwrap();
+        let mut second = lifecycle_record(&case);
+        second.canonical_path = root
+            .join("install/second-claude")
+            .to_string_lossy()
+            .into_owned();
+        second.executable_path = second.canonical_path.clone();
+        let second_path = second.canonical_path.clone();
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![lifecycle_record(&case), second]);
+        let proxy = runtime("vk-delayed-owner");
+        let delayed = state
+            .plan_connection(
+                case.agent_id,
+                &second_path,
+                Some(case.version),
+                "main",
+                &proxy,
+            )
+            .unwrap();
+        apply_lifecycle_connection(&state, &case, &proxy, "main");
+        let owner = state
+            .ownership
+            .list_agent_installation(case.agent_id, &case.installation_path)
+            .unwrap()
+            .remove(0);
+        let restore = state
+            .plan_restore(&owner.baseline_snapshot_id, "main")
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &restore.plan.operation_id,
+                &restore.confirmation_token,
+                "main",
+                &[PlanIntent::Restore],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&case.primary.path).unwrap(),
+            baseline.as_bytes()
+        );
+        let index = std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap();
+        let failure = state
+            .apply_from_cached_scan(
+                &delayed.plan.operation_id,
+                &delayed.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&proxy),
+            )
+            .expect_err("a delayed plan must not create a second configuration owner");
+        assert_eq!(failure.code, "ownership_commit_failed");
+        assert_eq!(failure.recovery, Some(RecoveryStatus::Restored));
+        assert_eq!(
+            std::fs::read(&case.primary.path).unwrap(),
+            baseline.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(state.paths.ownership_root.join("ownership-index.json")).unwrap(),
+            index
+        );
+        assert!(state
+            .ownership
+            .list_agent_installation(case.agent_id, &second_path)
+            .unwrap()
+            .is_empty());
+        clean_lifecycle_case(&state, &root);
+    }
+
     // Only these three tests use it, and they are off under this feature.
     #[cfg(not(feature = "bundled-plugins"))]
     fn running_app_with_adapters(
@@ -4822,6 +5551,132 @@ mod tests {
         assert_eq!(boundary.code, "write_failed");
         assert_eq!(boundary.stage, Some(TransactionStage::TargetWrite));
         assert_eq!(boundary.recovery, Some(RecoveryStatus::RepairRequired));
+    }
+
+    #[cfg(not(feature = "bundled-plugins"))]
+    #[test]
+    fn connection_commit_rechecks_runtime_after_scan_stops_the_proxy() {
+        use tauri::Manager;
+        let (root, app_state) =
+            running_app_with_adapters("scan-stop-race", &["agent-anthropic"], &["agent-anthropic"]);
+        let state = state("scan-stop-race-plans");
+        let target = root.join("home/.claude/settings.json");
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![record(&target, false)]);
+        let old_runtime = runtime_from_app(&app_state).unwrap();
+        let plan = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &old_runtime,
+            )
+            .unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let managed = app.state::<AppStateManaged>();
+        let result = apply_agent_plan_with_scan(
+            &state,
+            &managed,
+            &plan.plan.operation_id,
+            &plan.confirmation_token,
+            "main",
+            || {
+                crate::begin_serve_stop(app.handle().clone(), &managed);
+                Ok(())
+            },
+        );
+        let wrote_target = target.exists();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while managed.0.lock().unwrap().serve_view().phase == crate::ServePhase::Stopping
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(state.paths.snapshot_root.parent().unwrap()).ok();
+        assert!(
+            result.is_err(),
+            "A stop during scan must reject the connection commit"
+        );
+        assert!(
+            !wrote_target,
+            "Rejected connection must not modify the Agent config"
+        );
+    }
+
+    #[cfg(not(feature = "bundled-plugins"))]
+    #[test]
+    fn connection_commit_rejects_an_applying_runtime() {
+        let (root, app_state) = running_app_with_adapters(
+            "scan-apply-race",
+            &["agent-anthropic"],
+            &["agent-anthropic"],
+        );
+        let state = state("scan-apply-race-plans");
+        let target = root.join("home/.claude/settings.json");
+        install_scan(
+            &state,
+            CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            vec![record(&target, false)],
+        );
+        let runtime = runtime_from_app(&app_state).unwrap();
+        let plan = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &runtime,
+            )
+            .unwrap();
+        let result = apply_agent_plan_with_scan(
+            &state,
+            &app_state,
+            &plan.plan.operation_id,
+            &plan.confirmation_token,
+            "main",
+            || {
+                let mut inner = app_state.0.lock().unwrap();
+                let previous = std::mem::replace(
+                    &mut inner.server,
+                    crate::ServerLifecycle::Stopped { generation: 2 },
+                );
+                let crate::ServerLifecycle::Running { server, .. } = previous else {
+                    unreachable!()
+                };
+                inner.server = crate::ServerLifecycle::Applying {
+                    generation: 2,
+                    revision: 8,
+                    old: server,
+                };
+                Ok(())
+            },
+        );
+        let wrote = target.exists();
+        stop_running_app(&app_state);
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(state.paths.snapshot_root.parent().unwrap()).ok();
+        assert!(result.is_err(), "Applying exposes its old listener only for serving existing traffic, not for new Agent writes");
+        assert!(!wrote);
+    }
+
+    #[test]
+    fn search_setting_and_route_revision_invalidate_connection_plans() {
+        let mut runtime = runtime("vk-search-fixture");
+        let initial = runtime.fingerprint();
+        runtime.browser_search_enabled = true;
+        assert_ne!(initial, runtime.fingerprint());
+        assert!(
+            runtime
+                .input_for("codex-v1")
+                .unwrap()
+                .browser_search_enabled
+        );
+        let enabled = runtime.fingerprint();
+        runtime.running_revision += 1;
+        assert_ne!(enabled, runtime.fingerprint());
     }
 
     #[test]
@@ -5955,18 +6810,156 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_harness_connects_from_stock_settings_without_a_credentials_file() {
+    fn deepseek_legacy_settings_snapshot_remains_disconnectable_after_path_change() {
+        use crate::agent_integration::ownership::{compute_owned_value_macs, OwnershipRecord};
+        use crate::agent_integration::plan::file_revision_hash;
+        use crate::agent_integration::snapshot::SnapshotRequest;
+        let root = scratch("dsh-legacy-recovery");
+        let state = state("dsh-legacy-recovery");
+        let target = root.join(".dsh/settings.yaml");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"keep: original\n").unwrap();
+        let baseline = read_config_source(&target).unwrap();
+        let before_hash = file_revision_hash(&target, &baseline).unwrap();
+        let snapshot = state
+            .snapshots
+            .create(SnapshotRequest {
+                operation_id: &"12".repeat(16),
+                agent_id: "deepseek-harness",
+                target_config_path: target.to_str().unwrap(),
+                before_hash: before_hash.clone(),
+                source: &baseline,
+                created_at_ms: 1,
+                connector_id: "deepseek-harness-v1",
+                app_version: "2.1.3",
+                pinned: true,
+            })
+            .unwrap()
+            .record;
+        std::fs::write(&target,b"keep: original\nagent-default-model: {provider: tokenstation, model: auto}\nllm-pi-ai:\n  providers:\n    tokenstation: {api: openai-completions}\n").unwrap();
+        let current = read_config_source(&target).unwrap();
+        let document =
+            parse_source_bytes(Some(&current.exact_bytes), DocumentFormat::Yaml, "legacy").unwrap();
+        let connector = connector_for("deepseek-harness-v1").unwrap();
+        let paths = connector.legacy_owned_paths();
+        let key = state.keys.load().unwrap();
+        state
+            .ownership
+            .commit(
+                OwnershipRecord {
+                    schema_version: 1,
+                    revision: 0,
+                    agent_id: "deepseek-harness".into(),
+                    installation_path: "/opt/dsh".into(),
+                    target_config_path: target.to_string_lossy().into_owned(),
+                    connector_id: connector.connector_id().into(),
+                    baseline_snapshot_id: snapshot.snapshot_id.clone(),
+                    last_transaction_snapshot_id: snapshot.snapshot_id,
+                    before_hash,
+                    managed_after_hash: file_revision_hash(&target, &current).unwrap(),
+                    owned_value_macs: compute_owned_value_macs(&document, &paths, &key).unwrap(),
+                    owned_paths: paths,
+                    companion_files: vec![],
+                    acquired_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+        let mut discovered = record(&target.with_file_name("cordis.patch.yml"), false);
+        discovered.agent_id = "deepseek-harness".into();
+        discovered.canonical_path = "/opt/dsh".into();
+        discovered.executable_path = "/opt/dsh".into();
+        discovered.version_normalized = Some("0.2.0-rc.2".into());
+        install_scan(
+            &state,
+            CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            vec![discovered],
+        );
+        assert!(state
+            .plan_connection(
+                "deepseek-harness",
+                "/opt/dsh",
+                Some("0.2.0-rc.2"),
+                "legacy",
+                &runtime("vk-fixture")
+            )
+            .is_err());
+        let mut moved = record(&target.with_file_name("cordis.patch.yml"), false);
+        moved.agent_id = "deepseek-harness".into();
+        moved.canonical_path = "/opt/dsh-upgraded".into();
+        moved.executable_path = "/opt/dsh-upgraded".into();
+        moved.version_normalized = Some("0.2.0-rc.2".into());
+        let snapshot = state.with_managed_recovery_records(ScanSnapshot {
+            catalog: CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            source: CatalogSource::Builtin,
+            warning: None,
+            records: vec![moved],
+        });
+        assert!(snapshot
+            .records
+            .iter()
+            .any(|r| r.canonical_path == "/opt/dsh" && !r.runnable));
+        install_scan(&state, snapshot.catalog, snapshot.records);
+        let denied = state
+            .plan_connection(
+                "deepseek-harness",
+                "/opt/dsh-upgraded",
+                Some("0.2.0-rc.2"),
+                "legacy-new",
+                &runtime("vk-fixture"),
+            )
+            .err()
+            .expect("the previous credentials owner must block connection");
+        assert_eq!(denied.code, "configuration_owned_by_other_installation");
+        let plan = state
+            .plan_disconnect("deepseek-harness", "/opt/dsh", "legacy")
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "legacy",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored = parse_source_bytes(
+            Some(&std::fs::read(&target).unwrap()),
+            DocumentFormat::Yaml,
+            "restored",
+        )
+        .unwrap();
+        let restored = semantic_json(&restored).unwrap();
+        assert_eq!(restored["keep"], "original");
+        for path in connector.legacy_owned_paths() {
+            assert!(
+                crate::agent_integration::config_codec::semantic_value_at(&restored, &path)
+                    .is_none()
+            );
+        }
+        assert!(state
+            .ownership
+            .list_agent("deepseek-harness")
+            .unwrap()
+            .is_empty());
+        assert!(!target.with_file_name("cordis.patch.yml").exists());
+        clean_lifecycle_case(&state, &root);
+    }
+
+    #[test]
+    fn deepseek_harness_connects_to_cordis_overlay_without_a_credentials_file() {
         let root = scratch("dsh-stock");
         let case = LifecycleCase {
             label: "deepseek-harness",
             agent_id: "deepseek-harness",
             connector_id: "deepseek-harness-v1",
-            version: "0.1.0-rc.6",
+            version: "0.2.0-rc.2",
             installation_path: root.join("install/dsh").to_string_lossy().into_owned(),
             primary: LifecycleFileFixture {
-                path: root.join("home/.dsh/settings.yaml"),
-                baseline: b"ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\n",
-                format: DocumentFormat::Yaml,
+                path: root.join("home/.dsh/cordis.patch.yml"),
+                baseline: b"# keep settings independent\n- id: ui-onboarding\n  config: {welcomeNoticeVersion: 2026-08-13.1}\n",
+                format: DocumentFormat::CordisYaml,
                 marker: "welcomeNoticeVersion",
             },
             companions: vec![LifecycleFileFixture {
@@ -6056,6 +7049,45 @@ mod tests {
             );
         }
 
+        // Concurrent unowned edits invalidate the exact preview before either file is written.
+        let mut changed = std::fs::read_to_string(&case.primary.path).unwrap();
+        changed.push_str("# concurrent user comment\n");
+        std::fs::write(&case.primary.path, &changed).unwrap();
+        assert!(state
+            .apply_from_cached_scan(
+                &disconnect.plan.operation_id,
+                &disconnect.confirmation_token,
+                "dsh-disconnect-review",
+                &[PlanIntent::Disconnect],
+                None
+            )
+            .is_err());
+        assert!(std::fs::read_to_string(&case.companions[0].path)
+            .unwrap()
+            .contains(fixture_runtime.virtual_key()));
+        let fresh = state
+            .plan_disconnect(case.agent_id, &case.installation_path, "dsh-fresh")
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &fresh.plan.operation_id,
+                &fresh.confirmation_token,
+                "dsh-fresh",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored = std::fs::read_to_string(&case.primary.path).unwrap();
+        assert!(restored.contains("# concurrent user comment"));
+        let restored = semantic_json(
+            &parse_rendered(&restored, DocumentFormat::CordisYaml, "restored").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored,
+            json!([{"id":"ui-onboarding","config":{"welcomeNoticeVersion":"2026-08-13.1"}}])
+        );
+        assert!(!case.companions[0].path.exists());
         clean_lifecycle_case(&state, &root);
     }
 
@@ -6421,6 +7453,300 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
         std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn scx_grok_handoff_restores_the_stable_gateway_without_changing_its_ownership() {
+        let root = scratch("scx-grok-handoff");
+        let case = LifecycleCase {
+            label: "grok-build",
+            agent_id: "grok-build",
+            connector_id: "grok-build-v1",
+            version: "1.0.4",
+            installation_path: root.join("install/grok").to_string_lossy().into_owned(),
+            primary: LifecycleFileFixture {
+                path: root.join("home/.grok/config.toml"),
+                baseline: b"# Preserve the existing client settings.\nkeep = 'grok-user-setting'\n",
+                format: DocumentFormat::Toml,
+                marker: "grok-user-setting",
+            },
+            companions: Vec::new(),
+        };
+        seed_lifecycle_case(&case);
+        let stable = state("scx-grok-stable-store");
+        let experiment = state("scx-grok-experiment-store");
+        for command_state in [&stable, &experiment] {
+            let catalog = CompatibilityCatalog::builtin(&command_state.registry).unwrap();
+            install_scan(command_state, catalog, vec![lifecycle_record(&case)]);
+        }
+        assert_ne!(stable.paths.snapshot_root, experiment.paths.snapshot_root);
+        assert_ne!(stable.paths.ownership_root, experiment.paths.ownership_root);
+
+        let stable_runtime = runtime("vk-grok-stable-fixture");
+        apply_lifecycle_connection(&stable, &case, &stable_runtime, "stable-main");
+        let stable_bytes = std::fs::read(&case.primary.path).unwrap();
+        let stable_document =
+            parse_source_bytes(Some(&stable_bytes), case.primary.format, case.label).unwrap();
+        let mut expected_restored = semantic_json(&stable_document).unwrap();
+        let stable_ownership_path = stable.paths.ownership_root.join("ownership-index.json");
+        let stable_snapshot_index_path = stable.paths.snapshot_root.join("index.json");
+        let stable_ownership_bytes = std::fs::read(&stable_ownership_path).unwrap();
+        let stable_snapshot_index_bytes = std::fs::read(&stable_snapshot_index_path).unwrap();
+        let stale_stable_disconnect = stable
+            .plan_disconnect(case.agent_id, &case.installation_path, "stable-main")
+            .unwrap();
+
+        let experiment_runtime = AgentProxyRuntime::new(
+            "scx-fixture-runtime".to_string(),
+            "http://127.0.0.1:18787",
+            "vk-grok-scx-fixture".to_string(),
+            builtin_connectors()
+                .iter()
+                .map(|connector| (connector.capabilities().adapter_id.to_string(), true))
+                .collect(),
+            stable_runtime.model_metadata.clone(),
+            BTreeMap::new(),
+        );
+        let connection = experiment
+            .plan_connection(
+                case.agent_id,
+                &case.installation_path,
+                Some(case.version),
+                "scx-main",
+                &experiment_runtime,
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), stable_bytes);
+        assert!(experiment
+            .snapshots
+            .list_agent(case.agent_id)
+            .unwrap()
+            .is_empty());
+        assert_lifecycle_ownership(&experiment, &case, 0);
+        assert!(serde_json::to_string(&connection.plan)
+            .unwrap()
+            .contains("http://127.0.0.1:18787/agents/grok-build/v1"));
+        experiment
+            .apply_from_cached_scan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "scx-main",
+                &[PlanIntent::Connect],
+                Some(&experiment_runtime),
+            )
+            .unwrap();
+        assert!(experiment.any_connected_to(&experiment_runtime).unwrap());
+        assert!(!stable.any_connected_to(&stable_runtime).unwrap());
+        assert_lifecycle_ownership(&stable, &case, 1);
+        assert_lifecycle_ownership(&experiment, &case, 1);
+        let connected_bytes = std::fs::read(&case.primary.path).unwrap();
+        let connected_text = String::from_utf8_lossy(&connected_bytes);
+        assert!(connected_text.contains("http://127.0.0.1:18787/agents/grok-build/v1"));
+        assert!(connected_text.contains(experiment_runtime.virtual_key()));
+        assert!(!connected_text.contains(stable_runtime.virtual_key()));
+        assert!(connected_text.contains(case.primary.marker));
+
+        let experiment_ownership = experiment
+            .ownership
+            .list_agent_installation(case.agent_id, &case.installation_path)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let baseline = experiment
+            .snapshots
+            .load(&experiment_ownership.baseline_snapshot_id)
+            .unwrap();
+        assert_eq!(baseline.exact_bytes.as_slice(), stable_bytes.as_slice());
+        assert!(baseline.record.pinned);
+        assert!(stable
+            .snapshots
+            .load(&experiment_ownership.baseline_snapshot_id)
+            .is_err());
+
+        // A stale stable-App confirmation and a new stable-App disconnect
+        // must both fail without replacing the experiment's connection.
+        let stale_error = stable
+            .apply_from_cached_scan(
+                &stale_stable_disconnect.plan.operation_id,
+                &stale_stable_disconnect.confirmation_token,
+                "stable-main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(stale_error.code, "before_hash_changed");
+        let drift_error = stable
+            .plan_disconnect(case.agent_id, &case.installation_path, "stable-main")
+            .err()
+            .expect("the stable App must reject the experiment's managed values");
+        assert_eq!(drift_error.code, OWNED_VALUES_CHANGED);
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), connected_bytes);
+
+        let restore_preview = experiment
+            .plan_restore(&baseline.record.snapshot_id, "scx-main")
+            .unwrap();
+        assert_eq!(restore_preview.plan.intent, PlanIntent::Restore);
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), connected_bytes);
+        experiment
+            .discard_plan(
+                &restore_preview.plan.operation_id,
+                &restore_preview.confirmation_token,
+                "scx-main",
+            )
+            .unwrap();
+
+        let mut with_user_change = connected_bytes.clone();
+        with_user_change.extend_from_slice(b"\n[user_experiment_note]\nkeep = true\n");
+        std::fs::write(&case.primary.path, &with_user_change).unwrap();
+        let disconnect = experiment
+            .plan_disconnect(case.agent_id, &case.installation_path, "scx-main")
+            .unwrap();
+        assert_eq!(std::fs::read(&case.primary.path).unwrap(), with_user_change);
+        experiment
+            .apply_from_cached_scan(
+                &disconnect.plan.operation_id,
+                &disconnect.confirmation_token,
+                "scx-main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+
+        let restored_bytes = std::fs::read(&case.primary.path).unwrap();
+        let restored_document =
+            parse_source_bytes(Some(&restored_bytes), case.primary.format, case.label).unwrap();
+        expected_restored["user_experiment_note"] = json!({"keep": true});
+        assert_eq!(
+            semantic_json(&restored_document).unwrap(),
+            expected_restored
+        );
+        let restored_text = String::from_utf8_lossy(&restored_bytes);
+        assert!(restored_text.contains("http://127.0.0.1:8787/agents/grok-build/v1"));
+        assert!(restored_text.contains(stable_runtime.virtual_key()));
+        assert!(!restored_text.contains(experiment_runtime.virtual_key()));
+        assert!(stable.any_connected_to(&stable_runtime).unwrap());
+        assert!(!experiment.any_connected_to(&experiment_runtime).unwrap());
+        assert_lifecycle_ownership(&stable, &case, 1);
+        assert_lifecycle_ownership(&experiment, &case, 0);
+        assert!(experiment
+            .snapshots
+            .list_agent(case.agent_id)
+            .unwrap()
+            .iter()
+            .all(|snapshot| !snapshot.pinned));
+        assert_eq!(
+            std::fs::read(stable_ownership_path).unwrap(),
+            stable_ownership_bytes
+        );
+        assert_eq!(
+            std::fs::read(stable_snapshot_index_path).unwrap(),
+            stable_snapshot_index_bytes
+        );
+        clean_lifecycle_case(&experiment, &root);
+        clean_lifecycle_case(&stable, &root);
+    }
+
+    #[test]
+    fn forced_disconnect_command_keeps_session_token_and_one_shot_guards() {
+        let state = state("forced-disconnect-command");
+        let root = scratch("forced-disconnect-command-target");
+        let target = root.join("settings.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&target, br#"{"unowned":"original"}"#).unwrap();
+        install_scan(
+            &state,
+            CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            vec![record(&target, false)],
+        );
+        let runtime = runtime("synthetic-forced-command-key");
+        let connection = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &runtime,
+            )
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&runtime),
+            )
+            .unwrap();
+        let mut edited: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        edited["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("manually-edited-key");
+        edited["unowned"] = json!("keep-user-edit");
+        std::fs::write(&target, serde_json::to_vec(&edited).unwrap()).unwrap();
+        assert_eq!(
+            state
+                .plan_disconnect("claude-code", "/opt/claude", "main")
+                .err()
+                .unwrap()
+                .code,
+            OWNED_VALUES_CHANGED
+        );
+        let forced = state
+            .plan_disconnect_with_owned_drift("claude-code", "/opt/claude", "main", true)
+            .unwrap();
+        assert!(!serde_json::to_string(&forced)
+            .unwrap()
+            .contains("allow_owned_drift"));
+        let before = std::fs::read(&target).unwrap();
+        let wrong_session = state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &forced.confirmation_token,
+                "other-window",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(wrong_session.code, "operation_session_or_intent_mismatch");
+        let wrong_token = state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &"00".repeat(CONFIRMATION_TOKEN_BYTES),
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(wrong_token.code, "confirmation_token_mismatch");
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &forced.confirmation_token,
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .unwrap();
+        let restored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(restored["unowned"], "keep-user-edit");
+        assert!(restored["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(state
+            .ownership
+            .list_agent_installation("claude-code", "/opt/claude")
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .apply_from_cached_scan(
+                &forced.plan.operation_id,
+                &forced.confirmation_token,
+                "main",
+                &[PlanIntent::Disconnect],
+                None,
+            )
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(state.paths.snapshot_root.parent().unwrap()).unwrap();
     }
 
     #[test]

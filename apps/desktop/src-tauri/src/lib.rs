@@ -15,6 +15,7 @@ mod config_state;
 mod cursor_tunnel;
 mod desktop_shell;
 pub mod desktop_update;
+mod experimental;
 mod free_provider_catalog;
 mod model_catalog;
 mod pricing_catalog;
@@ -22,9 +23,13 @@ mod provider_tombstones;
 mod recovery;
 mod serve_lifecycle;
 
+mod chatgpt_commands;
+mod codex_auto;
+mod codex_commands;
 mod config_draft;
 mod desktop_update_commands;
 mod dock_icon;
+mod jev_commands;
 #[cfg(test)]
 mod lib_tests;
 mod model_test;
@@ -34,9 +39,12 @@ mod provider_commands;
 mod provider_discovery;
 mod recovery_commands;
 mod routing_commands;
+mod search_commands;
 mod self_test;
+mod semantic_commands;
 mod serve_supervisor;
 mod stats_commands;
+mod subscription_commands;
 mod views;
 mod vision_probe;
 
@@ -75,7 +83,8 @@ use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, discard_agent_plan, force_forget_agent,
     get_agent_backup_directory, get_agent_drift, get_cached_agent_views, list_agent_registry,
     list_agent_snapshots, open_agent_backup_directory, plan_agent_connection,
-    plan_agent_disconnect, plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
+    plan_agent_disconnect, plan_agent_forced_disconnect, plan_snapshot_restore, runtime_from_app,
+    scan_agents, AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
@@ -179,6 +188,7 @@ struct AppInner {
     agent_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
     /// In-process Harness mapping edits commit with the matching Agent tier draft.
     agent_harness_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
+    agent_harness_enabled_drafts: BTreeMap<String, bool>,
     /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
     /// Free-provider verification sends real upstream requests; an in-memory single-flight set limits duplication and abuse.
@@ -312,6 +322,12 @@ pub fn run() {
                 app.path().app_config_dir()?,
                 app.path().app_data_dir()?,
             );
+            experimental::validate_identity(
+                &app.config().identifier,
+                &app.path().app_config_dir()?,
+                &app.path().app_data_dir()?,
+            )
+            .map_err(std::io::Error::other)?;
             desktop_paths.create_writable_dirs().map_err(|error| {
                 std::io::Error::other(format!(
                     "初始化桌面应用目录失败（配置：{}，数据：{}，插件：{}）：{error}",
@@ -326,6 +342,7 @@ pub fn run() {
             // Agent command state, so normal read/write IPC cannot be invoked
             // behind the recovery shell.
             app.manage(desktop_paths.clone());
+
             app.manage(DesktopUpdateOperation::default());
             desktop_shell::prepare_close_fallback(app.handle());
             if recovery::inspect_recovery_state(&desktop_paths.data_dir).mode == RecoveryMode::Safe
@@ -355,6 +372,8 @@ pub fn run() {
                 &desktop_paths.data_dir,
                 &desktop_paths.plugins_dir,
             );
+            experimental::validate_draft(&desktop_paths.config_file, &draft)
+                .map_err(std::io::Error::other)?;
             let mut inner = AppInner::new_with_saved(
                 desktop_paths.config_file.clone(),
                 draft,
@@ -382,6 +401,12 @@ pub fn run() {
                 eprintln!("历史未知成本回填失败：{error}");
             }
             let read_only = inner.load_error.is_some();
+            if let Some(classifier) = semantic_commands::start_controller(&inner) {
+                app.manage(classifier);
+            }
+            app.manage(token_station_cli::jev::JevController::shared(
+                &inner.data_dir(),
+            ));
             app.manage(AppStateManaged(Mutex::new(inner)));
             app.manage(ModelTestStreamState::default());
             if !read_only {
@@ -478,6 +503,37 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            subscription_commands::subscription_discover,
+            subscription_commands::subscription_accounts_list,
+            subscription_commands::subscription_models,
+            subscription_commands::subscription_disconnect,
+            subscription_commands::subscription_connect_provider,
+            codex_commands::codex_accounts_list,
+            codex_commands::codex_account_discover,
+            codex_commands::codex_account_models,
+            codex_commands::codex_account_disconnect,
+            codex_commands::codex_connect_provider,
+            codex_auto::codex_auto_connect_provider,
+            chatgpt_commands::chatgpt_accounts_list,
+            chatgpt_commands::chatgpt_login_start,
+            chatgpt_commands::chatgpt_login_status,
+            chatgpt_commands::chatgpt_login_cancel,
+            chatgpt_commands::chatgpt_models,
+            chatgpt_commands::chatgpt_sign_out,
+            chatgpt_commands::chatgpt_connect_provider,
+            search_commands::get_search_status,
+            search_commands::save_search_settings,
+            search_commands::save_search_api_key,
+            search_commands::test_browser_search,
+            jev_commands::get_jev_status,
+            jev_commands::save_jev_key,
+            jev_commands::clear_jev_key,
+            jev_commands::set_jev_enabled,
+            jev_commands::test_jev_connection,
+            semantic_commands::get_semantic_status,
+            semantic_commands::set_semantic_enabled,
+            semantic_commands::set_semantic_mode,
+            semantic_commands::prepare_semantic_model,
             get_pricing_inventory,
             set_price_sync_enabled,
             sync_model_prices,
@@ -495,6 +551,7 @@ pub fn run() {
             set_direct_route,
             set_quota_accounts,
             set_quota_plan,
+            set_quota_plan_full,
             get_quota_snapshot,
             edit_provider,
             edit_provider_with_credential,
@@ -542,6 +599,7 @@ pub fn run() {
             apply_agent_plan,
             discard_agent_plan,
             plan_agent_disconnect,
+            plan_agent_forced_disconnect,
             force_forget_agent,
             list_agent_snapshots,
             get_agent_drift,
@@ -574,6 +632,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
     app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(controller) =
+                app.try_state::<Arc<token_station_cli::semantic::SemanticController>>()
+            {
+                let _ = controller.set_mode(token_station_cli::semantic::Mode::Off);
+            }
+        }
         #[cfg(not(target_os = "macos"))]
         let _ = (app, &event);
         #[cfg(target_os = "macos")]

@@ -5,7 +5,7 @@
 
 **每个 AI Agent，共用一个本地网关。**
 
-把 Claude Code、Codex、Gemini CLI、Cursor 接到你自己控制的模型上。固定供应商、按任务分档，或在额度重置前把配额用完。
+把 Claude Code、Codex、Gemini CLI 等 Agent 接到你自己控制的模型上。固定供应商、按任务分档，或在额度重置前把配额用完。
 
 [![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
@@ -68,13 +68,10 @@
     <td align="center">
       <a href="https://github.com/anomalyco/opencode"><img src="docs/assets/agents/opencode.svg" width="28" height="28" alt=""><br>OpenCode</a>
     </td>
-    <td align="center">
-      <a href="https://github.com/cursor/cursor"><img src="docs/assets/agents/cursor.svg" width="28" height="28" alt=""><br>Cursor</a>
-    </td>
   </tr>
 </table>
 
-其中 11 个 Agent 使用内置 Connector。Cursor 的独立接入目前只支持 macOS。协议与接入细节见 [指南](docs/guides/) 和 [参考](docs/reference.zh-CN.md#agent)。
+11 个 Agent 使用内置 Connector。Cursor 仅保留安装发现，不提供受支持的接入流程。协议与接入细节见 [指南](docs/guides/) 和 [参考](docs/reference.zh-CN.md#agent)。
 
 ## 快速开始
 
@@ -83,7 +80,7 @@
 1. 从 [Releases](https://github.com/ballast-ai/token-station/releases/latest) 下载最新版本：macOS 使用 DMG，Windows 使用 MSI，x86_64 Linux 可选 AppImage、DEB 或 RPM。
 2. 打开 Token Station，添加供应商。使用预设，或填写自定义 OpenAI 兼容端点。
 3. 在 **主页** 将全局路由设为单独路由、智能分档或额度优先。
-4. 对内置 Connector，选择已发现的 Agent 并点击 **一键接入**。Cursor 请使用独立接入流程。
+4. 对内置 Connector，选择已发现的 Agent 并点击 **一键接入**。
 5. 从该 Agent 发起一次请求，然后在 **用量** 中查看结果。
 
 默认监听地址是 `127.0.0.1:8787`。

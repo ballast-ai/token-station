@@ -105,12 +105,15 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             provider: spec.provider.to_owned(),
             base_url,
             auth,
+            codex_identity: None,
+            subscription_identity: None,
             local: spec.local,
             managed_route: false,
             access_tier: AccessTier::default(),
             // `upstream add` creates a Canonical-IR (translated) upstream;
             // anthropic-native passthrough is opted into by editing the config.
             api_dialect: crate::config::ApiDialect::default(),
+            native_search: None,
             provider_call: crate::config::ProviderCallEngine::default(),
             models,
             // Quota plans are declared by the desktop app's quota-mode picker,
@@ -450,6 +453,9 @@ fn parse_model_spec(raw: &str) -> Result<ModelCapability, String> {
 /// the value itself never appears on a command line.
 fn parse_auth_spec(source: &str, slot: &str) -> Result<AuthConfig, String> {
     let mut auth = AuthConfig {
+        chatgpt_account: None,
+        codex_account: None,
+        local_subscription: None,
         slot: slot.to_owned(),
         store: false,
         env: None,
