@@ -8,18 +8,30 @@
 //!   client top-level `host_values` key deserializes into this typed field, so
 //!   whatever arrives here is client-controlled. The desktop host mints none,
 //!   so it clears them.
-//! - Claude signed-thinking replay markers ask the upstream to trust a
-//!   signature. South refuses the markers unless the target model declares
-//!   `reasoning_replay.claude.v1`, and a target without it must not receive a
-//!   signature it did not issue. The markers are removed for such a target, so
-//!   the component sends the turn without replay instead of failing it.
+//! - Reasoning replay markers ask the upstream to trust reasoning state it
+//!   issued earlier. Each family has its own model capability: Claude signed
+//!   thinking needs `reasoning_replay.claude.v1`, and `OpenAI` encrypted
+//!   reasoning items need `reasoning_replay.openai.v1`. South refuses a
+//!   family's markers unless the target model declares its capability, and a
+//!   target must not receive state it did not issue. The markers are removed
+//!   for such a target, so the component sends the turn without replay instead
+//!   of failing it. The `OpenAI` items themselves
+//!   (`responses_opaque_reasoning_items`) stay: references read them only
+//!   under the marker, and codeassist reads its own thought state from them.
 
 use std::borrow::Cow;
 
-use token_station_protocol::{ChatRequest, ProviderConfig};
+use serde_json::Value;
+use token_station_protocol::{ChatRequest, Message, ProviderConfig};
 
 /// The model capability South requires before it replays Claude signed thinking.
 pub(super) const CLAUDE_REPLAY_CAPABILITY: &str = "reasoning_replay.claude.v1";
+/// The model capability South requires before it replays `OpenAI` encrypted
+/// reasoning items. No upstream is granted it yet: no shipped component serves
+/// the `OpenAI` Responses family.
+const OPENAI_REPLAY_CAPABILITY: &str = "reasoning_replay.openai.v1";
+const CLAUDE_REPLAY_FAMILY: &str = "claude-signed-thinking";
+const OPENAI_REPLAY_FAMILY: &str = "openai-encrypted-reasoning";
 const REPLAY_FAMILY: &str = "reasoning_replay_protocol_family";
 const REPLAY_LAYOUT: &str = "reasoning_replay_block_layout";
 
@@ -48,32 +60,50 @@ pub(super) fn grant_replay(config: &mut ProviderConfig, component_replays: bool)
     }
 }
 
-fn target_accepts_replay(config: &ProviderConfig, request: &ChatRequest) -> bool {
+/// The capability a target model must declare before it may receive the
+/// markers of `family`. An unknown family has none, so it is never accepted.
+fn family_capability(family: &str) -> Option<&'static str> {
+    match family {
+        CLAUDE_REPLAY_FAMILY => Some(CLAUDE_REPLAY_CAPABILITY),
+        OPENAI_REPLAY_FAMILY => Some(OPENAI_REPLAY_CAPABILITY),
+        _ => None,
+    }
+}
+
+fn target_declares(config: &ProviderConfig, request: &ChatRequest, capability: &str) -> bool {
     config.models.iter().any(|model| {
-        model.model == request.model
-            && model
-                .supported_parameters
-                .contains(CLAUDE_REPLAY_CAPABILITY)
+        model.model == request.model && model.supported_parameters.contains(capability)
     })
 }
 
-fn carries_replay_markers(request: &ChatRequest) -> bool {
-    request.messages.iter().any(|message| {
-        message.extensions.contains_key(REPLAY_FAMILY)
-            || message.extensions.contains_key(REPLAY_LAYOUT)
-    })
+/// Whether `message` carries replay markers the target has not declared it
+/// can take. Each family is judged by its own capability: a target that
+/// replays Claude signatures must not receive an `OpenAI` turn's markers,
+/// which every reference except the `OpenAI` Responses one refuses.
+fn strips_markers(config: &ProviderConfig, request: &ChatRequest, message: &Message) -> bool {
+    let family = message.extensions.get(REPLAY_FAMILY);
+    if family.is_none() && !message.extensions.contains_key(REPLAY_LAYOUT) {
+        return false;
+    }
+    !family
+        .and_then(Value::as_str)
+        .and_then(family_capability)
+        .is_some_and(|capability| target_declares(config, request, capability))
 }
 
 /// The request as the target's component may see it.
 pub(super) fn seal<'a>(config: &ProviderConfig, request: &'a ChatRequest) -> Cow<'a, ChatRequest> {
-    let strip_markers = carries_replay_markers(request) && !target_accepts_replay(config, request);
+    let strip_markers = request
+        .messages
+        .iter()
+        .any(|message| strips_markers(config, request, message));
     if request.host_values.is_empty() && !strip_markers {
         return Cow::Borrowed(request);
     }
     let mut sealed = request.clone();
     sealed.host_values = token_station_protocol::ComponentValues::new();
-    if strip_markers {
-        for message in &mut sealed.messages {
+    for (message, original) in sealed.messages.iter_mut().zip(&request.messages) {
+        if strips_markers(config, request, original) {
             message.extensions.remove(REPLAY_FAMILY);
             message.extensions.remove(REPLAY_LAYOUT);
         }
@@ -83,10 +113,15 @@ pub(super) fn seal<'a>(config: &ProviderConfig, request: &'a ChatRequest) -> Cow
 
 #[cfg(test)]
 mod tests {
-    use super::{CLAUDE_REPLAY_CAPABILITY, REPLAY_FAMILY, REPLAY_LAYOUT, grant_replay, seal};
+    use super::{
+        CLAUDE_REPLAY_CAPABILITY, OPENAI_REPLAY_CAPABILITY, REPLAY_FAMILY, REPLAY_LAYOUT,
+        grant_replay, seal,
+    };
     use serde_json::json;
     use std::borrow::Cow;
     use token_station_protocol::{ChatRequest, Message, ProviderConfig, Role};
+
+    const OPENAI_ITEMS: &str = "responses_opaque_reasoning_items";
 
     fn config(parameters: &[&str]) -> ProviderConfig {
         serde_json::from_value(json!({
@@ -145,6 +180,73 @@ mod tests {
             assert!(!message.extensions.contains_key(REPLAY_LAYOUT));
         }
         assert_eq!(request.messages[1].extensions.len(), 2, "the caller's copy");
+    }
+
+    fn openai_turn(request: &mut ChatRequest) {
+        let assistant = &mut request.messages[1];
+        assistant.extensions.clear();
+        assistant.extensions.insert(
+            REPLAY_FAMILY.to_owned(),
+            json!("openai-encrypted-reasoning"),
+        );
+        assistant.extensions.insert(
+            REPLAY_LAYOUT.to_owned(),
+            json!([{"kind": "reasoning_item", "index": 0}, {"kind": "content", "ordinal": 0}]),
+        );
+        assistant.extensions.insert(
+            OPENAI_ITEMS.to_owned(),
+            json!([{"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque"}]),
+        );
+    }
+
+    #[test]
+    fn an_openai_turn_loses_its_markers_on_a_claude_replay_target() {
+        let mut request = replayed_request();
+        openai_turn(&mut request);
+        for parameters in [&[CLAUDE_REPLAY_CAPABILITY][..], &[][..]] {
+            let sealed = seal(&config(parameters), &request);
+            let assistant = &sealed.messages[1];
+            assert!(
+                !assistant.extensions.contains_key(REPLAY_FAMILY),
+                "{parameters:?}"
+            );
+            assert!(
+                !assistant.extensions.contains_key(REPLAY_LAYOUT),
+                "{parameters:?}"
+            );
+            assert_eq!(
+                assistant.extensions[OPENAI_ITEMS][0]["encrypted_content"], "opaque",
+                "the items stay for a component that reads its own state"
+            );
+        }
+    }
+
+    #[test]
+    fn an_openai_turn_keeps_its_markers_on_an_openai_replay_target() {
+        let mut request = replayed_request();
+        openai_turn(&mut request);
+        let sealed = seal(&config(&[OPENAI_REPLAY_CAPABILITY]), &request);
+        assert!(matches!(sealed, Cow::Borrowed(_)));
+        // The OpenAI capability does not admit a Claude turn.
+        let claude = replayed_request();
+        let sealed = seal(&config(&[OPENAI_REPLAY_CAPABILITY]), &claude);
+        assert!(!sealed.messages[1].extensions.contains_key(REPLAY_FAMILY));
+    }
+
+    #[test]
+    fn an_unknown_family_or_a_bare_layout_is_removed_everywhere() {
+        let everything = [CLAUDE_REPLAY_CAPABILITY, OPENAI_REPLAY_CAPABILITY];
+        let mut unknown = replayed_request();
+        unknown.messages[1]
+            .extensions
+            .insert(REPLAY_FAMILY.to_owned(), json!("future-family"));
+        let mut bare_layout = replayed_request();
+        bare_layout.messages[1].extensions.remove(REPLAY_FAMILY);
+        for request in [unknown, bare_layout] {
+            let sealed = seal(&config(&everything), &request);
+            assert!(!sealed.messages[1].extensions.contains_key(REPLAY_FAMILY));
+            assert!(!sealed.messages[1].extensions.contains_key(REPLAY_LAYOUT));
+        }
     }
 
     #[test]

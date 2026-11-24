@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, VecDeque};
 use token_station_protocol::ResponseFormat;
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode, ErrorEnvelope, FinishReason,
-    HttpMethod, HttpRequestDescriptor, HttpResponseParts, ModelCapability, ProviderConfig,
+    HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message, ModelCapability, ProviderConfig,
     SafeHeaders, StreamEvent, Usage,
 };
 #[cfg(target_arch = "wasm32")]
@@ -233,6 +233,43 @@ fn thinking_signature(parts: &[Value], model: &str) -> ComponentResultV1<String>
     }
     Ok(format!("ca_th1_{}", URL_SAFE_NO_PAD.encode(raw)))
 }
+/// This component's own thought state on a Codex history message. South's
+/// north codec carries a reasoning item's `encrypted_content` in
+/// `responses_opaque_reasoning_items`, and the v0.37.0 codec carried it in
+/// `responses_reasoning_encrypted_content`. Both hold the same `ca_th1_` value,
+/// one per assistant message, as this component rendered it.
+fn responses_thought_state(m: &Message) -> ComponentResultV1<Option<&str>> {
+    fn opaque(value: &Value) -> ComponentResultV1<&str> {
+        value
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| capability("Invalid opaque Google thinking history."))
+    }
+    let legacy = m
+        .extensions
+        .get("responses_reasoning_encrypted_content")
+        .map(opaque)
+        .transpose()?;
+    let carried = m
+        .extensions
+        .get("responses_opaque_reasoning_items")
+        .map(|items| match items.as_array().map(Vec::as_slice) {
+            Some([item]) => opaque(&item["encrypted_content"]),
+            _ => Err(capability(
+                "Opaque Google thinking history requires one reasoning item per assistant message.",
+            )),
+        })
+        .transpose()?;
+    if legacy
+        .zip(carried)
+        .is_some_and(|(legacy, carried)| legacy != carried)
+    {
+        return Err(capability(
+            "Google thinking history contains conflicting opaque state.",
+        ));
+    }
+    Ok(carried.or(legacy))
+}
 fn decode_thinking(signature: &str, thinking: &str, model: &str) -> ComponentResultV1<Vec<Value>> {
     let encoded = signature.strip_prefix("ca_th1_").ok_or_else(|| {
         capability("Foreign opaque thinking cannot be transferred into Code Assist.")
@@ -408,16 +445,7 @@ impl ProviderComponentV1 for CodeAssist {
         }
         let mut thinking_parts = VecDeque::new();
         for m in &r.messages {
-            let responses_thinking = m
-                .extensions
-                .get("responses_reasoning_encrypted_content")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .filter(|value| !value.is_empty())
-                        .ok_or_else(|| capability("Invalid opaque Google thinking history."))
-                })
-                .transpose()?;
+            let responses_thinking = responses_thought_state(m)?;
             if responses_thinking.is_some()
                 && (m.role != token_station_protocol::Role::Assistant
                     || !matches!(&m.content, Some(Content::Parts(parts)) if parts.iter().filter(|part| matches!(part, ContentPart::Thinking { .. })).count() == 1))

@@ -220,9 +220,15 @@ fn check_semantics(r: &ChatRequest, path: &str) -> ComponentResultV1<()> {
         }
     }
     for message in &r.messages {
-        if message
-            .extensions
-            .contains_key("responses_reasoning_encrypted_content")
+        // Codex reasoning state: South's north codec carries it in
+        // `responses_opaque_reasoning_items`, the v0.37.0 codec in
+        // `responses_reasoning_encrypted_content`.
+        if [
+            "responses_opaque_reasoning_items",
+            "responses_reasoning_encrypted_content",
+        ]
+        .iter()
+        .any(|key| message.extensions.contains_key(*key))
         {
             return Err(capability(
                 "Copilot cannot preserve opaque Responses reasoning state",
