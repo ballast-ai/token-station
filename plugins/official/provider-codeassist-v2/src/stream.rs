@@ -1,7 +1,8 @@
 use super::*;
+use south_component_conformance::sse_split::{SseSplitErrorV1, SseSplitterV1};
 #[derive(Default)]
 pub(crate) struct Parser {
-    tail: Vec<u8>,
+    splitter: SseSplitterV1,
     calls: u32,
     model: String,
     thoughts: Vec<Value>,
@@ -132,10 +133,10 @@ impl StreamParserV1 for Parser {
             return Ok(Vec::new());
         }
         if chunk.is_empty() {
-            if !self.saw_frame && self.tail.is_empty() {
+            if !self.saw_frame && self.splitter.is_idle() {
                 return Ok(Vec::new());
             }
-            if !self.tail.is_empty() {
+            if !self.splitter.is_idle() {
                 return Err(protocol("Code Assist stream ended inside an SSE frame."));
             }
             if let Some(finish) = self.finish.take() {
@@ -164,47 +165,30 @@ impl StreamParserV1 for Parser {
                 "Code Assist stream ended without a finish reason.",
             ));
         }
-        if self.tail.len() + chunk.len() > LIMIT {
-            return Err(protocol("Code Assist SSE frame exceeds its size limit."));
-        }
-        self.tail.extend_from_slice(chunk);
+        // The SSE standard's line ends (LF, CR, CRLF), as the host decoder cuts
+        // them. Frames completed before a refusal are judged first.
+        let pushed = self.splitter.push(chunk);
         let mut events = Vec::new();
-        loop {
-            let a = self
-                .tail
-                .windows(2)
-                .position(|x| x == b"\n\n")
-                .map(|p| (p, 2));
-            let b = self
-                .tail
-                .windows(4)
-                .position(|x| x == b"\r\n\r\n")
-                .map(|p| (p, 4));
-            let boundary = match (a, b) {
-                (Some(a), Some(b)) => Some(if a.0 < b.0 { a } else { b }),
-                (a, None) => a,
-                (None, b) => b,
-            };
-            let Some((at, sep)) = boundary else { break };
-            let frame = self.tail.drain(..at + sep).collect::<Vec<_>>();
-            let text = std::str::from_utf8(&frame[..at])
-                .map_err(|_| protocol("Code Assist SSE is not UTF-8."))?;
-            let data = text
-                .lines()
-                .filter_map(|l| l.strip_prefix("data:").map(str::trim_start))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() {
+        for frame in pushed.frames {
+            if frame.data.len() > LIMIT {
+                return Err(protocol("Code Assist SSE frame exceeds its size limit."));
+            }
+            if frame.data.is_empty() {
                 continue;
             }
-            let v = serde_json::from_str(&data)
+            let v = serde_json::from_str(&frame.data)
                 .map_err(|_| protocol("Code Assist SSE contains invalid JSON."))?;
             events.extend(self.frame(v)?);
             if self.failed {
-                self.tail.clear();
-                break;
+                return Ok(events);
             }
         }
-        Ok(events)
+        match pushed.error {
+            Some(SseSplitErrorV1::NotUtf8) => Err(protocol("Code Assist SSE is not UTF-8.")),
+            Some(SseSplitErrorV1::TooLarge) => {
+                Err(protocol("Code Assist SSE frame exceeds its size limit."))
+            }
+            None => Ok(events),
+        }
     }
 }

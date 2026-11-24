@@ -2,6 +2,7 @@
 mod responses;
 use responses::ResponsesCodec;
 use serde_json::{json, Value};
+use south_component_conformance::sse_split::{SseFrameV1, SseSplitErrorV1, SseSplitterV1};
 use south_component_conformance::{
     reference::OpenAiCompatibleReferenceV1, reference_anthropic::AnthropicReferenceV1,
 };
@@ -576,20 +577,52 @@ impl ProviderComponentV1 for CopilotPlan {
     fn stream_parser(&self) -> Box<dyn StreamParserV1> {
         Box::new(DialectStream {
             pending: Vec::new(),
+            probe: SseSplitterV1::new(),
             parser: None,
             done: false,
         })
     }
 }
+/// The most bytes of one stream frame, and of the bytes held before the
+/// first frame names the dialect.
+const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// One SSE event as a frame with LF line ends, for a parser that cuts its own.
+fn encode_frame(frame: &SseFrameV1) -> Vec<u8> {
+    let mut out = String::new();
+    if frame.event != "message" {
+        out.push_str("event: ");
+        out.push_str(&frame.event);
+        out.push('\n');
+    }
+    for line in frame.data.split('\n') {
+        out.push_str("data: ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.into_bytes()
+}
+
+/// The event type a frame named, or `None` when it named none.
+fn named_event(frame: &SseFrameV1) -> Option<&str> {
+    (frame.event != "message").then_some(frame.event.as_str())
+}
+
 struct DialectStream {
+    /// Bytes held until the first frame names the dialect.
     pending: Vec<u8>,
+    /// Reads `pending` one byte at a time, so the byte that ends the first
+    /// frame is known. The selected parser gets that frame, then the raw
+    /// bytes after it.
+    probe: SseSplitterV1,
     parser: Option<Box<dyn StreamParserV1>>,
     done: bool,
 }
 impl StreamParserV1 for DialectStream {
     fn parse_chunk(&mut self, chunk: &[u8]) -> ComponentResultV1<Vec<StreamEvent>> {
         if chunk.is_empty() {
-            if self.parser.is_none() && self.pending.is_empty() {
+            if self.parser.is_none() && self.probe.is_idle() {
                 return Ok(Vec::new());
             }
             return self.finish();
@@ -599,49 +632,33 @@ impl StreamParserV1 for DialectStream {
             self.done |= events.iter().any(|e| matches!(e, StreamEvent::Done { .. }));
             return Ok(events);
         }
+        let start = self.pending.len();
         self.pending.extend_from_slice(chunk);
-        if self.pending.len() > 4 * 1024 * 1024 {
+        if self.pending.len() > MAX_FRAME_BYTES {
             return Err(protocol("Copilot stream frame exceeds its size limit"));
         }
-        loop {
-            let lf = self
-                .pending
-                .windows(2)
-                .position(|bytes| bytes == b"\n\n")
-                .map(|end| (end, 2));
-            let crlf = self
-                .pending
-                .windows(4)
-                .position(|bytes| bytes == b"\r\n\r\n")
-                .map(|end| (end, 4));
-            let Some((end, separator)) = (match (lf, crlf) {
-                (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
-                (left, right) => left.or(right),
-            }) else {
-                return Ok(Vec::new());
-            };
-            let text = std::str::from_utf8(&self.pending[..end])
-                .map_err(|_| protocol("Copilot stream is not UTF-8"))?;
-            let data = text
-                .lines()
-                .filter_map(|line| {
-                    line.strip_prefix("data:")
-                        .map(|value| value.strip_prefix(' ').unwrap_or(value))
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() {
-                self.pending.drain(..end + separator);
-                continue;
+        for at in start..self.pending.len() {
+            let pushed = self.probe.push(&self.pending[at..=at]);
+            match pushed.error {
+                Some(SseSplitErrorV1::NotUtf8) => {
+                    return Err(protocol("Copilot stream is not UTF-8"))
+                }
+                Some(SseSplitErrorV1::TooLarge) => {
+                    return Err(protocol("Copilot stream frame exceeds its size limit"))
+                }
+                None => {}
             }
-            let raw: Value = serde_json::from_str(&data)
+            let Some(frame) = pushed
+                .frames
+                .into_iter()
+                .find(|frame| !frame.data.is_empty())
+            else {
+                continue;
+            };
+            let raw: Value = serde_json::from_str(&frame.data)
                 .map_err(|_| protocol("Copilot stream has an invalid first frame"))?;
-            let event = text
-                .lines()
-                .filter_map(|line| line.strip_prefix("event:").map(str::trim))
-                .next_back();
+            let event = named_event(&frame);
             if event == Some("ping") || raw["type"] == "ping" {
-                self.pending.drain(..end + separator);
                 continue;
             }
             let mut parser = if raw.get("choices").is_some() {
@@ -660,14 +677,21 @@ impl StreamParserV1 for DialectStream {
             } else {
                 return Err(protocol("Copilot stream has an unknown dialect"));
             };
-            let events = parser.parse_chunk(&self.pending)?;
+            let mut replay = encode_frame(&frame);
+            replay.extend_from_slice(&self.pending[at + 1..]);
+            self.pending = Vec::new();
+            let events = parser.parse_chunk(&replay)?;
             self.done |= events
                 .iter()
                 .any(|event| matches!(event, StreamEvent::Done { .. }));
-            self.pending.clear();
             self.parser = Some(parser);
             return Ok(events);
         }
+        if self.probe.is_idle() {
+            // Every held byte belongs to a frame that was read and skipped.
+            self.pending.clear();
+        }
+        Ok(Vec::new())
     }
     fn finish(&mut self) -> ComponentResultV1<Vec<StreamEvent>> {
         let events = self
@@ -684,7 +708,7 @@ impl StreamParserV1 for DialectStream {
 }
 /// Rejects Anthropic stream state that the pinned South stream ABI cannot represent.
 struct MessagesStream {
-    tail: Vec<u8>,
+    splitter: SseSplitterV1,
     parser: Box<dyn StreamParserV1>,
     saw_thinking_block: bool,
     refused_thinking_blocks: bool,
@@ -692,7 +716,7 @@ struct MessagesStream {
 impl MessagesStream {
     fn new() -> Self {
         Self {
-            tail: Vec::new(),
+            splitter: SseSplitterV1::new(),
             parser: AnthropicReferenceV1.stream_parser(),
             saw_thinking_block: false,
             refused_thinking_blocks: false,
@@ -707,50 +731,24 @@ impl StreamParserV1 for MessagesStream {
             ));
         }
         if chunk.is_empty() {
-            if !self.tail.is_empty() {
+            if !self.splitter.is_idle() {
                 return Err(protocol("Copilot Messages ended inside a stream frame"));
             }
             return self.parser.parse_chunk(chunk);
         }
-        self.tail.extend_from_slice(chunk);
-        if self.tail.len() > 4 * 1024 * 1024 {
-            return Err(protocol("Copilot Messages frame exceeds its size limit"));
-        }
+        // The SSE standard's line ends (LF, CR, CRLF), as the host decoder cuts
+        // them. Frames completed before a refusal are judged first.
+        let pushed = self.splitter.push(chunk);
         let mut events = Vec::new();
-        loop {
-            let lf = self
-                .tail
-                .windows(2)
-                .position(|v| v == b"\n\n")
-                .map(|p| (p, 2));
-            let crlf = self
-                .tail
-                .windows(4)
-                .position(|v| v == b"\r\n\r\n")
-                .map(|p| (p, 4));
-            let boundary = match (lf, crlf) {
-                (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
-                (Some(a), None) | (None, Some(a)) => Some(a),
-                _ => None,
-            };
-            let Some((end, separator)) = boundary else {
-                break;
-            };
-            let frame = self.tail.drain(..end + separator).collect::<Vec<_>>();
-            let text = std::str::from_utf8(&frame)
-                .map_err(|_| protocol("Copilot Messages frame is not UTF-8"))?;
-            let event = text
-                .lines()
-                .filter_map(|line| line.strip_prefix("event:").map(str::trim))
-                .next_back();
-            let data = text
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:").map(str::trim))
-                .collect::<Vec<_>>()
-                .join("\n");
+        for frame in pushed.frames {
+            if frame.data.len() > MAX_FRAME_BYTES {
+                return Err(protocol("Copilot Messages frame exceeds its size limit"));
+            }
+            let event = named_event(&frame);
+            let data = frame.data.as_str();
             let mut parser_frame = None;
             if !data.is_empty() {
-                let raw: Value = serde_json::from_str(&data)
+                let raw: Value = serde_json::from_str(data)
                     .map_err(|_| protocol("Copilot Messages frame has invalid JSON"))?;
                 let event_name = event.or_else(|| raw["type"].as_str()).unwrap_or_default();
                 if event_name.contains(['\r', '\n']) {
@@ -792,10 +790,9 @@ impl StreamParserV1 for MessagesStream {
                             "Copilot cannot preserve initialized streamed tool arguments",
                         ));
                     }
-                    events.extend(
-                        self.parser
-                            .parse_chunk(parser_frame.as_deref().unwrap_or(&frame))?,
-                    );
+                    events.extend(self.parser.parse_chunk(
+                        &parser_frame.take().unwrap_or_else(|| encode_frame(&frame)),
+                    )?);
                     if let Some(text) = block["text"].as_str().filter(|v| !v.is_empty()) {
                         events.push(StreamEvent::Delta {
                             index: 0,
@@ -846,10 +843,16 @@ impl StreamParserV1 for MessagesStream {
             }
             events.extend(
                 self.parser
-                    .parse_chunk(parser_frame.as_deref().unwrap_or(&frame))?,
+                    .parse_chunk(&parser_frame.take().unwrap_or_else(|| encode_frame(&frame)))?,
             );
         }
-        Ok(events)
+        match pushed.error {
+            Some(SseSplitErrorV1::NotUtf8) => Err(protocol("Copilot Messages frame is not UTF-8")),
+            Some(SseSplitErrorV1::TooLarge) => {
+                Err(protocol("Copilot Messages frame exceeds its size limit"))
+            }
+            None => Ok(events),
+        }
     }
 }
 
