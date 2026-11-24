@@ -609,7 +609,9 @@ fn responses_thinking_extension_restores_only_unambiguous_bound_carriers() {
     );
     let request = |content: Value, opaque: Value| {
         req(json!({"model":"m","messages":[{
-            "role":"assistant","content":content,"responses_reasoning_encrypted_content":opaque
+            "role":"assistant","content":content,
+            "responses_opaque_reasoning_items":[{"type":"reasoning","id":"rs_resp_0",
+                "summary":[],"encrypted_content":opaque}]
         }]}))
     };
     let content = json!([{"type":"thinking","thinking":"firstsecond"}]);
@@ -687,41 +689,27 @@ fn responses_thinking_restores_from_the_south_reasoning_item_carrier() {
         json!({"type":"reasoning","id":"rs_resp_0","encrypted_content":opaque,
             "summary":[{"type":"summary_text","text":"firstsecond"}]})
     };
-    let request = |items: Value, legacy: Option<Value>| {
-        let mut message = json!({"role":"assistant",
+    let request = |items: Value| {
+        req(json!({"model":"m","messages":[{"role":"assistant",
             "content":[{"type":"thinking","thinking":"firstsecond"}],
-            "responses_opaque_reasoning_items":items});
-        if let Some(legacy) = legacy {
-            message["responses_reasoning_encrypted_content"] = legacy;
-        }
-        req(json!({"model":"m","messages":[message]}))
+            "responses_opaque_reasoning_items":items}]}))
     };
     let body = CodeAssist
         .build_http_request(
-            &request(json!([item(json!(carrier))]), None),
+            &request(json!([item(json!(carrier))])),
             &config("gemini-cli-plan"),
         )
         .unwrap()
         .body
         .unwrap();
     assert_eq!(body["request"]["contents"][0]["parts"], original);
-    assert!(CodeAssist
-        .build_http_request(
-            &request(json!([item(json!(carrier))]), Some(json!(carrier))),
-            &config("gemini-cli-plan")
-        )
-        .is_ok());
     for refused in [
-        request(json!([item(json!(carrier)), item(json!(carrier))]), None),
-        request(json!([]), None),
-        request(json!({}), None),
-        request(json!([item(json!("gAAAAA-openai-issued"))]), None),
-        request(json!([item(json!(""))]), None),
-        request(json!([item(json!(null))]), None),
-        request(
-            json!([item(json!(carrier))]),
-            Some(json!("ca_th1_different")),
-        ),
+        request(json!([item(json!(carrier)), item(json!(carrier))])),
+        request(json!([])),
+        request(json!({})),
+        request(json!([item(json!("gAAAAA-openai-issued"))])),
+        request(json!([item(json!(""))])),
+        request(json!([item(json!(null))])),
     ] {
         let error = CodeAssist
             .build_http_request(&refused, &config("gemini-cli-plan"))

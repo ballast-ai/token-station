@@ -398,4 +398,94 @@ assert.equal(
   "SOUTH_RUNTIME_MIN must equal the oldest south_runtime among the shipped components",
 );
 
+// Each WASM package under plugins/official is its own workspace with its own
+// lockfile, so the root closure above never sees it. agent-openai-responses
+// stayed on South v0.37.0 with a second kernel copy because of that.
+// Hold every package lockfile to the same two sources and revisions.
+// south-north-codec is reached only from a plugin package.
+const pluginSouthVersions = new Map([
+  ...southPackageVersions,
+  ["south-north-codec", southRelease],
+]);
+function lockPackages(lockfile) {
+  return lockfile
+    .split(/^\[\[package\]\]$/m)
+    .slice(1)
+    .map((block) => ({
+      name: block.match(/^name = "([^"]+)"$/m)?.[1],
+      version: block.match(/^version = "([^"]+)"$/m)?.[1],
+      source: block.match(/^source = "([^"]+)"$/m)?.[1],
+    }));
+}
+function validatePluginLock(lockfile, scope) {
+  const packages = lockPackages(lockfile);
+  for (const pkg of packages.filter((entry) => entry.source?.startsWith("git+"))) {
+    assert.ok(
+      pkg.source === southSource || pkg.source === kernelSource,
+      `${scope} ${pkg.name} must resolve from the approved South or kernel revision, found ${pkg.source}`,
+    );
+  }
+  for (const pkg of packages.filter(isSouthPackage)) {
+    assert.equal(
+      pkg.source,
+      southSource,
+      `${scope} ${pkg.name} must resolve from the one pinned South source and revision`,
+    );
+    assert.equal(
+      pkg.version,
+      pluginSouthVersions.get(pkg.name),
+      `${scope} ${pkg.name} must stay on its South ${southRelease} version`,
+    );
+  }
+  const protocols = packages.filter((pkg) => pkg.name === "token-station-protocol");
+  assert.ok(
+    protocols.length <= 1,
+    `${scope} must resolve one token-station-protocol, found ${protocols.length}`,
+  );
+  for (const pkg of protocols) {
+    assert.equal(pkg.version, kernelVersion, `${scope} protocol must stay on ${kernelVersion}`);
+  }
+}
+
+const staleLock = `[[package]]
+name = "south-north-codec"
+version = "0.37.0"
+source = "git+${southRepository}?tag=v0.37.0#3cb625104df76df738645b69f1cafd17bcbcad8d"
+
+[[package]]
+name = "token-station-protocol"
+version = "0.7.0"
+
+[[package]]
+name = "token-station-protocol"
+version = "0.3.0"
+source = "git+${kernelRepository}?rev=ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35#ab6bb2ffaab534e6732d1bfc53d24c7caa51fa35"
+`;
+assert.throws(
+  () => validatePluginLock(staleLock, "a stale package"),
+  /must resolve from the approved South or kernel revision/,
+  "the plugin lock check must refuse a tag-pinned South crate",
+);
+assert.throws(
+  () =>
+    validatePluginLock(
+      staleLock.replace(/^source = "git\+.*$/gm, `source = "${kernelSource}"`)
+        .replace('name = "south-north-codec"\nversion = "0.37.0"\n', 'name = "serde"\nversion = "1.0.0"\n'),
+      "a doubled package",
+    ),
+  /must resolve one token-station-protocol, found 2/,
+  "the plugin lock check must refuse two protocol crates",
+);
+
+const pluginsDirectory = path.join(root, "plugins/official");
+const pluginPackages = fs
+  .readdirSync(pluginsDirectory)
+  .filter((name) => fs.existsSync(path.join(pluginsDirectory, name, "Cargo.toml")));
+assert.ok(pluginPackages.length > 0, "plugins/official must hold WASM packages");
+for (const name of pluginPackages) {
+  const lockPath = path.join(pluginsDirectory, name, "Cargo.lock");
+  assert.ok(fs.existsSync(lockPath), `plugins/official/${name} must commit its Cargo.lock`);
+  validatePluginLock(fs.readFileSync(lockPath, "utf8"), `plugins/official/${name}`);
+}
+
 console.log("South dependency and MSRV policy check: PASS");

@@ -58,7 +58,8 @@
         "required": [
           "path"
         ]
-      }
+      },
+      "strict": false
     }
   ],
   "sampling": {

@@ -197,8 +197,8 @@ fn encrypted_responses_state_returns_capability_error() {
     );
     let mut r = request("assistant");
     r.messages[0].extensions.insert(
-        "responses_reasoning_encrypted_content".into(),
-        json!("opaque"),
+        "responses_opaque_reasoning_items".into(),
+        json!([{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}]),
     );
     assert!(CopilotPlan
         .build_http_request(&r, &config(json!(["/responses"])))
@@ -458,33 +458,28 @@ fn repeated_event_fields_use_the_last_value_including_ping() {
 }
 
 #[test]
-fn codex_reasoning_state_in_either_carrier_is_refused() {
-    let item = json!([{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}]);
-    for (key, value) in [
-        ("responses_opaque_reasoning_items", item),
-        ("responses_reasoning_encrypted_content", json!("opaque")),
-    ] {
-        for path in ["/chat/completions", "/responses", "/v1/messages"] {
-            let mut r = request("assistant");
-            r.messages.push(request("user").messages.remove(0));
-            assert!(
-                CopilotPlan
-                    .build_http_request(&r, &config(json!([path])))
-                    .is_ok(),
-                "the same turn without reasoning state is served on {path}"
-            );
-            r.messages[0]
-                .extensions
-                .insert(key.to_owned(), value.clone());
-            let error = CopilotPlan
+fn codex_reasoning_state_is_refused_on_every_dialect() {
+    let items = json!([{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}]);
+    for path in ["/chat/completions", "/responses", "/v1/messages"] {
+        let mut r = request("assistant");
+        r.messages.push(request("user").messages.remove(0));
+        assert!(
+            CopilotPlan
                 .build_http_request(&r, &config(json!([path])))
-                .unwrap_err();
-            assert_eq!(
-                error.code,
-                token_station_protocol::ErrorCode::Capability,
-                "{key} on {path}: {}",
-                error.message
-            );
-        }
+                .is_ok(),
+            "the same turn without reasoning state is served on {path}"
+        );
+        r.messages[0]
+            .extensions
+            .insert("responses_opaque_reasoning_items".into(), items.clone());
+        let error = CopilotPlan
+            .build_http_request(&r, &config(json!([path])))
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            token_station_protocol::ErrorCode::Capability,
+            "{path}: {}",
+            error.message
+        );
     }
 }

@@ -17,13 +17,15 @@ use south_north_codec::{
     ResponsesRequestOptions, ResponsesSseState,
 };
 use token_station::adapter::common::{AdapterKind, HealthStatus};
-use token_station_kernel_protocol::{ChatRequest, ChatResponse, Extensions, Message};
+use token_station_protocol::{
+    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope,
+    Extensions, HintKind, Message,
+};
 #[cfg(test)]
-use token_station_kernel_protocol::{
+use token_station_protocol::{
     Content, ContentPart, FinishReason, ResponseFormat, Role, StreamEvent, ToolChoice, ToolDef,
     Usage,
 };
-use token_station_protocol::{AgentHint, AgentRequestEnvelope, ErrorCode, ErrorEnvelope, HintKind};
 
 mod additional_tools;
 
@@ -897,7 +899,7 @@ impl Guest for ResponsesClient {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use token_station_kernel_protocol::{Choice, ToolCall};
+    use token_station_protocol::{Choice, ToolCall};
 
     #[test]
     fn streamed_response_numbers_every_frame_in_order() {
@@ -1026,6 +1028,58 @@ mod tests {
         }
     }
 
+    fn normalized_json(body: Value) -> Value {
+        serde_json::from_str(
+            &ResponsesClient::normalize_inbound(responses_envelope(body)).expect("normalizes"),
+        )
+        .expect("canonical request JSON")
+    }
+
+    #[test]
+    fn typed_reasoning_and_parallel_calls_keep_their_request_keys() {
+        // South 0.85.1 types these fields. The host reads the request JSON, so
+        // the keys and values it receives must be the ones v0.37.0 produced.
+        for effort in ["high", "xhigh", "unmodeled-level"] {
+            let request = normalized_json(json!({"model":"m","input":"text",
+                "reasoning":{"effort":effort},"parallel_tool_calls":false}));
+            assert_eq!(request["reasoning_effort"], effort, "{request}");
+            assert_eq!(request["parallel_tool_calls"], false, "{request}");
+        }
+    }
+
+    #[test]
+    fn reasoning_summary_travels_as_the_south_extension() {
+        let request = normalized_json(json!({"model":"m","input":"text",
+            "reasoning":{"effort":"low","summary":"auto"}}));
+        assert_eq!(request["responses_reasoning_summary"], "auto", "{request}");
+        assert!(request.get("reasoning").is_none(), "{request}");
+    }
+
+    #[test]
+    fn client_fields_are_bounded_before_they_reach_the_host() {
+        let accepted = normalized_json(json!({"model":"m","input":"text",
+            "user":"u-1","prompt_cache_key":"session-1","metadata":{"origin":"codex"}}));
+        assert_eq!(accepted["user"], "u-1");
+        assert_eq!(accepted["prompt_cache_key"], "session-1");
+        assert_eq!(accepted["metadata"], json!({"origin":"codex"}));
+
+        let many: serde_json::Map<String, Value> = (0..17)
+            .map(|index| (format!("k{index}"), json!("v")))
+            .collect();
+        for body in [
+            json!({"model":"m","input":"text","metadata":many}),
+            json!({"model":"m","input":"text","metadata":{"k":1}}),
+            json!({"model":"m","input":"text","metadata":{"k":"v".repeat(513)}}),
+            json!({"model":"m","input":"text","user":"u".repeat(513)}),
+            json!({"model":"m","input":"text","prompt_cache_key":"p".repeat(513)}),
+        ] {
+            let error = ResponsesClient::normalize_inbound(responses_envelope(body)).unwrap_err();
+            let envelope: Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(envelope["code"], "invalid_request", "{error}");
+            assert_eq!(envelope["http_status"], 400);
+        }
+    }
+
     #[test]
     fn empty_input_keeps_community_admission_and_continuation_history() {
         CONTINUATIONS.with(|store| *store.borrow_mut() = ContinuationStore::default());
@@ -1061,7 +1115,8 @@ mod tests {
         assert_eq!(
             continued.messages[2].content,
             Some(Content::Parts(vec![ContentPart::Text {
-                text: "first answer".to_owned()
+                text: "first answer".to_owned(),
+                cache_control: None,
             }]))
         );
         assert_eq!(
@@ -1149,10 +1204,16 @@ mod tests {
             expected
         );
         assert_eq!(second.messages[1].tool_calls[0].name, "files__read");
+        let replay = &second.messages[1].extensions;
         assert_eq!(
-            second.messages[1].extensions["responses_reasoning_encrypted_content"],
+            replay["reasoning_replay_protocol_family"],
+            "openai-encrypted-reasoning"
+        );
+        assert_eq!(
+            replay["responses_opaque_reasoning_items"][0]["encrypted_content"],
             "opaque-byte-string"
         );
+        assert!(!replay.contains_key("responses_reasoning_encrypted_content"));
         assert_eq!(second.messages[2].tool_call_id.as_deref(), Some("call_1"));
         render_native_test(
             &second,
@@ -1561,13 +1622,27 @@ mod tests {
                 )
         ));
         assert_eq!(
-            assistant.extensions["responses_reasoning_id"],
-            json!("rs_1")
+            assistant.extensions["reasoning_replay_protocol_family"],
+            json!("openai-encrypted-reasoning")
         );
+        let items = &assistant.extensions["responses_opaque_reasoning_items"];
+        assert_eq!(items.as_array().map(Vec::len), Some(1));
+        assert_eq!(items[0]["id"], json!("rs_1"));
         assert_eq!(
-            assistant.extensions["responses_reasoning_encrypted_content"],
+            items[0]["encrypted_content"],
             json!("opaque-reasoning-ticket")
         );
+        assert_eq!(
+            assistant.extensions["reasoning_replay_block_layout"],
+            json!([
+                {"kind": "reasoning_item", "index": 0},
+                {"kind": "tool_call", "call_id": "call_1"}
+            ])
+        );
+        assert!(!assistant.extensions.contains_key("responses_reasoning_id"));
+        assert!(!assistant
+            .extensions
+            .contains_key("responses_reasoning_encrypted_content"));
         assert_eq!(assistant.tool_calls[0].id, "call_1");
         assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_1"));
     }
@@ -1598,6 +1673,7 @@ mod tests {
                             }
                         })
                         .to_string(),
+                        signature: None,
                     }],
                     tool_call_id: None,
                     name: None,
@@ -1919,6 +1995,7 @@ mod tests {
                         },
                         ContentPart::Text {
                             text: "Done.".to_owned(),
+                            cache_control: None,
                         },
                     ])),
                     tool_calls: Vec::new(),
@@ -2009,6 +2086,7 @@ mod tests {
                 id: Some("call_invalid".to_owned()),
                 name: Some(LOCAL_SHELL_TOOL_NAME.to_owned()),
                 arguments_delta: "not-json".to_owned(),
+                signature: None,
             })
             .expect("event serializes"),
             context.clone(),
@@ -2344,6 +2422,7 @@ mod tests {
                 id: Some("call_custom".into()),
                 name: Some("functions__exec".into()),
                 arguments_delta: args,
+                signature: None,
             },
             StreamEvent::Done {
                 finish_reason: Some(FinishReason::ToolCalls),

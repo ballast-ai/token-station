@@ -235,40 +235,21 @@ fn thinking_signature(parts: &[Value], model: &str) -> ComponentResultV1<String>
 }
 /// This component's own thought state on a Codex history message. South's
 /// north codec carries a reasoning item's `encrypted_content` in
-/// `responses_opaque_reasoning_items`, and the v0.37.0 codec carried it in
-/// `responses_reasoning_encrypted_content`. Both hold the same `ca_th1_` value,
-/// one per assistant message, as this component rendered it.
+/// `responses_opaque_reasoning_items`. It holds the `ca_th1_` value this
+/// component rendered, one item per assistant message.
 fn responses_thought_state(m: &Message) -> ComponentResultV1<Option<&str>> {
-    fn opaque(value: &Value) -> ComponentResultV1<&str> {
-        value
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| capability("Invalid opaque Google thinking history."))
-    }
-    let legacy = m
-        .extensions
-        .get("responses_reasoning_encrypted_content")
-        .map(opaque)
-        .transpose()?;
-    let carried = m
-        .extensions
+    m.extensions
         .get("responses_opaque_reasoning_items")
         .map(|items| match items.as_array().map(Vec::as_slice) {
-            Some([item]) => opaque(&item["encrypted_content"]),
+            Some([item]) => item["encrypted_content"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| capability("Invalid opaque Google thinking history.")),
             _ => Err(capability(
                 "Opaque Google thinking history requires one reasoning item per assistant message.",
             )),
         })
-        .transpose()?;
-    if legacy
-        .zip(carried)
-        .is_some_and(|(legacy, carried)| legacy != carried)
-    {
-        return Err(capability(
-            "Google thinking history contains conflicting opaque state.",
-        ));
-    }
-    Ok(carried.or(legacy))
+        .transpose()
 }
 fn decode_thinking(signature: &str, thinking: &str, model: &str) -> ComponentResultV1<Vec<Value>> {
     let encoded = signature.strip_prefix("ca_th1_").ok_or_else(|| {
