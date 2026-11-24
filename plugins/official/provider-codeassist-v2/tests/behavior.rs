@@ -668,3 +668,64 @@ fn responses_thinking_extension_restores_only_unambiguous_bound_carriers() {
         .build_http_request(&foreign_role, &config("gemini-cli-plan"))
         .is_err());
 }
+
+/// South 0.85.1's north codec carries a reasoning item's `encrypted_content`
+/// in `responses_opaque_reasoning_items`. The host removes the replay markers
+/// for this target and keeps the items, so the message arrives as below.
+#[test]
+fn responses_thinking_restores_from_the_south_reasoning_item_carrier() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let original = json!([
+        {"text":"first","thought":true,"thoughtSignature":"signature-a"},
+        {"text":"second","thought":true,"thoughtSignature":"signature-b"}
+    ]);
+    let carrier = format!(
+        "ca_th1_{}",
+        URL_SAFE_NO_PAD.encode(json!(["m", original]).to_string())
+    );
+    let item = |opaque: Value| {
+        json!({"type":"reasoning","id":"rs_resp_0","encrypted_content":opaque,
+            "summary":[{"type":"summary_text","text":"firstsecond"}]})
+    };
+    let request = |items: Value, legacy: Option<Value>| {
+        let mut message = json!({"role":"assistant",
+            "content":[{"type":"thinking","thinking":"firstsecond"}],
+            "responses_opaque_reasoning_items":items});
+        if let Some(legacy) = legacy {
+            message["responses_reasoning_encrypted_content"] = legacy;
+        }
+        req(json!({"model":"m","messages":[message]}))
+    };
+    let body = CodeAssist
+        .build_http_request(
+            &request(json!([item(json!(carrier))]), None),
+            &config("gemini-cli-plan"),
+        )
+        .unwrap()
+        .body
+        .unwrap();
+    assert_eq!(body["request"]["contents"][0]["parts"], original);
+    assert!(CodeAssist
+        .build_http_request(
+            &request(json!([item(json!(carrier))]), Some(json!(carrier))),
+            &config("gemini-cli-plan")
+        )
+        .is_ok());
+    for refused in [
+        request(json!([item(json!(carrier)), item(json!(carrier))]), None),
+        request(json!([]), None),
+        request(json!({}), None),
+        request(json!([item(json!("gAAAAA-openai-issued"))]), None),
+        request(json!([item(json!(""))]), None),
+        request(json!([item(json!(null))]), None),
+        request(
+            json!([item(json!(carrier))]),
+            Some(json!("ca_th1_different")),
+        ),
+    ] {
+        let error = CodeAssist
+            .build_http_request(&refused, &config("gemini-cli-plan"))
+            .unwrap_err();
+        assert_eq!(error.code, token_station_protocol::ErrorCode::Capability);
+    }
+}
