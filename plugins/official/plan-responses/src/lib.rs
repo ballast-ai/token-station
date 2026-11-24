@@ -1,8 +1,12 @@
-//! ChatGPT plan Responses translation on the South-owned v2 ABI.
+//! The ChatGPT plan Responses codec, shared by the chatgpt-plan and
+//! copilot-plan components.
 //!
-//! This component has no network or credential access. The Host supplies a
+//! The codec has no network or credential access. The Host supplies a
 //! registration-bound credential through the declared slot. Sampling limits
 //! that the plan endpoint does not accept are deliberately not sent.
+//!
+//! The two components read the same Responses stream with three differences.
+//! Each component states them in its [`Profile`].
 
 use serde_json::{json, Value};
 use south_component_conformance::{ComponentResultV1, ProviderComponentV1, StreamParserV1};
@@ -15,12 +19,46 @@ use token_station_protocol::{
     ToolChoice, Usage,
 };
 
-#[path = "responses_stream.rs"]
 mod stream;
 
-pub struct ResponsesCodec;
 pub const TOOL_NAMESPACE: &str = "tokenstation_tools";
 const MAX_VALUE_BYTES: usize = 4 * 1024 * 1024;
+
+/// What a component does with an opaque reasoning item, one that carries
+/// `encrypted_content`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpaqueReasoning {
+    /// Read past it. The stream ABI cannot carry it, so it is dropped.
+    Ignore,
+    /// Refuse the response with a capability error.
+    Refuse,
+}
+
+/// What a component does with a `response.metadata` event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseMetadata {
+    /// Read past it. It is out-of-band information, not output or completion.
+    Ignore,
+    /// Refuse it as an unsupported response event.
+    Refuse,
+}
+
+/// The differences between the components that share this codec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Profile {
+    /// The subject of usage refusals, such as "The ChatGPT plan".
+    pub label: &'static str,
+    /// Opaque reasoning items.
+    pub opaque_reasoning: OpaqueReasoning,
+    /// `response.metadata` events.
+    pub response_metadata: ResponseMetadata,
+}
+
+/// The Responses codec under one [`Profile`].
+#[derive(Clone, Copy, Debug)]
+pub struct ResponsesCodec {
+    pub profile: Profile,
+}
 
 fn capability(message: &str) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorCode::Capability, 400, message)
@@ -257,7 +295,8 @@ fn build_body(r: &ChatRequest) -> ComponentResultV1<Value> {
             ToolChoice::Required | ToolChoice::Other(_) => json!("required"),
         };
     }
-    // Both are typed since protocol 0.6.0, with the same wire keys.
+    // Both are typed since protocol 0.6.0, with the same wire keys. The type
+    // now does the shape check the extension lookup used to do here.
     if let Some(parallel) = r.parallel_tool_calls {
         body["parallel_tool_calls"] = json!(parallel);
     }
@@ -290,11 +329,31 @@ fn reasoning_rejection(error: &Value) -> Option<ErrorEnvelope> {
         "Unsupported value for reasoning_effort. The selected model does not support this reasoning effort."))
 }
 
+impl ResponsesCodec {
+    /// The request descriptor for `r`, sent with `headers`. The caller has
+    /// checked `config`.
+    pub fn request(
+        &self,
+        r: &ChatRequest,
+        config: &ProviderConfig,
+        headers: SafeHeaders,
+    ) -> ComponentResultV1<HttpRequestDescriptor> {
+        let mut descriptor = HttpRequestDescriptor::new(
+            HttpMethod::Post,
+            config.base_url.resolve(ProviderApi::Responses),
+        );
+        descriptor.headers = headers;
+        descriptor.auth = config.auth.clone().map(Auth::bearer);
+        descriptor.body = Some(build_body(r)?);
+        Ok(descriptor)
+    }
+}
+
 impl ProviderComponentV1 for ResponsesCodec {
     fn metadata(&self) -> ComponentMetadataV1 {
         ComponentMetadataV1 {
-            name: "provider-chatgpt-plan".into(),
-            version: "2.1.0".into(),
+            name: "plan-responses".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
             api_version: PROVIDER_WORLD.into(),
         }
     }
@@ -310,19 +369,12 @@ impl ProviderComponentV1 for ResponsesCodec {
         config: &ProviderConfig,
     ) -> ComponentResultV1<HttpRequestDescriptor> {
         check_config(config)?;
-        let mut descriptor = HttpRequestDescriptor::new(
-            HttpMethod::Post,
-            config.base_url.resolve(ProviderApi::Responses),
-        );
-        descriptor.headers = SafeHeaders::try_new([
+        let headers = SafeHeaders::try_new([
             ("content-type", "application/json"),
             ("accept", "text/event-stream"),
         ])
         .map_err(|_| protocol("Cannot build safe request headers"))?;
-        descriptor.auth = config.auth.clone().map(Auth::bearer);
-        let body = build_body(r)?;
-        descriptor.body = Some(body);
-        Ok(descriptor)
+        self.request(r, config, headers)
     }
     fn parse_response(&self, parts: &HttpResponseParts) -> ComponentResultV1<ChatResponse> {
         if !(200..300).contains(&parts.status) {
@@ -330,7 +382,7 @@ impl ProviderComponentV1 for ResponsesCodec {
         }
         // A buffered client still receives an upstream SSE response. Use the
         // identical parser, including its terminal and failure checks.
-        let mut parser = stream::ResponsesStream::default();
+        let mut parser = stream::ResponsesStream::new(self.profile);
         let mut events = parser.parse_chunk(parts.body.as_bytes())?;
         events.extend(parser.finish()?);
         let mut message = Message::text(Role::Assistant, "");
@@ -426,17 +478,6 @@ impl ProviderComponentV1 for ResponsesCodec {
         Ok(error)
     }
     fn stream_parser(&self) -> Box<dyn StreamParserV1> {
-        Box::new(stream::ResponsesStream::default())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored_wit_matches_the_pinned_south_contract() {
-        assert_eq!(
-            include_str!("../wit/provider-adapter.wit"),
-            south_provider_api::ADAPTER_WIT
-        );
+        Box::new(stream::ResponsesStream::new(self.profile))
     }
 }

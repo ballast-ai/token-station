@@ -1,6 +1,5 @@
 //! Copilot subscription transport on the South ABI. The host resolves credentials and performs I/O.
-mod responses;
-use responses::ResponsesCodec;
+use plan_responses::{OpaqueReasoning, Profile, ResponseMetadata, ResponsesCodec};
 use serde_json::{json, Value};
 use south_component_conformance::sse_split::{SseFrameV1, SseSplitErrorV1, SseSplitterV1};
 use south_component_conformance::{
@@ -16,6 +15,15 @@ use token_station_protocol::{
 #[cfg(target_arch = "wasm32")]
 mod shell;
 
+/// The shared Responses codec. Copilot refuses opaque reasoning, which it
+/// cannot preserve, and `response.metadata`, as its own copy of the codec did.
+const RESPONSES: ResponsesCodec = ResponsesCodec {
+    profile: Profile {
+        label: "Copilot",
+        opaque_reasoning: OpaqueReasoning::Refuse,
+        response_metadata: ResponseMetadata::Refuse,
+    },
+};
 const CLAUDE_REPLAY_CAPABILITY: &str = "reasoning_replay.claude.v1";
 const REPLAY_FAMILY: &str = "reasoning_replay_protocol_family";
 const REPLAY_LAYOUT: &str = "reasoning_replay_block_layout";
@@ -293,7 +301,7 @@ fn prepare(
             serde_json::from_value(json!("chatgpt_access_token"))
                 .map_err(|_| protocol("Invalid reference credential slot"))?,
         );
-        let mut d = ResponsesCodec.build_http_request(r, &native)?;
+        let mut d = RESPONSES.build_http_request(r, &native)?;
         if let Some(body) = d.body.as_mut() {
             if let Some(groups) = body["tools"].as_array() {
                 let mut tools = Vec::new();
@@ -511,14 +519,14 @@ impl ProviderComponentV1 for CopilotPlan {
         if parts.body.trim_start().starts_with("event:")
             || parts.body.trim_start().starts_with("data:")
         {
-            return ResponsesCodec.parse_response(parts);
+            return RESPONSES.parse_response(parts);
         }
         let value: Value = serde_json::from_str(&parts.body)
             .map_err(|_| protocol("Copilot returned invalid JSON"))?;
         if value["object"] == "response" {
             // A Responses JSON object is the `response.completed` state; the
             // codec's terminal checks, usage included, apply to it as well.
-            return ResponsesCodec.parse_response(&HttpResponseParts {
+            return RESPONSES.parse_response(&HttpResponseParts {
                 body: format!(
                     "data: {}\n\n",
                     json!({"type":"response.completed","response":value})
@@ -667,7 +675,7 @@ impl StreamParserV1 for DialectStream {
                 .as_str()
                 .is_some_and(|kind| kind.starts_with("response."))
             {
-                ResponsesCodec.stream_parser()
+                RESPONSES.stream_parser()
             } else if event.is_some_and(|kind| {
                 kind.starts_with("message_") || kind.starts_with("content_block_") || kind == "ping"
             }) || raw["type"].as_str().is_some_and(|kind| {

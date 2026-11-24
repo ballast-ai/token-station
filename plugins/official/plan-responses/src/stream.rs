@@ -10,8 +10,8 @@ struct CallState {
     closed: bool,
 }
 
-#[derive(Default)]
 pub(super) struct ResponsesStream {
+    profile: Profile,
     splitter: SseSplitterV1,
     received_data: bool,
     calls: BTreeMap<String, CallState>,
@@ -31,6 +31,38 @@ fn number(value: &Value) -> ComponentResultV1<u32> {
 }
 
 impl ResponsesStream {
+    pub(super) fn new(profile: Profile) -> Self {
+        Self {
+            profile,
+            splitter: SseSplitterV1::default(),
+            received_data: false,
+            calls: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+            text: BTreeMap::new(),
+            complete: false,
+            failure: None,
+            id: String::new(),
+            model: String::new(),
+        }
+    }
+
+    /// Refuse an opaque reasoning item when the profile says so.
+    fn reasoning(&self, item: &Value) -> ComponentResultV1<()> {
+        if self.profile.opaque_reasoning == OpaqueReasoning::Refuse
+            && item.get("encrypted_content").is_some_and(|v| !v.is_null())
+        {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::Capability,
+                400,
+                format!(
+                    "{} cannot preserve opaque Responses reasoning state",
+                    self.profile.label
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn call_key(&self, event: &Value) -> ComponentResultV1<String> {
         let id = event
             .get("item_id")
@@ -249,7 +281,7 @@ impl ResponsesStream {
             // Reasoning is private model state. The pinned South stream ABI
             // cannot carry opaque Responses items. Do not request or fabricate
             // that state and do not mislabel it as an Anthropic signature.
-            Some("reasoning") => {}
+            Some("reasoning") => self.reasoning(item)?,
             _ => return Err(protocol("The provider returned an unsupported output item")),
         }
         Ok(())
@@ -305,7 +337,8 @@ impl ResponsesStream {
                 Some("function_call") => {
                     self.start_call(&v["item"], number(&v["output_index"])?, events)?
                 }
-                Some("message" | "reasoning") => {}
+                Some("message") => {}
+                Some("reasoning") => self.reasoning(&v["item"])?,
                 _ => return Err(protocol("The provider started an unsupported output item")),
             },
             "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
@@ -378,7 +411,7 @@ impl ResponsesStream {
                     stop_sequence: None,
                 });
                 events.push(StreamEvent::Usage {
-                    usage: usage_of(response.get("usage"))?,
+                    usage: usage_of(self.profile.label, response.get("usage"))?,
                 });
                 events.push(StreamEvent::Done {
                     finish_reason: None,
@@ -387,9 +420,10 @@ impl ResponsesStream {
                 self.complete = true;
             }
             // Response metadata is out-of-band information, not output or completion.
-            "response.metadata" => {}
+            "response.metadata" if self.profile.response_metadata == ResponseMetadata::Ignore => {}
             // Reasoning summaries are display hints, not replayable reasoning
-            // state. Preserve the encrypted item when available instead.
+            // state. An opaque reasoning item goes through the profile's
+            // reasoning rule instead.
             "response.reasoning_summary_text.delta"
             | "response.reasoning_summary_text.done"
             | "response.reasoning_text.delta"
@@ -493,34 +527,33 @@ impl StreamParserV1 for ResponsesStream {
 /// The terminal `response.usage`, under South 0.85.1's Responses rule
 /// (`reference_openai_responses::usage_of`, south #131): a completed response
 /// without exact usage is an error, never a zero.
-fn usage_of(usage: Option<&Value>) -> ComponentResultV1<Usage> {
+fn usage_of(label: &str, usage: Option<&Value>) -> ComponentResultV1<Usage> {
+    let protocol = |message: &str| protocol(&format!("{label} {message}"));
     let Some(usage) = usage.filter(|usage| usage.is_object()) else {
-        return Err(protocol(
-            "The ChatGPT plan response carries no usage object",
-        ));
+        return Err(protocol("response carries no usage object"));
     };
     let required = |key: &str| {
         usage[key]
             .as_u64()
-            .ok_or_else(|| protocol("The ChatGPT plan usage lacks a valid token count"))
+            .ok_or_else(|| protocol("usage lacks a valid token count"))
     };
     let details = |key: &str| match usage.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(details @ Value::Object(_)) => Ok(Some(details)),
-        Some(_) => Err(protocol("The ChatGPT plan usage has invalid token details")),
+        Some(_) => Err(protocol("usage has invalid token details")),
     };
     let optional = |details: Option<&Value>, key: &str| match details.and_then(|d| d.get(key)) {
         None | Some(Value::Null) => Ok(0),
         Some(value) => value
             .as_u64()
-            .ok_or_else(|| protocol("The ChatGPT plan usage has an invalid token count")),
+            .ok_or_else(|| protocol("usage has an invalid token count")),
     };
     let input = required("input_tokens")?;
     let output = required("output_tokens")?;
     let total = required("total_tokens")?;
     if input.checked_add(output) != Some(total) {
         return Err(protocol(
-            "The ChatGPT plan total_tokens does not equal input_tokens plus output_tokens",
+            "total_tokens does not equal input_tokens plus output_tokens",
         ));
     }
     let input_details = details("input_tokens_details")?;
@@ -531,14 +564,12 @@ fn usage_of(usage: Option<&Value>) -> ComponentResultV1<Usage> {
         .is_none_or(|cache| cache > input)
     {
         return Err(protocol(
-            "The ChatGPT plan cached and cache-write counts exceed input_tokens",
+            "cached and cache-write counts exceed input_tokens",
         ));
     }
     let reasoning = optional(details("output_tokens_details")?, "reasoning_tokens")?;
     if reasoning > output {
-        return Err(protocol(
-            "The ChatGPT plan reasoning_tokens exceeds output_tokens",
-        ));
+        return Err(protocol("reasoning_tokens exceeds output_tokens"));
     }
     Ok(Usage {
         input_tokens: input,
