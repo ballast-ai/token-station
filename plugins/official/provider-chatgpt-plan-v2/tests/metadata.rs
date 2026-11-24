@@ -188,7 +188,15 @@ fn metadata_keeps_frame_validation_and_size_limits() {
     for suffix in [
         b"data: {\"type\":\"response.metadata\",\"metadata\":\n\n".to_vec(),
         b"data: {\"type\":\"response.metadata\",\"metadata\":\"\xff\"}\n\n".to_vec(),
-        vec![b'x'; 4 * 1024 * 1024 + 1],
+        // A complete event's data is bounded at 4 MiB by the component.
+        [
+            b"data: ".as_slice(),
+            &vec![b'x'; 4 * 1024 * 1024 + 1],
+            b"\n\n",
+        ]
+        .concat(),
+        // A line that never ends is bounded by South's splitter (16 MiB).
+        vec![b'x'; south_component_conformance::sse_split::MAX_SSE_SPLIT_BYTES + 1],
     ] {
         let mut parser = ChatGptPlan.stream_parser();
         assert!(parser.parse_chunk(&frame(metadata())).unwrap().is_empty());

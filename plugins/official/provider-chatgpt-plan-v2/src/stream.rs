@@ -1,4 +1,5 @@
 use super::*;
+use south_component_conformance::sse_split::{SseSplitErrorV1, SseSplitterV1};
 
 #[derive(Default)]
 struct CallState {
@@ -11,7 +12,7 @@ struct CallState {
 
 #[derive(Default)]
 pub(super) struct ResponsesStream {
-    pending: Vec<u8>,
+    splitter: SseSplitterV1,
     received_data: bool,
     calls: BTreeMap<String, CallState>,
     indexes: BTreeMap<u32, String>,
@@ -408,6 +409,26 @@ impl ResponsesStream {
     }
 }
 
+impl ResponsesStream {
+    /// One dispatched SSE event's data.
+    fn frame(&mut self, data: &str, events: &mut Vec<StreamEvent>) -> ComponentResultV1<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        if data == "[DONE]" {
+            if self.complete {
+                return Ok(());
+            }
+            return Err(protocol(
+                "The upstream sent DONE without response.completed",
+            ));
+        }
+        let v = serde_json::from_str(data)
+            .map_err(|_| protocol("An SSE frame contains invalid JSON"))?;
+        self.event(v, events)
+    }
+}
+
 impl StreamParserV1 for ResponsesStream {
     fn finish(&mut self) -> ComponentResultV1<Vec<StreamEvent>> {
         if let Some(error) = &self.failure {
@@ -420,7 +441,7 @@ impl StreamParserV1 for ResponsesStream {
                 "The stream ended before response.completed",
             ));
         }
-        if !self.pending.iter().all(u8::is_ascii_whitespace) {
+        if !self.splitter.is_idle() {
             return Err(protocol("The stream ended inside an SSE frame"));
         }
         Ok(Vec::new())
@@ -440,62 +461,32 @@ impl StreamParserV1 for ResponsesStream {
             };
         }
         self.received_data = true;
-        if self.pending.len().saturating_add(chunk.len()) > MAX_VALUE_BYTES {
-            return Err(protocol("An SSE fragment exceeded the adapter limit"));
-        }
-        self.pending.extend_from_slice(chunk);
+        // The SSE standard's line ends (LF, CR, CRLF), as the host decoder cuts
+        // them. Frames completed before a refusal are judged first.
+        let pushed = self.splitter.push(chunk);
         let mut events = Vec::new();
-        loop {
-            let lf = self
-                .pending
-                .windows(2)
-                .position(|s| s == b"\n\n")
-                .map(|i| (i, 2));
-            let crlf = self
-                .pending
-                .windows(4)
-                .position(|s| s == b"\r\n\r\n")
-                .map(|i| (i, 4));
-            let Some((end, width)) = (match (lf, crlf) {
-                (Some(a), Some(b)) => Some(if a.0 < b.0 { a } else { b }),
-                (a, b) => a.or(b),
-            }) else {
-                break;
-            };
-            let frame = self.pending.drain(..end + width).collect::<Vec<_>>();
-            let result = (|| {
-                let frame = std::str::from_utf8(&frame)
-                    .map_err(|_| protocol("An SSE frame contains invalid UTF-8"))?;
-                let data = frame
-                    .lines()
-                    .filter_map(|line| {
-                        line.strip_prefix("data:")
-                            .map(|value| value.strip_prefix(' ').unwrap_or(value))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if data.is_empty() {
-                    return Ok(());
-                }
-                if data == "[DONE]" {
-                    if self.complete {
-                        return Ok(());
-                    }
-                    return Err(protocol(
-                        "The upstream sent DONE without response.completed",
-                    ));
-                }
-                let v = serde_json::from_str(&data)
-                    .map_err(|_| protocol("An SSE frame contains invalid JSON"))?;
-                self.event(v, &mut events)
-            })();
-            if let Err(error) = result {
+        for frame in pushed.frames {
+            if frame.data.len() > MAX_VALUE_BYTES {
+                return Err(protocol("An SSE fragment exceeded the adapter limit"));
+            }
+            if let Err(error) = self.frame(&frame.data, &mut events) {
                 self.failure = Some(error.clone());
                 events.push(StreamEvent::Error { error });
-                break;
+                return Ok(events);
             }
         }
-        Ok(events)
+        match pushed.error {
+            Some(SseSplitErrorV1::TooLarge) => {
+                Err(protocol("An SSE fragment exceeded the adapter limit"))
+            }
+            Some(SseSplitErrorV1::NotUtf8) => {
+                let error = protocol("An SSE frame contains invalid UTF-8");
+                self.failure = Some(error.clone());
+                events.push(StreamEvent::Error { error });
+                Ok(events)
+            }
+            None => Ok(events),
+        }
     }
 }
 
