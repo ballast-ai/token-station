@@ -262,6 +262,13 @@ impl SouthComponentAdapter {
         self.manifest.auth_arms.clone()
     }
 
+    /// The admitted manifest. The transport hands it to South's descriptor auth
+    /// rule.
+    #[must_use]
+    pub fn manifest(&self) -> &ComponentManifestV1 {
+        &self.manifest
+    }
+
     /// The secret-bearing header names the manifest declares (`secret_headers`,
     /// auth contract version five), already checked by South's manifest gate.
     #[must_use]

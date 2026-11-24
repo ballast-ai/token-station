@@ -4953,6 +4953,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "south-component-conformance"
+version = "0.81.1"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f#174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f"
+dependencies = [
+ "serde",
+ "serde_json",
+ "south-contracts",
+ "south-provider-api",
+ "token-station-protocol",
+]
+
+[[package]]
 name = "south-contracts"
 version = "0.57.0"
 source = "git+https://github.com/ballast-ai/token-station-south.git?rev=174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f#174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f"
@@ -5779,6 +5791,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "south-component-conformance",
  "south-contracts",
  "south-core",
  "south-provider-api",

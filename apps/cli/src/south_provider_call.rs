@@ -1,22 +1,21 @@
 //! Community-host adapter for South provider-call v1.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    time::Duration,
-};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+
+use south_component_conformance::{AdmittedAuthV1, DescriptorAuthErrorV1, admit_descriptor_auth};
 
 use south_contracts::{
     BearerAuthV1, ContractErrorV1, CredentialSlotV1, DeclaredSecretHeaderV1,
     DeclaredSecretHeadersV1, JsonBodyV1, JsonPostRequestV1, PreparationErrorV1, ProviderAuthV1,
     ProviderEndpointV1, ProviderQuotaMetadataFieldV1, RelativePathV1, ResponseTranscriptV1,
-    SafeHeaders, SecretHeaderV1, StreamTransportConfigV1,
+    SafeHeaders, StreamTransportConfigV1,
 };
 use south_core::raw::BoundedResolverV1;
 use south_core::{
     CredentialResolutionErrorV1, CredentialResolutionFuture, CredentialResolver, ProviderBindingV1,
     SecretValue, StreamingCallV1,
 };
+use south_provider_api::ComponentManifestV1;
 use south_transport_reqwest::{
     ReqwestStreamingTransportV1, ReqwestTransportConfigV1, ReqwestTransportV1,
 };
@@ -66,21 +65,45 @@ pub(crate) enum RequestBodyModeV1 {
     Buffered,
 }
 
+/// What the admitted component declares about descriptor auth.
+///
+/// South's `admit_descriptor_auth` reads the manifest: its auth arms, its
+/// declared secret headers and its credential recipes. The host does not keep
+/// its own copy of that rule. The declared secret headers are also parsed once
+/// here, because the request's `SafeHeaders` need them.
+#[derive(Clone)]
+pub(crate) struct ComponentAuthV1 {
+    manifest: Arc<ComponentManifestV1>,
+    secret_headers: DeclaredSecretHeadersV1,
+}
+
+impl ComponentAuthV1 {
+    /// Reads the auth declaration of an admitted component's manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns the contract error when a declared secret header name is not
+    /// declarable. South's manifest gate has already refused such a manifest.
+    pub(crate) fn try_new(manifest: ComponentManifestV1) -> Result<Self, ContractErrorV1> {
+        let secret_headers = DeclaredSecretHeadersV1::try_from_names(
+            manifest.secret_headers.iter().map(String::as_str),
+        )?;
+        Ok(Self {
+            manifest: Arc::new(manifest),
+            secret_headers,
+        })
+    }
+}
+
 /// Static host facts used before any credential lookup or transport call.
 #[derive(Clone)]
 pub(crate) struct CommunityCallPolicyV1 {
     egress_mode: EgressMode,
     body_mode: RequestBodyModeV1,
-    /// The auth shapes the admitted component declares it can carry. Read from
-    /// its manifest, which admission has already verified — so eligibility asks
-    /// the component what it does rather than matching its dialect against a
+    /// The admitted component's auth declaration. Eligibility asks the
+    /// component what it carries rather than matching its dialect against a
     /// list the host has to remember to extend.
-    auth_arms: BTreeSet<String>,
-    /// The secret-bearing header names the admitted component declares
-    /// (manifest `secret_headers`, auth contract version five). A descriptor
-    /// may carry its credential in one of these through the declared-header
-    /// arm, and no ordinary header may use the names at all.
-    secret_headers: DeclaredSecretHeadersV1,
+    auth: ComponentAuthV1,
 }
 
 impl CommunityCallPolicyV1 {
@@ -88,21 +111,13 @@ impl CommunityCallPolicyV1 {
     pub(crate) fn new(
         egress_mode: EgressMode,
         body_mode: RequestBodyModeV1,
-        auth_arms: BTreeSet<String>,
+        auth: ComponentAuthV1,
     ) -> Self {
         Self {
             egress_mode,
             body_mode,
-            auth_arms,
-            secret_headers: DeclaredSecretHeadersV1::default(),
+            auth,
         }
-    }
-
-    /// The component's declared secret headers, parsed once at assembly.
-    #[must_use]
-    pub(crate) fn with_secret_headers(mut self, secret_headers: DeclaredSecretHeadersV1) -> Self {
-        self.secret_headers = secret_headers;
-        self
     }
 }
 
@@ -112,11 +127,12 @@ impl fmt::Debug for CommunityCallPolicyV1 {
             .debug_struct("CommunityCallPolicyV1")
             .field("egress_mode", &self.egress_mode)
             .field("body_mode", &self.body_mode)
-            .field("auth_arms", &self.auth_arms)
+            .field("auth_arms", &self.auth.manifest.auth_arms)
             // Header names, never values: the declaration holds no secret.
             .field(
                 "secret_headers",
                 &self
+                    .auth
                     .secret_headers
                     .as_slice()
                     .iter()
@@ -301,7 +317,7 @@ fn prepare_provider_call_for_mode_v1(
     auth_config: &AuthConfig,
     descriptor: &HttpRequestDescriptor,
 ) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
-    check_static_eligibility(
+    let admission = check_static_eligibility(
         policy,
         expected_body_mode,
         provider,
@@ -338,59 +354,42 @@ fn prepare_provider_call_for_mode_v1(
         .as_ref()
         .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
     let bound_slot = CredentialSlotV1::parse(bound_slot.as_str())?;
-    let slot = |secret: &token_station_protocol::SecretRef| {
-        CredentialSlotV1::parse(secret.as_str()).map(BearerAuthV1::new)
+    // Admission refused every other descriptor auth shape. The descriptor's
+    // own slot is a contract check, so it comes before the kernel's endpoint
+    // and slot check, as South's conformance suite orders them.
+    let Some(
+        Auth::Bearer { secret }
+        | Auth::Header { secret, .. }
+        | Auth::BearerAndHeader { secret, .. },
+    ) = descriptor.auth.as_ref()
+    else {
+        return Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth));
     };
-    let requested_auth = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { secret }) => ProviderAuthV1::from(slot(secret)?),
-        Some(Auth::Header { name, secret }) if policy.auth_arms.contains("header_secret") => {
-            if let Some(header) = sanctioned_secret_header(name) {
-                ProviderAuthV1::HeaderSecret {
-                    header,
-                    slot: slot(secret)?,
-                }
-            } else if policy.secret_headers.contains(name) {
-                ProviderAuthV1::DeclaredHeaderSecret {
-                    header: DeclaredSecretHeaderV1::parse(name)?,
-                    slot: slot(secret)?,
-                }
-            } else {
-                return Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth));
-            }
+    let slot = BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?);
+    let admitted = match admission {
+        AdmissionV1::Admitted(admitted) => admitted,
+        AdmissionV1::NotAuthorized(error) => return Err(map_legacy_authorization(&error)),
+    };
+    let requested_auth = match admitted {
+        AdmittedAuthV1::Bearer => ProviderAuthV1::from(slot),
+        AdmittedAuthV1::HeaderSecret(header) => ProviderAuthV1::HeaderSecret { header, slot },
+        AdmittedAuthV1::DeclaredHeaderSecret(header) => {
+            ProviderAuthV1::DeclaredHeaderSecret { header, slot }
         }
-        Some(Auth::BearerAndHeader { name, secret })
-            if policy.auth_arms.contains("bearer_and_header_secret") =>
-        {
-            let header = sanctioned_secret_header(name)
-                .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
-            ProviderAuthV1::BearerAndHeaderSecret {
-                header,
-                slot: slot(secret)?,
-            }
+        AdmittedAuthV1::BearerAndHeaderSecret(header) => {
+            ProviderAuthV1::BearerAndHeaderSecret { header, slot }
         }
-        _ => return Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)),
+        AdmittedAuthV1::None | AdmittedAuthV1::HostSigned => {
+            return Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth));
+        }
     };
 
-    provider
-        .authorize(descriptor)
-        .map_err(|error| map_legacy_authorization(&error))?;
-
-    // A declared secret name on the ordinary header channel is refused outright,
-    // never handed to the legacy transport: that transport knows no declaration
-    // and would send the header as it came.
-    if descriptor
-        .headers
-        .iter()
-        .any(|(name, _)| policy.secret_headers.contains(&name.to_ascii_lowercase()))
-    {
-        return Err(PreparationErrorV1::UnsupportedAuthShape.into());
-    }
     let headers = SafeHeaders::try_from_iter_with_secret_headers(
         descriptor
             .headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str())),
-        &policy.secret_headers,
+        &policy.auth.secret_headers,
     )
     .map_err(|_| PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Headers))?;
     let body = descriptor
@@ -720,7 +719,7 @@ fn check_static_eligibility(
     provider: &ProviderConfig,
     auth_config: &AuthConfig,
     descriptor: &HttpRequestDescriptor,
-) -> Result<(), PrepareProviderCallErrorV1> {
+) -> Result<AdmissionV1, PrepareProviderCallErrorV1> {
     let ineligible = |reason| Err(PrepareProviderCallErrorV1::Ineligible(reason));
     if policy.egress_mode != EgressMode::Direct {
         return ineligible(IneligibleV1::Egress);
@@ -734,25 +733,13 @@ fn check_static_eligibility(
     if descriptor.body.is_none() {
         return ineligible(IneligibleV1::Body);
     }
+    if provider.auth.is_none() {
+        return ineligible(IneligibleV1::Auth);
+    }
     // The descriptor says what this request needs; the manifest says what the
     // component carries. Anything else — the dialect's name in particular — is
     // not the transport's business once admission has run.
-    let supported_auth = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { .. }) => policy.auth_arms.contains("bearer"),
-        Some(Auth::Header { name, .. }) => {
-            policy.auth_arms.contains("header_secret")
-                && (sanctioned_secret_header(name).is_some()
-                    || policy.secret_headers.contains(name))
-        }
-        Some(Auth::BearerAndHeader { name, .. }) => {
-            policy.auth_arms.contains("bearer_and_header_secret")
-                && sanctioned_secret_header(name).is_some()
-        }
-        _ => false,
-    };
-    if !supported_auth || provider.auth.is_none() {
-        return ineligible(IneligibleV1::Auth);
-    }
+    let admission = admit_auth(policy, provider, descriptor)?;
     if !has_supported_secret_source(auth_config) {
         return ineligible(IneligibleV1::SecretSource);
     }
@@ -764,13 +751,56 @@ fn check_static_eligibility(
     {
         return Err(PreparationErrorV1::CredentialBindingMismatch.into());
     }
-    Ok(())
+    Ok(admission)
 }
 
-fn sanctioned_secret_header(name: &str) -> Option<SecretHeaderV1> {
-    SecretHeaderV1::ALL
-        .into_iter()
-        .find(|header| header.header_name().eq_ignore_ascii_case(name))
+/// The descriptor auth judgment made during eligibility.
+enum AdmissionV1 {
+    Admitted(AdmittedAuthV1),
+    /// The kernel's endpoint and slot check refused the descriptor. The
+    /// refusal is reported after the URL and slot contract checks, in the
+    /// order South's conformance suite expects.
+    NotAuthorized(DescriptorError),
+}
+
+/// South's descriptor auth rule, `admit_descriptor_auth`, over the component's
+/// manifest, mapped to the host's outcomes. It runs the kernel's
+/// `ProviderConfig::authorize` first. Every refusal comes before a credential
+/// is resolved.
+fn admit_auth(
+    policy: &CommunityCallPolicyV1,
+    provider: &ProviderConfig,
+    descriptor: &HttpRequestDescriptor,
+) -> Result<AdmissionV1, PrepareProviderCallErrorV1> {
+    let ineligible = Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth));
+    // The host runs no credential recipe, so an OAuth exchange stays on the
+    // legacy path.
+    if matches!(descriptor.auth, Some(Auth::OAuth { .. })) {
+        return ineligible;
+    }
+    match admit_descriptor_auth(&policy.auth.manifest, provider, descriptor) {
+        // These go to the legacy path: the South transport has no
+        // unauthenticated or host-signed call, and the component does not
+        // declare the other shapes.
+        Ok(AdmittedAuthV1::None | AdmittedAuthV1::HostSigned)
+        | Err(
+            DescriptorAuthErrorV1::BearerNotDeclared
+            | DescriptorAuthErrorV1::HeaderSecretNotDeclared
+            | DescriptorAuthErrorV1::BearerAndHeaderNotDeclared
+            | DescriptorAuthErrorV1::HeaderNotSanctioned(_)
+            | DescriptorAuthErrorV1::CombinedHeaderNotSanctioned(_)
+            | DescriptorAuthErrorV1::OAuthNotAdmitted
+            | DescriptorAuthErrorV1::HostSignedCarriesAuth,
+        ) => ineligible,
+        Ok(admitted) => Ok(AdmissionV1::Admitted(admitted)),
+        Err(DescriptorAuthErrorV1::NotAuthorized(error)) => Ok(AdmissionV1::NotAuthorized(error)),
+        // A declared secret name on the ordinary header channel is refused
+        // outright, never handed to the legacy transport: that transport knows
+        // no declaration and would send the header as it came.
+        Err(DescriptorAuthErrorV1::SecretHeaderOnOrdinaryChannel(_)) => {
+            Err(PreparationErrorV1::UnsupportedAuthShape.into())
+        }
+    }
 }
 
 fn has_supported_secret_source(auth_config: &AuthConfig) -> bool {

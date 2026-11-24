@@ -1110,12 +1110,10 @@ struct Upstream {
     /// The translation engine: the South provider component that speaks this
     /// upstream's dialect, resolved at assembly.
     plugin: Arc<dyn ProviderAdapter + Send + Sync>,
-    /// The auth shapes the admitted component declares, read from its manifest
-    /// once at assembly. Transport eligibility judges by these instead of by
-    /// the dialect's name.
-    auth_arms: std::collections::BTreeSet<String>,
-    /// The secret header names the admitted component declares, parsed once.
-    secret_headers: south_contracts::DeclaredSecretHeadersV1,
+    /// The admitted component's auth declaration, read from its manifest once
+    /// at assembly. Transport eligibility judges by it, through South's
+    /// descriptor auth rule, instead of by the dialect's name.
+    component_auth: crate::south_provider_call::ComponentAuthV1,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
@@ -1269,11 +1267,9 @@ fn assemble_upstreams(
             .adapter_for(&entry.provider)
             .expect("the caller loaded a component for every configured dialect")
             .clone();
-        let auth_arms = admitted.auth_arms();
-        let secret_headers = south_contracts::DeclaredSecretHeadersV1::try_from_names(
-            admitted.secret_headers().iter().map(String::as_str),
-        )
-        .map_err(|error| format!("upstream `{name}` secret headers: {error}"))?;
+        let component_auth =
+            crate::south_provider_call::ComponentAuthV1::try_new(admitted.manifest().clone())
+                .map_err(|error| format!("upstream `{name}` secret headers: {error}"))?;
         let component_replays = admitted
             .declares_model_parameter(&entry.provider, component_request::CLAUDE_REPLAY_CAPABILITY);
         let plugin: Arc<dyn ProviderAdapter + Send + Sync> = admitted;
@@ -1334,8 +1330,7 @@ fn assemble_upstreams(
             Upstream {
                 config: provider_config,
                 auth_config: entry.auth.clone(),
-                auth_arms,
-                secret_headers,
+                component_auth,
                 plugin,
                 dialect: entry.api_dialect,
                 native_search: crate::native_search::resolve(entry),
