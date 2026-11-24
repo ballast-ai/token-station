@@ -45,6 +45,17 @@ south-transport-reqwest = { version = "=0.85.1", git = "https://github.com/balla
 south-provider-api = { version = "=0.65.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f" }
 south-provider-runtime = { version = "=0.85.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f" }
 
+# South compiles against the kernel mirror's protocol crate, which is this
+# repository's crates/protocol published one way (token-station-kernel). Two
+# copies of byte-identical source are still two Rust types, so host code could
+# not pass its requests and configs to a South function. This patch makes South
+# build against the source itself: one type set for the host and South.
+# tests/south-dependency-policy.mjs requires crates/protocol to stay
+# byte-identical to the mirror revision South pins, so a local IR change cannot
+# reach South before the mirror and South release it.
+[patch."https://github.com/ballast-ai/token-station-kernel.git"]
+token-station-protocol = { path = "crates/protocol" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

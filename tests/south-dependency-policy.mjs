@@ -32,6 +32,9 @@ const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git
 // one-way mirror of this repository's crates/protocol 0.7.0.
 const kernelRevision = "ce6894d99f51283e4985d39a2d533307bda27b6a";
 const kernelVersion = "0.7.0";
+// The git tree hash of crates/protocol that the kernel mirror at
+// kernelRevision records (compatibility.json mirror.subtrees).
+const kernelProtocolTree = "0b5099bb04a24e59773e785a9919562257519105";
 // Since South 0.16.0 (south #45), South pins the kernel protocol crate by
 // revision rather than by tag. A tag can be moved onto different bytes and a
 // revision cannot. Require the stricter form rather than accepting either.
@@ -242,23 +245,48 @@ for (const pkg of rootGitPackages) {
     `${pkg.name} must resolve from an exact approved Git source and commit`,
   );
 }
-const kernelPackages = rootGitPackages.filter(
-  (pkg) => pkg.source === kernelSource,
-);
+// The root workspace patches the kernel source to crates/protocol, so South
+// and the host share one protocol type set. No package may still resolve
+// from the kernel git source.
 assert.equal(
-  kernelPackages.length,
-  1,
-  "the root workspace must resolve exactly one approved kernel package",
+  rootGitPackages.filter((pkg) => pkg.source === kernelSource).length,
+  0,
+  "the root workspace must patch the kernel protocol crate to crates/protocol",
 );
-assert.equal(
-  kernelPackages[0].name,
-  "token-station-protocol",
-  "the approved kernel source may supply only the protocol package",
+assert.match(
+  rootManifest,
+  new RegExp(
+    `^\\[patch\\."${kernelRepository.replaceAll(".", "\\.")}"\\]\\ntoken-station-protocol = \\{ path = "crates/protocol" \\}$`,
+    "m",
+  ),
+  "the root manifest must patch the kernel protocol crate to crates/protocol",
 );
+const localProtocol = metadata.packages.filter(
+  (pkg) => pkg.name === "token-station-protocol",
+);
+assert.equal(localProtocol.length, 1, "the root workspace must resolve one protocol crate");
+assert.equal(localProtocol[0].source, null, "the protocol crate must be the local path crate");
 assert.equal(
-  kernelPackages[0].version,
+  localProtocol[0].version,
   kernelVersion,
-  `the kernel protocol package must stay on ${kernelVersion}`,
+  `the protocol crate must stay on ${kernelVersion}`,
+);
+// The patch is safe only while crates/protocol is byte-identical to the
+// mirror revision South compiles against. The kernel records the upstream git
+// tree hash of the subtree it mirrors (compatibility.json mirror.subtrees at
+// kernelRevision), so equal tree hashes mean equal bytes. A local IR change
+// must go out through a kernel-v* tag, the mirror and a South release first.
+const git = (...args) =>
+  execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+assert.equal(
+  git("rev-parse", "HEAD:crates/protocol"),
+  kernelProtocolTree,
+  "crates/protocol must equal the kernel mirror South pins; release a kernel-v* tag, sync the mirror and repin South first",
+);
+assert.equal(
+  git("status", "--porcelain", "--", "crates/protocol"),
+  "",
+  "crates/protocol must have no uncommitted change while it is patched into South",
 );
 
 const workspaceMemberIds = new Set(metadata.workspace_members);
@@ -266,9 +294,14 @@ const nodeById = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
 for (const pkg of southPackages) {
   const node = nodeById.get(pkg.id);
   assert.ok(node, `${pkg.name} must have a resolved dependency node`);
+  // The patched protocol crate is the kernel South declares, not a host
+  // crate, so it is the one workspace member South may reach.
   const reverseHostDependencies = node.deps
     .map((dependency) => dependency.pkg)
-    .filter((packageId) => workspaceMemberIds.has(packageId));
+    .filter(
+      (packageId) =>
+        workspaceMemberIds.has(packageId) && packageId !== localProtocol[0].id,
+    );
   assert.deepEqual(
     reverseHostDependencies,
     [],

@@ -2644,7 +2644,7 @@ dependencies = [
  "south-contracts",
  "south-provider-api",
  "south-provider-runtime",
- "token-station-protocol 0.7.0 (git+https://github.com/ballast-ai/token-station-kernel.git?rev=ce6894d99f51283e4985d39a2d533307bda27b6a)",
+ "token-station-protocol",
 ]
 
 [[package]]
@@ -3006,7 +3006,7 @@ dependencies = [
  "token-station-plugin-api",
  "token-station-plugin-runtime",
  "token-station-private-fs",
- "token-station-protocol 0.7.0",
+ "token-station-protocol",
  "token-station-release",
  "token-station-router-core",
  "tokio",
@@ -3025,7 +3025,7 @@ dependencies = [
  "serde",
  "serde_json",
  "token-station-plugin-api",
- "token-station-protocol 0.7.0",
+ "token-station-protocol",
 ]
 
 [[package]]
@@ -3034,7 +3034,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol 0.7.0",
+ "token-station-protocol",
  "token-station-router-core",
 ]
 
@@ -3055,7 +3055,7 @@ dependencies = [
  "serde_json",
  "token-station-conformance",
  "token-station-plugin-api",
- "token-station-protocol 0.7.0",
+ "token-station-protocol",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -3071,15 +3071,6 @@ dependencies = [
 [[package]]
 name = "token-station-protocol"
 version = "0.7.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "token-station-protocol"
-version = "0.7.0"
-source = "git+https://github.com/ballast-ai/token-station-kernel.git?rev=ce6894d99f51283e4985d39a2d533307bda27b6a#ce6894d99f51283e4985d39a2d533307bda27b6a"
 dependencies = [
  "serde",
  "serde_json",
@@ -3105,7 +3096,7 @@ version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
- "token-station-protocol 0.7.0",
+ "token-station-protocol",
 ]
 
 [[package]]
