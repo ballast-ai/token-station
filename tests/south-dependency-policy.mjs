@@ -57,6 +57,7 @@ const expectedSouthPackages = new Set([
   "south-host-grammars",
 ]);
 const expectedDesktopSouthPackages = new Set([
+  "south-component-conformance",
   "south-contracts",
   "south-core",
   "south-provider-api",
@@ -261,6 +262,34 @@ assert.match(
   ),
   "the root manifest must patch the kernel protocol crate to crates/protocol",
 );
+// The Desktop workspace builds the host as a path dependency. It needs the
+// same patch, or south-component-conformance would bring a second protocol
+// type set into the host build.
+const desktopManifest = fs.readFileSync(
+  path.join(root, "apps/desktop/src-tauri/Cargo.toml"),
+  "utf8",
+);
+assert.match(
+  desktopManifest,
+  new RegExp(
+    `^\\[patch\\."${kernelRepository.replaceAll(".", "\\.")}"\\]\\ntoken-station-protocol = \\{ path = "\\.\\./\\.\\./\\.\\./crates/protocol" \\}$`,
+    "m",
+  ),
+  "the Desktop manifest must patch the kernel protocol crate to crates/protocol",
+);
+const desktopProtocol = desktopMetadata.packages.filter(
+  (pkg) => pkg.name === "token-station-protocol",
+);
+assert.equal(
+  desktopProtocol.length,
+  1,
+  "the Desktop workspace must resolve one protocol crate",
+);
+assert.equal(
+  desktopProtocol[0].source,
+  null,
+  "the Desktop protocol crate must be the local path crate",
+);
 const localProtocol = metadata.packages.filter(
   (pkg) => pkg.name === "token-station-protocol",
 );
@@ -311,24 +340,31 @@ for (const pkg of southPackages) {
 
 const cli = metadata.packages.find((pkg) => pkg.name === "token-station-cli");
 assert.ok(cli, "token-station-cli must be present in workspace metadata");
-const cliSouthDependencies = new Map(
-  cli.dependencies
-    .filter((dependency) => declaredSouthPackages.has(dependency.name))
-    .map((dependency) => [dependency.name, dependency.kind ?? "normal"]),
-);
+const cliSouthDependencies = cli.dependencies
+  .filter((dependency) => declaredSouthPackages.has(dependency.name))
+  .map((dependency) => ({
+    name: dependency.name,
+    kind: dependency.kind ?? "normal",
+    features: [...dependency.features].sort(),
+  }))
+  .sort((left, right) =>
+    `${left.name} ${left.kind}`.localeCompare(`${right.name} ${right.kind}`),
+  );
 assert.deepEqual(
   cliSouthDependencies,
-  new Map([
-    ["south-component-conformance", "dev"],
-    ["south-contracts", "normal"],
-    ["south-core", "normal"],
-    ["south-provider-api", "normal"],
-    ["south-provider-conformance", "dev"],
-    ["south-provider-runtime", "normal"],
-    ["south-testkit", "dev"],
-    ["south-transport-reqwest", "normal"],
-  ]),
-  "the CLI must keep conformance/testkit test-only and only five South runtime dependencies",
+  [
+    // Descriptor auth admission only. The sandboxed seam stays test-only.
+    { name: "south-component-conformance", kind: "dev", features: ["sandbox"] },
+    { name: "south-component-conformance", kind: "normal", features: [] },
+    { name: "south-contracts", kind: "normal", features: [] },
+    { name: "south-core", kind: "normal", features: [] },
+    { name: "south-provider-api", kind: "normal", features: [] },
+    { name: "south-provider-conformance", kind: "dev", features: [] },
+    { name: "south-provider-runtime", kind: "normal", features: [] },
+    { name: "south-testkit", kind: "dev", features: [] },
+    { name: "south-transport-reqwest", kind: "normal", features: [] },
+  ],
+  "the CLI must keep testkit and the sandboxed conformance seam test-only, and use six South runtime dependencies",
 );
 
 const policyPackageIds = new Set([

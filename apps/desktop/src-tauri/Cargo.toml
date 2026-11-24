@@ -84,6 +84,13 @@ libc = "=0.2.186"
 # Exercise the actual repaired iterator used by the Linux WebView stack.
 glib = "=0.22.10"
 
+# The host's South dependencies reach the kernel protocol crate through
+# south-component-conformance. As in the root workspace, build them against
+# crates/protocol, so the host and South share one protocol type set.
+# tests/south-dependency-policy.mjs guards both patches.
+[patch."https://github.com/ballast-ai/token-station-kernel.git"]
+token-station-protocol = { path = "../../../crates/protocol" }
+
 # Source adaptations retain the upstream package versions. See vendor/README.md.
 [patch.crates-io]
 libappindicator = { path = "vendor/libappindicator" }

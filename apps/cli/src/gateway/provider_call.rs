@@ -444,9 +444,8 @@ impl Gateway {
         CommunityCallPolicyV1::new(
             self.egress.policy.mode,
             body_mode,
-            upstream.auth_arms.clone(),
+            upstream.component_auth.clone(),
         )
-        .with_secret_headers(upstream.secret_headers.clone())
     }
 
     /// Resolves the descriptor into a real HTTP exchange.

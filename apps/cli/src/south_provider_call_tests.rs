@@ -5,7 +5,7 @@ use crate::{
     secrets::{SecretStore, store_set},
     south_provider_call::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
-        IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
+        ComponentAuthV1, IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
         PreparedProviderStreamResultV1, RequestBodyModeV1, StableProviderCallFailureV1,
         build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
         execute_prepared_provider_call_v1, execute_prepared_provider_call_with_transcript_v1,
@@ -14,11 +14,11 @@ use crate::{
     },
 };
 use south_contracts::{
-    BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, DeclaredSecretHeadersV1,
-    MAX_JSON_REQUEST_BODY_BYTES, MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES,
-    MAX_STREAM_ERROR_BODY_BYTES, PreparationErrorV1, ProviderQuotaMetadataFieldV1,
-    ProviderQuotaMetadataV1, ResponseDiagnosticsV1, ResponseTranscriptV1, StreamChunkV1,
-    StreamReadErrorV1, StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
+    BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, MAX_JSON_REQUEST_BODY_BYTES,
+    MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, MAX_STREAM_ERROR_BODY_BYTES, PreparationErrorV1,
+    ProviderQuotaMetadataFieldV1, ProviderQuotaMetadataV1, ResponseDiagnosticsV1,
+    ResponseTranscriptV1, StreamChunkV1, StreamReadErrorV1, StreamRejectedV1,
+    StreamingResponseHeadV1, TransportErrorV1,
 };
 use south_core::{
     AsyncHttpTransport, AsyncStreamingTransport, CredentialResolutionFuture, CredentialResolver,
@@ -26,6 +26,7 @@ use south_core::{
     StreamByteSourceV1, StreamChunkFutureV1, StreamOpenErrorV1, StreamingOpenFutureV1,
     TransportFuture,
 };
+use south_provider_api::ComponentManifestV1;
 use south_provider_conformance::{
     FAKE_BEARER_SECRET_V1, FAKE_HEADER_SECRET_V1, HeaderAuthFixtureV1, HeaderAuthUpstreamV1,
     PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1, PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1,
@@ -80,28 +81,48 @@ fn both_arms() -> BTreeSet<String> {
     BTreeSet::from(["bearer".to_owned(), "header_secret".to_owned()])
 }
 
+/// The auth declaration of a component whose manifest declares `arms` and the
+/// secret header names `secret_headers`. The rest of the manifest is the
+/// official OpenAI-compatible package's.
+fn component_auth(arms: BTreeSet<String>, secret_headers: &[&str]) -> ComponentAuthV1 {
+    let mut manifest: ComponentManifestV1 = serde_json::from_str(include_str!(
+        "../../../plugins/official/provider-openai-compatible-v2/manifest.json"
+    ))
+    .expect("the official manifest parses");
+    manifest.auth_arms = arms;
+    manifest.secret_headers = secret_headers
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    ComponentAuthV1::try_new(manifest).expect("declarable secret header names")
+}
+
+fn policy_declaring(
+    body_mode: RequestBodyModeV1,
+    arms: BTreeSet<String>,
+    secret_headers: &[&str],
+) -> CommunityCallPolicyV1 {
+    CommunityCallPolicyV1::new(
+        EgressMode::Direct,
+        body_mode,
+        component_auth(arms, secret_headers),
+    )
+}
+
 fn eligible_policy_with(arms: BTreeSet<String>) -> CommunityCallPolicyV1 {
-    CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Buffered, arms)
+    policy_declaring(RequestBodyModeV1::Buffered, arms, &[])
 }
 
 fn eligible_streaming_policy_with(arms: BTreeSet<String>) -> CommunityCallPolicyV1 {
-    CommunityCallPolicyV1::new(EgressMode::Direct, RequestBodyModeV1::Streaming, arms)
+    policy_declaring(RequestBodyModeV1::Streaming, arms, &[])
 }
 
 fn eligible_policy() -> CommunityCallPolicyV1 {
-    CommunityCallPolicyV1::new(
-        EgressMode::Direct,
-        RequestBodyModeV1::Buffered,
-        bearer_arms(),
-    )
+    eligible_policy_with(bearer_arms())
 }
 
 fn eligible_streaming_policy() -> CommunityCallPolicyV1 {
-    CommunityCallPolicyV1::new(
-        EgressMode::Direct,
-        RequestBodyModeV1::Streaming,
-        bearer_arms(),
-    )
+    eligible_streaming_policy_with(bearer_arms())
 }
 
 fn provider_config() -> ProviderConfig {
@@ -293,11 +314,7 @@ fn a_declared_combined_arm_is_prepared_for_south() {
 
 #[test]
 fn a_declared_secret_header_is_served_and_never_smuggled() {
-    let declared = || {
-        DeclaredSecretHeadersV1::try_from_names(["x-vendor-key"])
-            .expect("a declarable secret header name")
-    };
-    let policy = || eligible_policy_with(both_arms()).with_secret_headers(declared());
+    let policy = || policy_declaring(RequestBodyModeV1::Buffered, both_arms(), &["x-vendor-key"]);
 
     let request = header_descriptor("x-vendor-key", "provider_api_key");
     prepare_provider_call_v1(&policy(), &provider_config(), &auth_config(), &request)
@@ -321,6 +338,128 @@ fn a_declared_secret_header_is_served_and_never_smuggled() {
             .expect_err("an undeclared header name"),
         PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
     );
+}
+
+/// South's rule checks the ordinary header channel before the auth arm. A
+/// descriptor whose arm the component does not declare used to fall back to
+/// the legacy transport here, which sends a declared secret header as it came.
+#[test]
+fn an_undeclared_arm_cannot_carry_a_declared_secret_header_to_the_legacy_path() {
+    let policy = policy_declaring(
+        RequestBodyModeV1::Buffered,
+        header_secret_arms(),
+        &["x-vendor-key"],
+    );
+    let mut smuggled = descriptor();
+    smuggled.headers =
+        SafeHeaders::try_new([("x-vendor-key", "not-a-credential")]).expect("plain header");
+    assert!(matches!(smuggled.auth, Some(Auth::Bearer { .. })));
+    assert_eq!(
+        prepare_provider_call_v1(&policy, &provider_config(), &auth_config(), &smuggled)
+            .expect_err("a declared name on the ordinary channel, under an undeclared arm"),
+        PrepareProviderCallErrorV1::Preparation(PreparationErrorV1::UnsupportedAuthShape)
+    );
+}
+
+/// Each refusal of South's `admit_descriptor_auth` maps to one host outcome:
+/// a shape the component does not declare falls back to the legacy transport,
+/// and a descriptor outside the configured upstream fails closed.
+#[test]
+fn every_descriptor_auth_refusal_maps_to_its_host_outcome() {
+    let ineligible = PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth);
+    let combined_arms = || {
+        let mut arms = both_arms();
+        arms.insert("bearer_and_header_secret".to_owned());
+        arms
+    };
+    let with_auth = |auth: Auth| {
+        let mut request = descriptor();
+        request.auth = Some(auth);
+        request
+    };
+    let slot = || SecretRef::new("provider_api_key");
+    let mut outside = descriptor();
+    outside.url = "https://elsewhere.example.test/v1/chat/completions".to_owned();
+    let cases = [
+        // BearerNotDeclared
+        (
+            "bearer, undeclared",
+            header_secret_arms(),
+            &[][..],
+            descriptor(),
+            ineligible,
+        ),
+        // HeaderSecretNotDeclared
+        (
+            "header, undeclared",
+            bearer_arms(),
+            &[][..],
+            header_descriptor("x-api-key", "provider_api_key"),
+            ineligible,
+        ),
+        // HeaderNotSanctioned
+        (
+            "header, neither sanctioned nor declared",
+            header_secret_arms(),
+            &[][..],
+            header_descriptor("x-other-key", "provider_api_key"),
+            ineligible,
+        ),
+        // BearerAndHeaderNotDeclared
+        (
+            "combined, undeclared",
+            both_arms(),
+            &[][..],
+            with_auth(
+                Auth::bearer_and_header("x-goog-api-key", slot()).expect("a combined credential"),
+            ),
+            ineligible,
+        ),
+        // CombinedHeaderNotSanctioned: the combined arm admits no declared name.
+        (
+            "combined, over a declared name",
+            combined_arms(),
+            &["x-vendor-key"][..],
+            with_auth(
+                Auth::bearer_and_header("x-vendor-key", slot()).expect("a combined credential"),
+            ),
+            ineligible,
+        ),
+        // HostSignedCarriesAuth
+        (
+            "host-signed package with a credential",
+            BTreeSet::from(["host_signed".to_owned()]),
+            &[][..],
+            descriptor(),
+            ineligible,
+        ),
+        // OAuth: the host runs no credential recipe, before South's
+        // OAuthNotAdmitted is reached.
+        (
+            "oauth",
+            both_arms(),
+            &[][..],
+            with_auth(Auth::oauth(slot(), Vec::new())),
+            ineligible,
+        ),
+        // NotAuthorized
+        (
+            "outside the configured endpoint",
+            bearer_arms(),
+            &[][..],
+            outside,
+            PrepareProviderCallErrorV1::Preparation(PreparationErrorV1::UrlOutsideBinding),
+        ),
+    ];
+    for (case, arms, secret_headers, request, expected) in cases {
+        let policy = policy_declaring(RequestBodyModeV1::Buffered, arms, secret_headers);
+        assert_eq!(
+            prepare_provider_call_v1(&policy, &provider_config(), &auth_config(), &request)
+                .expect_err(case),
+            expected,
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -445,7 +584,7 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
             CommunityCallPolicyV1::new(
                 EgressMode::Http,
                 RequestBodyModeV1::Buffered,
-                bearer_arms(),
+                component_auth(bearer_arms(), &[]),
             ),
             IneligibleV1::Egress,
         ),
@@ -453,7 +592,7 @@ fn unsupported_shapes_are_closed_host_local_reasons() {
             CommunityCallPolicyV1::new(
                 EgressMode::Direct,
                 RequestBodyModeV1::Streaming,
-                bearer_arms(),
+                component_auth(bearer_arms(), &[]),
             ),
             IneligibleV1::Streaming,
         ),
@@ -1854,15 +1993,15 @@ fn prepare_header_auth_conformance_fixture(
         "header_secret".to_owned(),
         "bearer_and_header_secret".to_owned(),
     ]);
-    let declared =
-        DeclaredSecretHeadersV1::try_from_names(fixture.declared_secret_headers().iter().copied())
-            .expect("the fixture declares valid secret header names");
-    let policy = if streaming {
-        eligible_streaming_policy_with(arms)
-    } else {
-        eligible_policy_with(arms)
-    }
-    .with_secret_headers(declared);
+    let policy = policy_declaring(
+        if streaming {
+            RequestBodyModeV1::Streaming
+        } else {
+            RequestBodyModeV1::Buffered
+        },
+        arms,
+        fixture.declared_secret_headers(),
+    );
 
     if streaming {
         prepare_provider_stream_v1(&policy, &provider, &auth, &descriptor)

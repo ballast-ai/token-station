@@ -10,7 +10,6 @@ use crate::{
     },
 };
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 use token_station_protocol::ChatRequest;
 
 #[test]
@@ -65,7 +64,7 @@ fn real_gateway_assembly_projects_all_local_subscription_metadata_into_wasm() {
                     } else {
                         RequestBodyModeV1::Buffered
                     },
-                    BTreeSet::from(["bearer".to_owned()]),
+                    upstream.component_auth.clone(),
                 );
                 let auth = config.upstreams["openai_personal"].auth.as_ref().unwrap();
                 let prepared = if stream {

@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["parsing"] }
+south-component-conformance = { workspace = true }
 south-contracts = { workspace = true }
 south-core = { workspace = true }
 south-provider-api = { workspace = true }
@@ -49,7 +50,9 @@ rustix = { version = "1", features = ["process"] }
 libc = "0.2"
 
 [dev-dependencies]
-south-component-conformance = { workspace = true }
+# The tests drive packaged components through South's sandboxed seam. The
+# normal build uses only descriptor auth admission and does not link it.
+south-component-conformance = { workspace = true, features = ["sandbox"] }
 south-provider-conformance = { workspace = true }
 south-testkit = { workspace = true }
 tokio = { version = "1.52.3", features = ["test-util"] }
