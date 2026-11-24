@@ -307,6 +307,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "plan-responses"
+version = "2.2.0"
+dependencies = [
+ "serde_json",
+ "south-component-conformance",
+ "south-provider-api",
+ "token-station-protocol",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -338,6 +348,7 @@ dependencies = [
 name = "provider-chatgpt-plan-v2"
 version = "2.2.0"
 dependencies = [
+ "plan-responses",
  "serde_json",
  "sha2",
  "south-component-conformance",

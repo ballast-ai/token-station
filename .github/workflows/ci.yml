@@ -31,6 +31,7 @@ jobs:
             .
             plugins/official/provider-openai-compatible-v2
             plugins/official/provider-anthropic-v2
+            plugins/official/plan-responses
             plugins/official/provider-chatgpt-plan-v2
             plugins/official/provider-claude-plan-v2
             plugins/official/provider-copilot-plan-v2
@@ -62,7 +63,7 @@ jobs:
       - name: Test local subscription components
         shell: bash
         run: |
-          for component in provider-claude-plan-v2 provider-copilot-plan-v2 provider-codeassist-v2; do
+          for component in plan-responses provider-claude-plan-v2 provider-copilot-plan-v2 provider-codeassist-v2; do
             cargo test --locked --manifest-path "plugins/official/$component/Cargo.toml"
             cargo clippy --locked --manifest-path "plugins/official/$component/Cargo.toml" --all-targets -- -D warnings
           done
