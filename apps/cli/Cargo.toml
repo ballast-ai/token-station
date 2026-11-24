@@ -25,6 +25,7 @@ time = { version = "0.3", features = ["parsing"] }
 south-component-conformance = { workspace = true }
 south-contracts = { workspace = true }
 south-core = { workspace = true }
+south-host-grammars = { workspace = true }
 south-provider-api = { workspace = true }
 south-provider-runtime = { workspace = true }
 south-transport-reqwest = { workspace = true }

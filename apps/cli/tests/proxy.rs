@@ -5276,6 +5276,47 @@ fn sse_crlf_no_space_multiline_data_and_split_unicode_are_decoded_once() {
     std::fs::remove_file(key).ok();
 }
 
+/// Lone CR and mixed line ends are SSE line ends. The host frames them at each
+/// blank line, the component reads them, and the usage event reaches the
+/// metrics row. The last frame ends with a lone CR, which only the end of
+/// input can close, because the CR could start a CRLF.
+#[test]
+fn sse_lone_cr_and_mixed_line_ends_complete_and_account() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\r\r",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\r\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9}}\r\n\r",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\r",
+        "data: [DONE]\r\r"
+    );
+    let header = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        sse.len()
+    );
+    // Cut inside the first CR CR, so a frame end straddles two reads.
+    let bytes = sse.as_bytes();
+    let first_end = sse.find("\r\r").expect("a lone-CR frame end") + 1;
+    let segments = vec![
+        header.into_bytes(),
+        bytes[..first_end].to_vec(),
+        bytes[first_end..].to_vec(),
+    ];
+    let mock = MockUpstream::start(vec![segments]);
+    let key = key_file("sse-lone-cr", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""content":"Hel""#), "{body}");
+    assert!(body.contains(r#""content":"lo""#), "{body}");
+    assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["input_tokens"], "Integer(7)");
+    assert_eq!(row["output_tokens"], "Integer(2)");
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn an_sse_error_before_output_stays_uncommitted_and_typed() {
     let sse = "event:error\n\n";

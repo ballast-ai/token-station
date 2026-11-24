@@ -697,11 +697,15 @@ mod tests {
         assert_eq!(record.cost_micros, None);
     }
 
+    /// Pushes of 8 KiB that pass the SSE frame bound (16 MiB) without a blank
+    /// line, so the tap gives up on the stream.
+    const PAST_THE_FRAME_BOUND: usize = 16 * 1024 * 1024 / 8192 + 1;
+
     #[test]
     fn oversized_stream_frames_are_bounded_and_do_not_create_cost() {
         let mut tap = AccountingTap::new("https://openrouter.ai/api/v1");
         tap.head(200, "text/event-stream");
-        for _ in 0..129 {
+        for _ in 0..PAST_THE_FRAME_BOUND {
             tap.push(&[b'x'; 8192]);
         }
         let mut record = RequestRecord::begin(0, "openai");
@@ -717,7 +721,7 @@ mod tests {
         tap.push(
             b"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"cost\":0.01}}\n\n",
         );
-        for _ in 0..129 {
+        for _ in 0..PAST_THE_FRAME_BOUND {
             tap.push(&[b'x'; 8192]);
         }
         let mut record = RequestRecord::begin(0, "openai");
@@ -732,7 +736,7 @@ mod tests {
         let mut tap = AccountingTap::new("https://api.anthropic.com/v1");
         tap.head(200, "text/event-stream");
         tap.push(b"data: {\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n");
-        for _ in 0..129 {
+        for _ in 0..PAST_THE_FRAME_BOUND {
             tap.push(&[b'x'; 8192]);
         }
         let mut record = RequestRecord::begin(0, "anthropic");

@@ -786,18 +786,11 @@ impl Gateway {
             }
             let read = match reader.read(&mut buffer) {
                 Ok(0) => {
-                    if let Err(envelope) = decoder.finish() {
-                        return Self::terminate_stream(
-                            agent,
-                            render_context,
-                            emit,
-                            record,
-                            envelope,
-                            committed,
-                        );
-                    }
-                    let events = match parser.finish() {
-                        Ok(events) => events,
+                    // A blank line made of a final lone CR closes the last
+                    // frame only at the end of input. Its events join the
+                    // parser's final batch.
+                    let last = match decoder.finish() {
+                        Ok(last) => last,
                         Err(envelope) => {
                             return Self::terminate_stream(
                                 agent,
@@ -809,7 +802,40 @@ impl Gateway {
                             );
                         }
                     };
-                    let mut events = events;
+                    let mut events = match last
+                        .map(|data| parser.parse_chunk(&StreamChunk { data }))
+                        .transpose()
+                    {
+                        Ok(events) => events.unwrap_or_default(),
+                        Err(envelope) => {
+                            return Self::terminate_stream(
+                                agent,
+                                render_context,
+                                emit,
+                                record,
+                                envelope,
+                                committed,
+                            );
+                        }
+                    };
+                    if !events
+                        .iter()
+                        .any(|event| matches!(event, StreamEvent::Error { .. }))
+                    {
+                        match parser.finish() {
+                            Ok(more) => events.extend(more),
+                            Err(envelope) => {
+                                return Self::terminate_stream(
+                                    agent,
+                                    render_context,
+                                    emit,
+                                    record,
+                                    envelope,
+                                    committed,
+                                );
+                            }
+                        }
+                    }
                     for event in &mut events {
                         ctx.restore_tool_event(event);
                     }
