@@ -3,6 +3,12 @@
 //! This component is northbound and provider-neutral. It translates Anthropic
 //! Messages requests into the Canonical IR and renders Canonical responses back
 //! to Anthropic JSON/SSE. Provider selection and credentials remain in the host.
+//!
+//! The mapping is South's north codec (`south-north-codec`), the one the
+//! server uses for this wire. This adapter keeps what the codec leaves to a
+//! host or does not produce: the request checks it always made, the Claude
+//! replay markers, the extensions the plan components read, the effort clamp,
+//! the per-stream render state and its limits, and the error frame.
 
 wit_bindgen::generate!({
     path: "../../../crates/plugin-api/wit",
@@ -13,34 +19,23 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
+use south_north_codec::{
+    anthropic_frames, anthropic_message_response, chat_request_from_anthropic_messages,
+    AnthropicSseState, CodecError, ResponseContext,
+};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Reasoning, ReasoningMode,
-    Role, Sampling, StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
+    ErrorEnvelope, Extensions, HintKind, ImageUrl, Message, Role, StreamEvent, ToolCall,
 };
 
 struct AnthropicClient;
 
-const KNOWN_REQUEST_FIELDS: &[&str] = &[
-    "model",
-    "messages",
-    "system",
-    "tools",
-    "max_tokens",
-    "stop_sequences",
-    "temperature",
-    "top_p",
-    "stream",
-    "thinking",
-    "tool_choice",
-];
-
-// Top-level wire keys of typed Canonical IR fields. A client key with one of
-// these names must not ride in `extensions`: flattened next to the typed field
-// it would set (or collide with) that field. `host_values` is the sharp case,
-// since only the host may mint them.
+// Top-level wire keys of typed Canonical IR fields. The codec refuses a client
+// key with one of these names. This adapter has always dropped them instead,
+// and keeps doing so. `host_values` is the sharp case, since only the host may
+// mint them.
 const RESERVED_IR_KEYS: &[&str] = &[
     "host_values",
     "parallel_tool_calls",
@@ -52,12 +47,12 @@ const RESERVED_IR_KEYS: &[&str] = &[
 ];
 
 // `anthropic_thinking` stays an adapter-local extension: it is the request's
-// thinking *configuration*, which no Canonical IR field models. The blocks
-// themselves no longer ride here — `ContentPart::Thinking` has carried them
-// since 0.3.0, and keeping a second channel for the same content is exactly
-// what S0's D5 ruling forbids ("extensions are data, not contract; a key that
-// changes behaviour must become a typed field").
+// thinking *configuration*, which the plan components still read.
 const ANTHROPIC_THINKING_EXTENSION: &str = "anthropic_thinking";
+const TOOL_RESULT_IS_ERROR_EXTENSION: &str = "anthropic_tool_result_is_error";
+
+const MAX_ACTIVE_STREAMS: usize = 1024;
+const MAX_BLOCKS_PER_STREAM: usize = 256;
 
 fn fail(envelope: &ErrorEnvelope) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| {
@@ -262,125 +257,6 @@ fn parse_plain_block(block: &Value) -> Result<ContentPart, String> {
     }
 }
 
-fn content_from_parts(parts: Vec<ContentPart>) -> Option<Content> {
-    (!parts.is_empty()).then_some(Content::Parts(parts))
-}
-
-fn system_message(system: &Value) -> Result<Option<Message>, String> {
-    match system {
-        Value::Null => Ok(None),
-        Value::String(text) => Ok((!text.is_empty()).then(|| Message::text(Role::System, text))),
-        Value::Array(blocks) => {
-            let mut parts = blocks
-                .iter()
-                .map(parse_plain_block)
-                .collect::<Result<Vec<_>, _>>()?;
-            parts.retain(|part| !matches!(part, ContentPart::Text { text, cache_control: None } if text.is_empty()));
-            if parts
-                .iter()
-                .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
-            {
-                return Err(invalid("Anthropic system blocks may only contain text"));
-            }
-            Ok(content_from_parts(parts).map(|content| Message {
-                role: Role::System,
-                content: Some(content),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                name: None,
-                extensions: Extensions::new(),
-            }))
-        }
-        _ => Err(invalid(
-            "system must be a string or an array of text blocks",
-        )),
-    }
-}
-
-fn tool_call(block: &Value) -> Result<ToolCall, String> {
-    let id = block
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("tool_use block declares no id"))?;
-    let name = block
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("tool_use block declares no name"))?;
-    let input = block
-        .get("input")
-        .ok_or_else(|| invalid("tool_use block declares no input"))?;
-
-    Ok(ToolCall {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        arguments: serde_json::to_string(input).map_err(internal)?,
-        signature: None,
-    })
-}
-
-fn tool_result_content(block: &Value) -> Result<Option<Content>, String> {
-    match block.get("content") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(Content::Text(text.clone()))),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .map(parse_plain_block)
-            .collect::<Result<Vec<_>, _>>()
-            .map(content_from_parts),
-        Some(_) => Err(invalid(
-            "tool_result content must be a string or an array of content blocks",
-        )),
-    }
-}
-
-fn push_user_parts(messages: &mut Vec<Message>, parts: &mut Vec<ContentPart>) {
-    if let Some(content) = content_from_parts(std::mem::take(parts)) {
-        messages.push(Message {
-            role: Role::User,
-            content: Some(content),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            name: None,
-            extensions: Extensions::new(),
-        });
-    }
-}
-
-fn parse_user_blocks(blocks: &[Value]) -> Result<Vec<Message>, String> {
-    let mut messages = Vec::new();
-    let mut parts = Vec::new();
-
-    for block in blocks {
-        match block.get("type").and_then(Value::as_str) {
-            Some("tool_result") => {
-                push_user_parts(&mut messages, &mut parts);
-                let tool_call_id = block
-                    .get("tool_use_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("tool_result block declares no tool_use_id"))?;
-                let mut extensions = Extensions::new();
-                if let Some(is_error) = block.get("is_error").and_then(Value::as_bool) {
-                    extensions.insert("anthropic_tool_result_is_error".to_owned(), json!(is_error));
-                }
-                messages.push(Message {
-                    role: Role::Tool,
-                    content: tool_result_content(block)?,
-                    tool_calls: Vec::new(),
-                    tool_call_id: Some(tool_call_id.to_owned()),
-                    name: None,
-                    extensions,
-                });
-            }
-            Some("tool_use") => {
-                return Err(invalid("user messages cannot contain tool_use blocks"));
-            }
-            _ => parts.push(parse_plain_block(block)?),
-        }
-    }
-    push_user_parts(&mut messages, &mut parts);
-    Ok(messages)
-}
-
 /// The Claude signed-thinking replay markers for one assistant turn, or `None`
 /// when the turn cannot carry them.
 ///
@@ -429,135 +305,6 @@ fn replay_markers(
     Some(extensions)
 }
 
-fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
-    let mut parts = Vec::new();
-    let mut tool_calls = Vec::new();
-    let mut order = Vec::new();
-
-    for block in blocks {
-        match block.get("type").and_then(Value::as_str) {
-            Some("tool_use") => {
-                let call = tool_call(block)?;
-                order.push(json!({"kind": "tool_call", "call_id": call.id}));
-                tool_calls.push(call);
-            }
-            Some("tool_result") => {
-                return Err(invalid(
-                    "assistant messages cannot contain tool_result blocks",
-                ));
-            }
-            Some("image") => {
-                return Err(invalid("assistant messages cannot contain image blocks"));
-            }
-            _ => {
-                order.push(json!({"kind": "content", "ordinal": parts.len()}));
-                parts.push(parse_plain_block(block)?);
-            }
-        }
-    }
-
-    let extensions = replay_markers(&parts, &tool_calls, &order).unwrap_or_default();
-    Ok(Message {
-        role: Role::Assistant,
-        content: content_from_parts(parts),
-        tool_calls,
-        tool_call_id: None,
-        name: None,
-        extensions,
-    })
-}
-
-fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
-    let raw_messages = body
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid("request declares no messages array"))?;
-    let mut messages = Vec::new();
-
-    if let Some(system) = system_message(body.get("system").unwrap_or(&Value::Null))? {
-        messages.push(system);
-    }
-
-    for raw in raw_messages {
-        let role = raw
-            .get("role")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("message declares no role"))?;
-        match (role, raw.get("content")) {
-            ("system", Some(content)) => {
-                // Claude Code also sends empty system entries that carry
-                // output configuration. They contain no prompt text.
-                if let Some(message) = system_message(content)? {
-                    messages.push(message);
-                }
-            }
-            ("user", Some(Value::String(text))) => {
-                messages.push(Message::text(Role::User, text));
-            }
-            ("assistant", Some(Value::String(text))) => {
-                messages.push(Message::text(Role::Assistant, text));
-            }
-            ("user", Some(Value::Array(blocks))) => {
-                messages.extend(parse_user_blocks(blocks)?);
-            }
-            ("assistant", Some(Value::Array(blocks))) => {
-                messages.push(parse_assistant_blocks(blocks)?);
-            }
-            ("system" | "user" | "assistant", _) => {
-                return Err(invalid("message content must be a string or block array"));
-            }
-            _ => return Err(invalid(format!("unknown Anthropic message role `{role}`"))),
-        }
-    }
-    Ok(messages)
-}
-
-fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
-    body.get("tools")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|tool| {
-            let name = tool
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| invalid("tool declares no name"))?
-                .to_owned();
-            let description = tool
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            // Server tools execute inside an Anthropic-native provider and have
-            // result, citation and usage semantics that Canonical IR cannot
-            // represent. Refuse them before routing instead of presenting an
-            // empty-schema function with no executor. Anthropic's client tools
-            // still become functions because Claude Code executes those calls.
-            let tool_type = tool.get("type").and_then(Value::as_str);
-            if tool_type.is_some_and(is_anthropic_server_tool) {
-                return Err(capability(format!(
-                    "Anthropic server tool `{}` requires an anthropic-native provider; the translated route cannot execute it",
-                    tool_type.unwrap_or_default()
-                )));
-            }
-            let is_user_tool = matches!(tool_type, None | Some("custom"));
-            let parameters = if is_user_tool {
-                tool.get("input_schema")
-                    .cloned()
-                    .ok_or_else(|| invalid("tool declares no input_schema"))?
-            } else {
-                tool.get("input_schema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}))
-            };
-            Ok(ToolDef {
-                name,
-                description,
-                parameters, cache_control: None, strict: None,
-            })
-        })
-        .collect()
-}
-
 fn is_anthropic_server_tool(tool_type: &str) -> bool {
     [
         "web_search_",
@@ -597,130 +344,6 @@ fn reasoning_effort_from_output_config(body: &Value) -> Option<&'static str> {
     }
 }
 
-fn request_extensions(body: &Value) -> Extensions {
-    let mut extensions: Extensions = body
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(key, _)| {
-            !KNOWN_REQUEST_FIELDS.contains(&key.as_str())
-                && !RESERVED_IR_KEYS.contains(&key.as_str())
-        })
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    if let Some(thinking) = body.get("thinking").filter(|value| !value.is_null()) {
-        extensions.insert(ANTHROPIC_THINKING_EXTENSION.to_owned(), thinking.clone());
-    }
-    if let Some(effort) = reasoning_effort_from_output_config(body) {
-        extensions.insert("reasoning_effort".to_owned(), json!(effort));
-    }
-    extensions
-}
-
-/// The client's `thinking` mode and budget as the typed protocol 0.6.0 fields.
-///
-/// `anthropic_thinking` keeps carrying the object for the plan components that
-/// read it. South 0.85.1 reads only these fields, and sends a caller's mode back
-/// to the upstream unchanged (`Thinking::Verbatim`). `validate_thinking` has
-/// already refused any other `type`.
-fn request_reasoning(body: &Value) -> Result<Reasoning, String> {
-    let Some(thinking) = body.get("thinking").and_then(Value::as_object) else {
-        return Ok(Reasoning::default());
-    };
-    let mode = match thinking.get("type").and_then(Value::as_str) {
-        Some("enabled") => Some(ReasoningMode::Enabled),
-        Some("disabled") => Some(ReasoningMode::Disabled),
-        Some("adaptive") => Some(ReasoningMode::Adaptive),
-        _ => None,
-    };
-    let budget_tokens = match thinking.get("budget_tokens") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(
-            value
-                .as_u64()
-                .and_then(|budget| u32::try_from(budget).ok())
-                .ok_or_else(|| invalid("thinking.budget_tokens must be a non-negative integer"))?,
-        ),
-    };
-    Ok(Reasoning {
-        mode,
-        budget_tokens,
-        ..Reasoning::default()
-    })
-}
-
-fn finish_reason_to_anthropic(reason: Option<FinishReason>) -> Value {
-    match reason {
-        Some(FinishReason::Stop) => json!("end_turn"),
-        Some(FinishReason::Length) => json!("max_tokens"),
-        Some(FinishReason::ToolCalls) => json!("tool_use"),
-        Some(FinishReason::ContentFilter) => json!("refusal"),
-        Some(FinishReason::StopSequence) => json!("stop_sequence"),
-        // 0.3.0: unknown reasons survive verbatim instead of vanishing.
-        Some(FinishReason::Other(other)) => json!(other),
-        None => Value::Null,
-    }
-}
-
-fn response_blocks(message: &Message) -> Result<Vec<Value>, String> {
-    let mut blocks = Vec::new();
-    match message.content.as_ref() {
-        Some(Content::Text(text)) => blocks.push(json!({"type": "text", "text": text})),
-        Some(Content::Parts(parts)) => {
-            for part in parts {
-                match part {
-                    ContentPart::Text { text, .. } => {
-                        blocks.push(json!({"type": "text", "text": text}));
-                    }
-                    ContentPart::ImageUrl { .. } => {
-                        return Err(capability(
-                            "Anthropic assistant responses cannot contain image blocks",
-                        ));
-                    }
-                    ContentPart::Thinking {
-                        thinking,
-                        signature,
-                    } => {
-                        blocks.push(json!({
-                            "type": "thinking",
-                            "thinking": thinking,
-                            "signature": signature,
-                        }));
-                    }
-                    ContentPart::RedactedThinking { data } => {
-                        blocks.push(json!({"type": "redacted_thinking", "data": data}));
-                    }
-                    // 0.3.0: unmodeled parts survive verbatim instead of
-                    // silently dropping content.
-                    ContentPart::Unknown(value) => blocks.push(value.clone()),
-                }
-            }
-        }
-        None => {}
-    }
-    for call in &message.tool_calls {
-        let input = serde_json::from_str::<Value>(&call.arguments).map_err(|_| {
-            invalid(format!(
-                "tool call `{}` arguments are not complete JSON",
-                call.id
-            ))
-        })?;
-        if !input.is_object() {
-            return Err(invalid(format!(
-                "tool call `{}` arguments must encode a JSON object",
-                call.id
-            )));
-        }
-        blocks.push(json!({
-            "type": "tool_use",
-            "id": call.id,
-            "name": call.name,
-            "input": input,
-        }));
-    }
-    Ok(blocks)
-}
-
 fn anthropic_error_type(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::Auth | ErrorCode::PaymentRequired => "authentication_error",
@@ -736,135 +359,6 @@ fn anthropic_error_type(code: ErrorCode) -> &'static str {
         | ErrorCode::Timeout
         | ErrorCode::Internal => "api_error",
     }
-}
-
-const MAX_ACTIVE_STREAMS: usize = 1024;
-const MAX_BLOCKS_PER_STREAM: u32 = 256;
-
-#[derive(Debug)]
-struct ToolBlock {
-    content_index: u32,
-    id: String,
-    name: String,
-}
-
-#[derive(Debug)]
-struct StreamState {
-    response_id: String,
-    model: String,
-    usage: Usage,
-    started: bool,
-    next_block_index: u32,
-    text_blocks: BTreeMap<u32, u32>,
-    thinking_blocks: BTreeMap<(u32, u32), u32>,
-    tool_blocks: BTreeMap<u32, ToolBlock>,
-    open_blocks: BTreeSet<u32>,
-    pending_finish_reason: Option<FinishReason>,
-    pending_stop_sequence: Option<String>,
-}
-
-impl StreamState {
-    fn new(response_id: &str, model: &str, input_tokens: u64) -> Self {
-        Self {
-            response_id: response_id.to_owned(),
-            model: model.to_owned(),
-            usage: Usage {
-                input_tokens,
-                ..Usage::default()
-            },
-            started: false,
-            next_block_index: 0,
-            text_blocks: BTreeMap::new(),
-            thinking_blocks: BTreeMap::new(),
-            tool_blocks: BTreeMap::new(),
-            open_blocks: BTreeSet::new(),
-            pending_finish_reason: None,
-            pending_stop_sequence: None,
-        }
-    }
-
-    fn allocate_block(&mut self) -> Result<u32, String> {
-        if self.next_block_index >= MAX_BLOCKS_PER_STREAM {
-            return Err(capability(format!(
-                "stream exceeds the {MAX_BLOCKS_PER_STREAM}-block safety limit"
-            )));
-        }
-        let index = self.next_block_index;
-        self.next_block_index += 1;
-        self.open_blocks.insert(index);
-        Ok(index)
-    }
-
-    /// Return the outbound Anthropic block for one canonical choice and source
-    /// block pair. Open a new outbound block on first use.
-    fn thinking_block(
-        &mut self,
-        choice_index: u32,
-        source_block_index: u32,
-        rendered: &mut String,
-    ) -> Result<u32, String> {
-        let key = (choice_index, source_block_index);
-        if let Some(block_index) = self.thinking_blocks.get(&key) {
-            return Ok(*block_index);
-        }
-        let block_index = self.allocate_block()?;
-        self.thinking_blocks.insert(key, block_index);
-        rendered.push_str(&sse(
-            "content_block_start",
-            json!({
-                "type": "content_block_start",
-                "index": block_index,
-                "content_block": {"type": "thinking", "thinking": ""}
-            }),
-        )?);
-        Ok(block_index)
-    }
-
-    fn ensure_started(&mut self, rendered: &mut String) -> Result<(), String> {
-        if self.started {
-            return Ok(());
-        }
-        rendered.push_str(&sse(
-            "message_start",
-            json!({
-                "type": "message_start",
-                "message": {
-                    "id": self.response_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [],
-                    "model": self.model,
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": {"input_tokens": fresh_input_tokens(self.usage), "output_tokens": 0}
-                }
-            }),
-        )?);
-        self.started = true;
-        Ok(())
-    }
-}
-
-const fn fresh_input_tokens(usage: Usage) -> u64 {
-    usage
-        .input_tokens
-        .saturating_sub(usage.cache_read_tokens)
-        .saturating_sub(usage.cache_write_tokens)
-}
-
-fn stream_usage(usage: Usage) -> Value {
-    json!({
-        "input_tokens": fresh_input_tokens(usage),
-        "output_tokens": usage.output_tokens,
-        "cache_read_input_tokens": usage.cache_read_tokens,
-        "cache_creation_input_tokens": usage.cache_write_tokens,
-    })
-}
-
-thread_local! {
-    static STREAM_STATES: RefCell<BTreeMap<String, StreamState>> = const {
-        RefCell::new(BTreeMap::new())
-    };
 }
 
 fn stream_context(context: &Value) -> Result<(&str, &str, &str, u64), String> {
@@ -891,6 +385,260 @@ fn stream_context(context: &Value) -> Result<(&str, &str, &str, u64), String> {
 
 fn sse(event: &str, data: Value) -> Result<String, String> {
     Ok(format!("event: {event}\ndata: {}\n\n", to_output(&data)?))
+}
+
+// -- request checks the codec does not make -------------------------------------
+
+/// The structural refusals this adapter has always made, before the codec
+/// reads the body.
+fn validate_shape(body: &Value) -> Result<(), String> {
+    body.get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("request declares no model"))?;
+    as_u32(
+        body.get("max_tokens")
+            .ok_or_else(|| invalid("request declares no max_tokens"))?,
+        "max_tokens",
+    )?;
+    match body.get("stop_sequences") {
+        None => {}
+        Some(Value::Array(values)) => {
+            if !values.iter().all(Value::is_string) {
+                return Err(invalid("stop_sequences must contain only strings"));
+            }
+        }
+        Some(_) => return Err(invalid("stop_sequences must be an array")),
+    }
+    for tool in body
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        tool.get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("tool declares no name"))?;
+        let tool_type = tool.get("type").and_then(Value::as_str);
+        // Server tools execute inside an Anthropic-native provider and have
+        // result, citation and usage semantics that Canonical IR cannot
+        // represent. Refuse them before routing instead of presenting an
+        // empty-schema function with no executor.
+        if let Some(kind) = tool_type.filter(|kind| is_anthropic_server_tool(kind)) {
+            return Err(capability(format!(
+                "Anthropic server tool `{kind}` requires an anthropic-native provider; the translated route cannot execute it"
+            )));
+        }
+        if matches!(tool_type, None | Some("custom")) && tool.get("input_schema").is_none() {
+            return Err(invalid("tool declares no input_schema"));
+        }
+    }
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("request declares no messages array"))?;
+    // A block without a type is malformed, not unmodelled. The codec would
+    // carry it as an unknown part.
+    let blocks_of = |value: &Value| value.as_array().cloned().unwrap_or_default();
+    let mut all_blocks = blocks_of(&body["system"]);
+    for message in messages {
+        for block in blocks_of(&message["content"]) {
+            if block["type"] == "tool_result" {
+                all_blocks.extend(blocks_of(&block["content"]));
+            }
+            all_blocks.push(block);
+        }
+    }
+    if all_blocks
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str).is_none())
+    {
+        return Err(invalid("content block declares no type"));
+    }
+    for message in messages {
+        let blocks = message.get("content").and_then(Value::as_array);
+        match message.get("role").and_then(Value::as_str) {
+            Some("assistant") => {
+                for block in blocks.into_iter().flatten() {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_result") => {
+                            return Err(invalid(
+                                "assistant messages cannot contain tool_result blocks",
+                            ))
+                        }
+                        Some("image") => {
+                            return Err(invalid("assistant messages cannot contain image blocks"))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("user")
+                if blocks
+                    .into_iter()
+                    .flatten()
+                    .any(|block| block["type"] == "tool_use") =>
+            {
+                return Err(invalid("user messages cannot contain tool_use blocks"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn codec_error(error: &CodecError) -> String {
+    invalid(error.to_string())
+}
+
+/// Restores what the codec does not produce, matching each raw block to the
+/// IR message the codec built from it. The codec keeps assistant turns and
+/// tool results one to one and in order; a count that does not match leaves
+/// the request as the codec built it.
+fn restore_adapter_state(body: &Value, request: &mut ChatRequest) -> Result<(), String> {
+    let raw_messages = body["messages"].as_array().cloned().unwrap_or_default();
+
+    // An assistant turn with only `tool_use` blocks has no content, as before.
+    // The codec gives it an empty part list, which a Chat wire sends as `[]`.
+    for message in &mut request.messages {
+        if message.role == Role::Assistant
+            && matches!(&message.content, Some(Content::Parts(parts)) if parts.is_empty())
+        {
+            message.content = None;
+        }
+    }
+
+    // Claude replay markers on assistant turns, in wire order.
+    let raw_assistants: Vec<&Value> = raw_messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .collect();
+    let ir_assistants: Vec<&mut Message> = request
+        .messages
+        .iter_mut()
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+    if raw_assistants.len() == ir_assistants.len() {
+        for (raw, message) in raw_assistants.into_iter().zip(ir_assistants) {
+            let Some(blocks) = raw["content"].as_array() else {
+                continue;
+            };
+            let parts = match &message.content {
+                Some(Content::Parts(parts)) => parts.clone(),
+                _ => Vec::new(),
+            };
+            let mut order = Vec::new();
+            let mut ordinal = 0;
+            for block in blocks {
+                if block["type"] == "tool_use" {
+                    order.push(json!({"kind": "tool_call", "call_id": block["id"]}));
+                } else {
+                    order.push(json!({"kind": "content", "ordinal": ordinal}));
+                    ordinal += 1;
+                }
+            }
+            if let Some(markers) = replay_markers(&parts, &message.tool_calls, &order) {
+                message.extensions.extend(markers);
+            }
+        }
+    }
+
+    // Tool results: the error flag the plan components read, and non-text
+    // blocks the codec drops (an image a tool returned stays with it).
+    let raw_results: Vec<&Value> = raw_messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "tool_result")
+        .collect();
+    let ir_results: Vec<&mut Message> = request
+        .messages
+        .iter_mut()
+        .filter(|message| message.role == Role::Tool)
+        .collect();
+    if raw_results.len() == ir_results.len() {
+        for (raw, message) in raw_results.into_iter().zip(ir_results) {
+            if let Some(is_error) = raw.get("is_error").and_then(Value::as_bool) {
+                message
+                    .extensions
+                    .insert(TOOL_RESULT_IS_ERROR_EXTENSION.to_owned(), json!(is_error));
+            }
+            if let Some(blocks) = raw["content"].as_array() {
+                if blocks.iter().any(|block| block["type"] != "text") {
+                    let parts = blocks
+                        .iter()
+                        .map(parse_plain_block)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    message.content = (!parts.is_empty()).then_some(Content::Parts(parts));
+                }
+            }
+        }
+    }
+
+    // The thinking configuration, for the plan components.
+    if let Some(thinking) = body.get("thinking").filter(|value| !value.is_null()) {
+        request
+            .extensions
+            .insert(ANTHROPIC_THINKING_EXTENSION.to_owned(), thinking.clone());
+    }
+
+    // The effort clamp: `max` is `high`, an unknown level is dropped, and a
+    // Claude Code system entry may carry it.
+    request.reasoning.effort = reasoning_effort_from_output_config(body)
+        .map(|effort| serde_json::from_value(json!(effort)).map_err(internal))
+        .transpose()?;
+    Ok(())
+}
+
+// -- streams ---------------------------------------------------------------------
+
+struct StreamState {
+    response_id: String,
+    model: String,
+    codec: AnthropicSseState,
+    /// The wire block each source thinking block renders into. The codec keeps
+    /// one open thinking block, so two source blocks (interleaved thinking)
+    /// would share it, and their signatures with it.
+    thinking_blocks: BTreeMap<u32, usize>,
+}
+
+thread_local! {
+    static STREAM_STATES: RefCell<BTreeMap<String, StreamState>> = const {
+        RefCell::new(BTreeMap::new())
+    };
+}
+
+fn render_frames(state: &mut StreamState, event: &StreamEvent) -> Result<String, String> {
+    let thinking_block = match event {
+        StreamEvent::ThinkingDelta { block_index, .. }
+        | StreamEvent::ThinkingSignatureDelta { block_index, .. } => Some(*block_index),
+        _ => None,
+    };
+    if let Some(block_index) = thinking_block {
+        // Point the codec at this source block's wire block, or at none so it
+        // opens a new one.
+        state.codec.thinking_index = state.thinking_blocks.get(&block_index).copied();
+    }
+    let frames = anthropic_frames(std::slice::from_ref(event), &mut state.codec);
+    if let (Some(block_index), Some(index)) = (thinking_block, state.codec.thinking_index) {
+        state.thinking_blocks.insert(block_index, index);
+    }
+    if state.codec.next_index > MAX_BLOCKS_PER_STREAM {
+        return Err(capability(format!(
+            "stream exceeded {MAX_BLOCKS_PER_STREAM} content blocks"
+        )));
+    }
+    let mut rendered = String::new();
+    for frame in frames {
+        rendered.push_str(&sse(frame.event, frame.data)?);
+    }
+    Ok(rendered)
+}
+
+fn state_ended(states: &BTreeMap<String, StreamState>, stream_id: &str) -> bool {
+    states
+        .get(stream_id)
+        .is_some_and(|state| state.codec.terminated)
 }
 
 impl Guest for AnthropicClient {
@@ -954,70 +702,17 @@ impl Guest for AnthropicClient {
         validate_response_format(body)?;
         validate_thinking(body)?;
         validate_tool_choice(body)?;
-        let model = body
-            .get("model")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("request declares no model"))?
-            .to_owned();
-        let max_output_tokens = as_u32(
-            body.get("max_tokens")
-                .ok_or_else(|| invalid("request declares no max_tokens"))?,
-            "max_tokens",
-        )?;
-        let stop = match body.get("stop_sequences") {
-            None => Vec::new(),
-            Some(Value::Array(values)) => values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| invalid("stop_sequences must contain only strings"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            Some(_) => return Err(invalid("stop_sequences must be an array")),
-        };
-
-        to_output(&ChatRequest {
-            model,
-            messages: parse_messages(body)?,
-            tools: parse_tools(body)?,
-            response_format: None,
-            // Translate honestly at the wire boundary. `any` is lossless →
-            // `Required`. A forced specific `tool` is carried as
-            // `ToolChoice::Other` in the OpenAI object form
-            // `{type:function,function:{name}}`: the OpenAI-compatible renderer
-            // serializes it verbatim, and the Anthropic renderer maps it back
-            // to `{type:tool,name}` (stage A′ retired the old degrade to
-            // `auto`, which lost the caller's instruction on every wire).
-            // `validate_tool_choice` already refused any other shape.
-            tool_choice: body
-                .get("tool_choice")
-                .filter(|value| !value.is_null())
-                .map(|value| match value.get("type").and_then(Value::as_str) {
-                    Some("any") => ToolChoice::Required,
-                    Some("tool") => match value.get("name").and_then(Value::as_str) {
-                        Some(name) => ToolChoice::Other(json!({
-                            "type": "function",
-                            "function": {"name": name}
-                        })),
-                        None => ToolChoice::Auto,
-                    },
-                    _ => ToolChoice::Auto,
-                }),
-            sampling: Sampling {
-                temperature: body.get("temperature").and_then(Value::as_f64),
-                top_p: body.get("top_p").and_then(Value::as_f64),
-                max_output_tokens: Some(max_output_tokens),
-                stop,
-                top_k: None,
-            },
-            stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
-            host_values: token_station_protocol::ComponentValues::new(),
-            extensions: request_extensions(body),
-            parallel_tool_calls: None,
-            reasoning: request_reasoning(body)?,
-        })
+        validate_shape(body)?;
+        let mut wire = body.clone();
+        if let Some(object) = wire.as_object_mut() {
+            for key in RESERVED_IR_KEYS {
+                object.remove(*key);
+            }
+        }
+        let mut request =
+            chat_request_from_anthropic_messages(&wire).map_err(|e| codec_error(&e))?;
+        restore_adapter_state(body, &mut request)?;
+        to_output(&request)
     }
 
     fn extract_agent_hint(envelope: String) -> Result<String, String> {
@@ -1031,52 +726,35 @@ impl Guest for AnthropicClient {
         to_output(&hints)
     }
 
-    fn render_response(response: String, _context: String) -> Result<String, String> {
+    fn render_response(response: String, context: String) -> Result<String, String> {
         let response: ChatResponse = parse_input(&response)?;
-        if response.choices.len() != 1 {
-            return Err(capability(
-                "Anthropic Messages requires exactly one response choice",
-            ));
-        }
-        let choice = &response.choices[0];
-        let mut usage = Map::new();
-        usage.insert(
-            "input_tokens".to_owned(),
-            json!(fresh_input_tokens(response.usage)),
-        );
-        usage.insert(
-            "output_tokens".to_owned(),
-            json!(response.usage.output_tokens),
-        );
-        if response.usage.cache_read_tokens > 0 {
-            usage.insert(
-                "cache_read_input_tokens".to_owned(),
-                json!(response.usage.cache_read_tokens),
-            );
-        }
-        if response.usage.cache_write_tokens > 0 {
-            usage.insert(
-                "cache_creation_input_tokens".to_owned(),
-                json!(response.usage.cache_write_tokens),
-            );
-        }
-
-        to_output(&json!({
-            "id": response.id,
-            "type": "message",
-            "role": "assistant",
-            "content": response_blocks(&choice.message)?,
-            "model": response.model,
-            "stop_reason": finish_reason_to_anthropic(choice.finish_reason.clone()),
-            "stop_sequence": choice.stop_sequence,
-            "usage": Value::Object(usage),
-        }))
+        let context: Value = serde_json::from_str(&context).unwrap_or(Value::Null);
+        let fallback_id = context
+            .get("response_id")
+            .and_then(Value::as_str)
+            .unwrap_or("msg_token_station")
+            .to_owned();
+        let rendered = anthropic_message_response(
+            &response,
+            &ResponseContext {
+                created: 0,
+                fallback_id,
+            },
+        )
+        .map_err(|error| match &error {
+            // The Messages envelope carries one message.
+            CodecError::Unrenderable { field, .. } if field == "choices" => {
+                capability("Anthropic Messages requires exactly one response choice")
+            }
+            _ => codec_error(&error),
+        })?;
+        to_output(&rendered)
     }
 
     fn render_stream_event(event: String, context: String) -> Result<String, String> {
         let event: StreamEvent = parse_input(&event)?;
         let context: Value = parse_input(&context)?;
-        let (stream_id, response_id, model, input_tokens) = stream_context(&context)?;
+        let (stream_id, response_id, model, _) = stream_context(&context)?;
         let data = STREAM_STATES.with(|states| {
             let mut states = states.borrow_mut();
 
@@ -1102,220 +780,26 @@ impl Guest for AnthropicClient {
                 }
                 states.insert(
                     stream_id.to_owned(),
-                    StreamState::new(response_id, model, input_tokens),
+                    StreamState {
+                        response_id: response_id.to_owned(),
+                        model: model.to_owned(),
+                        codec: AnthropicSseState::new(model, response_id),
+                        thinking_blocks: BTreeMap::new(),
+                    },
                 );
             }
-
-            if let Some(state) = states.get(stream_id) {
-                if state.response_id != response_id || state.model != model {
-                    states.remove(stream_id);
-                    return Err(invalid(
-                        "stream render context changed response_id or model mid-stream",
-                    ));
-                }
-            }
-
-            let result = match event {
-                StreamEvent::Delta { index, content } => {
-                    let state = states.get_mut(stream_id).expect("state inserted above");
-                    let mut rendered = String::new();
-                    state.ensure_started(&mut rendered)?;
-                    let block_index = match state.text_blocks.get(&index) {
-                        Some(block_index) => *block_index,
-                        None => {
-                            let block_index = state.allocate_block()?;
-                            state.text_blocks.insert(index, block_index);
-                            rendered.push_str(&sse(
-                                "content_block_start",
-                                json!({
-                                    "type": "content_block_start",
-                                    "index": block_index,
-                                    "content_block": {"type": "text", "text": ""}
-                                }),
-                            )?);
-                            block_index
-                        }
-                    };
-                    rendered.push_str(&sse(
-                        "content_block_delta",
-                        json!({
-                            "type": "content_block_delta",
-                            "index": block_index,
-                            "delta": {"type": "text_delta", "text": content}
-                        }),
-                    )?);
-                    Ok(rendered)
-                }
-                // Reasoning streams as native Anthropic thinking blocks. Each
-                // canonical choice and source-block pair gets one outbound
-                // block, which closes at `Done` with the other open blocks.
-                StreamEvent::ThinkingDelta {
-                    index,
-                    block_index,
-                    thinking_delta,
-                } => {
-                    let state = states.get_mut(stream_id).expect("state inserted above");
-                    let mut rendered = String::new();
-                    state.ensure_started(&mut rendered)?;
-                    let block_index = state.thinking_block(index, block_index, &mut rendered)?;
-                    rendered.push_str(&sse(
-                        "content_block_delta",
-                        json!({
-                            "type": "content_block_delta",
-                            "index": block_index,
-                            "delta": {"type": "thinking_delta", "thinking": thinking_delta}
-                        }),
-                    )?);
-                    Ok(rendered)
-                }
-                StreamEvent::ThinkingSignatureDelta {
-                    index,
-                    block_index,
-                    signature_delta,
-                } => {
-                    let state = states.get_mut(stream_id).expect("state inserted above");
-                    let mut rendered = String::new();
-                    state.ensure_started(&mut rendered)?;
-                    let block_index = state.thinking_block(index, block_index, &mut rendered)?;
-                    rendered.push_str(&sse(
-                        "content_block_delta",
-                        json!({
-                            "type": "content_block_delta",
-                            "index": block_index,
-                            "delta": {"type": "signature_delta", "signature": signature_delta}
-                        }),
-                    )?);
-                    Ok(rendered)
-                }
-                StreamEvent::RedactedThinking { .. } => Err(invalid(
-                    "anthropic-messages redacted thinking is not implemented by this adapter version",
-                )),
-                StreamEvent::ToolCallDelta {
-                    index,
-                    id,
-                    name,
-                    arguments_delta,
-                    ..
-                } => {
-                    let state = states.get_mut(stream_id).expect("state inserted above");
-                    let mut rendered = String::new();
-                    state.ensure_started(&mut rendered)?;
-
-                    if !state.tool_blocks.contains_key(&index) {
-                        let first_id = id
-                            .as_deref()
-                            .ok_or_else(|| {
-                                invalid("first tool-call stream fragment declares no id")
-                            })?
-                            .to_owned();
-                        let first_name = name
-                            .as_deref()
-                            .ok_or_else(|| {
-                                invalid("first tool-call stream fragment declares no name")
-                            })?
-                            .to_owned();
-                        let content_index = state.allocate_block()?;
-                        rendered.push_str(&sse(
-                            "content_block_start",
-                            json!({
-                                "type": "content_block_start",
-                                "index": content_index,
-                                "content_block": {
-                                    "type": "tool_use",
-                                    "id": first_id,
-                                    "name": first_name,
-                                    "input": {}
-                                }
-                            }),
-                        )?);
-                        state.tool_blocks.insert(
-                            index,
-                            ToolBlock {
-                                content_index,
-                                id: first_id,
-                                name: first_name,
-                            },
-                        );
-                    }
-
-                    let block = state.tool_blocks.get(&index).expect("tool block inserted");
-                    if id.as_deref().is_some_and(|id| id != block.id)
-                        || name.as_deref().is_some_and(|name| name != block.name)
-                    {
-                        return Err(invalid(
-                            "tool-call identity changed between stream fragments",
-                        ));
-                    }
-                    rendered.push_str(&sse(
-                        "content_block_delta",
-                        json!({
-                            "type": "content_block_delta",
-                            "index": block.content_index,
-                            "delta": {
-                                "type": "input_json_delta",
-                                "partial_json": arguments_delta
-                            }
-                        }),
-                    )?);
-                    Ok(rendered)
-                }
-                StreamEvent::Usage { usage } => {
-                    let state = states.get_mut(stream_id).expect("state inserted above");
-                    let mut rendered = String::new();
-                    state.usage.absorb(usage);
-                    state.ensure_started(&mut rendered)?;
-                    rendered.push_str(&sse(
-                        "message_delta",
-                        json!({
-                            "type": "message_delta",
-                            "delta": {"stop_reason": null, "stop_sequence": null},
-                            "usage": stream_usage(state.usage)
-                        }),
-                    )?);
-                    Ok(rendered)
-                }
-                StreamEvent::Finish {
-                    finish_reason,
-                    stop_sequence,
-                } => {
-                    let state = states.get_mut(stream_id).expect("state inserted above");
-                    state.pending_finish_reason = finish_reason;
-                    state.pending_stop_sequence = stop_sequence;
-                    Ok(String::new())
-                }
-                StreamEvent::Done {
-                    finish_reason,
-                    stop_sequence,
-                } => {
-                    let mut state = states.remove(stream_id).expect("state inserted above");
-                    let finish_reason = finish_reason.or(state.pending_finish_reason.take());
-                    let stop_sequence = stop_sequence.or(state.pending_stop_sequence.take());
-                    let mut rendered = String::new();
-                    state.ensure_started(&mut rendered)?;
-                    for block_index in &state.open_blocks {
-                        rendered.push_str(&sse(
-                            "content_block_stop",
-                            json!({"type": "content_block_stop", "index": block_index}),
-                        )?);
-                    }
-                    rendered.push_str(&sse(
-                        "message_delta",
-                        json!({
-                            "type": "message_delta",
-                            "delta": {
-                                "stop_reason": finish_reason_to_anthropic(finish_reason),
-                                "stop_sequence": stop_sequence
-                            },
-                            "usage": stream_usage(state.usage)
-                        }),
-                    )?);
-                    rendered.push_str(&sse("message_stop", json!({"type": "message_stop"}))?);
-                    Ok(rendered)
-                }
-                StreamEvent::Error { .. } => unreachable!("error handled before state creation"),
+            let state = states.get_mut(stream_id).expect("state inserted above");
+            let result = if state.response_id != response_id || state.model != model {
+                Err(invalid(
+                    "stream render context changed response_id or model mid-stream",
+                ))
+            } else {
+                render_frames(state, &event)
             };
-
-            if result.is_err() {
+            if result.is_err()
+                || matches!(event, StreamEvent::Done { .. })
+                || state_ended(&states, stream_id)
+            {
                 states.remove(stream_id);
             }
             result
@@ -1335,13 +819,11 @@ impl Guest for AnthropicClient {
     }
 }
 
-export!(AnthropicClient);
-
 #[cfg(test)]
 mod tests {
-    use super::{fresh_input_tokens, AnthropicClient, Guest};
+    use super::{AnthropicClient, Guest};
     use serde_json::{json, Value};
-    use token_station_protocol::{ErrorCode, ErrorEnvelope, ReasoningEffort, Usage};
+    use token_station_protocol::{ErrorCode, ErrorEnvelope, ReasoningEffort};
 
     #[test]
     fn structured_response_constraints_are_rejected_without_affecting_effort_or_tools() {
@@ -1380,7 +862,9 @@ mod tests {
 
     #[test]
     fn empty_system_configuration_entries_preserve_effort_without_empty_prompt_text() {
-        let body = json!({
+        let request = normalized(json!({
+            "model": "fixture",
+            "max_tokens": 100,
             "system": [{"type":"text","text":"Keep these instructions."}],
             "messages": [
                 {"role":"system","content":[{"type":"text","text":""}]},
@@ -1388,50 +872,39 @@ mod tests {
                 {"role":"system","content":[],"output_config":{"effort":"low"}},
                 {"role":"system","content":[],"output_config":{"effort":"medium"}}
             ]
-        });
-        let messages = super::parse_messages(&body).expect("empty configuration entries are valid");
-        assert_eq!(messages.len(), 2);
-        assert!(serde_json::to_string(&messages[0])
-            .unwrap()
-            .contains("Keep these instructions."));
-        assert_eq!(
-            super::request_extensions(&body)["reasoning_effort"],
-            "medium"
-        );
+        }))
+        .expect("empty configuration entries are valid");
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages[0].to_string().contains("Keep these instructions."));
+        assert_eq!(request["reasoning_effort"], "medium");
     }
 
     #[test]
     fn top_level_effort_precedes_system_configuration_entries() {
-        let body = json!({"output_config":{"effort":"high"},"messages":[
+        let request = normalized(json!({"model": "fixture", "max_tokens": 100,
+            "output_config":{"effort":"high"},"messages":[
             {"role":"system","content":"A later instruction.","output_config":{"effort":"low"}},
             {"role":"user","content":"Read the file."}
-        ]});
-        assert_eq!(super::request_extensions(&body)["reasoning_effort"], "high");
-        assert_eq!(super::parse_messages(&body).unwrap().len(), 2);
+        ]}))
+        .unwrap();
+        assert_eq!(request["reasoning_effort"], "high");
+        assert_eq!(request["messages"].as_array().unwrap().len(), 2);
     }
 
     #[test]
-    fn canonical_input_is_denormalized_for_anthropic_wire_usage() {
-        let usage = Usage {
-            input_tokens: 150,
-            cache_read_tokens: 100,
-            cache_write_tokens: 20,
-            ..Usage::default()
-        };
-
-        assert_eq!(fresh_input_tokens(usage), 30);
-    }
-
-    #[test]
-    fn inconsistent_buckets_cannot_underflow_wire_input() {
-        let usage = Usage {
-            input_tokens: 10,
-            cache_read_tokens: 20,
-            cache_write_tokens: 5,
-            ..Usage::default()
-        };
-
-        assert_eq!(fresh_input_tokens(usage), 0);
+    fn effort_max_is_clamped_and_unknown_levels_are_dropped() {
+        for (effort, expected) in [("max", Some("high")), ("xhigh", None), ("low", Some("low"))] {
+            let request = normalized(json!({"model": "fixture", "max_tokens": 100,
+                "output_config": {"effort": effort},
+                "messages": [{"role":"user","content":"q"}]}))
+            .unwrap();
+            assert_eq!(
+                request.get("reasoning_effort").and_then(Value::as_str),
+                expected,
+                "{effort}"
+            );
+        }
     }
 
     #[test]
@@ -1482,29 +955,31 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_rejection_names_the_adapter_version() {
-        let event = json!({
-            "type": "redacted_thinking",
-            "index": 0,
-            "block_index": 2,
-            "data": "供应商原值+/=opaque"
-        });
+    fn redacted_thinking_renders_no_block_and_the_stream_continues() {
         let context = json!({
             "stream_id": "stream-redacted",
             "response_id": "msg-redacted",
-            "model": "claude-test",
-            "input_tokens": 1
+            "model": "claude-test"
         });
-
-        let error =
-            <AnthropicClient as Guest>::render_stream_event(event.to_string(), context.to_string())
-                .expect_err("redacted thinking needs an explicit wire mapping");
-        let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
-        assert_eq!(error.code, ErrorCode::InvalidRequest);
-        assert_eq!(
-            error.message,
-            "anthropic-messages redacted thinking is not implemented by this adapter version"
+        let render = |event: Value| {
+            let rendered = <AnthropicClient as Guest>::render_stream_event(
+                event.to_string(),
+                context.to_string(),
+            )
+            .expect("event renders");
+            serde_json::from_str::<Value>(&rendered).unwrap()["data"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let redacted = render(
+            json!({"type": "redacted_thinking", "index": 0, "block_index": 2,
+            "data": "供应商原值+/=opaque"}),
         );
+        assert!(!redacted.contains("opaque"));
+        let text = render(json!({"type": "delta", "index": 0, "content": "answer"}));
+        assert!(text.contains("\"text\":\"answer\""), "{text}");
+        render(json!({"type": "done", "finish_reason": "stop"}));
     }
 
     #[test]
@@ -1657,6 +1132,146 @@ mod tests {
         assert!(request.get("host_values").is_none());
         assert!(request.get("reasoning_mode").is_none());
         assert!(request["sampling"].get("temperature").is_none());
-        assert_eq!(request["metadata"]["user_id"], "kept-as-data");
+        // The end-user value is the host's to derive, so the client's
+        // `metadata` is not carried.
+        assert!(request.get("metadata").is_none());
+    }
+
+    #[test]
+    fn a_tool_only_assistant_turn_has_no_content() {
+        let request = normalized(with_assistant(json!([
+            {"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}
+        ])))
+        .unwrap();
+        let assistant = &request["messages"][1];
+        assert!(assistant.get("content").is_none(), "{assistant}");
+        assert_eq!(assistant["tool_calls"][0]["id"], "toolu_1");
+    }
+
+    #[test]
+    fn tool_results_keep_their_error_flag_and_images() {
+        let request = normalized(json!({"model":"fixture","max_tokens":100,"messages":[
+            {"role":"user","content":"look"},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"toolu_1","name":"Read","input":{}},
+                {"type":"tool_use","id":"toolu_2","name":"Bash","input":{}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"toolu_1","content":[
+                    {"type":"text","text":"image:"},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]},
+                {"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":"denied"}]}
+        ]}))
+        .unwrap();
+        let first = &request["messages"][2];
+        assert_eq!(first["role"], "tool");
+        assert_eq!(
+            first["content"][1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        assert!(first.get("anthropic_tool_result_is_error").is_none());
+        let second = &request["messages"][3];
+        assert_eq!(second["anthropic_tool_result_is_error"], true);
+        assert_eq!(second["content"], "denied");
+    }
+
+    #[test]
+    fn tool_results_precede_text_in_the_same_user_turn() {
+        let request = normalized(json!({"model":"fixture","max_tokens":100,"messages":[
+            {"role":"user","content":"read"},
+            {"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},
+            {"role":"user","content":[{"type":"text","text":"note"},
+                {"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}
+        ]}))
+        .unwrap();
+        assert_eq!(request["messages"][2]["role"], "tool");
+        assert_eq!(request["messages"][3]["role"], "user");
+    }
+
+    #[test]
+    fn the_checks_this_adapter_always_made_still_refuse() {
+        for (body, message) in [
+            (json!({"model":"fixture","messages":[{"role":"user","content":"q"}]}), "request declares no max_tokens"),
+            (json!({"max_tokens":1,"messages":[{"role":"user","content":"q"}]}), "request declares no model"),
+            (json!({"model":"fixture","max_tokens":1,"messages":[{"role":"user","content":"q"}],
+                "stop_sequences":"END"}), "stop_sequences must be an array"),
+            (json!({"model":"fixture","max_tokens":1,"messages":[{"role":"user","content":"q"}],
+                "tools":[{"name":"t"}]}), "tool declares no input_schema"),
+            (json!({"model":"fixture","max_tokens":1,"messages":[{"role":"user","content":"q"}],
+                "tools":[{"type":"web_search_20250305","name":"web_search"}]}),
+                "Anthropic server tool `web_search_20250305` requires an anthropic-native provider; the translated route cannot execute it"),
+            (json!({"model":"fixture","max_tokens":1,"messages":[{"role":"user","content":"q"},
+                {"role":"assistant","content":[{"type":"tool_result","tool_use_id":"x","content":"y"}]}]}),
+                "assistant messages cannot contain tool_result blocks"),
+        ] {
+            let error: ErrorEnvelope = serde_json::from_str(&normalized(body).unwrap_err()).unwrap();
+            assert_eq!(error.message, message);
+        }
+    }
+
+    fn stream(stream_id: &str, events: &[Value]) -> String {
+        let context =
+            json!({"stream_id": stream_id, "response_id": "msg_ts", "model": "claude-test"});
+        events
+            .iter()
+            .map(|event| {
+                let rendered = <AnthropicClient as Guest>::render_stream_event(
+                    event.to_string(),
+                    context.to_string(),
+                )
+                .expect("event renders");
+                serde_json::from_str::<Value>(&rendered).unwrap()["data"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stream_usage_rides_the_one_terminal_message_delta() {
+        let data = stream(
+            "stream-usage",
+            &[
+                json!({"type":"usage","usage":{"input_tokens":100,"output_tokens":1,
+                    "cache_read_tokens":60,"cache_write_tokens":30}}),
+                json!({"type":"delta","index":0,"content":"x"}),
+                json!({"type":"usage","usage":{"output_tokens":20}}),
+                json!({"type":"finish","finish_reason":"stop"}),
+                json!({"type":"done","finish_reason":"stop"}),
+            ],
+        );
+        assert_eq!(data.matches("event: message_delta").count(), 1, "{data}");
+        assert_eq!(data.matches("event: message_stop").count(), 1, "{data}");
+        assert!(data.contains("\"input_tokens\":10"), "{data}");
+        assert!(data.contains("\"cache_read_input_tokens\":60"), "{data}");
+        assert!(data.contains("\"output_tokens\":20"), "{data}");
+        super::STREAM_STATES.with(|states| assert!(!states.borrow().contains_key("stream-usage")));
+    }
+
+    #[test]
+    fn stream_state_is_per_stream_and_a_changed_context_is_refused() {
+        let first = stream(
+            "stream-a",
+            &[json!({"type":"delta","index":0,"content":"x"})],
+        );
+        let second = stream(
+            "stream-b",
+            &[json!({"type":"delta","index":0,"content":"y"})],
+        );
+        assert!(first.contains("event: message_start") && second.contains("event: message_start"));
+        let changed =
+            json!({"stream_id":"stream-a","response_id":"msg_other","model":"claude-test"});
+        let error = <AnthropicClient as Guest>::render_stream_event(
+            json!({"type":"delta","index":0,"content":"z"}).to_string(),
+            changed.to_string(),
+        )
+        .unwrap_err();
+        assert!(error.contains("changed response_id or model"), "{error}");
+        super::STREAM_STATES.with(|states| {
+            assert!(!states.borrow().contains_key("stream-a"));
+            assert!(states.borrow().contains_key("stream-b"));
+        });
     }
 }
+
+export!(AnthropicClient);

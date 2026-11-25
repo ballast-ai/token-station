@@ -1,72 +1,79 @@
 {
-  "model": "routed-model",
+  "future_field": {
+    "kept": true
+  },
   "messages": [
     {
-      "role": "system",
-      "content": [
-        {
-          "type": "text",
-          "text": "You are a coding assistant."
-        }
-      ]
+      "content": "You are a coding assistant.",
+      "role": "system"
     },
     {
-      "role": "user",
       "content": [
         {
-          "type": "text",
-          "text": "Weather in Beijing?"
+          "text": "Weather in Beijing?",
+          "type": "text"
         },
         {
-          "type": "image_url",
           "image_url": {
             "url": "data:image/png;base64,aGVsbG8="
-          }
-        }
-      ]
-    },
-    {
-      "role": "system",
-      "content": "The following skills are available."
-    },
-    {
-      "role": "assistant",
-      "content": [
-        {
-          "type": "text",
-          "text": "I'll check."
+          },
+          "type": "image_url"
         }
       ],
-      "tool_calls": [
-        {
-          "id": "toolu_1",
-          "name": "get_weather",
-          "arguments": "{\"city\":\"Beijing\",\"unit\":\"c\"}"
-        }
-      ]
+      "role": "user"
     },
     {
-      "role": "tool",
-      "content": "20 C",
-      "tool_call_id": "toolu_1",
-      "anthropic_tool_result_is_error": false
+      "content": "The following skills are available.",
+      "role": "system"
     },
     {
-      "role": "user",
       "content": [
         {
-          "type": "text",
-          "text": "Thanks"
+          "text": "I'll check.",
+          "type": "text"
+        }
+      ],
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "arguments": "{\"city\":\"Beijing\",\"unit\":\"c\"}",
+          "id": "toolu_1",
+          "name": "get_weather"
         }
       ]
+    },
+    {
+      "anthropic_tool_result_is_error": false,
+      "content": "20 C",
+      "role": "tool",
+      "tool_call_id": "toolu_1"
+    },
+    {
+      "content": [
+        {
+          "text": "Thanks",
+          "type": "text"
+        }
+      ],
+      "role": "user"
     }
   ],
+  "model": "routed-model",
+  "sampling": {
+    "max_output_tokens": 1024,
+    "stop": [
+      "END"
+    ],
+    "temperature": 0.2,
+    "top_p": 0.9
+  },
+  "stream": true,
+  "tool_choice": "auto",
   "tools": [
     {
-      "name": "get_weather",
       "description": "Look up the weather in a city",
+      "name": "get_weather",
       "parameters": {
-        "type": "object",
         "properties": {
           "city": {
             "type": "string"
@@ -77,24 +84,9 @@
         },
         "required": [
           "city"
-        ]
+        ],
+        "type": "object"
       }
     }
-  ],
-  "sampling": {
-    "temperature": 0.2,
-    "top_p": 0.9,
-    "max_output_tokens": 1024,
-    "stop": [
-      "END"
-    ]
-  },
-  "stream": true,
-  "future_field": {
-    "kept": true
-  },
-  "metadata": {
-    "user_id": "local-user"
-  },
-  "tool_choice": "auto"
+  ]
 }
