@@ -3205,8 +3205,8 @@ impl Gateway {
                 // A final lone CR closes the last frame only at the end of
                 // input.
                 let mut events = match decoder.finish().map_err(describe)? {
-                    Some(data) => parser
-                        .parse_chunk(&StreamChunk { data })
+                    Some(frame) => parser
+                        .parse_chunk(&StreamChunk { data: frame.raw })
                         .map_err(describe)?,
                     None => Vec::new(),
                 };
@@ -3221,10 +3221,10 @@ impl Gateway {
                 return Err("upstream SSE connection closed before a terminal event".to_owned());
             }
             let mut events = Vec::new();
-            for data in decoder.push(&buffer[..read]).map_err(describe)? {
+            for frame in decoder.push(&buffer[..read]).map_err(describe)? {
                 events.extend(
                     parser
-                        .parse_chunk(&StreamChunk { data })
+                        .parse_chunk(&StreamChunk { data: frame.raw })
                         .map_err(describe)?,
                 );
             }

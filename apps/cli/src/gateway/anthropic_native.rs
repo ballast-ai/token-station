@@ -1,6 +1,7 @@
 // Split from gateway.rs — code moved verbatim; see gateway.rs for the module map.
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use south_host_grammars::SseDecoderV1;
 
 /// Reads Anthropic's wire `usage` object into the canonical [`Usage`].
 ///
@@ -40,6 +41,18 @@ fn anthropic_wire_usage(usage: &serde_json::Value) -> Option<Usage> {
 #[cfg(test)]
 mod usage_tests {
     use super::{AnthropicSseUsageTap, anthropic_wire_usage};
+
+    #[test]
+    fn lone_cr_mixed_line_ends_and_multi_line_data_are_read() {
+        let mut tap = AnthropicSseUsageTap::default();
+        tap.observe("event: message_start\rdata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"output_tokens\":1}}}\r\r");
+        tap.observe("event: message_delta\ndata: {\"type\":\"message_delta\",\ndata: \"usage\":{\"output_tokens\":12}}\n\n");
+        tap.observe("event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r");
+        tap.finish();
+        assert!(tap.is_complete());
+        let usage = tap.into_usage().unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (30, 12));
+    }
 
     #[test]
     fn wire_input_becomes_one_inclusive_canonical_total() {
@@ -198,43 +211,39 @@ mod usage_tests {
 ///
 /// Anthropic reports usage twice — `message_start` carries the input buckets,
 /// `message_delta` the final output count — which is exactly the shape
-/// [`Usage::absorb`] exists for. The tap is line-oriented so it never needs
-/// the whole stream in memory, and it gives up rather than grow without bound
-/// if a peer sends no newline.
+/// [`Usage::absorb`] exists for. The tap reads events with South's
+/// `SseDecoderV1`, the grammar every other host reader uses, so it never needs
+/// the whole stream in memory. It gives up rather than fail the relay when the
+/// decoder refuses the stream, for example a line or event over South's bounds.
 #[derive(Default)]
 struct AnthropicSseUsageTap {
-    partial: String,
+    decoder: SseDecoderV1,
     usage: Option<Usage>,
     saw_message_stop: bool,
     abandoned: bool,
 }
 
 impl AnthropicSseUsageTap {
-    /// A single SSE line far beyond any real Anthropic event. Past this the
-    /// peer is not sending frames and the tap stops looking.
-    const MAX_LINE: usize = 256 * 1024;
-
     fn observe(&mut self, chunk: &str) {
         if self.abandoned {
             return;
         }
-        self.partial.push_str(chunk);
-        while let Some(end) = self.partial.find('\n') {
-            let line = self.partial[..end].trim_end_matches('\r').to_owned();
-            self.partial.drain(..=end);
-            self.observe_line(&line);
-        }
-        if self.partial.len() > Self::MAX_LINE {
-            self.abandoned = true;
-            self.partial = String::new();
+        self.decoder.push(chunk.as_bytes());
+        loop {
+            match self.decoder.next_event() {
+                Ok(Some(event)) => self.observe_data(event.data()),
+                Ok(None) => break,
+                Err(_) => {
+                    self.abandoned = true;
+                    self.decoder = SseDecoderV1::new();
+                    break;
+                }
+            }
         }
     }
 
-    fn observe_line(&mut self, line: &str) {
-        let Some(payload) = line.strip_prefix("data:") else {
-            return;
-        };
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(payload.trim()) else {
+    fn observe_data(&mut self, data: &str) {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
             return;
         };
         if event.get("type").and_then(serde_json::Value::as_str) == Some("message_stop") {
@@ -255,12 +264,16 @@ impl AnthropicSseUsageTap {
         }
     }
 
+    /// Ends the input. South's decoder dispatches the event the end of input
+    /// leaves, even without a closing blank line, so an upstream that omits
+    /// the final blank line still reports its last event.
     fn finish(&mut self) {
-        if self.abandoned || self.partial.is_empty() {
+        if self.abandoned {
             return;
         }
-        let line = std::mem::take(&mut self.partial);
-        self.observe_line(line.trim_end_matches('\r'));
+        if let Ok(Some(event)) = std::mem::take(&mut self.decoder).finish() {
+            self.observe_data(event.data());
+        }
     }
 
     const fn is_complete(&self) -> bool {

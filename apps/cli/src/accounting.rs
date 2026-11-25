@@ -326,14 +326,8 @@ impl AccountingTap {
         if self.mode == BodyMode::Stream {
             match self.decoder.push(bytes) {
                 Ok(frames) => {
-                    for frame in frames {
-                        let data = frame
-                            .lines()
-                            .filter_map(|line| line.strip_prefix("data:"))
-                            .map(|line| line.strip_prefix(' ').unwrap_or(line))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        self.parse_event(data.as_bytes());
+                    for event in frames.into_iter().filter_map(|frame| frame.event) {
+                        self.parse_event(event.data().as_bytes());
                     }
                 }
                 Err(_) => self.mode = BodyMode::Abandoned,
@@ -365,6 +359,18 @@ impl AccountingTap {
             let bytes = std::mem::take(&mut self.json);
             self.parse_event(&bytes);
         }
+        // A blank line made of a final lone CR closes the last frame only at
+        // the end of input. A cut-off frame is never read.
+        let ended_cleanly = self.mode != BodyMode::Stream
+            || match std::mem::take(&mut self.decoder).finish() {
+                Ok(last) => {
+                    if let Some(event) = last.and_then(|frame| frame.event) {
+                        self.parse_event(event.data().as_bytes());
+                    }
+                    true
+                }
+                Err(_) => false,
+            };
         if self.stage != UsageStage::Unseen {
             self.observation.incomplete |= self.stage == UsageStage::Preliminary;
             record.usage_observation = Some(self.observation);
@@ -383,8 +389,7 @@ impl AccountingTap {
             record.cost_micros = Some(cost);
             record.price_version = None;
         }
-        self.parsed_terminal_usage
-            && (self.mode != BodyMode::Stream || self.decoder.finish().is_ok())
+        self.parsed_terminal_usage && ended_cleanly
     }
 }
 
@@ -749,5 +754,42 @@ mod tests {
         assert_eq!(record.usage.unwrap().output_tokens, 7);
         assert!(record.usage_observation.unwrap().incomplete);
         assert!(record.cost_micros.is_none());
+    }
+
+    /// Lone CR line ends, `event` lines, a comment, and a terminal frame that
+    /// only the end of input closes, cut at every byte.
+    #[test]
+    fn lone_cr_events_and_a_terminal_closed_by_the_end_of_input_are_accounted() {
+        let wire = concat!(
+            "event: response.created\r",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cr\"}}\r\r",
+            ": keep-alive\r\r",
+            "event: response.completed\r",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cr\",",
+            "\"usage\":{\"input_tokens\":11,\"output_tokens\":4}}}\r\r",
+        );
+        for split in 0..=wire.len() {
+            let mut tap = AccountingTap::new("https://api.openai.com/v1");
+            tap.head(200, "text/event-stream");
+            tap.push(&wire.as_bytes()[..split]);
+            tap.push(&wire.as_bytes()[split..]);
+            let mut record = RequestRecord::begin(0, "openai");
+            assert!(tap.finish(&mut record), "{split}");
+            let usage = record.usage.unwrap();
+            assert_eq!(
+                (usage.input_tokens, usage.output_tokens),
+                (11, 4),
+                "{split}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cut_off_terminal_event_is_never_certified() {
+        let mut tap = AccountingTap::new("https://api.openai.com/v1");
+        tap.head(200, "text/event-stream");
+        tap.push(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":4}}}\n");
+        let mut record = RequestRecord::begin(0, "openai");
+        assert!(!tap.finish(&mut record));
     }
 }
