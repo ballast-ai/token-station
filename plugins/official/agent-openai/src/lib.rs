@@ -5,9 +5,14 @@
 //! sees a credential — the envelope's headers arrive with credential values
 //! already redacted, and the `agent-adapter-v1` world cannot even name one.
 //!
-//! The logic is deliberately the same as the native reference adapter in
-//! `token-station-conformance`'s own tests. The fixture pack in `fixtures/`
-//! pins both to identical outputs, so they cannot drift apart silently.
+//! The mapping is South's north codec (`south-north-codec`), the one the
+//! server uses for this wire. This adapter keeps only what the codec leaves to
+//! a host: the Cursor body shim, the strict `response_format` check, the
+//! required model, the per-stream render state, the `[DONE]` sentinel and the
+//! error frame. The fixture pack in `fixtures/` pins the rendered output.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 wit_bindgen::generate!({
     path: "../../../crates/plugin-api/wit",
@@ -15,12 +20,15 @@ wit_bindgen::generate!({
 });
 
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
+use south_north_codec::{
+    chat_request_from_openai_chat, openai_chat_response, ChatStreamContext, OpenAiChatStream,
+    ResponseContext,
+};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
-    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, Extensions, HintKind, Message, ResponseFormat, Role, Sampling, StreamEvent,
-    ToolCall, ToolDef,
+    AgentHint, AgentRequestEnvelope, ChatResponse, ErrorCode, ErrorEnvelope, HintKind,
+    ResponseFormat, StreamEvent,
 };
 
 struct OpenAiClient;
@@ -31,6 +39,9 @@ const HINT_HEADERS: &[(&str, HintKind)] = &[
     ("x-agent-task", HintKind::TaskType),
     ("x-agent-preference", HintKind::Preference),
 ];
+
+/// The most streams this instance renders at once. The host admits no more.
+const MAX_STREAMS: usize = 1024;
 
 // -- error plumbing -------------------------------------------------------------
 
@@ -64,74 +75,7 @@ fn to_output<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string(value).map_err(internal)
 }
 
-// -- translation ----------------------------------------------------------------
-
-fn tool_calls_from_openai(raw: &Value) -> Vec<ToolCall> {
-    raw.as_array()
-        .into_iter()
-        .flatten()
-        .map(|call| ToolCall {
-            id: call["id"].as_str().unwrap_or_default().to_owned(),
-            name: call["function"]["name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
-            arguments: call["function"]["arguments"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
-            signature: None,
-        })
-        .collect()
-}
-
-fn tool_calls_to_openai(calls: &[ToolCall]) -> Value {
-    Value::Array(
-        calls
-            .iter()
-            .map(|call| {
-                json!({
-                    "id": call.id,
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments},
-                })
-            })
-            .collect(),
-    )
-}
-
-fn content_to_json(content: Option<&Content>) -> Value {
-    match content {
-        Some(Content::Text(text)) => json!(text),
-        Some(Content::Parts(parts)) => {
-            let text = parts.iter().fold(String::new(), |mut text, part| {
-                if let ContentPart::Text { text: part, .. } = part {
-                    text.push_str(part);
-                }
-                text
-            });
-            if text.is_empty() {
-                Value::Null
-            } else {
-                json!(text)
-            }
-        }
-        None => Value::Null,
-    }
-}
-
-fn reasoning_to_json(content: Option<&Content>) -> Option<Value> {
-    let Content::Parts(parts) = content? else {
-        return None;
-    };
-    let reasoning = parts.iter().fold(String::new(), |mut reasoning, part| {
-        if let ContentPart::Thinking { thinking, .. } = part {
-            reasoning.push_str(thinking);
-        }
-        reasoning
-    });
-    (!reasoning.is_empty()).then(|| json!(reasoning))
-}
+// -- host shims around the codec --------------------------------------------------
 
 fn response_format(body: &Value) -> Result<Option<ResponseFormat>, String> {
     let Some(raw) = body.get("response_format").filter(|value| !value.is_null()) else {
@@ -258,6 +202,28 @@ fn normalize_cursor_body(body: &Value) -> Result<Value, String> {
         };
         messages.push(json!({"role": role, "content": content}));
     }
+    // Responses fields with a Chat equivalent. Before, the system prompt, the
+    // output cap and the reasoning level were dropped here.
+    match normalized.remove("instructions") {
+        Some(Value::String(text)) if !text.is_empty() => {
+            messages.insert(0, json!({"role": "system", "content": text}));
+        }
+        None | Some(Value::Null | Value::String(_)) => {}
+        Some(_) => return Err(invalid("Cursor instructions must be a string")),
+    }
+    if let Some(cap) = normalized.remove("max_output_tokens") {
+        if !normalized.contains_key("max_completion_tokens")
+            && !normalized.contains_key("max_tokens")
+        {
+            normalized.insert("max_completion_tokens".to_owned(), cap);
+        }
+    }
+    if let Some(effort) = normalized
+        .remove("reasoning")
+        .and_then(|reasoning| reasoning.get("effort").filter(|e| e.is_string()).cloned())
+    {
+        normalized.entry("reasoning_effort").or_insert(effort);
+    }
     normalized.remove("input");
     normalized.remove("previous_response_id");
     normalized.remove("store");
@@ -281,6 +247,105 @@ fn normalize_cursor_body(body: &Value) -> Result<Value, String> {
         }
     }
     Ok(Value::Object(normalized))
+}
+
+/// Drops `reasoning_content` from assistant turns before the codec reads them.
+///
+/// The codec turns it into a leading thinking block. The host passes an
+/// unmarked thinking block to every upstream, so an Anthropic upstream would
+/// get it without a signature, and an assistant turn with only reasoning and
+/// tool calls would carry `content: []` to an OpenAI-compatible one. Until that
+/// path is verified, the adapter keeps the earlier behavior: a client's
+/// reasoning text is not replayed (design record, P3.1 R7).
+fn without_reasoning_replay(body: &mut Value) {
+    let messages = body.get_mut("messages").and_then(Value::as_array_mut);
+    for message in messages.into_iter().flatten() {
+        if message.get("role").and_then(Value::as_str) == Some("assistant") {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("reasoning_content");
+            }
+        }
+    }
+}
+
+/// The codec refuses tool arguments that are not JSON. This adapter has always
+/// passed them on, and some clients repair them, so it renders a valid
+/// placeholder and puts the original text back (design record, P3.1 S4).
+fn render_keeping_tool_arguments(
+    mut response: ChatResponse,
+    context: &ResponseContext,
+) -> Result<Value, String> {
+    let mut kept = Vec::new();
+    for (choice_index, choice) in response.choices.iter_mut().enumerate() {
+        for (call_index, call) in choice.message.tool_calls.iter_mut().enumerate() {
+            if serde_json::from_str::<serde::de::IgnoredAny>(&call.arguments).is_err() {
+                let original = std::mem::replace(&mut call.arguments, "{}".to_owned());
+                kept.push((choice_index, call_index, original));
+            }
+        }
+    }
+    let mut rendered = openai_chat_response(&response, context).map_err(internal)?;
+    for (choice_index, call_index, original) in kept {
+        let pointer =
+            format!("/choices/{choice_index}/message/tool_calls/{call_index}/function/arguments");
+        let slot = rendered
+            .pointer_mut(&pointer)
+            .ok_or_else(|| internal("rendered tool call is missing its arguments"))?;
+        *slot = Value::String(original);
+    }
+    Ok(rendered)
+}
+
+/// One stream's codec state and the identity it was opened with.
+struct StreamState {
+    response_id: String,
+    model: String,
+    codec: OpenAiChatStream,
+    finish_seen: bool,
+}
+
+thread_local! {
+    static STREAMS: RefCell<BTreeMap<String, StreamState>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+fn context_field<'a>(context: &'a Value, name: &str) -> Result<&'a str, String> {
+    context
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(&format!("stream render context declares no {name}")))
+}
+
+/// Renders one event of a stream through its codec state. Returns the SSE text
+/// and whether the stream ended.
+fn render_in_stream(state: &mut StreamState, event: StreamEvent) -> Result<(String, bool), String> {
+    let mut events = Vec::with_capacity(2);
+    match &event {
+        StreamEvent::Finish { .. } => state.finish_seen = true,
+        // Every current producer sends Finish before Done. A Done that carries
+        // a reason alone still closes with a finish chunk, as it always did.
+        StreamEvent::Done {
+            finish_reason: Some(reason),
+            stop_sequence,
+        } if !state.finish_seen => events.push(StreamEvent::Finish {
+            finish_reason: Some(reason.clone()),
+            stop_sequence: stop_sequence.clone(),
+        }),
+        _ => {}
+    }
+    let done = matches!(event, StreamEvent::Done { .. });
+    events.push(event);
+    let frames = state.codec.frames(&events).map_err(internal)?;
+    let mut data = String::new();
+    for frame in frames {
+        data.push_str("data: ");
+        data.push_str(&serde_json::to_string(&frame.data).map_err(internal)?);
+        data.push_str("\n\n");
+    }
+    if done {
+        data.push_str("data: [DONE]\n\n");
+    }
+    Ok((data, done))
 }
 
 impl Guest for OpenAiClient {
@@ -337,99 +402,23 @@ impl Guest for OpenAiClient {
 
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
-        let body = if envelope.agent_tool.as_deref() == Some("cursor") {
+        let mut body = if envelope.agent_tool.as_deref() == Some("cursor") {
             normalize_cursor_body(&envelope.body)?
         } else {
             envelope.body.clone()
         };
+        // The codec accepts a missing model as an empty one. A request must
+        // name the model it wants routed.
+        if body.get("model").and_then(Value::as_str).is_none() {
+            return Err(invalid("request declares no model"));
+        }
         let response_format = response_format(&body)?;
-
-        let model = body["model"]
-            .as_str()
-            .ok_or_else(|| invalid("request declares no model"))?
-            .to_owned();
-
-        let mut messages = Vec::new();
-        for raw in body["messages"].as_array().into_iter().flatten() {
-            let role = match raw["role"].as_str() {
-                Some("system") => Role::System,
-                Some("user") => Role::User,
-                Some("assistant") => Role::Assistant,
-                Some("tool") => Role::Tool,
-                _ => return Err(invalid("message declares no known role")),
-            };
-            let content = match &raw["content"] {
-                Value::String(text) => Some(Content::Text(text.clone())),
-                parts @ Value::Array(_) => {
-                    let parsed: Vec<ContentPart> =
-                        serde_json::from_value(parts.clone()).map_err(internal)?;
-                    Some(Content::Parts(parsed))
-                }
-                _ => None,
-            };
-            messages.push(Message {
-                role,
-                content,
-                tool_calls: tool_calls_from_openai(&raw["tool_calls"]),
-                tool_call_id: raw["tool_call_id"].as_str().map(str::to_owned),
-                name: raw["name"].as_str().map(str::to_owned),
-                extensions: Extensions::new(),
-            });
-        }
-
-        let tools = body["tools"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|tool| ToolDef {
-                name: tool["function"]["name"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                description: tool["function"]["description"].as_str().map(str::to_owned),
-                parameters: tool["function"]["parameters"].clone(),
-                cache_control: None,
-                strict: None,
-            })
-            .collect();
-
-        let mut extensions = Extensions::new();
-        if let Some(effort) = body.get("reasoning_effort").and_then(Value::as_str) {
-            extensions.insert("reasoning_effort".to_owned(), json!(effort));
-        }
-        if let Some(parallel) = body.get("parallel_tool_calls").and_then(Value::as_bool) {
-            extensions.insert("parallel_tool_calls".to_owned(), json!(parallel));
-        }
-
-        to_output(&ChatRequest {
-            model,
-            messages,
-            tools,
-            response_format,
-            tool_choice: body
-                .get("tool_choice")
-                .map(|v| serde_json::from_value(v.clone()).expect("ToolChoice accepts any value")),
-            sampling: Sampling {
-                temperature: body["temperature"].as_f64(),
-                top_p: body["top_p"].as_f64(),
-                max_output_tokens: body["max_tokens"]
-                    .as_u64()
-                    .or_else(|| body["max_completion_tokens"].as_u64())
-                    .and_then(|value| u32::try_from(value).ok()),
-                stop: body["stop"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect(),
-                top_k: None,
-            },
-            stream: body["stream"].as_bool().unwrap_or(false),
-            host_values: token_station_protocol::ComponentValues::new(),
-            extensions,
-            parallel_tool_calls: None,
-            reasoning: token_station_protocol::Reasoning::default(),
-        })
+        without_reasoning_replay(&mut body);
+        let mut request =
+            chat_request_from_openai_chat(&body).map_err(|error| invalid(&error.to_string()))?;
+        // The strict check above wins over the codec's lenient parse.
+        request.response_format = response_format;
+        to_output(&request)
     }
 
     fn extract_agent_hint(envelope: String) -> Result<String, String> {
@@ -449,176 +438,83 @@ impl Guest for OpenAiClient {
         to_output(&hints)
     }
 
-    fn render_response(response: String, _context: String) -> Result<String, String> {
+    fn render_response(response: String, context: String) -> Result<String, String> {
         let response: ChatResponse = parse_input(&response)?;
-
-        let choices: Vec<Value> = response
-            .choices
-            .iter()
-            .map(|choice| {
-                let mut message = Map::new();
-                message.insert("role".to_owned(), json!(choice.message.role));
-                message.insert(
-                    "content".to_owned(),
-                    content_to_json(choice.message.content.as_ref()),
-                );
-                if let Some(reasoning) = reasoning_to_json(choice.message.content.as_ref()) {
-                    message.insert("reasoning_content".to_owned(), reasoning);
-                }
-                if !choice.message.tool_calls.is_empty() {
-                    message.insert(
-                        "tool_calls".to_owned(),
-                        tool_calls_to_openai(&choice.message.tool_calls),
-                    );
-                }
-                json!({
-                    "index": choice.index,
-                    "message": Value::Object(message),
-                    "finish_reason": choice.finish_reason,
-                })
-            })
-            .collect();
-
-        to_output(&json!({
-            "id": response.id,
-            "object": "chat.completion",
-            "model": response.model,
-            "choices": choices,
-            "usage": {
-                "prompt_tokens": response.usage.input_tokens,
-                "completion_tokens": response.usage.output_tokens,
-                "total_tokens": response.usage.total(),
-                "prompt_tokens_details": {
-                    "cached_tokens": response.usage.cache_read_tokens,
-                    "cache_write_tokens": response.usage.cache_write_tokens,
-                },
-                "completion_tokens_details": {
-                    "reasoning_tokens": response.usage.reasoning_tokens,
-                },
+        let context: Value = serde_json::from_str(&context).unwrap_or(Value::Null);
+        let fallback_id = context
+            .get("response_id")
+            .and_then(Value::as_str)
+            .unwrap_or("token-station")
+            .to_owned();
+        let rendered = render_keeping_tool_arguments(
+            response,
+            &ResponseContext {
+                created: 0,
+                fallback_id,
             },
-        }))
+        )?;
+        to_output(&rendered)
     }
 
     fn render_stream_event(event: String, context: String) -> Result<String, String> {
         let event: StreamEvent = parse_input(&event)?;
         let context: Value = parse_input(&context)?;
-        let response_id = context
-            .get("response_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("stream render context declares no response_id"))?;
-        let model = context
-            .get("model")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("stream render context declares no model"))?;
-        let stream_identity = format!(
-            "\"id\":{},\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":{},",
-            serde_json::to_string(response_id).map_err(internal)?,
-            serde_json::to_string(model).map_err(internal)?,
-        );
-
-        // Templated rather than serialized: the entry protocol's key order is
-        // part of its wire format, and a `Map` would sort it.
-        let data = match &event {
-            StreamEvent::Delta { index, content } => format!(
-                "data: {{{stream_identity}\"choices\":[{{\"index\":{index},\"delta\":{{\"content\":{}}}}}]}}\n\n",
-                serde_json::to_string(content).map_err(internal)?
-            ),
-            StreamEvent::ToolCallDelta {
-                index,
-                id,
-                name,
-                arguments_delta,
-                ..
-            } => {
-                let mut function = format!(
-                    "\"arguments\":{}",
-                    serde_json::to_string(arguments_delta).map_err(internal)?
-                );
-                if let Some(name) = name {
-                    function = format!(
-                        "\"name\":{},{function}",
-                        serde_json::to_string(name).map_err(internal)?
-                    );
-                }
-                let tool_identity = match id {
-                    Some(id) => {
-                        format!("\"id\":{},", serde_json::to_string(id).map_err(internal)?)
-                    }
-                    None => String::new(),
-                };
-                format!(
-                    "data: {{{stream_identity}\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":\
-                     [{{\"index\":{index},{tool_identity}\"function\":{{{function}}}}}]}}}}]}}\n\n"
-                )
-            }
-            StreamEvent::Usage { usage } => format!(
-                "data: {{{stream_identity}\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\
-                 \"total_tokens\":{},\"prompt_tokens_details\":{{\"cached_tokens\":{},\
-                 \"cache_write_tokens\":{}}},\"completion_tokens_details\":{{\"reasoning_tokens\":{}}}}}}}\n\n",
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.total(),
-                usage.cache_read_tokens,
-                usage.cache_write_tokens,
-                usage.reasoning_tokens
-            ),
-            // 0.3.0: reasoning deltas ride the openai-compat
-            // `delta.reasoning_content` slot; the signature fragment has no
-            // openai wire slot and renders nothing. This wire has no
-            // content-block ordinal, so it ignores `block_index` while
-            // preserving `index` as the choice index.
-            StreamEvent::ThinkingDelta {
-                index,
-                block_index: _,
-                thinking_delta,
-            } => format!(
-                "data: {{{stream_identity}\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
-                serde_json::to_string(thinking_delta).map_err(internal)?
-            ),
-            StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
-            StreamEvent::RedactedThinking { .. } => {
-                return Err(invalid(
-                    "openai-chat-completions cannot render redacted thinking",
-                ));
-            }
-            StreamEvent::Finish {
-                finish_reason,
-                // openai chat SSE has no stop-sequence slot to render into.
-                stop_sequence: _,
-            } => {
-                let reason = match finish_reason {
-                    Some(reason) => serde_json::to_string(reason).map_err(internal)?,
-                    None => "null".to_owned(),
-                };
-                format!(
-                    "data: {{{stream_identity}\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\n\n"
-                )
-            }
-            StreamEvent::Done {
-                finish_reason,
-                // openai chat SSE has no stop-sequence slot to render into.
-                stop_sequence: _,
-            } => {
-                let reason = match finish_reason {
-                    Some(reason) => serde_json::to_string(reason).map_err(internal)?,
-                    None => "null".to_owned(),
-                };
-                if finish_reason.is_some() {
-                    format!(
-                        "data: {{{stream_identity}\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\
-                         \n\ndata: [DONE]\n\n"
-                    )
-                } else {
-                    "data: [DONE]\n\n".to_owned()
-                }
-            }
-            StreamEvent::Error { error } => {
-                let rendered = Self::map_inbound_error(to_output(error)?, String::new())?;
-                format!("data: {rendered}\n\n")
-            }
+        let response_id = context_field(&context, "response_id")?;
+        let model = context_field(&context, "model")?;
+        // The host names every stream. A context without a name still renders,
+        // as it did when this adapter kept no state: its state is keyed on the
+        // response id instead.
+        let stream_key = match context.get("stream_id").and_then(Value::as_str) {
+            Some(id) => format!("stream:{id}"),
+            None => format!("response:{response_id}"),
         };
+        let stream_id = stream_key.as_str();
 
-        to_output(&json!({ "data": data }))
+        // The codec renders nothing for an error. The client gets this wire's
+        // error frame, and the stream ends.
+        if let StreamEvent::Error { error } = &event {
+            STREAMS.with(|streams| streams.borrow_mut().remove(stream_id));
+            let rendered = Self::map_inbound_error(to_output(error)?, String::new())?;
+            return to_output(&json!({ "data": format!("data: {rendered}\n\n") }));
+        }
+
+        STREAMS.with(|streams| {
+            let mut streams = streams.borrow_mut();
+            if !streams.contains_key(stream_id) && streams.len() >= MAX_STREAMS {
+                return Err(capability("too many open streams"));
+            }
+            let state = streams
+                .entry(stream_id.to_owned())
+                .or_insert_with(|| StreamState {
+                    response_id: response_id.to_owned(),
+                    model: model.to_owned(),
+                    codec: OpenAiChatStream::new(ChatStreamContext {
+                        id: response_id.to_owned(),
+                        model: model.to_owned(),
+                        created: 0,
+                    }),
+                    finish_seen: false,
+                });
+            let result = if state.response_id != response_id || state.model != model {
+                Err(invalid(
+                    "stream render context changed response_id or model mid-stream",
+                ))
+            } else {
+                render_in_stream(state, event)
+            };
+            match result {
+                Ok((data, ended)) => {
+                    if ended {
+                        streams.remove(stream_id);
+                    }
+                    to_output(&json!({ "data": data }))
+                }
+                Err(error) => {
+                    streams.remove(stream_id);
+                    Err(error)
+                }
+            }
+        })
     }
 
     fn map_inbound_error(error: String, _context: String) -> Result<String, String> {
@@ -641,7 +537,57 @@ impl Guest for OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use token_station_protocol::{HeaderDigest, Principal};
+    use token_station_protocol::{
+        ChatRequest, Content, ContentPart, Extensions, HeaderDigest, Principal,
+    };
+
+    fn envelope(agent_tool: &str, body: Value) -> String {
+        serde_json::to_string(&AgentRequestEnvelope {
+            protocol: "openai-chat-completions".to_owned(),
+            agent_tool: Some(agent_tool.to_owned()),
+            headers: HeaderDigest::default(),
+            principal: Principal {
+                subject: "local".to_owned(),
+                tenant: None,
+            },
+            hints: Vec::new(),
+            body,
+            extensions: Extensions::new(),
+        })
+        .unwrap()
+    }
+
+    fn normalize(agent_tool: &str, body: Value) -> Result<ChatRequest, String> {
+        OpenAiClient::normalize_inbound(envelope(agent_tool, body))
+            .map(|request| serde_json::from_str(&request).unwrap())
+    }
+
+    /// Renders `events` as one stream and returns the SSE text.
+    fn stream(stream_id: &str, events: &[Value]) -> String {
+        let context = json!({
+            "stream_id": stream_id,
+            "response_id": "chatcmpl-token-station-7",
+            "model": "routed-model"
+        });
+        events
+            .iter()
+            .map(|event| {
+                let rendered =
+                    OpenAiClient::render_stream_event(event.to_string(), context.to_string())
+                        .expect("canonical stream event renders");
+                let rendered: Value = serde_json::from_str(&rendered).unwrap();
+                rendered["data"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    fn chunks(data: &str) -> Vec<Value> {
+        data.split("\n\n")
+            .filter_map(|frame| frame.strip_prefix("data: "))
+            .filter(|frame| *frame != "[DONE]")
+            .map(|frame| serde_json::from_str(frame).unwrap())
+            .collect()
+    }
 
     #[test]
     fn structured_formats_preserve_constraints_and_reject_invalid_fields() {
@@ -683,62 +629,89 @@ mod tests {
                 "{format}"
             );
         }
+        // A format the strict check refuses never reaches the codec.
+        let refused = normalize(
+            "opencode",
+            json!({"model":"m","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"grammar"}}),
+        )
+        .unwrap_err();
+        assert!(refused.contains("unsupported Chat Completions response_format type grammar"));
     }
 
     #[test]
     fn opencode_logical_model_reaches_canonical_request_unchanged() {
         for model in ["auto", "fast", "balanced", "power"] {
-            let envelope = AgentRequestEnvelope {
-                protocol: "openai-chat-completions".to_owned(),
-                agent_tool: Some("opencode".to_owned()),
-                headers: HeaderDigest::default(),
-                principal: Principal {
-                    subject: "local".to_owned(),
-                    tenant: None,
-                },
-                hints: Vec::new(),
-                body: json!({
-                    "model": model,
-                    "messages": [{"role": "user", "content": "hello"}]
-                }),
-                extensions: Extensions::new(),
-            };
-
-            let normalized =
-                OpenAiClient::normalize_inbound(serde_json::to_string(&envelope).unwrap())
-                    .expect("OpenCode request normalizes");
-            let request: ChatRequest = serde_json::from_str(&normalized).unwrap();
+            let request = normalize(
+                "opencode",
+                json!({"model": model, "messages": [{"role": "user", "content": "hello"}]}),
+            )
+            .expect("OpenCode request normalizes");
             assert_eq!(request.model, model);
         }
     }
 
     #[test]
-    fn chat_completion_content_is_always_text_or_null() {
-        let mixed = Content::Parts(vec![
-            ContentPart::Thinking {
-                thinking: "private reasoning".to_owned(),
-                signature: None,
-            },
-            ContentPart::Text {
-                text: "Hello".to_owned(),
-                cache_control: None,
-            },
-            ContentPart::Text {
-                text: ", world".to_owned(),
-                cache_control: None,
-            },
-        ]);
-        assert_eq!(content_to_json(Some(&mixed)), json!("Hello, world"));
-        assert_eq!(
-            reasoning_to_json(Some(&mixed)),
-            Some(json!("private reasoning"))
-        );
+    fn a_request_without_a_model_is_refused() {
+        let error = normalize(
+            "opencode",
+            json!({"messages":[{"role":"user","content":"hi"}]}),
+        )
+        .unwrap_err();
+        let error: ErrorEnvelope = serde_json::from_str(&error).unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.message, "request declares no model");
+    }
 
-        let reasoning_only = Content::Parts(vec![ContentPart::Thinking {
-            thinking: "private reasoning".to_owned(),
-            signature: None,
-        }]);
-        assert_eq!(content_to_json(Some(&reasoning_only)), Value::Null);
+    #[test]
+    fn codec_mapping_reaches_the_canonical_request() {
+        let request = normalize(
+            "generic-openai-sdk",
+            json!({
+                "model": "m",
+                "messages": [
+                    {"role": "developer", "content": "be brief"},
+                    {"role": "user", "content": "hi"}
+                ],
+                "stop": "END",
+                "max_tokens": 100,
+                "max_completion_tokens": 200,
+                "seed": 7
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(request.messages[0].role).unwrap(),
+            json!("system")
+        );
+        assert_eq!(request.sampling.stop, ["END"]);
+        assert_eq!(request.sampling.max_output_tokens, Some(200));
+        assert_eq!(request.extensions.get("seed"), Some(&json!(7)));
+
+        let error = normalize(
+            "opencode",
+            json!({"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":-1}),
+        )
+        .unwrap_err();
+        let error: ErrorEnvelope = serde_json::from_str(&error).unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(error.message.contains("max_tokens"), "{}", error.message);
+    }
+
+    #[test]
+    fn client_reasoning_text_is_not_replayed_upstream() {
+        let request = normalize(
+            "opencode",
+            json!({"model": "deepseek-reasoner", "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": null, "reasoning_content": "call the tool",
+                 "tool_calls": [{"id": "call_1", "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(request.messages[1].content, None);
+        assert_eq!(request.messages[1].tool_calls.len(), 1);
     }
 
     #[test]
@@ -772,7 +745,47 @@ mod tests {
     }
 
     #[test]
-    fn non_stream_usage_preserves_cache_and_reasoning_details() {
+    fn cursor_instructions_output_cap_and_reasoning_reach_the_request() {
+        let request = normalize(
+            "cursor",
+            json!({
+                "model": "gpt-5.5",
+                "instructions": "You are Cursor.",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+                "reasoning": {"effort": "medium"},
+                "max_output_tokens": 2048
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(request.messages[0].role).unwrap(),
+            json!("system")
+        );
+        assert_eq!(
+            request.messages[0].content,
+            Some(Content::Text("You are Cursor.".to_owned()))
+        );
+        assert_eq!(request.sampling.max_output_tokens, Some(2048));
+        assert_eq!(
+            serde_json::to_value(&request.reasoning.effort).unwrap(),
+            json!("medium")
+        );
+        for key in ["instructions", "max_output_tokens", "reasoning"] {
+            assert!(!request.extensions.contains_key(key), "{key}");
+        }
+        // An explicit Chat cap or level is not overwritten.
+        let explicit = normalize_cursor_body(&json!({
+            "model": "m", "input": [], "max_output_tokens": 1, "max_tokens": 9,
+            "reasoning": {"effort": "low"}, "reasoning_effort": "high"
+        }))
+        .unwrap();
+        assert_eq!(explicit["max_tokens"], json!(9));
+        assert!(explicit.get("max_completion_tokens").is_none());
+        assert_eq!(explicit["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn non_stream_usage_writes_only_reported_buckets() {
         let response = json!({
             "id": "chatcmpl-usage",
             "model": "routed-model",
@@ -785,153 +798,218 @@ mod tests {
                 "reasoning_tokens": 5
             }
         });
-
         let rendered = OpenAiClient::render_response(response.to_string(), String::new())
             .expect("canonical response renders");
-        let rendered: Value = serde_json::from_str(&rendered).expect("OpenAI response is JSON");
-
+        let rendered: Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(
             rendered["usage"],
             json!({
                 "prompt_tokens": 100,
                 "completion_tokens": 20,
                 "total_tokens": 120,
-                "prompt_tokens_details": {
-                    "cached_tokens": 60,
-                    "cache_write_tokens": 10
-                },
-                "completion_tokens_details": {
-                    "reasoning_tokens": 5
-                }
+                "prompt_tokens_details": {"cached_tokens": 60},
+                "completion_tokens_details": {"reasoning_tokens": 5}
             })
         );
     }
 
     #[test]
-    fn stream_usage_preserves_cache_and_reasoning_details() {
-        let event = json!({
-            "type": "usage",
-            "usage": {
-                "input_tokens": 100,
-                "output_tokens": 20,
-                "cache_read_tokens": 60,
-                "cache_write_tokens": 10,
-                "reasoning_tokens": 5
-            }
-        });
-
-        let context = json!({
-            "response_id": "chatcmpl-usage",
-            "model": "routed-model"
-        });
-        let rendered = OpenAiClient::render_stream_event(event.to_string(), context.to_string())
-            .expect("canonical usage event renders");
-        let rendered: Value = serde_json::from_str(&rendered).expect("stream wrapper is JSON");
-
+    fn reasoning_only_content_renders_null_text_and_reasoning() {
+        let response = ChatResponse {
+            id: "chatcmpl-r".to_owned(),
+            model: "m".to_owned(),
+            choices: vec![serde_json::from_value(json!({
+                "index": 0,
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "private reasoning"}]},
+                "finish_reason": "stop"
+            }))
+            .unwrap()],
+            usage: Default::default(),
+            extensions: Extensions::new(),
+        };
+        let rendered =
+            OpenAiClient::render_response(serde_json::to_string(&response).unwrap(), String::new())
+                .unwrap();
+        let rendered: Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(rendered["choices"][0]["message"]["content"], Value::Null);
         assert_eq!(
-            rendered["data"],
-            json!(concat!(
-                "data: {\"id\":\"chatcmpl-usage\",\"object\":\"chat.completion.chunk\",",
-                "\"created\":0,\"model\":\"routed-model\",\"choices\":[],\"usage\":{",
-                "\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,",
-                "\"prompt_tokens_details\":{\"cached_tokens\":60,\"cache_write_tokens\":10},",
-                "\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n"
-            ))
+            rendered["choices"][0]["message"]["reasoning_content"],
+            json!("private reasoning")
         );
+        let _ = ContentPart::Thinking {
+            thinking: String::new(),
+            signature: None,
+        };
     }
 
     #[test]
-    fn reasoning_stream_chunks_include_the_chat_completion_identity() {
-        let event = json!({
-            "type": "thinking_delta",
-            "index": 0,
-            "block_index": 2,
-            "thinking_delta": "checking"
+    fn tool_arguments_that_are_not_json_pass_through() {
+        let response = json!({
+            "id": "chatcmpl-args",
+            "model": "m",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "name": "f", "arguments": "{not json"},
+                    {"id": "call_2", "name": "g", "arguments": "{\"ok\":true}"},
+                    {"id": "call_3", "name": "h", "arguments": ""}
+                ]}}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}
         });
-        let context = json!({
-            "stream_id": "stream-7",
-            "response_id": "chatcmpl-token-station-7",
-            "model": "routed-model"
-        });
-
-        let rendered = OpenAiClient::render_stream_event(event.to_string(), context.to_string())
-            .expect("canonical reasoning event renders");
-        let wrapper: Value = serde_json::from_str(&rendered).expect("stream wrapper is JSON");
-        let data = wrapper["data"]
-            .as_str()
-            .expect("stream wrapper contains SSE data")
-            .strip_prefix("data: ")
-            .and_then(|value| value.strip_suffix("\n\n"))
-            .expect("one complete SSE data frame");
-        let chunk: Value = serde_json::from_str(data).expect("SSE payload is JSON");
-
-        assert_eq!(chunk["id"], json!("chatcmpl-token-station-7"));
-        assert_eq!(chunk["object"], json!("chat.completion.chunk"));
-        assert_eq!(chunk["model"], json!("routed-model"));
+        let rendered = OpenAiClient::render_response(response.to_string(), String::new()).unwrap();
+        let rendered: Value = serde_json::from_str(&rendered).unwrap();
+        let calls = &rendered["choices"][0]["message"]["tool_calls"];
+        assert_eq!(calls[0]["function"]["arguments"], json!("{not json"));
+        assert_eq!(calls[1]["function"]["arguments"], json!("{\"ok\":true}"));
+        assert_eq!(calls[2]["function"]["arguments"], json!(""));
     }
 
     #[test]
-    fn redacted_thinking_is_rejected_instead_of_dropped() {
-        let event = json!({
-            "type": "redacted_thinking",
-            "index": 0,
-            "block_index": 2,
-            "data": "供应商原值+/=opaque"
-        });
-        let context = json!({
-            "response_id": "chatcmpl-redacted",
-            "model": "routed-model"
-        });
-
-        let error = OpenAiClient::render_stream_event(event.to_string(), context.to_string())
-            .expect_err("OpenAI chat has no redacted-thinking wire slot");
-        let error: ErrorEnvelope = serde_json::from_str(&error).expect("canonical error");
-        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    fn stream_chunks_carry_identity_role_and_wire_key_order() {
+        let data = stream(
+            "stream-identity",
+            &[
+                json!({"type": "thinking_delta", "index": 0, "block_index": 2, "thinking_delta": "checking"}),
+                json!({"type": "delta", "index": 0, "content": "hi"}),
+                json!({"type": "done", "finish_reason": "stop"}),
+            ],
+        );
+        assert!(
+            data.starts_with(
+                "data: {\"id\":\"chatcmpl-token-station-7\",\"object\":\"chat.completion.chunk\",\
+                 \"created\":0,\"model\":\"routed-model\",\"choices\":"
+            ),
+            "{data}"
+        );
+        let chunks = chunks(&data);
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], json!("assistant"));
         assert_eq!(
-            error.message,
-            "openai-chat-completions cannot render redacted thinking"
+            chunks[0]["choices"][0]["delta"]["reasoning_content"],
+            json!("checking")
         );
+        assert!(chunks[1]["choices"][0]["delta"].get("role").is_none());
+        assert!(data.ends_with("data: [DONE]\n\n"));
     }
 
     #[test]
-    fn finish_usage_and_done_render_in_workbuddy_order() {
-        let events = [
-            json!({"type": "finish", "finish_reason": "stop", "stop_sequence": null}),
-            json!({
-                "type": "usage",
-                "usage": {
-                    "input_tokens": 42,
-                    "output_tokens": 7,
-                    "cache_read_tokens": 0,
-                    "cache_write_tokens": 0,
-                    "reasoning_tokens": 0
-                }
-            }),
-            json!({"type": "done", "finish_reason": null, "stop_sequence": null}),
-        ];
-        let data = events
-            .into_iter()
-            .map(|event| {
-                let context = json!({
-                    "response_id": "chatcmpl-order",
-                    "model": "routed-model"
-                });
-                let rendered =
-                    OpenAiClient::render_stream_event(event.to_string(), context.to_string())
-                        .expect("canonical stream event renders");
-                let rendered: Value =
-                    serde_json::from_str(&rendered).expect("stream wrapper is JSON");
-                rendered["data"]
-                    .as_str()
-                    .expect("stream data is text")
-                    .to_owned()
-            })
-            .collect::<String>();
-
+    fn finish_and_usage_close_the_stream_in_one_chunk_before_done() {
+        let data = stream(
+            "stream-order",
+            &[
+                json!({"type": "delta", "index": 0, "content": "x"}),
+                json!({"type": "finish", "finish_reason": "stop", "stop_sequence": null}),
+                json!({"type": "usage", "usage": {"input_tokens": 42, "output_tokens": 7,
+                    "cache_read_tokens": 3, "cache_write_tokens": 1, "reasoning_tokens": 0}}),
+                json!({"type": "done", "finish_reason": "stop", "stop_sequence": null}),
+            ],
+        );
+        let chunks = chunks(&data);
+        assert_eq!(chunks.len(), 2, "{data}");
+        let terminal = &chunks[1];
+        assert_eq!(terminal["choices"][0]["finish_reason"], json!("stop"));
+        assert_eq!(
+            terminal["usage"],
+            json!({"prompt_tokens": 42, "completion_tokens": 7, "total_tokens": 49,
+                "prompt_tokens_details": {"cached_tokens": 3}})
+        );
         let finish = data.find("\"finish_reason\":\"stop\"").unwrap();
         let usage = data.find("\"prompt_tokens\":42").unwrap();
         let done = data.find("data: [DONE]").unwrap();
         assert!(finish < usage && usage < done);
+    }
+
+    #[test]
+    fn usage_without_a_finish_rides_its_own_chunk() {
+        let data = stream(
+            "stream-usage-only",
+            &[
+                json!({"type": "usage", "usage": {"input_tokens": 5, "output_tokens": 1}}),
+                json!({"type": "done", "finish_reason": null}),
+            ],
+        );
+        let chunks = chunks(&data);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0]["choices"], json!([]));
+        assert_eq!(chunks[0]["usage"]["total_tokens"], json!(6));
+    }
+
+    #[test]
+    fn a_done_with_a_reason_and_no_finish_still_closes_with_a_finish_chunk() {
+        let data = stream(
+            "stream-done-only",
+            &[
+                json!({"type": "delta", "index": 0, "content": "hi"}),
+                json!({"type": "done", "finish_reason": "length"}),
+            ],
+        );
+        let chunks = chunks(&data);
+        assert_eq!(
+            chunks.last().unwrap()["choices"][0]["finish_reason"],
+            json!("length")
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_renders_nothing() {
+        let data = stream(
+            "stream-redacted",
+            &[
+                json!({"type": "redacted_thinking", "index": 0, "block_index": 2, "data": "opaque"}),
+                json!({"type": "delta", "index": 0, "content": "answer"}),
+            ],
+        );
+        assert!(!data.contains("opaque"));
+        assert!(data.contains("\"content\":\"answer\""));
+    }
+
+    #[test]
+    fn an_error_renders_the_wire_error_frame_and_ends_the_stream() {
+        let data = stream(
+            "stream-error",
+            &[
+                json!({"type": "delta", "index": 0, "content": "x"}),
+                json!({"type": "error", "error": {"code": "upstream_unavailable",
+                    "http_status": 502, "message": "upstream went away"}}),
+            ],
+        );
+        assert!(data.ends_with(
+            "data: {\"error\":{\"message\":\"upstream went away\",\"type\":\"upstream_unavailable\",\"code\":\"upstream_unavailable\"}}\n\n"
+        ));
+        STREAMS.with(|streams| assert!(!streams.borrow().contains_key("stream:stream-error")));
+    }
+
+    #[test]
+    fn stream_state_is_per_stream_and_freed_at_done() {
+        let first = json!({"stream_id": "a", "response_id": "chatcmpl-a", "model": "m"});
+        let second = json!({"stream_id": "b", "response_id": "chatcmpl-b", "model": "m"});
+        let delta = json!({"type": "delta", "index": 0, "content": "x"}).to_string();
+        let done = json!({"type": "done", "finish_reason": "stop"}).to_string();
+        for context in [&first, &second] {
+            let rendered =
+                OpenAiClient::render_stream_event(delta.clone(), context.to_string()).unwrap();
+            // Each stream's first delta carries the role: the state is not shared.
+            assert!(rendered.contains("assistant"), "{rendered}");
+        }
+        OpenAiClient::render_stream_event(done.clone(), first.to_string()).unwrap();
+        STREAMS.with(|streams| {
+            assert!(!streams.borrow().contains_key("stream:a"));
+            assert!(streams.borrow().contains_key("stream:b"));
+        });
+        let changed = json!({"stream_id": "b", "response_id": "chatcmpl-other", "model": "m"});
+        let error = OpenAiClient::render_stream_event(delta, changed.to_string()).unwrap_err();
+        assert!(error.contains("changed response_id or model"), "{error}");
+        STREAMS.with(|streams| assert!(!streams.borrow().contains_key("stream:b")));
+        // A context without a stream name is keyed on its response id.
+        let anonymous = json!({"response_id": "chatcmpl-anon", "model": "m"});
+        OpenAiClient::render_stream_event(done, anonymous.to_string()).unwrap();
+        let missing = json!({"stream_id": "c", "model": "m"});
+        let delta = json!({"type": "delta", "index": 0, "content": "x"}).to_string();
+        assert!(
+            OpenAiClient::render_stream_event(delta, missing.to_string())
+                .unwrap_err()
+                .contains("declares no response_id")
+        );
     }
 }
 

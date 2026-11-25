@@ -5329,6 +5329,56 @@ fn sse_crlf_no_space_multiline_data_and_split_unicode_are_decoded_once() {
 /// blank line, the component reads them, and the usage event reaches the
 /// metrics row. The last frame ends with a lone CR, which only the end of
 /// input can close, because the CR could start a CRLF.
+/// The Chat agent renders with South's north codec: the first chunk names the
+/// role, the finish chunk is sent once with the usage on it, and the stream
+/// ends with one `[DONE]`. The old adapter sent the finish chunk twice and the
+/// usage on a chunk of its own.
+#[test]
+fn chat_stream_renders_one_terminal_chunk_with_usage() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("chat-codec-terminal", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    let chunks: Vec<Value> = body
+        .split("\n\n")
+        .filter_map(|frame| frame.strip_prefix("data: "))
+        .filter(|frame| *frame != "[DONE]")
+        .map(|frame| serde_json::from_str(frame).expect("a JSON chunk"))
+        .collect();
+    assert_eq!(
+        chunks[0]["choices"][0]["delta"]["role"],
+        json!("assistant"),
+        "{body}"
+    );
+    assert_eq!(
+        chunks[0]["choices"][0]["delta"]["content"],
+        json!("Hel"),
+        "{body}"
+    );
+    let terminals: Vec<&Value> = chunks
+        .iter()
+        .filter(|chunk| chunk["choices"][0]["finish_reason"] == json!("stop"))
+        .collect();
+    assert_eq!(terminals.len(), 1, "{body}");
+    assert_eq!(terminals[0]["usage"]["total_tokens"], json!(9), "{body}");
+    assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+    assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn sse_lone_cr_and_mixed_line_ends_complete_and_account() {
     let sse = concat!(
