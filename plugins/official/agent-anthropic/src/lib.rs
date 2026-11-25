@@ -619,6 +619,20 @@ fn render_frames(state: &mut StreamState, event: &StreamEvent) -> Result<String,
         // opens a new one.
         state.codec.thinking_index = state.thinking_blocks.get(&block_index).copied();
     }
+    let mut rendered = String::new();
+    if matches!(event, StreamEvent::Done { .. }) {
+        // The codec closes only the thinking block it points at. Close every
+        // other one this stream opened, so each block gets its stop.
+        let current = state.codec.thinking_index;
+        for index in state.thinking_blocks.values() {
+            if Some(*index) != current {
+                rendered.push_str(&sse(
+                    "content_block_stop",
+                    json!({"type": "content_block_stop", "index": index}),
+                )?);
+            }
+        }
+    }
     let frames = anthropic_frames(std::slice::from_ref(event), &mut state.codec);
     if let (Some(block_index), Some(index)) = (thinking_block, state.codec.thinking_index) {
         state.thinking_blocks.insert(block_index, index);
@@ -628,7 +642,6 @@ fn render_frames(state: &mut StreamState, event: &StreamEvent) -> Result<String,
             "stream exceeded {MAX_BLOCKS_PER_STREAM} content blocks"
         )));
     }
-    let mut rendered = String::new();
     for frame in frames {
         rendered.push_str(&sse(frame.event, frame.data)?);
     }
@@ -1037,6 +1050,14 @@ mod tests {
         assert!(second_thinking.contains(r#""thinking":"second thought""#));
         assert!(second_signature.contains(r#""index":1"#));
         assert!(second_signature.contains(r#""signature":"second signature""#));
+
+        // Every block the stream opened gets exactly one stop.
+        let done = render(json!({"type": "done", "finish_reason": "stop"}));
+        for index in [0, 1] {
+            let stop = format!(r#"{{"index":{index},"type":"content_block_stop"}}"#);
+            assert_eq!(done.matches(&stop).count(), 1, "{index}: {done}");
+        }
+        assert!(done.find("content_block_stop").unwrap() < done.find("message_delta").unwrap());
     }
 
     fn normalized(body: Value) -> Result<Value, String> {
