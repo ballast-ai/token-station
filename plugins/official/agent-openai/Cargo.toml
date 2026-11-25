@@ -14,8 +14,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 serde = "1"
-serde_json = "1"
-# The Canonical IR, used as types rather than re-derived by hand: the plugin
-# and the host agree on the wire format because they compile the same structs.
-token-station-protocol = { path = "../../../crates/protocol" }
+# `preserve_order` keeps the codec's chunk key order (`id`, `object`,
+# `created`, `model`, `choices`, `usage`) on the wire instead of sorting it.
+serde_json = { version = "1", features = ["preserve_order"] }
 wit-bindgen = "0.59"
+
+# The Chat codec comes from the same South revision as the host and the
+# provider components (South 0.85.1), as in agent-openai-responses. The
+# protocol crate is the kernel mirror South compiles against, so the codec and
+# this adapter share one set of canonical types. Its sources equal this
+# repository's crates/protocol 0.7.0.
+south-north-codec = { version = "=0.85.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f" }
+token-station-protocol = { version = "=0.7.0", git = "https://github.com/ballast-ai/token-station-kernel.git", rev = "ce6894d99f51283e4985d39a2d533307bda27b6a" }
