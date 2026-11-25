@@ -39,27 +39,25 @@ const kernelProtocolTree = "0b5099bb04a24e59773e785a9919562257519105";
 // revision rather than by tag. A tag can be moved onto different bytes and a
 // revision cannot. Require the stricter form rather than accepting either.
 const kernelSource = `git+${kernelRepository}?rev=${kernelRevision}#${kernelRevision}`;
-// The eight crates the root manifest declares directly.
+// The nine crates the root manifest declares directly.
 const declaredSouthPackages = new Set([
   "south-component-conformance",
   "south-contracts",
   "south-core",
+  "south-host-grammars",
   "south-provider-api",
   "south-provider-conformance",
   "south-provider-runtime",
   "south-testkit",
   "south-transport-reqwest",
 ]);
-// The resolved closure adds south-host-grammars. Only the test-only
-// conformance and testkit crates pull it in.
-const expectedSouthPackages = new Set([
-  ...declaredSouthPackages,
-  "south-host-grammars",
-]);
+// The resolved closure is exactly the declared set.
+const expectedSouthPackages = new Set(declaredSouthPackages);
 const expectedDesktopSouthPackages = new Set([
   "south-component-conformance",
   "south-contracts",
   "south-core",
+  "south-host-grammars",
   "south-provider-api",
   "south-provider-runtime",
   "south-transport-reqwest",
@@ -358,13 +356,15 @@ assert.deepEqual(
     { name: "south-component-conformance", kind: "normal", features: [] },
     { name: "south-contracts", kind: "normal", features: [] },
     { name: "south-core", kind: "normal", features: [] },
+    // The SSE decoder the server also cuts upstream frames with.
+    { name: "south-host-grammars", kind: "normal", features: [] },
     { name: "south-provider-api", kind: "normal", features: [] },
     { name: "south-provider-conformance", kind: "dev", features: [] },
     { name: "south-provider-runtime", kind: "normal", features: [] },
     { name: "south-testkit", kind: "dev", features: [] },
     { name: "south-transport-reqwest", kind: "normal", features: [] },
   ],
-  "the CLI must keep testkit and the sandboxed conformance seam test-only, and use six South runtime dependencies",
+  "the CLI must keep testkit and the sandboxed conformance seam test-only, and use seven South runtime dependencies",
 );
 
 const policyPackageIds = new Set([

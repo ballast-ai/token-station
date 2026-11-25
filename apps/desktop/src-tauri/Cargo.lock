@@ -4993,6 +4993,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "south-host-grammars"
+version = "0.85.1"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f#174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f"
+
+[[package]]
 name = "south-provider-api"
 version = "0.65.0"
 source = "git+https://github.com/ballast-ai/token-station-south.git?rev=174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f#174158d1abfc842cc47dc88c9c6ef0c18c0e4d2f"
@@ -5794,6 +5799,7 @@ dependencies = [
  "south-component-conformance",
  "south-contracts",
  "south-core",
+ "south-host-grammars",
  "south-provider-api",
  "south-provider-runtime",
  "south-transport-reqwest",

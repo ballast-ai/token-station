@@ -3202,8 +3202,16 @@ impl Gateway {
                 .read(&mut buffer)
                 .map_err(|_| "upstream connection broke while streaming".to_owned())?;
             if read == 0 {
-                decoder.finish().map_err(describe)?;
-                for event in parser.finish().map_err(describe)? {
+                // A final lone CR closes the last frame only at the end of
+                // input.
+                let mut events = match decoder.finish().map_err(describe)? {
+                    Some(data) => parser
+                        .parse_chunk(&StreamChunk { data })
+                        .map_err(describe)?,
+                    None => Vec::new(),
+                };
+                events.extend(parser.finish().map_err(describe)?);
+                for event in events {
                     match event {
                         StreamEvent::Done { .. } => return Ok(()),
                         StreamEvent::Error { error } => return Err(describe(error)),

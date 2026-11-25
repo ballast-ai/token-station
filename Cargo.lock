@@ -2995,6 +2995,7 @@ dependencies = [
  "south-component-conformance",
  "south-contracts",
  "south-core",
+ "south-host-grammars",
  "south-provider-api",
  "south-provider-conformance",
  "south-provider-runtime",
