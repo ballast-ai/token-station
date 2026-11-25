@@ -152,6 +152,7 @@ mod usage_tests {
             let response = UpstreamResponse {
                 status: 200,
                 headers,
+                quota: south_contracts::ProviderQuotaMetadataV1::default(),
                 body: UpstreamBody::Streaming(Box::new(std::io::Cursor::new(body.into_bytes()))),
                 max_body_bytes: MAX_UPSTREAM_BODY,
             };
@@ -779,7 +780,7 @@ impl Gateway {
         }
 
         // L2 authoritative quota: harvest remaining/reset headers, never the body.
-        let windows = crate::quota_headers::parse_quota_reports(&response.headers, unix_millis());
+        let windows = crate::quota_metadata::parse_quota_reports(&response.quota, unix_millis());
         self.quota.lock().expect("quota lock").note_header_reports(
             target.upstream.as_str(),
             unix_millis(),

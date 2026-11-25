@@ -1110,7 +1110,7 @@ impl Gateway {
         // headers off this successful response and record them for the account.
         // Mode-agnostic (cheap; only read in quota-first mode) so the data is
         // already warm whenever the user is in quota mode. Never touches the body.
-        let windows = crate::quota_headers::parse_quota_reports(&response.headers, unix_millis());
+        let windows = crate::quota_metadata::parse_quota_reports(&response.quota, unix_millis());
         self.quota.lock().expect("quota lock").note_header_reports(
             target.upstream.as_str(),
             unix_millis(),

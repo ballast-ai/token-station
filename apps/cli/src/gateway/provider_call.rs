@@ -575,7 +575,7 @@ impl Gateway {
         let response = response.map_err(|failure| {
             map_failure_v1(failure, Self::south_cancellation_disposition(ctx))
         })?;
-        Ok(UpstreamResponse::from_parts_with_limit(
+        Ok(UpstreamResponse::from_south_parts(
             response,
             upstream_body_limit(ctx),
         ))

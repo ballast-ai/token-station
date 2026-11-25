@@ -546,7 +546,7 @@ impl Gateway {
             );
             return Err(error);
         }
-        let windows = crate::quota_headers::parse_quota_reports(&response.headers, unix_millis());
+        let windows = crate::quota_metadata::parse_quota_reports(&response.quota, unix_millis());
         self.quota.lock().expect("quota lock").note_header_reports(
             target.upstream.as_str(),
             unix_millis(),

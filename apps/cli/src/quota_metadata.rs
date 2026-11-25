@@ -1,82 +1,111 @@
-//! Parse a provider's own quota / rate-limit response headers into windows.
+//! Read a provider's own quota / rate-limit facts into windows.
 //!
 //! This is the L2 authoritative layer: providers stamp their remaining allowance
 //! and reset time on every response, and unlike the local ledger those figures
 //! count *all* of the key's usage — no blind spot. The gateway harvests them off
 //! a successful response and hands them to the quota tracker.
 //!
+//! The input is South's typed `ProviderQuotaMetadataV1`. A South component call
+//! returns it directly. A response read from real headers gets it from the
+//! canonical header names, with [`quota_metadata_from_headers`].
+//!
 //! Only the token-quota families that are actually documented are read, and only
 //! when limit, remaining, and reset all parse; anything unrecognized is ignored
 //! rather than guessed. Pure and clock-injected (`now_ms`), so it is unit-
-//! testable against fixed header maps.
+//! testable against fixed metadata.
 
 use std::collections::BTreeMap;
 
+use south_contracts::{
+    MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, ProviderQuotaMetadataFieldV1 as Field,
+    ProviderQuotaMetadataV1,
+};
+
 use crate::quota_ledger::WindowSnapshot;
 
-/// `(limit, remaining, reset)` header names for one token-quota family. Keys are
-/// lowercase to match the gateway's normalized header map.
-const FAMILIES: &[(&str, &str, &str)] = &[
+/// `(limit, remaining, reset)` fields for one token-quota family.
+const FAMILIES: &[(Field, Field, Field)] = &[
     // OpenAI-compatible token rate limit.
     (
-        "x-ratelimit-limit-tokens",
-        "x-ratelimit-remaining-tokens",
-        "x-ratelimit-reset-tokens",
+        Field::XRateLimitLimitTokens,
+        Field::XRateLimitRemainingTokens,
+        Field::XRateLimitResetTokens,
     ),
     // Anthropic per-window token limit.
     (
-        "anthropic-ratelimit-tokens-limit",
-        "anthropic-ratelimit-tokens-remaining",
-        "anthropic-ratelimit-tokens-reset",
+        Field::AnthropicRateLimitTokensLimit,
+        Field::AnthropicRateLimitTokensRemaining,
+        Field::AnthropicRateLimitTokensReset,
     ),
     // Anthropic unified subscription window (e.g. the 5-hour plan window).
     (
-        "anthropic-ratelimit-unified-limit",
-        "anthropic-ratelimit-unified-remaining",
-        "anthropic-ratelimit-unified-reset",
+        Field::AnthropicRateLimitUnifiedLimit,
+        Field::AnthropicRateLimitUnifiedRemaining,
+        Field::AnthropicRateLimitUnifiedReset,
     ),
 ];
 
-/// Every recognized token-quota window the headers report, in family order.
-/// Empty when the provider stamped none we understand.
+/// Reads the quota fields from real response headers, under their canonical
+/// names: South's canonical quota declaration. Keys are lowercase, as in the
+/// gateway's normalized header map.
+///
+/// A value South would refuse (over its length bound, or not header text) is
+/// dropped, as South's transport drops it.
 #[must_use]
-pub fn parse_quota_windows(headers: &BTreeMap<String, String>, now_ms: u64) -> Vec<WindowSnapshot> {
-    parse_quota_reports(headers, now_ms)
+pub fn quota_metadata_from_headers(headers: &BTreeMap<String, String>) -> ProviderQuotaMetadataV1 {
+    let fields = Field::ALL.into_iter().filter_map(|field| {
+        let value = headers.get(field.as_header_name())?;
+        (value.len() <= MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES
+            && value
+                .bytes()
+                .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte)))
+        .then(|| (field, value.clone()))
+    });
+    // Each field is read once and each value was checked, so South accepts it.
+    ProviderQuotaMetadataV1::try_from_iter(fields).unwrap_or_default()
+}
+
+/// Every recognized token-quota window the metadata reports, in family order.
+/// Empty when the provider reported none we understand.
+#[must_use]
+pub fn parse_quota_windows(metadata: &ProviderQuotaMetadataV1, now_ms: u64) -> Vec<WindowSnapshot> {
+    parse_quota_reports(metadata, now_ms)
         .into_iter()
         .map(|(_, window)| window)
         .collect()
 }
 
-/// Keep each response-header family's identity so a partial response updates
-/// only that family instead of deleting independent exhaustion gates.
+/// Keep each family's identity so a partial response updates only that family
+/// instead of deleting independent exhaustion gates. The identity is the limit
+/// field's canonical header name.
 #[must_use]
 pub fn parse_quota_reports(
-    headers: &BTreeMap<String, String>,
+    metadata: &ProviderQuotaMetadataV1,
     now_ms: u64,
 ) -> Vec<(String, WindowSnapshot)> {
     FAMILIES
         .iter()
-        .filter_map(|(limit_key, remaining_key, reset_key)| {
-            window_from(headers, limit_key, remaining_key, reset_key, now_ms)
-                .map(|window| ((*limit_key).to_owned(), window))
+        .filter_map(|&(limit, remaining, reset)| {
+            window_from(metadata, limit, remaining, reset, now_ms)
+                .map(|window| (limit.as_header_name().to_owned(), window))
         })
         .collect()
 }
 
 fn window_from(
-    headers: &BTreeMap<String, String>,
-    limit_key: &str,
-    remaining_key: &str,
-    reset_key: &str,
+    metadata: &ProviderQuotaMetadataV1,
+    limit_field: Field,
+    remaining_field: Field,
+    reset_field: Field,
     now_ms: u64,
 ) -> Option<WindowSnapshot> {
-    let limit = get_u64(headers, limit_key)?;
+    let limit = get_u64(metadata, limit_field)?;
     if limit == 0 {
         return None;
     }
-    let remaining = get_u64(headers, remaining_key)?.min(limit);
-    let ms_until_reset = headers
-        .get(reset_key)
+    let remaining = get_u64(metadata, remaining_field)?.min(limit);
+    let ms_until_reset = metadata
+        .value(reset_field)
         .and_then(|value| parse_reset_ms(value, now_ms))?;
     let used = limit - remaining;
     let remaining_permille =
@@ -92,8 +121,8 @@ fn window_from(
     })
 }
 
-fn get_u64(headers: &BTreeMap<String, String>, key: &str) -> Option<u64> {
-    headers.get(key)?.trim().parse::<u64>().ok()
+fn get_u64(metadata: &ProviderQuotaMetadataV1, field: Field) -> Option<u64> {
+    metadata.value(field)?.trim().parse::<u64>().ok()
 }
 
 /// Milliseconds until a reset expressed as any of the forms providers use:
@@ -162,11 +191,62 @@ fn parse_rfc3339_ms(value: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect()
+    /// Metadata as a real response with these headers carries it.
+    fn headers(pairs: &[(&str, &str)]) -> ProviderQuotaMetadataV1 {
+        quota_metadata_from_headers(
+            &pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn real_headers_become_metadata_under_their_canonical_names_only() {
+        let long = "9".repeat(MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES + 1);
+        let metadata = headers(&[
+            ("x-ratelimit-limit-tokens", "1000"),
+            ("x-ratelimit-remaining-tokens", long.as_str()),
+            ("x-ratelimit-reset-tokens", "6m0s"),
+            ("anthropic-ratelimit-tokens-limit", "2000"),
+            ("x-codex-primary-used-percent", "50"),
+            ("content-type", "application/json"),
+        ]);
+        assert_eq!(metadata.present_field_count(), 3);
+        assert_eq!(metadata.value(Field::XRateLimitLimitTokens), Some("1000"));
+        // Over South's bound: dropped, as South's transport drops it.
+        assert_eq!(metadata.value(Field::XRateLimitRemainingTokens), None);
+        assert_eq!(metadata.value(Field::XRateLimitResetTokens), Some("6m0s"));
+        assert_eq!(
+            metadata.value(Field::AnthropicRateLimitTokensLimit),
+            Some("2000")
+        );
+        // The family without a remaining value is not a window.
+        assert!(parse_quota_windows(&metadata, 0).is_empty());
+        assert_eq!(
+            quota_metadata_from_headers(&BTreeMap::new()),
+            ProviderQuotaMetadataV1::default()
+        );
+    }
+
+    /// The parser reads fields. A South response carries them with no header
+    /// map at all.
+    #[test]
+    fn metadata_without_any_header_is_read() {
+        let metadata = ProviderQuotaMetadataV1::try_from_iter([
+            (Field::AnthropicRateLimitUnifiedLimit, "500".to_owned()),
+            (Field::AnthropicRateLimitUnifiedRemaining, "125".to_owned()),
+            (
+                Field::AnthropicRateLimitUnifiedReset,
+                "1970-01-01T00:01:00Z".to_owned(),
+            ),
+        ])
+        .unwrap();
+        let reports = parse_quota_reports(&metadata, 0);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].0, "anthropic-ratelimit-unified-limit");
+        assert_eq!(reports[0].1.remaining_permille, 250);
+        assert_eq!(reports[0].1.ms_until_reset, 60_000);
     }
 
     #[test]
