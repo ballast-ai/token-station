@@ -3,7 +3,7 @@
 use super::web_search::{emit_content, from_responses, search_action_input, search_id, sse};
 use super::{ErrorCode, ErrorEnvelope, MAX_UPSTREAM_BODY, Reply, Value};
 
-use crate::sse::SseFrameDecoder;
+use crate::sse::{SseFrame, SseFrameDecoder};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -158,8 +158,18 @@ impl<'a> ResponsesSearchStream<'a> {
         chunk: &str,
         emit: &mut dyn FnMut(Reply) -> bool,
     ) -> Result<bool, ErrorEnvelope> {
+        self.limited(emit, |stream, emit| stream.push_inner(chunk, emit))
+    }
+
+    /// Runs `operation` under the converted output bound. An error leaves the
+    /// stream incomplete.
+    fn limited(
+        &mut self,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        operation: impl FnOnce(&mut Self, &mut dyn FnMut(Reply) -> bool) -> Result<bool, ErrorEnvelope>,
+    ) -> Result<bool, ErrorEnvelope> {
         let mut bytes = self.output_bytes;
-        let result = limit_stream_output(&mut bytes, emit, |emit| self.push_inner(chunk, emit));
+        let result = limit_stream_output(&mut bytes, emit, |emit| operation(self, emit));
         self.output_bytes = bytes;
         if result.is_err() {
             self.complete = false;
@@ -177,25 +187,36 @@ impl<'a> ResponsesSearchStream<'a> {
             return Err(invalid("Search stream exceeds the conversion size limit."));
         }
         for frame in self.decoder.push(chunk.as_bytes())? {
-            let data = frame
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() || data == "[DONE]" || self.complete {
-                continue;
-            }
-            let event: Value = serde_json::from_str(&data)
-                .map_err(|_| invalid("Search stream contains invalid JSON."))?;
-            if !self.event(&event, emit)? {
+            if !self.frame(frame, emit)? {
                 return Ok(false);
             }
-            let entries = self.items.len()
-                + self.text.len()
-                + self.annotations.values().map(Vec::len).sum::<usize>();
-            if entries > 4096 || self.next_block > 4096 {
-                return Err(invalid("Search stream has too many output items."));
-            }
+        }
+        Ok(true)
+    }
+
+    /// Reads the event a frame carries, if any.
+    fn frame(
+        &mut self,
+        frame: SseFrame,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) -> Result<bool, ErrorEnvelope> {
+        let Some(event) = frame.event else {
+            return Ok(true);
+        };
+        let data = event.data().trim_start();
+        if data.is_empty() || data == "[DONE]" || self.complete {
+            return Ok(true);
+        }
+        let event: Value = serde_json::from_str(data)
+            .map_err(|_| invalid("Search stream contains invalid JSON."))?;
+        if !self.event(&event, emit)? {
+            return Ok(false);
+        }
+        let entries = self.items.len()
+            + self.text.len()
+            + self.annotations.values().map(Vec::len).sum::<usize>();
+        if entries > 4096 || self.next_block > 4096 {
+            return Err(invalid("Search stream has too many output items."));
         }
         Ok(true)
     }
@@ -428,8 +449,15 @@ impl<'a> ResponsesSearchStream<'a> {
         ))))
     }
 
-    pub(super) fn finish(&mut self) -> Result<(), ErrorEnvelope> {
-        std::mem::take(&mut self.decoder).finish()?;
+    pub(super) fn finish(
+        &mut self,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) -> Result<(), ErrorEnvelope> {
+        // A blank line made of a final lone CR closes the last frame only at
+        // the end of input.
+        if let Some(frame) = std::mem::take(&mut self.decoder).finish()? {
+            self.limited(emit, |stream, emit| stream.frame(frame, emit))?;
+        }
         if !self.complete {
             return Err(ErrorEnvelope::new(
                 ErrorCode::TransportTruncated,
@@ -490,10 +518,13 @@ impl<'a> SearchStream<'a> {
             Self::IntoResponses(stream) => stream.push(chunk, emit),
         }
     }
-    pub(super) fn finish(&mut self) -> Result<(), ErrorEnvelope> {
+    pub(super) fn finish(
+        &mut self,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) -> Result<(), ErrorEnvelope> {
         match self {
-            Self::IntoAnthropic(stream) => stream.finish(),
-            Self::IntoResponses(stream) => stream.finish(),
+            Self::IntoAnthropic(stream) => stream.finish(emit),
+            Self::IntoResponses(stream) => stream.finish(emit),
         }
     }
 }
@@ -566,7 +597,7 @@ mod tests {
             ).expect_err("invalid terminal content must produce a protocol error");
             assert_eq!(error.code, ErrorCode::ProviderProtocolError);
             assert!(!chunks(&replies).contains("message_stop"));
-            assert!(bridge.finish().is_err());
+            assert!(bridge.finish(&mut |_| true).is_err());
         }
     }
 
@@ -600,7 +631,7 @@ mod tests {
         assert!(error.message.contains("output size limit"));
         assert!((received as u64) < MAX_UPSTREAM_BODY);
         assert!(emitted <= MAX_UPSTREAM_BODY);
-        assert!(bridge.finish().is_err());
+        assert!(bridge.finish(&mut |_| true).is_err());
     }
 
     #[test]
@@ -630,7 +661,7 @@ mod tests {
         ).unwrap_err();
         assert_eq!(error.code, ErrorCode::ProviderProtocolError);
         assert!(!chunks(&replies).contains("message_stop"));
-        assert!(bridge.finish().is_err());
+        assert!(bridge.finish(&mut |_| true).is_err());
     }
 
     #[test]
@@ -672,7 +703,7 @@ mod tests {
                 },
             )
             .unwrap();
-        bridge.finish().unwrap();
+        bridge.finish(&mut |_| true).unwrap();
         let output = chunks(&replies);
         assert_eq!(output.matches("Rust 文档").count(), 1);
         assert!(output.contains("Rust docs"));
@@ -701,7 +732,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        bridge.finish().unwrap();
+        bridge.finish(&mut |_| true).unwrap();
         let wire = chunks(&replies);
         assert!(wire.contains("https://docs.rs/"));
         assert!(wire.contains("Cargo"));
@@ -741,7 +772,7 @@ mod tests {
                 &mut |_| true,
             )
             .unwrap();
-        assert!(bridge.finish().is_err());
+        assert!(bridge.finish(&mut |_| true).is_err());
         let mut bridge = ResponsesSearchStream::new(&request, "web_search", None);
         assert!(
             bridge
@@ -777,7 +808,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        bridge.finish().unwrap();
+        bridge.finish(&mut |_| true).unwrap();
         assert!(chunks(&output).contains("Rust 文档"));
     }
 
@@ -809,5 +840,43 @@ mod tests {
                 .is_err()
         );
         assert!(!chunks(&output).contains("message_stop"));
+    }
+
+    /// Lone CR line ends with `event` lines, and a terminal frame that only
+    /// the end of input closes, convert like LF frames.
+    #[test]
+    fn lone_cr_frames_and_a_terminal_closed_by_the_end_of_input_complete() {
+        use std::fmt::Write as _;
+        let request = request();
+        let mut wire = String::new();
+        for event in [
+            json!({"type":"response.created","response":{"id":"resp_test"}}),
+            json!({"type":"response.completed","response":document()}),
+        ] {
+            write!(
+                wire,
+                "event: {}\rdata: {event}\r\r",
+                event["type"].as_str().unwrap()
+            )
+            .unwrap();
+        }
+        let mut bridge = ResponsesSearchStream::new(&request, "web_search", None);
+        let mut replies = Vec::new();
+        bridge
+            .push(&wire, &mut |reply| {
+                replies.push(reply);
+                true
+            })
+            .unwrap();
+        assert!(!chunks(&replies).contains("message_stop"));
+        bridge
+            .finish(&mut |reply| {
+                replies.push(reply);
+                true
+            })
+            .unwrap();
+        let output = chunks(&replies);
+        assert!(output.contains("Rust 文档"), "{output}");
+        assert!(output.contains("message_stop"), "{output}");
     }
 }

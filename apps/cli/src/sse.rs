@@ -11,8 +11,14 @@
 //! frame without a `data:` line is handed on at its blank line too. The
 //! component gets the upstream's raw frame bytes. Socket chunk boundaries are
 //! never treated as character or event boundaries.
+//!
+//! Each frame also carries the event its blank line dispatched, if any. A host
+//! reader that needs the event content, such as accounting or a search stream,
+//! reads that event and never splits the raw bytes itself.
 
-use south_host_grammars::{MAX_SSE_EVENT_BYTES, SseDecoderV1, SseErrorV1};
+use std::collections::VecDeque;
+
+use south_host_grammars::{MAX_SSE_EVENT_BYTES, SseDecoderV1, SseErrorV1, SseEventV1};
 use token_station_protocol::{ErrorCode, ErrorEnvelope};
 
 /// The bound on one frame's raw bytes, and on the bytes not yet framed.
@@ -24,9 +30,24 @@ use token_station_protocol::{ErrorCode, ErrorEnvelope};
 /// same number.
 const MAX_SSE_FRAME_BYTES: usize = MAX_SSE_EVENT_BYTES;
 
+/// One frame: the upstream's raw bytes up to and including a blank line, and
+/// the event that blank line dispatched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SseFrame {
+    pub(crate) raw: String,
+    /// `None` when the frame has no `data` field: a comment, or only `event`
+    /// or `id` lines.
+    pub(crate) event: Option<SseEventV1>,
+}
+
 #[derive(Default)]
 pub(crate) struct SseFrameDecoder {
     decoder: SseDecoderV1,
+    /// The events the decoder dispatched that no frame took yet, each with the
+    /// stream offset of the end of the blank line that dispatched it.
+    events: VecDeque<(u64, SseEventV1)>,
+    /// The stream offset of `pending[0]`.
+    offset: u64,
     /// Raw bytes received after the end of the last frame.
     pending: Vec<u8>,
     /// Where the next line in `pending` starts. Every line before it was read
@@ -39,9 +60,13 @@ pub(crate) struct SseFrameDecoder {
 
 impl SseFrameDecoder {
     /// Feeds one chunk of upstream bytes and returns the frames it completes.
-    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, ErrorEnvelope> {
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseFrame>, ErrorEnvelope> {
         self.decoder.push(bytes);
-        while self.decoder.next_event().map_err(refusal)?.is_some() {}
+        while let Some(event) = self.decoder.next_event().map_err(refusal)? {
+            // Right after an event, the decoder's position is the end of the
+            // blank line that dispatched it: the end of a frame.
+            self.events.push_back((self.decoder.position(), event));
+        }
         self.pending.extend_from_slice(bytes);
         let mut frames = Vec::new();
         while let Some(end) = self.next_frame_end() {
@@ -51,11 +76,25 @@ impl SseFrameDecoder {
             let raw: Vec<u8> = self.pending.drain(..end).collect();
             self.line_start = 0;
             self.searched = 0;
+            self.offset += end as u64;
+            // Both cut lines with the same rules, so a frame takes the event
+            // its own blank line dispatched, and no other.
+            let event = if self
+                .events
+                .front()
+                .is_some_and(|(at, _)| *at == self.offset)
+            {
+                self.events.pop_front().map(|(_, event)| event)
+            } else {
+                None
+            };
+            debug_assert!(self.events.front().is_none_or(|(at, _)| *at > self.offset));
             // A frame of line ends only carries nothing. It is not handed on.
             if raw.iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
                 continue;
             }
-            frames.push(String::from_utf8(raw).map_err(|_| not_utf8())?);
+            let raw = String::from_utf8(raw).map_err(|_| not_utf8())?;
+            frames.push(SseFrame { raw, event });
         }
         if self.pending.len() > MAX_SSE_FRAME_BYTES {
             return Err(frame_too_large());
@@ -102,11 +141,15 @@ impl SseFrameDecoder {
     /// An event or a field line that no blank line closes is a truncated
     /// stream. The component never sees it. A rest of whitespace or comments
     /// ends the stream cleanly.
-    pub(crate) fn finish(self) -> Result<Option<String>, ErrorEnvelope> {
+    pub(crate) fn finish(self) -> Result<Option<SseFrame>, ErrorEnvelope> {
         let rest = self.pending;
         match self.decoder.finish().map_err(refusal)? {
-            Some(_) if ends_with_blank_line(&rest) => {
-                String::from_utf8(rest).map(Some).map_err(|_| not_utf8())
+            Some(event) if ends_with_blank_line(&rest) => {
+                let raw = String::from_utf8(rest).map_err(|_| not_utf8())?;
+                Ok(Some(SseFrame {
+                    raw,
+                    event: Some(event),
+                }))
             }
             Some(_) => Err(truncated()),
             None if has_field_line(&rest) => Err(truncated()),
@@ -167,12 +210,12 @@ fn truncated() -> ErrorEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SSE_FRAME_BYTES, SseFrameDecoder};
+    use super::{MAX_SSE_FRAME_BYTES, SseFrame, SseFrameDecoder};
     use south_host_grammars::{SseEventV1, decode_sse_v1};
     use token_station_protocol::{ErrorCode, ErrorEnvelope};
 
     /// The frames of `chunks`, then the end of input.
-    fn frames(chunks: &[&[u8]]) -> (Vec<String>, Result<Option<String>, ErrorEnvelope>) {
+    fn frames(chunks: &[&[u8]]) -> (Vec<SseFrame>, Result<Option<SseFrame>, ErrorEnvelope>) {
         let mut decoder = SseFrameDecoder::default();
         let mut out = Vec::new();
         for chunk in chunks {
@@ -181,12 +224,16 @@ mod tests {
         (out, decoder.finish())
     }
 
+    fn raw(frames: impl IntoIterator<Item = SseFrame>) -> Vec<String> {
+        frames.into_iter().map(|frame| frame.raw).collect()
+    }
+
     #[test]
     fn lf_crlf_and_multiple_frames_are_handed_on_as_raw_bytes() {
         let mut decoder = SseFrameDecoder::default();
-        let frames = decoder
+        let frames = raw(decoder
             .push(b"data:{\"a\":1}\n\ndata: {\"b\":2}\r\n\r\ndata: [DONE]\n\n")
-            .unwrap();
+            .unwrap());
         assert_eq!(
             frames,
             [
@@ -204,7 +251,7 @@ mod tests {
         let bytes = "data: 你\n\n".as_bytes();
         assert!(decoder.push(&bytes[..7]).unwrap().is_empty());
         assert!(decoder.push(&bytes[7..8]).unwrap().is_empty());
-        assert_eq!(decoder.push(&bytes[8..]).unwrap(), ["data: 你\n\n"]);
+        assert_eq!(raw(decoder.push(&bytes[8..]).unwrap()), ["data: 你\n\n"]);
     }
 
     #[test]
@@ -213,7 +260,7 @@ mod tests {
         let bytes = "data: 😀\n\n".as_bytes();
         let mut frames = Vec::new();
         for byte in bytes {
-            frames.extend(decoder.push(&[*byte]).unwrap());
+            frames.extend(raw(decoder.push(&[*byte]).unwrap()));
         }
         assert_eq!(frames, ["data: 😀\n\n"]);
     }
@@ -229,7 +276,14 @@ mod tests {
                 frames.extend(decoder.push(&separator.as_bytes()[split..]).unwrap());
                 let last = decoder.finish().unwrap();
                 frames.extend(last);
-                assert_eq!(frames, [format!("data: 你{separator}")], "{separator:?}");
+                assert_eq!(
+                    frames,
+                    [SseFrame {
+                        raw: format!("data: 你{separator}"),
+                        event: Some(SseEventV1::new("message", "你")),
+                    }],
+                    "{separator:?}"
+                );
             }
         }
     }
@@ -241,8 +295,11 @@ mod tests {
             let mut decoder = SseFrameDecoder::default();
             let mut frames = decoder.push(&wire[..split]).unwrap();
             frames.extend(decoder.push(&wire[split..]).unwrap());
-            assert_eq!(frames, ["data: first\r\n\r\n", "data: second\n\n"]);
-            assert_eq!(decoder.push(b"\r\n\r\n").unwrap(), ["data: tail\r\n\r\n"]);
+            assert_eq!(raw(frames), ["data: first\r\n\r\n", "data: second\n\n"]);
+            assert_eq!(
+                raw(decoder.push(b"\r\n\r\n").unwrap()),
+                ["data: tail\r\n\r\n"]
+            );
             assert_eq!(decoder.finish().unwrap(), None);
         }
     }
@@ -289,11 +346,15 @@ mod tests {
             for feed in feeds {
                 let (mut cut, end) = frames(&feed);
                 cut.extend(end.expect("a clean end"));
-                assert_eq!(cut.concat(), body, "{ends:?}");
-                let events: Vec<SseEventV1> = cut
-                    .iter()
-                    .flat_map(|frame| decode_sse_v1(frame.as_bytes()).expect("one frame"))
-                    .collect();
+                let raws: Vec<&str> = cut.iter().map(|frame| frame.raw.as_str()).collect();
+                assert_eq!(raws.concat(), body, "{ends:?}");
+                // Each frame carries exactly the event its own bytes decode to.
+                for frame in &cut {
+                    let own = decode_sse_v1(frame.raw.as_bytes()).expect("one frame");
+                    assert_eq!(frame.event.iter().cloned().collect::<Vec<_>>(), own);
+                }
+                let events: Vec<SseEventV1> =
+                    cut.iter().filter_map(|frame| frame.event.clone()).collect();
                 assert_eq!(events, expected, "{ends:?}");
                 // The comment frame is handed on too: the component owns it.
                 assert_eq!(cut.len(), 4, "{ends:?}");
@@ -304,16 +365,19 @@ mod tests {
     #[test]
     fn a_leading_byte_order_mark_stays_with_the_first_frame() {
         let (cut, end) = frames(&[b"\xEF\xBB\xBFdata: 1\r\rdata: 2\r\r"]);
-        assert_eq!(cut, ["\u{feff}data: 1\r\r"]);
+        assert_eq!(cut[0].event, Some(SseEventV1::new("message", "1")));
+        assert_eq!(raw(cut), ["\u{feff}data: 1\r\r"]);
         // The final CR could start a CRLF, so only the end of input closes it.
-        assert_eq!(end.unwrap().as_deref(), Some("data: 2\r\r"));
+        let end = end.unwrap().expect("the last frame");
+        assert_eq!(end.raw, "data: 2\r\r");
+        assert_eq!(end.event, Some(SseEventV1::new("message", "2")));
     }
 
     #[test]
     fn a_last_event_without_a_blank_line_is_truncated() {
         for tail in [&b"data: 2"[..], b"data: 2\n", b"data: 2\r", b"data: 2\r\n"] {
             let (cut, end) = frames(&[b"data: 1\n\n", tail]);
-            assert_eq!(cut, ["data: 1\n\n"]);
+            assert_eq!(raw(cut), ["data: 1\n\n"]);
             assert_eq!(
                 end.unwrap_err().code,
                 ErrorCode::TransportTruncated,
@@ -326,7 +390,11 @@ mod tests {
     fn a_blank_line_ended_by_a_final_cr_completes_the_last_frame() {
         for tail in ["data: 2\n\r", "data: 2\r\r", "data: 2\r\n\r"] {
             let (_, end) = frames(&[b"data: 1\n\n", tail.as_bytes()]);
-            assert_eq!(end.unwrap().as_deref(), Some(tail), "{tail:?}");
+            assert_eq!(
+                end.unwrap().map(|frame| frame.raw).as_deref(),
+                Some(tail),
+                "{tail:?}"
+            );
         }
     }
 
@@ -355,7 +423,7 @@ mod tests {
             let mut decoder = SseFrameDecoder::default();
             let mut frames = decoder.push(&at_limit).unwrap();
             frames.extend(decoder.finish().unwrap());
-            assert_eq!(frames[0].len(), MAX_SSE_FRAME_BYTES);
+            assert_eq!(frames[0].raw.len(), MAX_SSE_FRAME_BYTES);
 
             let mut oversized = b"data: x".to_vec();
             oversized.extend_from_slice(&at_limit[prefix.len()..]);
@@ -385,7 +453,7 @@ mod tests {
         let mut decoder = SseFrameDecoder::default();
         let mut frames = Vec::new();
         for byte in wire.bytes() {
-            frames.extend(decoder.push(&[byte]).unwrap());
+            frames.extend(raw(decoder.push(&[byte]).unwrap()));
         }
         assert_eq!(frames, [wire]);
         assert_eq!(decoder.finish().unwrap(), None);
@@ -398,7 +466,7 @@ mod tests {
         let mut decoder = SseFrameDecoder::default();
         let frames = decoder.push(wire.as_bytes()).unwrap();
         assert_eq!(frames.len(), 16 * 1024);
-        assert!(frames.iter().all(|frame| frame == "data: item\n\n"));
+        assert!(frames.iter().all(|frame| frame.raw == "data: item\n\n"));
         assert_eq!(
             decoder.finish().unwrap_err().code,
             ErrorCode::TransportTruncated

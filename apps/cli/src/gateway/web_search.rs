@@ -739,7 +739,7 @@ impl Gateway {
         record.stream = stream;
         if stream && answer.is_none() {
             if bridge_error.is_none() && outcome != StreamOutcome::ClientCancelled {
-                bridge_error = bridge.finish().err();
+                bridge_error = bridge.finish(emit).err();
             }
             if let Some(error) = bridge_error {
                 if !bridge.started {

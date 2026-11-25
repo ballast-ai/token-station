@@ -4502,6 +4502,55 @@ fn native_responses_web_search_relays_sse_without_translation() {
     std::fs::remove_file(key).ok();
 }
 
+/// The native relay reads usage with South's decoder: lone CR line ends, and a
+/// terminal frame that only the end of input closes, still complete and
+/// account. The bytes are relayed unchanged.
+#[test]
+fn native_responses_lone_cr_sse_completes_and_accounts() {
+    let sse = concat!(
+        "event: response.web_search_call.completed\r",
+        "data: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"ws_1\",\"output_index\":0}\r\r",
+        "event: response.completed\r",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_cr\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"output_tokens\":5,\"total_tokens\":18}}}\r\r"
+    );
+    let header = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        sse.len()
+    );
+    // Cut inside the first CR CR, so a frame end straddles two reads.
+    let first_end = sse.find("\r\r").expect("a lone-CR frame end") + 1;
+    let mock = MockUpstream::start(vec![vec![
+        header.into_bytes(),
+        sse.as_bytes()[..first_end].to_vec(),
+        sse.as_bytes()[first_end..].to_vec(),
+    ]]);
+    let key = key_file("native-responses-lone-cr", "sk-native-responses");
+    let proxy = start_native_responses_proxy(&mock, &key);
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": "Find current information.",
+            "tools": [{"type": "web_search"}],
+            "stream": true
+        }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, sse, "native SSE frames are relayed byte for byte");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["input_tokens"], "Integer(13)");
+    assert_eq!(row["output_tokens"], "Integer(5)");
+
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn native_responses_never_falls_back_to_a_translated_upstream() {
     let native_error = json!({"error": {"message": "native unavailable"}}).to_string();

@@ -803,7 +803,7 @@ impl Gateway {
                         }
                     };
                     let mut events = match last
-                        .map(|data| parser.parse_chunk(&StreamChunk { data }))
+                        .map(|frame| parser.parse_chunk(&StreamChunk { data: frame.raw }))
                         .transpose()
                     {
                         Ok(events) => events.unwrap_or_default(),
@@ -982,8 +982,8 @@ impl Gateway {
                 }
             };
 
-            for data in frames {
-                let events = match parser.parse_chunk(&StreamChunk { data }) {
+            for frame in frames {
+                let events = match parser.parse_chunk(&StreamChunk { data: frame.raw }) {
                     Ok(events) => events,
                     Err(envelope) => {
                         return Self::terminate_stream(

@@ -1,5 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use south_host_grammars::SseDecoderV1;
 
 /// Release a normalized request reservation on every exit, including admission
 /// failures before the first upstream attempt. Completed histories survive it.
@@ -76,7 +77,7 @@ enum ResponsesTerminal {
 
 #[derive(Default)]
 pub(super) struct ResponsesSseUsageTap {
-    partial: String,
+    decoder: SseDecoderV1,
     usage: Option<Usage>,
     terminal: Option<ResponsesTerminal>,
     terminal_reports_both_token_counts: bool,
@@ -85,29 +86,29 @@ pub(super) struct ResponsesSseUsageTap {
 }
 
 impl ResponsesSseUsageTap {
-    const MAX_LINE: usize = 256 * 1024;
+    /// The largest terminal response kept for the native response store.
+    const MAX_TERMINAL_RESPONSE: usize = 256 * 1024;
 
     pub(super) fn observe(&mut self, chunk: &str) {
         if self.abandoned {
             return;
         }
-        self.partial.push_str(chunk);
-        while let Some(end) = self.partial.find('\n') {
-            let line = self.partial[..end].trim_end_matches('\r').to_owned();
-            self.partial.drain(..=end);
-            self.observe_line(&line);
-        }
-        if self.partial.len() > Self::MAX_LINE {
-            self.abandoned = true;
-            self.partial.clear();
+        self.decoder.push(chunk.as_bytes());
+        loop {
+            match self.decoder.next_event() {
+                Ok(Some(event)) => self.observe_data(event.data()),
+                Ok(None) => break,
+                Err(_) => {
+                    self.abandoned = true;
+                    self.decoder = SseDecoderV1::new();
+                    break;
+                }
+            }
         }
     }
 
-    fn observe_line(&mut self, line: &str) {
-        let Some(payload) = line.strip_prefix("data:") else {
-            return;
-        };
-        let Ok(event) = serde_json::from_str::<Value>(payload.trim()) else {
+    fn observe_data(&mut self, data: &str) {
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
             return;
         };
         if matches!(
@@ -134,7 +135,7 @@ impl ResponsesSseUsageTap {
                 },
             );
         }
-        if line.len() <= Self::MAX_LINE
+        if data.len() <= Self::MAX_TERMINAL_RESPONSE
             && event.get("type").and_then(Value::as_str) == Some("response.completed")
         {
             self.terminal_response = event.get("response").cloned();
@@ -153,12 +154,15 @@ impl ResponsesSseUsageTap {
         self.terminal == Some(ResponsesTerminal::Complete) && !self.abandoned
     }
 
+    /// Ends the input. South's decoder dispatches the event the end of input
+    /// leaves, even without a closing blank line.
     pub(super) fn finish(&mut self) {
-        if self.abandoned || self.partial.is_empty() {
+        if self.abandoned {
             return;
         }
-        let line = std::mem::take(&mut self.partial);
-        self.observe_line(line.trim_end_matches('\r'));
+        if let Ok(Some(event)) = std::mem::take(&mut self.decoder).finish() {
+            self.observe_data(event.data());
+        }
     }
 }
 
@@ -805,6 +809,43 @@ impl Gateway {
 #[cfg(test)]
 mod tests {
     use super::{ResponsesSseUsageTap, responses_wire_usage};
+
+    /// A terminal event over the old 256 KiB line bound, read in 8 KiB parts,
+    /// still completes and reports usage. It is too large to keep for the
+    /// native response store.
+    #[test]
+    fn a_large_terminal_event_across_many_reads_completes_with_usage() {
+        let event = serde_json::json!({"type":"response.completed","response":{
+            "id":"resp_big","status":"completed",
+            "output":[{"type":"message","content":[{"type":"output_text","text":"x".repeat(300 * 1024)}]}],
+            "usage":{"input_tokens":13,"output_tokens":5}}});
+        let wire = format!("event: response.completed\ndata: {event}\n\n");
+        let mut tap = ResponsesSseUsageTap::default();
+        for chunk in wire.as_bytes().chunks(8 * 1024) {
+            tap.observe(std::str::from_utf8(chunk).unwrap());
+        }
+        tap.finish();
+        assert!(tap.completed_successfully());
+        let usage = tap.usage.unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (13, 5));
+        assert!(tap.terminal_response.is_none());
+    }
+
+    #[test]
+    fn lone_cr_events_and_an_unterminated_last_event_are_read() {
+        let mut tap = ResponsesSseUsageTap::default();
+        tap.observe("event: response.created\rdata: {\"type\":\"response.created\"}\r\r");
+        tap.observe(concat!(
+            "event: response.completed\r",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",",
+            "\"usage\":{\"input_tokens\":13,\"output_tokens\":5}}}"
+        ));
+        tap.finish();
+        assert!(tap.completed_successfully());
+        let usage = tap.usage.unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (13, 5));
+        assert!(tap.terminal_response.is_some());
+    }
 
     #[test]
     fn failed_and_incomplete_streams_do_not_establish_image_acceptance() {

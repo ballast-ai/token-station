@@ -4,7 +4,7 @@ use super::reverse_search::{from_anthropic, message_id, response_id};
 use super::web_search::sse;
 use super::{ErrorCode, ErrorEnvelope, MAX_UPSTREAM_BODY, Reply, Value};
 
-use crate::sse::SseFrameDecoder;
+use crate::sse::{SseFrame, SseFrameDecoder};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,9 +59,19 @@ impl<'a> AnthropicSearchStream<'a> {
         chunk: &str,
         emit: &mut dyn FnMut(Reply) -> bool,
     ) -> Result<bool, ErrorEnvelope> {
+        self.limited(emit, |stream, emit| stream.push_inner(chunk, emit))
+    }
+
+    /// Runs `operation` under the converted output bound. An error leaves the
+    /// stream incomplete.
+    fn limited(
+        &mut self,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        operation: impl FnOnce(&mut Self, &mut dyn FnMut(Reply) -> bool) -> Result<bool, ErrorEnvelope>,
+    ) -> Result<bool, ErrorEnvelope> {
         let mut bytes = self.output_bytes;
         let result = super::search_stream::limit_stream_output(&mut bytes, emit, |emit| {
-            self.push_inner(chunk, emit)
+            operation(self, emit)
         });
         self.output_bytes = bytes;
         if result.is_err() {
@@ -80,31 +90,42 @@ impl<'a> AnthropicSearchStream<'a> {
             return Err(invalid("Native search stream exceeds the size limit."));
         }
         for frame in self.decoder.push(chunk.as_bytes())? {
-            let data = frame
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() || self.complete {
-                continue;
-            }
-            let event: Value = serde_json::from_str(&data)
-                .map_err(|_| invalid("Native search stream contains invalid JSON."))?;
-            if !self.event(&event, emit)? {
+            if !self.frame(frame, emit)? {
                 return Ok(false);
             }
-            let entries: usize = self.message["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|block| {
-                    1 + block["citations"].as_array().map_or(0, Vec::len)
-                        + block["content"].as_array().map_or(0, Vec::len)
-                })
-                .sum();
-            if entries > 4096 {
-                return Err(invalid("Native search stream has too many output items."));
-            }
+        }
+        Ok(true)
+    }
+
+    /// Reads the event a frame carries, if any.
+    fn frame(
+        &mut self,
+        frame: SseFrame,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) -> Result<bool, ErrorEnvelope> {
+        let Some(event) = frame.event else {
+            return Ok(true);
+        };
+        let data = event.data().trim_start();
+        if data.is_empty() || self.complete {
+            return Ok(true);
+        }
+        let event: Value = serde_json::from_str(data)
+            .map_err(|_| invalid("Native search stream contains invalid JSON."))?;
+        if !self.event(&event, emit)? {
+            return Ok(false);
+        }
+        let entries: usize = self.message["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|block| {
+                1 + block["citations"].as_array().map_or(0, Vec::len)
+                    + block["content"].as_array().map_or(0, Vec::len)
+            })
+            .sum();
+        if entries > 4096 {
+            return Err(invalid("Native search stream has too many output items."));
         }
         Ok(true)
     }
@@ -367,8 +388,15 @@ impl<'a> AnthropicSearchStream<'a> {
         ))
     }
 
-    pub(super) fn finish(&mut self) -> Result<(), ErrorEnvelope> {
-        std::mem::take(&mut self.decoder).finish()?;
+    pub(super) fn finish(
+        &mut self,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) -> Result<(), ErrorEnvelope> {
+        // A blank line made of a final lone CR closes the last frame only at
+        // the end of input.
+        if let Some(frame) = std::mem::take(&mut self.decoder).finish()? {
+            self.limited(emit, |stream, emit| stream.frame(frame, emit))?;
+        }
         if !self.complete {
             return Err(ErrorEnvelope::new(
                 ErrorCode::TransportTruncated,
@@ -458,7 +486,7 @@ mod tests {
         assert!((received as u64) < MAX_UPSTREAM_BODY);
         assert!(emitted > MAX_UPSTREAM_BODY / 2);
         assert!(emitted <= MAX_UPSTREAM_BODY);
-        assert!(bridge.finish().is_err());
+        assert!(bridge.finish(&mut |_| true).is_err());
     }
 
     #[test]
@@ -492,7 +520,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::ProviderProtocolError);
         assert!(!chunks.join("").contains("response.completed"));
-        assert!(bridge.finish().is_err());
+        assert!(bridge.finish(&mut |_| true).is_err());
     }
 
     #[test]
@@ -514,7 +542,7 @@ mod tests {
                 assert!(!chunks.join("").contains("response.completed"));
             }
         }
-        bridge.finish().unwrap();
+        bridge.finish(&mut |_| true).unwrap();
         let events: Vec<Value> = chunks
             .iter()
             .map(|chunk| {
@@ -546,7 +574,7 @@ mod tests {
         bridge
             .push(&frame(&wire()[0].clone()), &mut |_| true)
             .unwrap();
-        assert!(bridge.finish().is_err());
+        assert!(bridge.finish(&mut |_| true).is_err());
         assert!(
             bridge
                 .push(
@@ -578,5 +606,43 @@ mod tests {
                 .push(&frame(&wire()[0].clone()), &mut |_| false)
                 .unwrap()
         );
+    }
+
+    /// Lone CR line ends with `event` lines, and a `message_stop` frame that
+    /// only the end of input closes, convert like LF frames.
+    #[test]
+    fn lone_cr_frames_and_a_terminal_closed_by_the_end_of_input_complete() {
+        use std::fmt::Write as _;
+        let request = request();
+        let mut body = String::new();
+        for event in wire() {
+            write!(
+                body,
+                "event: {}\rdata: {event}\r\r",
+                event["type"].as_str().unwrap()
+            )
+            .unwrap();
+        }
+        let mut bridge = AnthropicSearchStream::new(&request);
+        let mut chunks = String::new();
+        bridge
+            .push(&body, &mut |reply| {
+                if let Reply::Chunk(text) = reply {
+                    chunks.push_str(&text);
+                }
+                true
+            })
+            .unwrap();
+        assert!(chunks.contains("Rust 文档"), "{chunks}");
+        assert!(!chunks.contains("response.completed"), "{chunks}");
+        bridge
+            .finish(&mut |reply| {
+                if let Reply::Chunk(text) = reply {
+                    chunks.push_str(&text);
+                }
+                true
+            })
+            .unwrap();
+        assert!(chunks.contains("response.completed"), "{chunks}");
     }
 }
