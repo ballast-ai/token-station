@@ -99,10 +99,11 @@ use crate::secrets::SecretStore;
 use crate::south_provider_call::{
     CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
     PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1, PreparedProviderStreamResultV1,
-    RequestBodyModeV1, StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
-    build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1, map_failure_v1,
-    map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
-    prepare_provider_stream_v1, project_open_stream_head_v1,
+    RequestBodyModeV1, SouthResponsePartsV1, StableProviderCallFailureV1,
+    build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
+    execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
+    open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
+    project_open_stream_head_v1,
 };
 use south_core::raw::BoundedResolverV1;
 
@@ -1203,17 +1204,18 @@ impl SouthProviderRuntime {
             .map_err(|failure| map_failure_v1(failure, disposition))?;
         Ok(match opened {
             PreparedProviderStreamResultV1::Opened(stream) => {
-                let (status, headers) = project_open_stream_head_v1(&stream);
+                let (status, headers, quota) = project_open_stream_head_v1(&stream);
                 UpstreamResponse::from_south_stream(
                     status,
                     headers,
+                    quota,
                     self.handle.clone(),
                     stream,
                     max_body_bytes,
                 )
             }
             PreparedProviderStreamResultV1::Rejected(response) => {
-                UpstreamResponse::from_parts_with_limit(response, max_body_bytes)
+                UpstreamResponse::from_south_parts(response, max_body_bytes)
             }
         })
     }
@@ -2865,7 +2867,8 @@ impl Gateway {
             cancellation,
         )
         .await
-        .map_err(|failure| describe_south_failure(failure, CancellationDispositionV1::Deadline))?;
+        .map_err(|failure| describe_south_failure(failure, CancellationDispositionV1::Deadline))?
+        .parts;
         let status = response.status;
         if status >= 400 {
             let envelope = upstream
@@ -4297,6 +4300,10 @@ impl Gateway {
 struct UpstreamResponse {
     status: u16,
     headers: BTreeMap<String, String>,
+    /// The provider's quota facts as typed fields: from South on a component
+    /// call, from the canonical header names on a response read from real
+    /// headers.
+    quota: south_contracts::ProviderQuotaMetadataV1,
     body: UpstreamBody,
     max_body_bytes: u64,
 }
@@ -4399,18 +4406,35 @@ impl UpstreamResponse {
             // reaches zero, even when the underlying body ends at that boundary.
             .limit(max_body_bytes.saturating_add(1))
             .reader();
+        let quota = crate::quota_metadata::quota_metadata_from_headers(&headers);
         Self {
             status,
             headers,
+            quota,
             body: UpstreamBody::Streaming(Box::new(reader)),
             max_body_bytes,
         }
     }
 
+    /// A buffered response read from real headers.
     fn from_parts_with_limit(parts: HttpResponseParts, max_body_bytes: u64) -> Self {
+        let quota = crate::quota_metadata::quota_metadata_from_headers(&parts.headers);
         Self {
             status: parts.status,
             headers: parts.headers,
+            quota,
+            body: UpstreamBody::Buffered(parts.body),
+            max_body_bytes,
+        }
+    }
+
+    /// A buffered South response, with the quota metadata South read.
+    fn from_south_parts(response: SouthResponsePartsV1, max_body_bytes: u64) -> Self {
+        let SouthResponsePartsV1 { parts, quota } = response;
+        Self {
+            status: parts.status,
+            headers: parts.headers,
+            quota,
             body: UpstreamBody::Buffered(parts.body),
             max_body_bytes,
         }
@@ -4419,6 +4443,7 @@ impl UpstreamResponse {
     fn from_south_stream(
         status: u16,
         headers: BTreeMap<String, String>,
+        quota: south_contracts::ProviderQuotaMetadataV1,
         handle: tokio::runtime::Handle,
         stream: south_core::StreamingCallV1,
         max_body_bytes: u64,
@@ -4426,6 +4451,7 @@ impl UpstreamResponse {
         Self {
             status,
             headers,
+            quota,
             body: UpstreamBody::Streaming(Box::new(SouthStreamReader {
                 handle,
                 stream,
@@ -4439,6 +4465,7 @@ impl UpstreamResponse {
         let Self {
             status,
             headers,
+            quota: _,
             body,
             max_body_bytes,
         } = self;
@@ -5142,6 +5169,7 @@ mod upstream_response_tests {
         let response = UpstreamResponse {
             status: 200,
             headers: BTreeMap::new(),
+            quota: south_contracts::ProviderQuotaMetadataV1::default(),
             body: UpstreamBody::Streaming(Box::new(std::io::Cursor::new(b"four"))),
             max_body_bytes: 4,
         };
@@ -5150,6 +5178,7 @@ mod upstream_response_tests {
         let oversized = UpstreamResponse {
             status: 200,
             headers: BTreeMap::new(),
+            quota: south_contracts::ProviderQuotaMetadataV1::default(),
             body: UpstreamBody::Streaming(Box::new(std::io::Cursor::new(b"fifth"))),
             max_body_bytes: 4,
         };

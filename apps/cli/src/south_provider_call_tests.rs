@@ -6,11 +6,12 @@ use crate::{
     south_provider_call::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
         ComponentAuthV1, IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
-        PreparedProviderStreamResultV1, RequestBodyModeV1, StableProviderCallFailureV1,
-        build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
-        execute_prepared_provider_call_v1, execute_prepared_provider_call_with_transcript_v1,
-        map_failure_v1, map_stream_read_failure_v1, open_prepared_provider_stream_v1,
-        prepare_provider_call_v1, prepare_provider_stream_v1,
+        PreparedProviderStreamResultV1, RequestBodyModeV1, SouthResponsePartsV1,
+        StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
+        build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1,
+        execute_prepared_provider_call_with_transcript_v1, map_failure_v1,
+        map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
+        prepare_provider_stream_v1,
     },
 };
 use south_contracts::{
@@ -1035,7 +1036,10 @@ async fn assembled_execution_uses_real_south_core_and_projects_the_response() {
     };
     let cancellation = CancellationToken::new();
 
-    let response = execute_prepared_provider_call_v1(
+    let SouthResponsePartsV1 {
+        parts: response,
+        quota,
+    } = execute_prepared_provider_call_v1(
         &prepared,
         &resolver,
         &transport,
@@ -1057,41 +1061,24 @@ async fn assembled_execution_uses_real_south_core_and_projects_the_response() {
         response.headers.get("retry-after").map(String::as_str),
         Some("2")
     );
+    // The quota fields stay typed. None is written back as a header.
     assert_eq!(
         response.headers,
         [
-            (
-                "anthropic-ratelimit-tokens-limit".to_owned(),
-                "2000".to_owned()
-            ),
-            (
-                "anthropic-ratelimit-tokens-remaining".to_owned(),
-                "1500".to_owned(),
-            ),
-            (
-                "anthropic-ratelimit-tokens-reset".to_owned(),
-                "20s".to_owned()
-            ),
-            (
-                "anthropic-ratelimit-unified-limit".to_owned(),
-                "3000".to_owned()
-            ),
-            (
-                "anthropic-ratelimit-unified-remaining".to_owned(),
-                "2500".to_owned(),
-            ),
-            (
-                "anthropic-ratelimit-unified-reset".to_owned(),
-                "1970-01-01T00:00:30Z".to_owned(),
-            ),
             ("content-type".to_owned(), "application/json".to_owned()),
             ("retry-after".to_owned(), "2".to_owned()),
-            ("x-ratelimit-limit-tokens".to_owned(), "1000".to_owned()),
-            ("x-ratelimit-remaining-tokens".to_owned(), "900".to_owned()),
-            ("x-ratelimit-reset-tokens".to_owned(), "10s".to_owned()),
         ]
         .into_iter()
         .collect()
+    );
+    assert_eq!(quota.present_field_count(), 9);
+    assert_eq!(
+        quota.value(ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedReset),
+        Some("1970-01-01T00:00:30Z")
+    );
+    assert_eq!(
+        crate::quota_metadata::parse_quota_windows(&quota, 0).len(),
+        3
     );
     assert!(response.extensions.is_empty());
 }
@@ -1645,7 +1632,10 @@ async fn real_streaming_rejections_are_bounded_projected_and_never_become_live_s
     )
     .await
     .expect("bounded rejection is a valid open outcome");
-    let PreparedProviderStreamResultV1::Rejected(rejected) = rejected else {
+    let PreparedProviderStreamResultV1::Rejected(SouthResponsePartsV1 {
+        parts: rejected, ..
+    }) = rejected
+    else {
         panic!("non-2xx must not create a live stream");
     };
     assert_eq!(rejected.status, 429);
@@ -1707,7 +1697,10 @@ async fn truncated_streaming_rejection_preserves_the_upstream_status() {
     )
     .await
     .expect("body decoding cannot replace the authoritative rejection status");
-    let PreparedProviderStreamResultV1::Rejected(rejected) = result else {
+    let PreparedProviderStreamResultV1::Rejected(SouthResponsePartsV1 {
+        parts: rejected, ..
+    }) = result
+    else {
         panic!("non-2xx must not create a live stream");
     };
     assert_eq!(rejected.status, 429);
@@ -2091,16 +2084,16 @@ impl CommunityHeaderAuthConformanceExecutorV1 {
         )
         .await
         {
-            Ok((response, transcript)) => {
+            Ok((SouthResponsePartsV1 { parts, quota }, transcript)) => {
                 let bounded = BufferedHttpResponseV1::try_from_parts_with_response_metadata(
-                    response
+                    parts
                         .status
                         .try_into()
                         .expect("canonical response status is valid"),
-                    response.body.into_bytes(),
-                    response.headers.get("content-type").cloned(),
-                    response.headers.get("retry-after").cloned(),
-                    ProviderQuotaMetadataV1::default(),
+                    parts.body.into_bytes(),
+                    parts.headers.get("content-type").cloned(),
+                    parts.headers.get("retry-after").cloned(),
+                    quota,
                     ResponseDiagnosticsV1::default(),
                     transcript,
                 )
@@ -2213,7 +2206,10 @@ impl CommunityStreamConformanceExecutorV1 {
         .await;
         let mut stream = match opened {
             Ok(PreparedProviderStreamResultV1::Opened(stream)) => stream,
-            Ok(PreparedProviderStreamResultV1::Rejected(response)) => {
+            Ok(PreparedProviderStreamResultV1::Rejected(SouthResponsePartsV1 {
+                parts: response,
+                ..
+            })) => {
                 let head = StreamingResponseHeadV1::try_from_parts(
                     response
                         .status
@@ -2556,7 +2552,9 @@ impl CommunityConformanceExecutorV1 {
             transport_dropped.load(Ordering::SeqCst),
         );
         match result {
-            Ok(response) => {
+            Ok(SouthResponsePartsV1 {
+                parts: response, ..
+            }) => {
                 let content_type = response.headers.get("content-type").cloned();
                 let retry_after = response.headers.get("retry-after").cloned();
                 let bounded = BufferedHttpResponseV1::try_from_parts(
@@ -2846,18 +2844,8 @@ impl CommunityQuotaConformanceExecutorV1 {
         );
 
         match result {
-            Ok(response) => {
-                let projected = ProviderQuotaMetadataV1::try_from_iter(
-                    QUOTA_METADATA_FIELDS_V1.into_iter().filter_map(|field| {
-                        response
-                            .headers
-                            .get(field.as_header_name())
-                            .map(|value| (field, value.to_owned()))
-                    }),
-                )
-                .expect("host projection remains inside the quota contract");
-                ProviderQuotaMetadataObservationV1::response(projected, evidence)
-            }
+            // The host reads the metadata South returned, never a header.
+            Ok(response) => ProviderQuotaMetadataObservationV1::response(response.quota, evidence),
             Err(error) => ProviderQuotaMetadataObservationV1::failure(
                 map_stable_failure_code(&error),
                 evidence,
@@ -3034,7 +3022,10 @@ fn execute_legacy_quota_fixture() -> QuotaFixtureResult {
                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect();
-    let windows = crate::quota_headers::parse_quota_windows(&headers, 0);
+    let windows = crate::quota_metadata::parse_quota_windows(
+        &crate::quota_metadata::quota_metadata_from_headers(&headers),
+        0,
+    );
     QuotaFixtureResult {
         windows,
         response_headers: headers,
@@ -3045,17 +3036,17 @@ fn execute_legacy_quota_fixture() -> QuotaFixtureResult {
 async fn execute_south_quota_fixture() -> QuotaFixtureResult {
     let (response, hit_count) =
         execute_south_quota_fixture_with_response(QUOTA_LOOPBACK_RESPONSE.to_vec()).await;
-    let windows = crate::quota_headers::parse_quota_windows(&response.headers, 0);
+    let windows = crate::quota_metadata::parse_quota_windows(&response.quota, 0);
     QuotaFixtureResult {
         windows,
-        response_headers: response.headers,
+        response_headers: response.parts.headers,
         hit_count,
     }
 }
 
 async fn execute_south_quota_fixture_with_response(
     raw_response: Vec<u8>,
-) -> (token_station_protocol::HttpResponseParts, usize) {
+) -> (SouthResponsePartsV1, usize) {
     let (base_url, server) = start_quota_loopback(raw_response);
     let mut provider = ProviderConfig::new(
         "openai-compatible",
@@ -3143,38 +3134,46 @@ async fn south_quota_projection_is_fail_soft_for_absent_partial_and_malformed_fi
     let (absent, absent_hits) =
         execute_south_quota_fixture_with_response(NO_QUOTA_LOOPBACK_RESPONSE.to_vec()).await;
     assert_eq!(absent_hits, 1);
-    assert_eq!(absent.status, 200);
-    assert_eq!(absent.body, "{}");
-    assert!(crate::quota_headers::parse_quota_windows(&absent.headers, 0).is_empty());
+    assert_eq!(absent.parts.status, 200);
+    assert_eq!(absent.parts.body, "{}");
+    assert!(crate::quota_metadata::parse_quota_windows(&absent.quota, 0).is_empty());
 
     let (malformed, malformed_hits) =
         execute_south_quota_fixture_with_response(malformed_quota_loopback_response()).await;
     assert_eq!(malformed_hits, 1);
-    assert_eq!(malformed.status, 200);
-    assert_eq!(malformed.body, "{}");
-    assert!(!malformed.headers.contains_key("x-ratelimit-limit-tokens"));
-    assert!(
-        !malformed
-            .headers
-            .contains_key("x-ratelimit-remaining-tokens")
-    );
-    assert!(!malformed.headers.contains_key("x-ratelimit-reset-tokens"));
+    assert_eq!(malformed.parts.status, 200);
+    assert_eq!(malformed.parts.body, "{}");
+    let quota = &malformed.quota;
     assert_eq!(
-        malformed
-            .headers
-            .get("anthropic-ratelimit-tokens-limit")
-            .map(String::as_str),
+        quota.value(ProviderQuotaMetadataFieldV1::XRateLimitLimitTokens),
+        None
+    );
+    assert_eq!(
+        quota.value(ProviderQuotaMetadataFieldV1::XRateLimitRemainingTokens),
+        None
+    );
+    assert_eq!(
+        quota.value(ProviderQuotaMetadataFieldV1::XRateLimitResetTokens),
+        None
+    );
+    assert_eq!(
+        quota.value(ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensLimit),
         Some("2000")
     );
     assert_eq!(
-        malformed
-            .headers
-            .get("anthropic-ratelimit-unified-limit")
-            .map(String::as_str),
+        quota.value(ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedLimit),
         Some("3000")
     );
+    // No quota field is written back as a header.
+    assert!(
+        malformed
+            .parts
+            .headers
+            .keys()
+            .all(|name| ProviderQuotaMetadataFieldV1::from_header_name(name).is_none())
+    );
     assert_eq!(
-        crate::quota_headers::parse_quota_windows(&malformed.headers, 0).len(),
+        crate::quota_metadata::parse_quota_windows(quota, 0).len(),
         1,
         "only the complete Anthropic token family may create a quota window"
     );

@@ -7,8 +7,8 @@ use south_component_conformance::{AdmittedAuthV1, DescriptorAuthErrorV1, admit_d
 use south_contracts::{
     BearerAuthV1, ContractErrorV1, CredentialSlotV1, DeclaredSecretHeaderV1,
     DeclaredSecretHeadersV1, JsonBodyV1, JsonPostRequestV1, PreparationErrorV1, ProviderAuthV1,
-    ProviderEndpointV1, ProviderQuotaMetadataFieldV1, RelativePathV1, ResponseTranscriptV1,
-    SafeHeaders, StreamTransportConfigV1,
+    ProviderEndpointV1, ProviderQuotaMetadataV1, RelativePathV1, ResponseTranscriptV1, SafeHeaders,
+    StreamTransportConfigV1,
 };
 use south_core::raw::BoundedResolverV1;
 use south_core::{
@@ -33,18 +33,6 @@ use crate::{
 };
 
 const MAX_COMMUNITY_CREDENTIAL_BYTES_V1: usize = 16 * 1024;
-
-const PROVIDER_QUOTA_METADATA_FIELDS_V1: [ProviderQuotaMetadataFieldV1; 9] = [
-    ProviderQuotaMetadataFieldV1::XRateLimitLimitTokens,
-    ProviderQuotaMetadataFieldV1::XRateLimitRemainingTokens,
-    ProviderQuotaMetadataFieldV1::XRateLimitResetTokens,
-    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensLimit,
-    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensRemaining,
-    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensReset,
-    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedLimit,
-    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedRemaining,
-    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedReset,
-];
 
 /// Host-owned reasons why a call cannot enter the first South rollout slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +167,18 @@ pub(crate) enum StableProviderCallFailureV1 {
 /// A streaming open either returns a live 2xx pull stream or a bounded non-2xx response.
 pub(crate) enum PreparedProviderStreamResultV1 {
     Opened(StreamingCallV1),
-    Rejected(HttpResponseParts),
+    Rejected(SouthResponsePartsV1),
+}
+
+/// A South response as the host reads it: the HTTP parts it classifies, and the
+/// provider quota metadata it reads as typed fields. The quota fields are not
+/// written back into the headers: a component may declare that a vendor header
+/// feeds a field, so a canonical name there could be a header the upstream
+/// never sent.
+#[derive(Debug)]
+pub(crate) struct SouthResponsePartsV1 {
+    pub(crate) parts: HttpResponseParts,
+    pub(crate) quota: ProviderQuotaMetadataV1,
 }
 
 /// Host lifecycle context used only to interpret South's context-free `CANCELLED` code.
@@ -412,7 +411,7 @@ pub(crate) async fn execute_prepared_provider_call_v1<R, T>(
     transport: &T,
     deadline: Instant,
     cancellation: &CancellationToken,
-) -> Result<HttpResponseParts, StableProviderCallFailureV1>
+) -> Result<SouthResponsePartsV1, StableProviderCallFailureV1>
 where
     R: south_core::CredentialResolver + ?Sized,
     T: south_core::AsyncHttpTransport + ?Sized,
@@ -437,7 +436,7 @@ pub(crate) async fn execute_prepared_provider_call_with_transcript_v1<R, T>(
     transport: &T,
     deadline: Instant,
     cancellation: &CancellationToken,
-) -> Result<(HttpResponseParts, ResponseTranscriptV1), StableProviderCallFailureV1>
+) -> Result<(SouthResponsePartsV1, ResponseTranscriptV1), StableProviderCallFailureV1>
 where
     R: south_core::CredentialResolver + ?Sized,
     T: south_core::AsyncHttpTransport + ?Sized,
@@ -460,17 +459,15 @@ where
     if let Some(retry_after) = response.retry_after() {
         headers.insert("retry-after".to_owned(), retry_after.to_owned());
     }
-    for field in PROVIDER_QUOTA_METADATA_FIELDS_V1 {
-        if let Some(value) = response.provider_quota_metadata().value(field) {
-            headers.insert(field.as_header_name().to_owned(), value.to_owned());
-        }
-    }
     Ok((
-        HttpResponseParts {
-            status: response.status().as_u16(),
-            headers,
-            body: response.body().to_owned(),
-            extensions: BTreeMap::new(),
+        SouthResponsePartsV1 {
+            parts: HttpResponseParts {
+                status: response.status().as_u16(),
+                headers,
+                body: response.body().to_owned(),
+                extensions: BTreeMap::new(),
+            },
+            quota: response.provider_quota_metadata().clone(),
         },
         response.response_transcript().clone(),
     ))
@@ -502,11 +499,14 @@ where
         Err(south_core::ProviderCallErrorV1::Rejected(rejected)) => {
             let body = String::from_utf8_lossy(rejected.body()).into_owned();
             Ok(PreparedProviderStreamResultV1::Rejected(
-                HttpResponseParts {
-                    status: rejected.head().status().as_u16(),
-                    headers: project_stream_head_headers(rejected.head()),
-                    body,
-                    extensions: BTreeMap::new(),
+                SouthResponsePartsV1 {
+                    parts: HttpResponseParts {
+                        status: rejected.head().status().as_u16(),
+                        headers: project_stream_head_headers(rejected.head()),
+                        body,
+                        extensions: BTreeMap::new(),
+                    },
+                    quota: rejected.head().provider_quota_metadata().clone(),
                 },
             ))
         }
@@ -524,21 +524,17 @@ fn project_stream_head_headers(
     if let Some(retry_after) = head.retry_after() {
         headers.insert("retry-after".to_owned(), retry_after.to_owned());
     }
-    for field in PROVIDER_QUOTA_METADATA_FIELDS_V1 {
-        if let Some(value) = head.provider_quota_metadata().value(field) {
-            headers.insert(field.as_header_name().to_owned(), value.to_owned());
-        }
-    }
     headers
 }
 
 /// Projects the content-free head fields needed by the host before body streaming begins.
 pub(crate) fn project_open_stream_head_v1(
     stream: &StreamingCallV1,
-) -> (u16, BTreeMap<String, String>) {
+) -> (u16, BTreeMap<String, String>, ProviderQuotaMetadataV1) {
     (
         stream.head().status().as_u16(),
         project_stream_head_headers(stream.head()),
+        stream.head().provider_quota_metadata().clone(),
     )
 }
 
