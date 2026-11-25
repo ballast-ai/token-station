@@ -5102,6 +5102,71 @@ fn anthropic_local_auth_and_protocol_mismatch_fail_before_upstream() {
     std::fs::remove_file(key).ok();
 }
 
+/// The Messages agent renders with South's north codec. A tool-only assistant
+/// turn reaches an OpenAI-compatible upstream with `content: null`, not the
+/// codec's empty part list, and the client gets one terminal `message_delta`
+/// carrying the usage. The old adapter sent an extra `message_delta` for the
+/// mid-stream usage event.
+#[test]
+fn an_anthropic_translated_stream_has_one_message_delta_and_tool_only_turns_stay_null() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Done.\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("anthropic-codec-terminal", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, _, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "stream": true,
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            "messages": [
+                {"role": "user", "content": "read a.txt"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "a.txt"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "hello"}]}
+            ]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let events = sse_events(&body);
+    let deltas: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "message_delta")
+        .collect();
+    assert_eq!(deltas.len(), 1, "{body}");
+    assert_eq!(
+        deltas[0]["delta"]["stop_reason"],
+        json!("end_turn"),
+        "{body}"
+    );
+    assert_eq!(deltas[0]["usage"]["output_tokens"], json!(2), "{body}");
+    let seen = mock.seen();
+    let assistant = &seen[0].body["messages"][1];
+    assert_eq!(assistant["role"], json!("assistant"), "{assistant}");
+    assert!(assistant["content"].is_null(), "{assistant}");
+    assert_eq!(
+        assistant["tool_calls"][0]["id"],
+        json!("toolu_1"),
+        "{assistant}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
     let sse = concat!(
