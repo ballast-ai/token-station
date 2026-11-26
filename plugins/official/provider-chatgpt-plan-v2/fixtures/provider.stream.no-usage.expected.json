@@ -2,6 +2,6 @@
   "error": {
     "code": "provider_protocol_error",
     "http_status": 502,
-    "message": "The ChatGPT plan response carries no usage object"
+    "message": "the upstream response carries no usage object"
   }
 }

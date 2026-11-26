@@ -191,8 +191,8 @@ dependencies = [
 
 [[package]]
 name = "south-north-codec"
-version = "0.88.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=bc07c516e3488b321eabf3a67e6a650ecbd6eeda#bc07c516e3488b321eabf3a67e6a650ecbd6eeda"
+version = "0.88.1"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=d5fa458a561796d641efce2c308fa80ac294caf5#d5fa458a561796d641efce2c308fa80ac294caf5"
 dependencies = [
  "base64",
  "serde_json",

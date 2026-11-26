@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda";
-const southRelease = "0.88.0";
+const southRevision = "d5fa458a561796d641efce2c308fa80ac294caf5";
+const southRelease = "0.88.1";
 // South versions its crates independently: a crate whose public surface did
 // not change keeps its version across a release. One revision still pins all
 // of them, so each per-crate version is an exact expectation of that revision.
 const southPackageVersions = new Map([
-  ["south-component-conformance", "0.82.0"],
+  ["south-component-conformance", "0.82.1"],
   ["south-contracts", "0.57.0"],
   ["south-core", southRelease],
   ["south-host-grammars", southRelease],
@@ -28,7 +28,7 @@ const southPackageVersions = new Map([
 const kernelContracts = { canonical_ir: 5, error_catalog: 1, stream: 3 };
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const kernelRepository = "https://github.com/ballast-ai/token-station-kernel.git";
-// South 0.88.0 resolves the kernel protocol crate at this revision. It is the
+// South 0.88.1 resolves the kernel protocol crate at this revision. It is the
 // one-way mirror of this repository's crates/protocol 0.7.0.
 const kernelRevision = "ce6894d99f51283e4985d39a2d533307bda27b6a";
 const kernelVersion = "0.7.0";

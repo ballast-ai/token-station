@@ -13,8 +13,8 @@ crate-type = ["cdylib", "rlib"]
 plan-responses = { path = "../plan-responses" }
 sha2 = "0.10"
 serde_json = "1"
-south-component-conformance = { version = "=0.82.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda", default-features = false }
-south-provider-api = { version = "=0.66.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
+south-component-conformance = { version = "=0.82.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5", default-features = false }
+south-provider-api = { version = "=0.66.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
 token-station-protocol = { version = "=0.7.0", git = "https://github.com/ballast-ai/token-station-kernel.git", rev = "ce6894d99f51283e4985d39a2d533307bda27b6a" }
 wit-bindgen = "0.59"
 

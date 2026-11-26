@@ -11,7 +11,7 @@ use token_station_protocol::ResponseFormat;
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode, ErrorEnvelope, FinishReason,
     HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message, ModelCapability, ProviderConfig,
-    SafeHeaders, StreamEvent, Usage,
+    SafeHeaders, StreamEvent,
 };
 #[cfg(target_arch = "wasm32")]
 mod shell;
@@ -312,66 +312,9 @@ fn unwrap_response(parts: &HttpResponseParts) -> ComponentResultV1<HttpResponseP
         ..parts.clone()
     })
 }
-/// Gemini `usageMetadata` as the IR reports it, under South 0.85.1's rule
-/// (`gemini_text::usage_of`): a turn without exact usage is an error, never a
-/// zero (south #131).
-///
-/// Thoughts are reported outside the candidates, so output is candidates plus
-/// thoughts and input is prompt plus tool-use prompt. `promptTokenCount` and
-/// `totalTokenCount` are required, and the parts must add up to the total. A
-/// missing `candidatesTokenCount` is zero only when the total closes without it.
-pub(crate) fn usage_of(meta: &Value) -> ComponentResultV1<Usage> {
-    let count = |key: &str| -> ComponentResultV1<u64> {
-        match meta.get(key) {
-            None => Ok(0),
-            Some(value) => value
-                .as_u64()
-                .ok_or_else(|| protocol("Code Assist returned an invalid usage count.")),
-        }
-    };
-    let sum = |a: u64, b: u64| {
-        a.checked_add(b)
-            .ok_or_else(|| protocol("Code Assist usage counts overflow."))
-    };
-    if !meta.is_object() {
-        return Err(protocol("Code Assist usage metadata is not an object."));
-    }
-    let required = |key: &str| {
-        meta.get(key).and_then(Value::as_u64).ok_or_else(|| {
-            protocol("Code Assist usage lacks a valid promptTokenCount or totalTokenCount.")
-        })
-    };
-    let prompt = required("promptTokenCount")?;
-    let total = required("totalTokenCount")?;
-    let cached = count("cachedContentTokenCount")?;
-    if cached > prompt {
-        return Err(protocol(
-            "Code Assist cachedContentTokenCount exceeds promptTokenCount.",
-        ));
-    }
-    let input_tokens = sum(prompt, count("toolUsePromptTokenCount")?)?;
-    let thoughts = count("thoughtsTokenCount")?;
-    let candidates = match meta.get("candidatesTokenCount") {
-        Some(_) => count("candidatesTokenCount")?,
-        None if sum(input_tokens, thoughts)? < total => {
-            return Err(protocol("Code Assist usage lacks candidatesTokenCount."));
-        }
-        None => 0,
-    };
-    let output_tokens = sum(candidates, thoughts)?;
-    if sum(input_tokens, output_tokens)? != total {
-        return Err(protocol(
-            "Code Assist totalTokenCount does not equal its prompt, candidates and thoughts.",
-        ));
-    }
-    Ok(Usage {
-        input_tokens,
-        output_tokens,
-        cache_read_tokens: cached,
-        reasoning_tokens: thoughts,
-        ..Usage::default()
-    })
-}
+/// Gemini `usageMetadata` as the IR reports it, by South's rule (south #364):
+/// a turn without exact usage is an error, never a zero.
+pub(crate) use south_component_conformance::reference_gemini::usage_of;
 
 impl ProviderComponentV1 for CodeAssist {
     fn metadata(&self) -> ComponentMetadataV1 {

@@ -95,12 +95,15 @@ fn response_metadata_is_ignored_or_refused() {
 }
 
 #[test]
-fn usage_refusals_name_the_profile() {
-    for (profile, label) in [(LENIENT, "Lenient"), (STRICT, "Strict")] {
+fn usage_refusals_follow_the_south_rule_for_every_profile() {
+    // South's rule (south #364) names the upstream, never a product, so both
+    // profiles refuse with the same text and the same 502.
+    for profile in [LENIENT, STRICT] {
         let missing = read(profile, &[completed(None)]).unwrap_err();
+        assert_eq!(missing.http_status, 502);
         assert_eq!(
             missing.message,
-            format!("{label} response carries no usage object")
+            "the upstream response carries no usage object"
         );
         let unequal = read(
             profile,
@@ -111,7 +114,7 @@ fn usage_refusals_name_the_profile() {
         .unwrap_err();
         assert_eq!(
             unequal.message,
-            format!("{label} total_tokens does not equal input_tokens plus output_tokens")
+            "the upstream total_tokens does not equal input_tokens plus output_tokens"
         );
     }
 }
