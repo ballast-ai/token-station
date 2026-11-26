@@ -1,6 +1,6 @@
 {
   "name": "provider-openai-compatible",
-  "version": "2.14.3",
+  "version": "2.14.4",
   "api_version": "provider-adapter-v2",
   "providers": [
     "openai-compatible",

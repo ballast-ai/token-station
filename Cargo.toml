@@ -36,15 +36,15 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-south-contracts = { version = "=0.57.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-core = { version = "=0.88.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-component-conformance = { version = "=0.82.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-host-grammars = { version = "=0.88.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-provider-conformance = { version = "=0.88.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-testkit = { version = "=0.88.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-transport-reqwest = { version = "=0.88.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-provider-api = { version = "=0.66.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
-south-provider-runtime = { version = "=0.88.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
+south-contracts = { version = "=0.57.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-core = { version = "=0.88.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-component-conformance = { version = "=0.82.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-host-grammars = { version = "=0.88.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-provider-conformance = { version = "=0.88.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-testkit = { version = "=0.88.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-transport-reqwest = { version = "=0.88.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-provider-api = { version = "=0.66.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
+south-provider-runtime = { version = "=0.88.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
 
 # South compiles against the kernel mirror's protocol crate, which is this
 # repository's crates/protocol published one way (token-station-kernel). Two

@@ -118,7 +118,7 @@ pub fn south_component_runtime() -> Result<ComponentRuntimeV1, String> {
 /// to the one this host links. A package built before the range handshake
 /// declares no `runtime_abi` and is refused; the exact-tuple arm left with the
 /// last such package.
-pub(crate) const SOUTH_RUNTIME: &str = "0.88.0";
+pub(crate) const SOUTH_RUNTIME: &str = "0.88.1";
 /// The oldest South runtime a package may declare: the oldest one among the
 /// packages this host ships. Raising it is how a host enforces a release that
 /// tightened a South gate.

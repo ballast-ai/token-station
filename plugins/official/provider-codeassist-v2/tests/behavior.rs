@@ -170,6 +170,35 @@ fn sse_envelope_handles_split_frames_and_usage() {
     );
     assert!(events.iter().any(|e|matches!(e,StreamEvent::Usage{usage} if usage.input_tokens==9 && usage.output_tokens==6 && usage.cache_read_tokens==3 && usage.reasoning_tokens==2)));
 }
+/// Usage follows South's Gemini rule (south #364): an explicit `null` count
+/// reads zero, as an omitted one does, and a refusal names the upstream rather
+/// than the product.
+#[test]
+fn stream_usage_follows_the_south_gemini_rule() {
+    let terminal = |meta: Value| {
+        let data = format!(
+            "data: {}\n\n",
+            json!({"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":meta}})
+        );
+        let mut parser = CodeAssist.stream_parser();
+        let mut events = parser.parse_chunk(data.as_bytes())?;
+        events.extend(parser.parse_chunk(&[])?);
+        Ok::<_, token_station_protocol::ErrorEnvelope>(events)
+    };
+    let events = terminal(json!({"promptTokenCount":5,"candidatesTokenCount":2,"thoughtsTokenCount":null,"totalTokenCount":7})).unwrap();
+    assert!(events.iter().any(|e| matches!(e, StreamEvent::Usage { usage } if usage.input_tokens == 5 && usage.output_tokens == 2 && usage.reasoning_tokens == 0)));
+    let error =
+        terminal(json!({"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":9}))
+            .unwrap_err();
+    assert_eq!(error.http_status, 502);
+    assert!(
+        error
+            .message
+            .starts_with("the upstream totalTokenCount does not equal"),
+        "{}",
+        error.message
+    );
+}
 #[test]
 fn stream_failure_is_not_success() {
     let mut p = CodeAssist.stream_parser();

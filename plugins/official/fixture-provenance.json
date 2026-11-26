@@ -9,7 +9,7 @@
     "provider-chatgpt-plan-v2": {
       "files": 34,
       "fixtures": "fixtures",
-      "sha256": "bfdb15a3377933e1cd88b6848fb6169adddb1f0ba2b463d9ae469f6e6f3817bb",
+      "sha256": "5476d0a16317cb9275d1da899d05d170b003d5e9cac43bcc647c508def1f1ca2",
       "source": "repository"
     },
     "provider-claude-plan-v2": {
@@ -36,5 +36,5 @@
       "sha256": "881904e934270f5436423bbdbe13c00a5000fbdd8e1fea41fda534718483ce59"
     }
   },
-  "south_revision": "bc07c516"
+  "south_revision": "d5fa458a"
 }

@@ -17,8 +17,8 @@ serde_json = "1"
 wit-bindgen = "0.59"
 
 # The Responses codec comes from the same South revision as the host and the
-# provider components (South 0.88.0). The protocol crate is the kernel mirror
+# provider components (South 0.88.1). The protocol crate is the kernel mirror
 # South compiles against, so the codec and this adapter share one set of
 # canonical types. Its sources equal this repository's crates/protocol 0.7.0.
-south-north-codec = { version = "=0.88.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "bc07c516e3488b321eabf3a67e6a650ecbd6eeda" }
+south-north-codec = { version = "=0.88.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "d5fa458a561796d641efce2c308fa80ac294caf5" }
 token-station-protocol = { version = "=0.7.0", git = "https://github.com/ballast-ai/token-station-kernel.git", rev = "ce6894d99f51283e4985d39a2d533307bda27b6a" }
