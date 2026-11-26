@@ -6,9 +6,10 @@
 //!
 //! The mapping is South's north codec (`south-north-codec`), the one the
 //! server uses for this wire. This adapter keeps what the codec leaves to a
-//! host or does not produce: the request checks it always made, the Claude
-//! replay markers, the extensions the plan components read, the effort clamp,
-//! the per-stream render state and its limits, and the error frame.
+//! host or does not produce: the request checks it always made, the extensions
+//! the plan components read, the effort clamp, the per-stream render state and
+//! its limits, and the error frame. The codec writes the Claude replay markers
+//! (`claude_replay_markers`).
 
 wit_bindgen::generate!({
     path: "../../../crates/plugin-api/wit",
@@ -16,18 +17,18 @@ wit_bindgen::generate!({
 });
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
 use serde_json::{json, Value};
 use south_north_codec::{
-    anthropic_frames, anthropic_message_response, chat_request_from_anthropic_messages,
-    AnthropicSseState, CodecError, ResponseContext,
+    anthropic_frames, anthropic_message_response, chat_request_from_anthropic_messages_with,
+    AnthropicRequestOptions, AnthropicSseState, CodecError, ResponseContext,
 };
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, Extensions, HintKind, ImageUrl, Message, Role, StreamEvent, ToolCall,
+    ErrorEnvelope, HintKind, ImageUrl, Message, Role, StreamEvent,
 };
 
 struct AnthropicClient;
@@ -257,54 +258,6 @@ fn parse_plain_block(block: &Value) -> Result<ContentPart, String> {
     }
 }
 
-/// The Claude signed-thinking replay markers for one assistant turn, or `None`
-/// when the turn cannot carry them.
-///
-/// South replays signatures only for a turn that names its family and lists
-/// every block in wire order (`reasoning_replay::validated_layout`). The layout
-/// admits text, `redacted_thinking`, signed thinking and tool calls. A turn
-/// with no reasoning needs no replay. A turn with an unsigned thinking block or
-/// a block the IR does not model (`server_tool_use`, …) cannot be described,
-/// so it gets no markers and the component sends it without replay, as before.
-/// The host removes the markers again for a target that cannot replay.
-fn replay_markers(
-    parts: &[ContentPart],
-    tool_calls: &[ToolCall],
-    order: &[Value],
-) -> Option<Extensions> {
-    const MAX_BLOCKS: usize = 128;
-    let reasoning = parts.iter().any(|part| {
-        matches!(
-            part,
-            ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. }
-        )
-    });
-    let replayable = parts.iter().all(|part| match part {
-        ContentPart::Text { .. } | ContentPart::RedactedThinking { .. } => true,
-        ContentPart::Thinking { signature, .. } => signature
-            .as_deref()
-            .is_some_and(|signature| !signature.is_empty()),
-        ContentPart::ImageUrl { .. } | ContentPart::Unknown(_) => false,
-    });
-    let mut ids = BTreeSet::new();
-    let unique_ids = tool_calls
-        .iter()
-        .all(|call| !call.id.is_empty() && ids.insert(call.id.as_str()));
-    if !reasoning || !replayable || !unique_ids || order.len() > MAX_BLOCKS {
-        return None;
-    }
-    let mut extensions = Extensions::new();
-    extensions.insert(
-        "reasoning_replay_protocol_family".to_owned(),
-        json!("claude-signed-thinking"),
-    );
-    extensions.insert(
-        "reasoning_replay_block_layout".to_owned(),
-        Value::Array(order.to_vec()),
-    );
-    Some(extensions)
-}
-
 fn is_anthropic_server_tool(tool_type: &str) -> bool {
     [
         "web_search_",
@@ -507,41 +460,6 @@ fn restore_adapter_state(body: &Value, request: &mut ChatRequest) -> Result<(), 
         }
     }
 
-    // Claude replay markers on assistant turns, in wire order.
-    let raw_assistants: Vec<&Value> = raw_messages
-        .iter()
-        .filter(|message| message["role"] == "assistant")
-        .collect();
-    let ir_assistants: Vec<&mut Message> = request
-        .messages
-        .iter_mut()
-        .filter(|message| message.role == Role::Assistant)
-        .collect();
-    if raw_assistants.len() == ir_assistants.len() {
-        for (raw, message) in raw_assistants.into_iter().zip(ir_assistants) {
-            let Some(blocks) = raw["content"].as_array() else {
-                continue;
-            };
-            let parts = match &message.content {
-                Some(Content::Parts(parts)) => parts.clone(),
-                _ => Vec::new(),
-            };
-            let mut order = Vec::new();
-            let mut ordinal = 0;
-            for block in blocks {
-                if block["type"] == "tool_use" {
-                    order.push(json!({"kind": "tool_call", "call_id": block["id"]}));
-                } else {
-                    order.push(json!({"kind": "content", "ordinal": ordinal}));
-                    ordinal += 1;
-                }
-            }
-            if let Some(markers) = replay_markers(&parts, &message.tool_calls, &order) {
-                message.extensions.extend(markers);
-            }
-        }
-    }
-
     // Tool results: the error flag the plan components read, and non-text
     // blocks the codec drops (an image a tool returned stays with it).
     let raw_results: Vec<&Value> = raw_messages
@@ -596,10 +514,6 @@ struct StreamState {
     response_id: String,
     model: String,
     codec: AnthropicSseState,
-    /// The wire block each source thinking block renders into. The codec keeps
-    /// one open thinking block, so two source blocks (interleaved thinking)
-    /// would share it, and their signatures with it.
-    thinking_blocks: BTreeMap<u32, usize>,
 }
 
 thread_local! {
@@ -609,39 +523,13 @@ thread_local! {
 }
 
 fn render_frames(state: &mut StreamState, event: &StreamEvent) -> Result<String, String> {
-    let thinking_block = match event {
-        StreamEvent::ThinkingDelta { block_index, .. }
-        | StreamEvent::ThinkingSignatureDelta { block_index, .. } => Some(*block_index),
-        _ => None,
-    };
-    if let Some(block_index) = thinking_block {
-        // Point the codec at this source block's wire block, or at none so it
-        // opens a new one.
-        state.codec.thinking_index = state.thinking_blocks.get(&block_index).copied();
-    }
-    let mut rendered = String::new();
-    if matches!(event, StreamEvent::Done { .. }) {
-        // The codec closes only the thinking block it points at. Close every
-        // other one this stream opened, so each block gets its stop.
-        let current = state.codec.thinking_index;
-        for index in state.thinking_blocks.values() {
-            if Some(*index) != current {
-                rendered.push_str(&sse(
-                    "content_block_stop",
-                    json!({"type": "content_block_stop", "index": index}),
-                )?);
-            }
-        }
-    }
     let frames = anthropic_frames(std::slice::from_ref(event), &mut state.codec);
-    if let (Some(block_index), Some(index)) = (thinking_block, state.codec.thinking_index) {
-        state.thinking_blocks.insert(block_index, index);
-    }
     if state.codec.next_index > MAX_BLOCKS_PER_STREAM {
         return Err(capability(format!(
             "stream exceeded {MAX_BLOCKS_PER_STREAM} content blocks"
         )));
     }
+    let mut rendered = String::new();
     for frame in frames {
         rendered.push_str(&sse(frame.event, frame.data)?);
     }
@@ -722,8 +610,15 @@ impl Guest for AnthropicClient {
                 object.remove(*key);
             }
         }
-        let mut request =
-            chat_request_from_anthropic_messages(&wire).map_err(|e| codec_error(&e))?;
+        // The codec marks each assistant turn that can carry Claude replay. The
+        // host removes the markers again for a target that cannot replay.
+        let mut request = chat_request_from_anthropic_messages_with(
+            &wire,
+            AnthropicRequestOptions {
+                claude_replay_markers: true,
+            },
+        )
+        .map_err(|e| codec_error(&e))?;
         restore_adapter_state(body, &mut request)?;
         to_output(&request)
     }
@@ -797,7 +692,6 @@ impl Guest for AnthropicClient {
                         response_id: response_id.to_owned(),
                         model: model.to_owned(),
                         codec: AnthropicSseState::new(model, response_id),
-                        thinking_blocks: BTreeMap::new(),
                     },
                 );
             }
