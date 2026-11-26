@@ -118,7 +118,7 @@ pub fn south_component_runtime() -> Result<ComponentRuntimeV1, String> {
 /// to the one this host links. A package built before the range handshake
 /// declares no `runtime_abi` and is refused; the exact-tuple arm left with the
 /// last such package.
-pub(crate) const SOUTH_RUNTIME: &str = "0.85.1";
+pub(crate) const SOUTH_RUNTIME: &str = "0.88.0";
 /// The oldest South runtime a package may declare: the oldest one among the
 /// packages this host ships. Raising it is how a host enforces a release that
 /// tightened a South gate.
@@ -499,9 +499,17 @@ mod tests {
     #[test]
     fn the_range_arm_refuses_runtimes_and_contracts_outside_the_host() {
         let range = packaged_manifest("provider-anthropic-v2");
+        // One patch release past the runtime this host links.
+        let (release, patch) = super::SOUTH_RUNTIME
+            .rsplit_once('.')
+            .expect("a semver triple");
+        let newer = format!(
+            "{release}.{}",
+            patch.parse::<u32>().expect("a patch number") + 1
+        );
         for (field, value) in [
             ("south_runtime", serde_json::json!("0.76.9")),
-            ("south_runtime", serde_json::json!("0.85.2")),
+            ("south_runtime", serde_json::json!(newer)),
             ("runtime_abi", serde_json::json!(2)),
             (
                 "kernel_contracts",

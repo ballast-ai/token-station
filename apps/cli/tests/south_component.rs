@@ -127,7 +127,9 @@ fn a_range_component_outside_the_host_range_is_refused() {
     for (field, other) in [
         ("runtime_abi", serde_json::json!(2)),
         ("south_runtime", serde_json::json!("0.76.0")),
-        ("south_runtime", serde_json::json!("0.86.0")),
+        // Newer than any runtime this host links. The unit test in
+        // south_component.rs checks the exact upper bound.
+        ("south_runtime", serde_json::json!("0.999.0")),
         (
             "kernel_contracts",
             serde_json::json!({"canonical_ir": 4, "error_catalog": 1, "stream": 3}),
